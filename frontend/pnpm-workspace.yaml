@@ -1,0 +1,3 @@
+# pnpm 11 构建脚本批准：esbuild（随 vite 打包）需放行其平台二进制 postinstall。
+allowBuilds:
+  esbuild: true

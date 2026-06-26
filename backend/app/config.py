@@ -1,0 +1,47 @@
+"""应用配置（pydantic-settings）。所有值来自环境变量 / `.env`。"""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "DyFlow"
+    environment: str = "development"
+
+    # CORS：前端开发服务器与容器内 nginx 来源
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
+
+    # —— 数据库 / Redis ——
+    # 默认指向本机（host 直连容器暴露端口）；容器内由 compose 覆盖为服务名。
+    database_url: str = "postgresql+asyncpg://dyflow:dyflow_dev_pw@localhost:5432/dyflow"
+    redis_url: str = "redis://localhost:6379/0"
+
+    # 连接池
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_echo: bool = False
+
+    # —— 认证（JWT）——
+    jwt_secret: str = "dev-only-change-me-please-min-32-bytes-secret"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 720
+
+    # —— 初始管理员种子（app/seed.py 用）——
+    admin_email: str = "admin@dyflow.local"
+    admin_password: str = "admin12345"
+    default_org_name: str = "DyFlow"
+
+    # —— 对象存储（v1 本地卷，MinIO 接口预留；T2 暂不接入实际读写）——
+    storage_backend: str = "local"
+    storage_local_dir: str = "/data/objects"
+
+
+settings = Settings()

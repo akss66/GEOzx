@@ -1,0 +1,18 @@
+:root {
+  --dy-border: rgba(255, 255, 255, 0.1);
+}
+:root[data-theme="light"] {
+  --dy-border: rgba(0, 0, 0, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+}

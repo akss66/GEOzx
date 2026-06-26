@@ -1,0 +1,90 @@
+# DyFlow 一键编排（本机 Windows / Docker Desktop）
+# T1 范围：postgres + redis + minio + backend + frontend 五服务可启动。
+# worker(arq) 在 M0 T6 加入。
+name: dyflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dyflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dyflow_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-dyflow}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dyflow} -d ${POSTGRES_DB:-dyflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dyflow}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dyflow_dev_pw}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # 控制台
+    volumes:
+      - miniodata:/data
+
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      # 容器内服务名覆盖（确保不依赖 .env 写法）
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:-dyflow_dev_pw}@postgres:5432/${POSTGRES_DB:-dyflow}
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - objects:/data/objects   # v1 本地对象存储卷
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health/ready').status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  objects:
