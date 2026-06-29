@@ -97,24 +97,19 @@
 
 ### E2 — 六个创作 Agent（各自垂直切片：prompt + 输出 schema + 编排接入 + 测试）
 > 每个 = 注册 payload schema（`schemas/deliverable.py`）+ 草稿 prompt + LLMAgent 子类 + 接入 PIPELINE + 单测（mock 网关）。
-- [ ] **01 定位**：positioning_strategy（已有 schema，替换 DummyAgent 为真实 LLMAgent）
-  - [x] `PositioningAgent(LLMAgent)` 接入 PIPELINE 第一步；orchestrator 测试加 stub_llm fixture（不触网）
-  - [x] 验证：51 passed+ruff；**真实端到端**：DeepSeek 现场生成定位策略(404 tok/$0.00024/2.2s)→schema 校验→落库 v1→自动门放行→强制门阻塞，链路完整
-- [ ] **02 编导**：topic_plan + video_script（已有 script schema，补 topic_plan schema）
-  - [x] `ContentAgent(LLMAgent)` 接入 PIPELINE 第三步（video_script）；读上游定位策略作输入
-  - [x] 验证：52 passed（+上游流转断言：编导 messages 含定位 payload）+ruff；**真实端到端**：定位→编导两个 DeepSeek 串跑(7.7s)，编导脚本顺应上游定位主题，证明上游交付物流转生效；两次调用均入账
-  - [ ] 待补：topic_plan（选题方案）schema + 输出（可后续补，当前 video_script 已跑通）
-- [ ] **03 美术**：art_prompt（视觉风格书 + 结构化 AI 提示词，输出喂 Seedance）
-- [ ] **04 视频**：video_asset（生成参数计划；真实出片在 E7 接 Seedance，此处先产计划）
-- [ ] **05 剪辑**：edited_video（剪辑说明 + 成片清单；真实素材处理在 E9）
-- [ ] **06 运营**：review_report（复盘 + 优化建议；数据源接 E6 看板/E8 回流）
-- [ ] 验证：每个 Agent 单测（输出 schema 校验 + golden 关键字段断言）；6 个合计纳入 pytest
+- [x] **01 定位**：positioning_strategy（PositioningAgent，真实跑通）
+- [x] **02 编导**：video_script（ContentAgent，读上游定位，真实跑通）
+- [x] **03 美术**：art_prompt（ArtAgent，schema 注册 + 接入，随 E3 真实跑通）
+- [x] **04 视频**：video_asset（VideoAgent，生成参数计划，随 E3 真实跑通）
+- [x] **05 剪辑**：edited_video（EditingAgent，随 E3 真实跑通）
+- [x] **06 运营**：review_report（OperationAgent，随 E3 真实跑通）
+- [ ] 待补：02 topic_plan（选题方案）schema；各 Agent 的 golden 关键字段单测（当前靠 E3 整链测试覆盖）
 
 ### E3 — 主链路六阶段自动流转 + 6 道质量门接入（L，依赖：E2）
-- [ ] PIPELINE 从 2 步扩到 6 阶段 + 6 道门（Gate1 定位/Gate2 选题=自动；Gate3 脚本/Gate5 发布前=强制；Gate4 成片=自动；Gate6 投流属 M3）
-- [ ] 上游交付物注入下游 `AgentContext.upstream`（按 type→payload 解析最新版本）
-- [ ] 事件驱动：每阶段 done 自动触发下一阶段；强制门 blocked→审批→续跑（复用 T7 引擎）
-- [ ] 验证：`test_orchestrator` 扩展——六阶段全流转、Gate3/Gate5 阻塞与审批、上游引用解析；端到端实测
+- [x] PIPELINE 扩到六阶段 + 5 道门（Gate1 定位/Gate2 选题/Gate4 成片=自动；Gate3 脚本/Gate5 发布前=强制；Gate6 大额投放属 M3 并行投流链路）
+- [x] 上游交付物经 `AgentContext.upstream` 注入下游（LLMAgent.build_user_message 组装）
+- [x] 事件驱动：每阶段 done 自动触发下一阶段；强制门 blocked→审批→续跑（复用 T7 引擎）
+- [x] 验证：`test_orchestrator` 扩展（六阶段全流转、Gate3/Gate5 阻塞与续跑、上游引用断言）52 passed+ruff；**真实端到端**：六阶段 DeepSeek 全跑通，2 道强制门审批续跑，6 份交付物各过 schema 校验，published；12 次调用累计 $0.0078 入账
 
 ### E4 — 交付物版本化 / 回滚 / 上游引用解析（M，依赖：E3）
 - [ ] 同 type 重跑产新 version（已有唯一约束），旧版置 superseded；回滚接口（指定 version 设回 approved）

@@ -14,6 +14,7 @@ from app.models.enums import (
     ContentStatus,
     DeliverableType,
     GateStatus,
+    GateType,
 )
 from app.orchestrator.engine import OrchestrationEngine
 
@@ -37,7 +38,51 @@ _SCRIPT_JSON = json.dumps(
     }
 )
 
-_AGENT_OUTPUT = {"01-positioning": _POSITIONING_JSON, "02-content": _SCRIPT_JSON}
+_ART_JSON = json.dumps(
+    {
+        "visual_style": "硬核冷调科技风",
+        "prompts": ["开箱特写，冷光", "上手实测，俯拍"],
+        "aspect_ratio": "9:16",
+    }
+)
+
+_VIDEO_JSON = json.dumps(
+    {
+        "tool": "seedance",
+        "clips": [{"prompt": "开箱", "duration_seconds": 5, "motion": "推近"}],
+        "resolution": "1080x1920",
+    }
+)
+
+_EDIT_JSON = json.dumps(
+    {
+        "cut_plan": ["前3秒钩子", "高频转场"],
+        "captions": ["关键参数花字"],
+        "transitions": "快切",
+        "deliverables": ["成片_竖版.mp4"],
+        "platform_variants": ["抖音版", "小红书版"],
+    }
+)
+
+_REVIEW_JSON = json.dumps(
+    {
+        "period": "日",
+        "summary": "首发表现良好",
+        "key_metrics": {"play": 12000, "completion_rate": 0.41, "engagement_rate": 0.08},
+        "highlights": ["完播率高于均值"],
+        "issues": ["转发率偏低"],
+        "optimization_suggestions": ["编导：前3秒强化钩子"],
+    }
+)
+
+_AGENT_OUTPUT = {
+    "01-positioning": _POSITIONING_JSON,
+    "02-content": _SCRIPT_JSON,
+    "03-art": _ART_JSON,
+    "04-video": _VIDEO_JSON,
+    "05-editing": _EDIT_JSON,
+    "06-operation": _REVIEW_JSON,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -88,7 +133,7 @@ async def test_pipeline_runs_until_forced_gate(session, content_item) -> None:
     await engine.start(session, content_item.id)
     await session.refresh(content_item)
 
-    # 两个 Agent 步都完成
+    # 跑到首个强制门（Gate3 脚本合规）前：定位 + 编导两步完成
     tasks = (
         await session.scalars(select(AgentTask).where(AgentTask.content_item_id == content_item.id))
     ).all()
@@ -110,13 +155,15 @@ async def test_pipeline_runs_until_forced_gate(session, content_item) -> None:
     }
     assert all(d.version == 1 for d in delivs)
 
-    # 自动门 auto_passed + 强制门 pending；内容 BLOCKED
+    # Gate1 定位 + Gate2 选题 自动放行；Gate3 脚本合规 pending；内容 BLOCKED
     gates = (
         await session.scalars(
             select(GateApproval).where(GateApproval.content_item_id == content_item.id)
         )
     ).all()
-    assert sorted(g.status.value for g in gates) == ["auto_passed", "pending"]
+    assert sorted(g.status.value for g in gates) == ["auto_passed", "auto_passed", "pending"]
+    pending = next(g for g in gates if g.status == GateStatus.PENDING)
+    assert pending.gate == GateType.SCRIPT_COMPLIANCE
     assert content_item.status == ContentStatus.BLOCKED
     assert "gate.pending" in emit.events
     assert "agent.done" in emit.events
@@ -124,16 +171,31 @@ async def test_pipeline_runs_until_forced_gate(session, content_item) -> None:
 
 @pytest.mark.asyncio
 async def test_approve_forced_gate_completes_pipeline(session, content_item) -> None:
+    """审批两道强制门（Gate3 脚本、Gate5 发布前）后，六阶段全部完成并 published。"""
     emit = FakeEmit()
     engine = OrchestrationEngine(emit=emit)
     await engine.start(session, content_item.id)
 
-    gate = await _pending_gate(session, content_item.id)
-    await engine.approve_gate(session, gate.id, user_id=1, approved=True)
+    # 第 1 道强制门：脚本合规
+    gate3 = await _pending_gate(session, content_item.id)
+    assert gate3.gate == GateType.SCRIPT_COMPLIANCE
+    await engine.approve_gate(session, gate3.id, user_id=1, approved=True)
 
+    # 续跑至第 2 道强制门：发布前审核
     await session.refresh(content_item)
-    await session.refresh(gate)
-    assert gate.status == GateStatus.APPROVED
+    gate5 = await _pending_gate(session, content_item.id)
+    assert gate5 is not None
+    assert gate5.gate == GateType.PRE_PUBLISH_REVIEW
+    assert content_item.status == ContentStatus.BLOCKED
+    await engine.approve_gate(session, gate5.id, user_id=1, approved=True)
+
+    # 六阶段全部 done，内容 published
+    await session.refresh(content_item)
+    tasks = (
+        await session.scalars(select(AgentTask).where(AgentTask.content_item_id == content_item.id))
+    ).all()
+    assert len(tasks) == 6
+    assert all(t.status == AgentTaskStatus.DONE for t in tasks)
     assert content_item.status == ContentStatus.PUBLISHED
     assert "pipeline.done" in emit.events
 
@@ -167,8 +229,8 @@ async def test_advance_is_idempotent_while_blocked(session, content_item) -> Non
             select(GateApproval).where(GateApproval.content_item_id == content_item.id)
         )
     ).all()
-    assert len(tasks) == 2
-    assert len(gates) == 2  # 1 auto_passed + 1 pending，无重复
+    assert len(tasks) == 2  # 定位 + 编导
+    assert len(gates) == 3  # Gate1 + Gate2 auto_passed + Gate3 pending，无重复
 
 
 @pytest.mark.asyncio
