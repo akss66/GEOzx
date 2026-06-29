@@ -7,6 +7,7 @@ from app.models.configuration import IntegrationConfig, ModelConfig
 from app.models.content import ContentItem, Deliverable
 from app.models.identity import Org, User
 from app.models.knowledge import KnowledgeEntry
+from app.models.llm import LLMCall
 from app.models.orchestration import AgentTask, Event, GateApproval
 from app.models.workspace import Account, AccountGroup, Project
 
@@ -24,4 +25,5 @@ __all__ = [
     "KnowledgeEntry",
     "ModelConfig",
     "IntegrationConfig",
+    "LLMCall",
 ]

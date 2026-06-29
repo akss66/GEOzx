@@ -25,9 +25,7 @@ async def get_current_user(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> User:
     if creds is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="未提供认证凭证"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未提供认证凭证")
     try:
         payload = decode_token(creds.credentials)
     except jwt.PyJWTError as exc:
@@ -38,9 +36,7 @@ async def get_current_user(
     sub = payload.get("sub")
     user = await session.get(User, int(sub)) if sub else None
     if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用")
     return user
 
 
@@ -51,9 +47,7 @@ def require_role(*roles: UserRole):
         user: Annotated[User, Depends(get_current_user)],
     ) -> User:
         if user.role not in roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="权限不足"
-            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
         return user
 
     return _checker

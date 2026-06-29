@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api import auth, health, users
+from app.api import auth, events, health, llm, orchestrator, users, ws
 from app.config import settings
 
 app = FastAPI(
@@ -28,6 +28,10 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(llm.router)
+app.include_router(events.router)
+app.include_router(ws.router)
+app.include_router(orchestrator.router)
 
 
 @app.get("/", tags=["system"])

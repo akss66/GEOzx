@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     admin_password: str = "admin12345"
     default_org_name: str = "DyFlow"
 
+    # —— 大模型网关（v1 默认 DeepSeek）——
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    llm_default_model: str = "deepseek-chat"
+
     # —— 对象存储（v1 本地卷，MinIO 接口预留；T2 暂不接入实际读写）——
     storage_backend: str = "local"
     storage_local_dir: str = "/data/objects"

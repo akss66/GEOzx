@@ -17,9 +17,7 @@ from app.models.enums import UserRole
 
 async def seed() -> None:
     async with async_session() as session:
-        existing = await session.scalar(
-            select(User).where(User.email == settings.admin_email)
-        )
+        existing = await session.scalar(select(User).where(User.email == settings.admin_email))
         if existing is not None:
             print(f"[seed] 管理员已存在，跳过：{settings.admin_email}")
             return

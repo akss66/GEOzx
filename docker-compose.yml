@@ -70,6 +70,22 @@ services:
       retries: 6
       start_period: 15s
 
+  worker:
+    build: ./backend
+    command: ["arq", "app.worker.WorkerSettings"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:-dyflow_dev_pw}@postgres:5432/${POSTGRES_DB:-dyflow}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true   # worker 无 HTTP 服务，禁用继承自镜像的 HTTP 健康检查
+    restart: unless-stopped
+
   frontend:
     build: ./frontend
     ports:
