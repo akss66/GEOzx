@@ -124,11 +124,12 @@
 - [x] 验证：55 passed（+3 CRUD/过滤）+ruff；前端 tsc+eslint+build；**真实端到端**：建 3 类条目→list/过滤正确→注入定位 Agent 输入（含"知识库参考"+爆款条目标题）
 
 ### E6 — 富可视化复盘看板（L，依赖：E8 数据回流；可先 mock 数据撑结构）
-- [ ] `MetricSnapshot` 模型 + 迁移（播放/完播/互动/粉丝/时段，按内容/账号/日期）
-- [ ] 复盘聚合 API（日/周/月维度、多平台对比、按项目/账号/内容筛选）
-- [ ] ReviewDashboard.tsx 接真实聚合 API（ECharts 多图已搭，替换 mock 数据源）
-- [ ] 报告导出（PNG/PDF）；运营复盘交付物可引用看板图表
-- [ ] 验证：聚合查询单测；前端图表渲染 + 导出冒烟
+- [x] `MetricSnapshot` 模型 + 迁移（播放/曝光/完播/点赞/评论/转发/涨粉，按内容/账号/日期；含 PG enum DROP TYPE）
+- [x] 复盘聚合 API（`/metrics/overview` 趋势/完播互动/排名/汇总，days 窗口）+ 录入 API（`/metrics/ingest`，E8 回流写入口，幂等）
+- [x] ReviewDashboard 接真实：流量趋势/完播互动/内容排名 3 图 + 汇总卡 + 空态；其余（热力/雷达/ROI/情感/漏斗）标"示例数据"待 M2/M3/多平台回流
+- [x] 报告导出：流量趋势图 PNG 导出（ECharts getDataURL）
+- [x] 验证：65 passed（+3：空态/聚合/幂等回流）+ruff；迁移 alembic check 一致；前端 tsc+eslint+build；真实环境 ingest→overview 聚合（趋势/总播放/平均完播/净增粉/排名）正确
+- [ ] 待补：完播互动/排名图的 PNG 导出；周/月维度精确分桶（当前按 days 窗口）；运营复盘交付物引用看板
 
 ### E7 — 真实集成 Seedance（M，依赖：E2-04；已有 Key）
 - [ ] `integrations/video_gen/seedance.py` 适配器（真实 API：提交生成→轮询→取素材 URL）

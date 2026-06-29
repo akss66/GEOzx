@@ -125,3 +125,13 @@ class ComplianceRisk(enum.StrEnum):
     PASS = "pass"
     WARN = "warn"
     BLOCK = "block"
+
+
+class MetricSource(enum.StrEnum):
+    """数据指标来源。douyin=抖音回流(E8)；manual=手动录入；demo=演示数据。"""
+
+    DOUYIN = "douyin"
+    XIAOHONGSHU = "xiaohongshu"
+    SHIPINHAO = "shipinhao"
+    MANUAL = "manual"
+    DEMO = "demo"
