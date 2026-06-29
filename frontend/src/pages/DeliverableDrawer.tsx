@@ -12,6 +12,7 @@ import {
   rerunStage,
   rollbackDeliverable,
 } from "../api/orchestrator";
+import { API_BASE } from "../api/client";
 import type {
   ContentItem,
   ContentStage,
@@ -216,7 +217,14 @@ export function DeliverableDrawer({
 /** 视频交付物预览：按出片状态展示占位 / 播放器。 */
 function VideoPreview({ payload }: { payload: Record<string, unknown> }) {
   const status = typeof payload.gen_status === "string" ? payload.gen_status : undefined;
-  const url = typeof payload.video_url === "string" ? payload.video_url : undefined;
+  const rawUrl = typeof payload.video_url === "string" ? payload.video_url : undefined;
+  // 后端存的是 /materials/{id}/file（相对后端根）；前端访问后端需走 API_BASE(/api) 前缀。
+  // 绝对 URL（http 开头，如外部直链）则原样使用。
+  const url = rawUrl
+    ? rawUrl.startsWith("http")
+      ? rawUrl
+      : `${API_BASE}${rawUrl}`
+    : undefined;
 
   if (url) {
     return (
