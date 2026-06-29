@@ -44,10 +44,13 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     llm_default_model: str = "deepseek-chat"
 
-    # —— Seedance 视频生成（豆包，火山引擎方舟 Ark；M1 E7 接入）——
+    # —— 视频生成 ——
+    # 火山引擎方舟 Ark（豆包视频模型 Doubao-Seedance-1.5-pro；M1 E7 接入）
+    ark_api_key: str = ""
+    ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ark_video_model: str = "doubao-seedance-1-5-pro"
+    # Seedance 独立 API（后期接入，与火山方舟是不同供应商）
     seedance_api_key: str = ""
-    seedance_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    seedance_model: str = "doubao-seedance-1-5-pro"
 
     # —— 对象存储（v1 本地卷，MinIO 接口预留；T2 暂不接入实际读写）——
     storage_backend: str = "local"
