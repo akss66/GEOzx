@@ -13,6 +13,7 @@ from app.api import (
     auth,
     events,
     health,
+    knowledge,
     llm,
     model_configs,
     orchestrator,
@@ -46,6 +47,7 @@ app.include_router(orchestrator.router)
 app.include_router(projects.router)
 app.include_router(accounts.router)
 app.include_router(model_configs.router)
+app.include_router(knowledge.router)
 
 
 @app.get("/", tags=["system"])

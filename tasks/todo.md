@@ -117,10 +117,10 @@
 - [ ] 验证：版本递增、回滚、superseded 流转单测；前端 tsc+build
 
 ### E5 — 共享知识库读写 + 前端页（M，依赖：M0）
-- [ ] `KnowledgeEntry` CRUD API（4 类：爆款/画像/提示词/话术），按 category 过滤，RBAC
-- [ ] Agent 可读知识库切片注入 `AgentContext.knowledge`（运营写爆款、客服写话术——M2）
-- [ ] Knowledge.tsx 接真实 API（替换 mock，分类标签 + 增删改）
-- [ ] 验证：CRUD + 过滤单测；前端 tsc+eslint+build
+- [x] `KnowledgeEntry` CRUD API（4 类：爆款/画像/提示词/话术），按 category 过滤，org 隔离（全体可读可写）
+- [x] Agent 读知识库切片注入 `AgentContext.knowledge`（engine._knowledge 按 category 分组，上限 20 条）
+- [x] Knowledge.tsx 接真实 API（Tabs 分类 + 卡片网格 + 新增/编辑/删除 + 标签）
+- [x] 验证：55 passed（+3 CRUD/过滤）+ruff；前端 tsc+eslint+build；**真实端到端**：建 3 类条目→list/过滤正确→注入定位 Agent 输入（含"知识库参考"+爆款条目标题）
 
 ### E6 — 富可视化复盘看板（L，依赖：E8 数据回流；可先 mock 数据撑结构）
 - [ ] `MetricSnapshot` 模型 + 迁移（播放/完播/互动/粉丝/时段，按内容/账号/日期）

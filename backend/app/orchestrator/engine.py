@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentContext
 from app.core.events import publish_event
-from app.models import AgentTask, ContentItem, Deliverable, GateApproval, Project
+from app.models import AgentTask, ContentItem, Deliverable, GateApproval, KnowledgeEntry, Project
 from app.models.enums import (
     AgentTaskStatus,
     ContentStatus,
@@ -27,6 +27,9 @@ from app.orchestrator.gates import is_forced
 from app.orchestrator.pipeline import PIPELINE, AgentStep
 
 EmitFn = Callable[..., Awaitable[None]]
+
+# 注入 Agent 上下文的知识库条目上限（避免上下文过大；后续可按 category/相关性精选）。
+_KNOWLEDGE_LIMIT = 20
 
 
 def _now() -> datetime:
@@ -137,9 +140,14 @@ class OrchestrationEngine:
         ci.status = ContentStatus.IN_PROGRESS
         await session.flush()
 
-        ctx = AgentContext(content_item_id=ci.id, upstream=await self._upstream(session, ci.id))
+        org_id = await self._org_id(session, ci)
+        ctx = AgentContext(
+            content_item_id=ci.id,
+            upstream=await self._upstream(session, ci.id),
+            knowledge=await self._knowledge(session, org_id),
+        )
         try:
-            result = await step.agent.run(session, await self._org_id(session, ci), ctx)
+            result = await step.agent.run(session, org_id, ctx)
         except Exception as exc:  # noqa: BLE001 — 记录失败并停下
             task.status = AgentTaskStatus.FAILED
             task.error = str(exc)
@@ -186,6 +194,30 @@ class OrchestrationEngine:
         """经 project 解析内容所属 org，供 Agent 按 org 路由 ModelConfig。"""
         project = await session.get(Project, ci.project_id)
         return project.org_id if project else None
+
+    async def _knowledge(
+        self, session: AsyncSession, org_id: int | None
+    ) -> dict[str, list[dict]]:
+        """加载 org 的知识库切片，按 category 分组注入 Agent 上下文。
+
+        每类取最近若干条（标题+payload+tags），供 Agent 参考爆款结构/画像/提示词/话术。
+        """
+        if org_id is None:
+            return {}
+        rows = (
+            await session.scalars(
+                select(KnowledgeEntry)
+                .where(KnowledgeEntry.org_id == org_id)
+                .order_by(KnowledgeEntry.id.desc())
+                .limit(_KNOWLEDGE_LIMIT)
+            )
+        ).all()
+        grouped: dict[str, list[dict]] = {}
+        for k in rows:
+            grouped.setdefault(k.category.value, []).append(
+                {"title": k.title, "payload": k.payload, "tags": k.tags}
+            )
+        return grouped
 
     async def _next_version(self, session: AsyncSession, ci_id: int, dtype: DeliverableType) -> int:
         current = await session.scalar(

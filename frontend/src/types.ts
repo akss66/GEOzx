@@ -118,3 +118,27 @@ export interface ModelConfig {
   primary_model: string;
   fallback_model: string | null;
 }
+
+// —— 共享知识库 ——
+
+export type KnowledgeCategory =
+  | "hot_content"
+  | "user_persona"
+  | "prompt_library"
+  | "script_library";
+
+export interface KnowledgeEntry {
+  id: number;
+  category: KnowledgeCategory;
+  title: string;
+  payload: Record<string, unknown>;
+  tags: string[] | null;
+  created_at: string;
+}
+
+export interface CreateKnowledgeInput {
+  category: KnowledgeCategory;
+  title: string;
+  payload?: Record<string, unknown>;
+  tags?: string[] | null;
+}
