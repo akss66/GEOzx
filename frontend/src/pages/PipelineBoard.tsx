@@ -112,6 +112,7 @@ export default function PipelineBoard() {
   const { connected } = useEventStream(() => {
     qc.invalidateQueries({ queryKey: ["content-items"] });
     qc.invalidateQueries({ queryKey: ["gates"] });
+    qc.invalidateQueries({ queryKey: ["deliverable-history"] });
   });
 
   const createMutation = useMutation({

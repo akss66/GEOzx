@@ -72,3 +72,10 @@ class ArkVideoAdapter:
         return VideoGenResult(
             task_id=task_id, status=status, video_url=video_url, error=err_msg
         )
+
+    async def download(self, url: str) -> bytes:
+        """下载生成的视频字节（火山 TOS URL 带签名，需在过期前下载）。"""
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content

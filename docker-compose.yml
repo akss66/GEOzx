@@ -77,6 +77,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:-dyflow_dev_pw}@postgres:5432/${POSTGRES_DB:-dyflow}
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      - objects:/data/objects   # 出片落本地卷（与 backend 共享，供播放接口读取）
     depends_on:
       postgres:
         condition: service_healthy

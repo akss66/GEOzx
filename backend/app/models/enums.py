@@ -135,3 +135,12 @@ class MetricSource(enum.StrEnum):
     SHIPINHAO = "shipinhao"
     MANUAL = "manual"
     DEMO = "demo"
+
+
+class MaterialStatus(enum.StrEnum):
+    """素材生成状态。queued=已入队；generating=生成中；ready=已就绪(落库)；failed=失败。"""
+
+    QUEUED = "queued"
+    GENERATING = "generating"
+    READY = "ready"
+    FAILED = "failed"

@@ -43,6 +43,18 @@ async def process_event(ctx: dict, event: dict[str, Any]) -> int:
     return event_id
 
 
+async def generate_video(ctx: dict, deliverable_id: int) -> int | None:
+    """后台出片任务：真实调 Ark 生成→下载落本地卷→回写交付物→发事件。"""
+    from app.core.events import publish_event
+    from app.integrations.video_gen.tasks import generate_video_for_deliverable
+
+    async with async_session() as session:
+        asset = await generate_video_for_deliverable(
+            session, deliverable_id, emit=publish_event
+        )
+        return asset.id if asset else None
+
+
 async def on_startup(ctx: dict) -> None:
     ctx["redis_pub"] = aioredis.from_url(settings.redis_url, decode_responses=True)
     # 导入以注册处理器
@@ -54,7 +66,7 @@ async def on_shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions = [process_event]
+    functions = [process_event, generate_video]
     redis_settings = redis_settings()
     on_startup = on_startup
     on_shutdown = on_shutdown

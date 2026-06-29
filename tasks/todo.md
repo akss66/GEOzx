@@ -135,8 +135,10 @@
 - [x] `integrations/video_gen/` 接口（VideoGenAdapter 可切换后端）+ `ArkVideoAdapter`（火山方舟，提交→轮询→取 URL）
 - [x] 04 视频 Agent 接入：LLM 产计划 → 用上游美术提示词调 Ark 真实出片 → video_url 写入交付物；无 key/失败降级不阻断
 - [x] 验证：68 passed（+3：适配器 mock + 降级 + 出错）+ruff；**真实出片跑通**：豆包 Seedance 1.0-pro 约 50s 出片，返回火山 TOS 视频 URL；完整六阶段流水线含真实出片端到端跑通
-- [ ] ⚠️ 待改：出片同步阻塞在 HTTP 请求里会触发 nginx 60s 代理超时（后端仍完成）→ 应改 arq 后台任务异步出片
-- [ ] 待补：素材落本地卷/MinIO（当前仅存 URL，火山 URL 24h 过期）；`MaterialAsset` 模型；图生视频（首帧）
+- [x] ✅ 已改异步：出片改 arq 后台任务（agent.done→入队 generate_video），编排不再阻塞、HTTP 不再超时（审批续跑秒级返回）
+- [x] ✅ 已落卷：worker 下载视频落本地卷 objects:/data/objects + MaterialAsset 记录 + `/materials/{id}/file` 播放接口（不再 24h 过期）；前端 DeliverableDrawer 出片状态 + 视频播放
+- [x] 验证（异步）：68 passed（VideoAgent 只产计划 + 出片任务下载/落卷/失败降级）+ruff；迁移 alembic check 一致；**真实异步出片**：审批续跑 34s 返回(视频阶段秒过 gen_status=queued)→后台 worker 出片 ready→videos/14/1.mp4(5.3MB)→播放接口 200 video/mp4
+- [ ] 待补：图生视频（首帧）；素材列表页；MinIO 替换本地卷
 
 ### E8 — 真实集成 抖音（L，依赖：E3；⚠️ 接口权限待确认）
 - [ ] `integrations/publish/douyin.py` 适配器（OAuth 授权 + 视频上传/发布）

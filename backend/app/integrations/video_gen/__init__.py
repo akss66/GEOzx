@@ -30,3 +30,7 @@ class VideoGenAdapter(Protocol):
     async def poll(self, task_id: str) -> VideoGenResult:
         """查询任务状态/结果。"""
         ...
+
+    async def download(self, url: str) -> bytes:
+        """下载生成结果（视频字节）。"""
+        ...

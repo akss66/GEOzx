@@ -1,4 +1,9 @@
-import { HistoryOutlined, ReloadOutlined, RollbackOutlined } from "@ant-design/icons";
+import {
+  HistoryOutlined,
+  LoadingOutlined,
+  ReloadOutlined,
+  RollbackOutlined,
+} from "@ant-design/icons";
 import { App as AntApp, Button, Drawer, Empty, Spin, Tag } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -181,6 +186,7 @@ export function DeliverableDrawer({
                           </Button>
                         )}
                       </div>
+                      {d.type === "video_asset" && <VideoPreview payload={d.payload} />}
                       <pre
                         style={{
                           margin: 0,
@@ -204,5 +210,48 @@ export function DeliverableDrawer({
         </div>
       )}
     </Drawer>
+  );
+}
+
+/** 视频交付物预览：按出片状态展示占位 / 播放器。 */
+function VideoPreview({ payload }: { payload: Record<string, unknown> }) {
+  const status = typeof payload.gen_status === "string" ? payload.gen_status : undefined;
+  const url = typeof payload.video_url === "string" ? payload.video_url : undefined;
+
+  if (url) {
+    return (
+      <video
+        src={url}
+        controls
+        style={{ width: "100%", borderRadius: 8, marginBottom: 10, background: "#000" }}
+      />
+    );
+  }
+
+  const label =
+    status === "queued" || status === "ready"
+      ? "出片中… 完成后自动刷新"
+      : status?.startsWith("error")
+        ? `出片失败：${status.slice(7)}`
+        : "等待出片";
+  const isError = status?.startsWith("error");
+  return (
+    <div
+      style={{
+        marginBottom: 10,
+        padding: "12px 14px",
+        borderRadius: 8,
+        background: "var(--dy-elevated)",
+        border: "1px solid var(--dy-border-subtle)",
+        fontSize: 12.5,
+        color: isError ? "var(--dy-error)" : "var(--dy-muted)",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+      }}
+    >
+      {!isError && <LoadingOutlined />}
+      {label}
+    </div>
   );
 }
