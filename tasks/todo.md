@@ -78,19 +78,90 @@
 
 ---
 
-## Phase M1 — 创作闭环（中粒度，检查点 B 后细化为可实现任务）
+## Phase M1 — 创作闭环（已细化，2026-06-29 检查点 B 后）
 
-- [ ] E1 Agent 基座完善 + 6 个 system prompt 装载（源自配置表）
-- [ ] E2 六个创作 Agent（各自垂直切片：prompt + 输出 schema + 编排接入 + 测试）
-  - [ ] 01 定位　[ ] 02 编导　[ ] 03 美术提示词　[ ] 04 视频创作　[ ] 05 剪辑　[ ] 06 运营
-- [ ] E3 主链路六阶段自动流转 + 6 道质量门接入（Gate3/Gate5 强制人工）
-- [ ] E4 交付物版本化 / 回滚 / 上游引用解析
-- [ ] E5 共享知识库（爆款/画像/提示词/话术）读写 + 前端页
-- [ ] E6 富可视化复盘看板（ECharts 多图 + 日/周/月 + 报告导出）
-- [ ] E7 真实集成 Seedance（视频生成，素材落存储）
-- [ ] E8 真实集成 抖音（发布 + 数据回流；其余平台 stub）
-- [ ] E9 执行层：矩阵管理 + 合规检测服务(接 Gate3) + 素材工具集
-- [ ] E10 闭环反馈（optimization.suggestion 广播 + 建议→执行→验证 追踪）
+> 目标：定位→编导→美术→视频→剪辑→运营 六阶段端到端自动跑通，默认 DeepSeek，交付物版本化，
+> 6 道质量门接入，共享知识库 + 富可视化复盘看板，真实接 Seedance + 抖音。
+> 实现顺序：E1 → E2(01→06 顺序切片) → E3 → 其余按依赖。每个子任务 = 垂直切片，含验收+验证。
+> ⚠️ 阻塞前提：① 6 个 system prompt 的权威来源是 `配置表.xlsx`（当前不在仓库）→ E1 先写草稿版、
+> 标记 `# TODO: 待配置表校准`；② 抖音接口权限范围未确认（阻塞 E8 真实边界，见决策区）。
+
+### E1 — Agent 基座完善 + Prompt 装载（M，依赖：M0；E2 的前置）
+- [ ] `BaseAgent` 升级：注入 `LLMGateway` + system prompt + 输出 schema，新增 `LLMAgent` 基类
+      （组装 messages→网关 chat→解析 JSON→`validate_payload` 校验→失败重试/兜底）
+- [ ] `app/prompts/` 建目录 + 6 个 `*.md`（01-06），先写草稿 prompt（角色/能力/流程/输出 JSON 标准/协作接口），标 TODO 待校准
+- [ ] Prompt 装载器：按 agent_code 读取 .md，缓存；`ModelConfig` 缺失时用默认 deepseek-chat
+- [ ] 8 个 Agent 的 `ModelConfig` 种子（seed 扩展，幂等）+ 前端 Config 页接真实模型配置 API
+- [ ] 验证：单测 LLMAgent（mock 网关返回合规/非法 JSON，校验通过与重试）；ruff
+
+### E2 — 六个创作 Agent（各自垂直切片：prompt + 输出 schema + 编排接入 + 测试）
+> 每个 = 注册 payload schema（`schemas/deliverable.py`）+ 草稿 prompt + LLMAgent 子类 + 接入 PIPELINE + 单测（mock 网关）。
+- [ ] **01 定位**：positioning_strategy（已有 schema，替换 DummyAgent 为真实 LLMAgent）
+- [ ] **02 编导**：topic_plan + video_script（已有 script schema，补 topic_plan schema）
+- [ ] **03 美术**：art_prompt（视觉风格书 + 结构化 AI 提示词，输出喂 Seedance）
+- [ ] **04 视频**：video_asset（生成参数计划；真实出片在 E7 接 Seedance，此处先产计划）
+- [ ] **05 剪辑**：edited_video（剪辑说明 + 成片清单；真实素材处理在 E9）
+- [ ] **06 运营**：review_report（复盘 + 优化建议；数据源接 E6 看板/E8 回流）
+- [ ] 验证：每个 Agent 单测（输出 schema 校验 + golden 关键字段断言）；6 个合计纳入 pytest
+
+### E3 — 主链路六阶段自动流转 + 6 道质量门接入（L，依赖：E2）
+- [ ] PIPELINE 从 2 步扩到 6 阶段 + 6 道门（Gate1 定位/Gate2 选题=自动；Gate3 脚本/Gate5 发布前=强制；Gate4 成片=自动；Gate6 投流属 M3）
+- [ ] 上游交付物注入下游 `AgentContext.upstream`（按 type→payload 解析最新版本）
+- [ ] 事件驱动：每阶段 done 自动触发下一阶段；强制门 blocked→审批→续跑（复用 T7 引擎）
+- [ ] 验证：`test_orchestrator` 扩展——六阶段全流转、Gate3/Gate5 阻塞与审批、上游引用解析；端到端实测
+
+### E4 — 交付物版本化 / 回滚 / 上游引用解析（M，依赖：E3）
+- [ ] 同 type 重跑产新 version（已有唯一约束），旧版置 superseded；回滚接口（指定 version 设回 approved）
+- [ ] 交付物历史 + 版本对比 API；前端交付物抽屉（看历史/对比/回滚）
+- [ ] 验证：版本递增、回滚、superseded 流转单测；前端 tsc+build
+
+### E5 — 共享知识库读写 + 前端页（M，依赖：M0）
+- [ ] `KnowledgeEntry` CRUD API（4 类：爆款/画像/提示词/话术），按 category 过滤，RBAC
+- [ ] Agent 可读知识库切片注入 `AgentContext.knowledge`（运营写爆款、客服写话术——M2）
+- [ ] Knowledge.tsx 接真实 API（替换 mock，分类标签 + 增删改）
+- [ ] 验证：CRUD + 过滤单测；前端 tsc+eslint+build
+
+### E6 — 富可视化复盘看板（L，依赖：E8 数据回流；可先 mock 数据撑结构）
+- [ ] `MetricSnapshot` 模型 + 迁移（播放/完播/互动/粉丝/时段，按内容/账号/日期）
+- [ ] 复盘聚合 API（日/周/月维度、多平台对比、按项目/账号/内容筛选）
+- [ ] ReviewDashboard.tsx 接真实聚合 API（ECharts 多图已搭，替换 mock 数据源）
+- [ ] 报告导出（PNG/PDF）；运营复盘交付物可引用看板图表
+- [ ] 验证：聚合查询单测；前端图表渲染 + 导出冒烟
+
+### E7 — 真实集成 Seedance（M，依赖：E2-04；已有 Key）
+- [ ] `integrations/video_gen/seedance.py` 适配器（真实 API：提交生成→轮询→取素材 URL）
+- [ ] 素材落本地卷（MinIO 接口预留）；`MaterialAsset` 模型 + 迁移
+- [ ] 04 视频 Agent 接入：美术提示词→Seedance 生成→素材入库→交付物引用
+- [ ] 验证：适配器 mock 单测；真实 Key 端到端生成一条素材（手动）
+
+### E8 — 真实集成 抖音（L，依赖：E3；⚠️ 接口权限待确认）
+- [ ] `integrations/publish/douyin.py` 适配器（OAuth 授权 + 视频上传/发布）
+- [ ] 数据回流：拉取视频/粉丝数据写 `MetricSnapshot`（喂 E6 看板）
+- [ ] 06 运营 Agent 接入发布；发布前过 Gate5 强制门
+- [ ] 小红书/视频号先 stub（接口同构，预留）
+- [ ] 验证：适配器 mock 单测；真实 Key 发布 + 回流（手动，依权限范围裁剪）
+
+### E9 — 执行层：矩阵 + 合规检测 + 素材工具（M，依赖：E3）
+- [ ] 合规检测服务（敏感词库 + 原创度检查）→ 接 Gate3 脚本合规（自动预检 + 人工复核）
+- [ ] `ComplianceCheck` 模型 + 迁移；脚本完成自动触发预检，结果呈现在审批页
+- [ ] 素材工具集骨架（去/加水印、裁剪、转码、GIF——接口先行，实现按需）
+- [ ] 矩阵批量下发：账号页"批量下发任务/排期"接真实编排（M0 已留 UI）
+- [ ] 验证：合规检测单测（命中敏感词/原创度阈值）；批量下发单测
+
+### E10 — 闭环反馈（M，依赖：E2-06、E3）
+- [ ] 运营复盘完成→广播 `optimization.suggestion` 事件；上游 Agent 订阅并在下周期响应
+- [ ] 建议→执行→验证追踪：`OptimizationSuggestion` 模型（状态机：建议/已采纳/已验证）
+- [ ] 客服需求报告→编导选题输入（需求反哺，客服 Agent 属 M2，此处先留接口）
+- [ ] 前端"建议→执行→验证"追踪视图
+- [ ] 验证：广播→订阅→响应链路单测；端到端实测
+
+### ⛳ 检查点 C（M1 完成）
+- [ ] 六阶段端到端自动流转 + 6 道门（Gate3/Gate5 强制人工）跑通
+- [ ] 交付物版本化/回滚/上游引用正确
+- [ ] 知识库读写 + 复盘看板真实数据
+- [ ] Seedance 真实生成 + 抖音真实发布/回流（依权限范围）
+- [ ] 闭环反馈一个完整周期可追踪
+- [ ] **人工评审 M1 → 细化 M2**
 
 ---
 
@@ -116,5 +187,6 @@
 ## 待人工决策（阻塞项见 plan.md 第十一节）
 - [x] 团队角色 → **已确认：`admin` + `user` 两级，可扩展**
 - [x] 对象存储起步 → **已确认：本地磁盘卷 + MinIO 接口预留**
-- [ ] 抖音 API 能力范围（阻塞 M1 E8 真实边界）
+- [ ] **配置表 xlsx 缺失**（阻塞 E1 prompt 权威来源）→ 现策略：先写草稿 prompt 标 TODO，拿到表后校准
+- [ ] **抖音 API 能力范围**（阻塞 E8 真实边界）→ 需确认应用已申请通过哪些接口权限（至少"视频发布+数据分析"才能跑 E8 真实，否则先 stub）
 - [ ] 检查点 A：数据模型契约确认
