@@ -95,6 +95,8 @@ def _stub_llm(monkeypatch):
         return CompletionResult(content, "deepseek-chat", 10, 20, 30), 0.0
 
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+    # 禁用 Ark 真实出片（04 视频 Agent 会据此跳过生成），测试不触网、不计费
+    monkeypatch.setattr("app.config.settings.ark_api_key", "")
 
 
 class FakeEmit:

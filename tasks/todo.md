@@ -132,10 +132,11 @@
 - [ ] 待补：完播互动/排名图的 PNG 导出；周/月维度精确分桶（当前按 days 窗口）；运营复盘交付物引用看板
 
 ### E7 — 真实集成 Seedance（M，依赖：E2-04；已有 Key）
-- [ ] `integrations/video_gen/seedance.py` 适配器（真实 API：提交生成→轮询→取素材 URL）
-- [ ] 素材落本地卷（MinIO 接口预留）；`MaterialAsset` 模型 + 迁移
-- [ ] 04 视频 Agent 接入：美术提示词→Seedance 生成→素材入库→交付物引用
-- [ ] 验证：适配器 mock 单测；真实 Key 端到端生成一条素材（手动）
+- [x] `integrations/video_gen/` 接口（VideoGenAdapter 可切换后端）+ `ArkVideoAdapter`（火山方舟，提交→轮询→取 URL）
+- [x] 04 视频 Agent 接入：LLM 产计划 → 用上游美术提示词调 Ark 真实出片 → video_url 写入交付物；无 key/失败降级不阻断
+- [x] 验证：68 passed（+3：适配器 mock + 降级 + 出错）+ruff；**真实出片跑通**：豆包 Seedance 1.0-pro 约 50s 出片，返回火山 TOS 视频 URL；完整六阶段流水线含真实出片端到端跑通
+- [ ] ⚠️ 待改：出片同步阻塞在 HTTP 请求里会触发 nginx 60s 代理超时（后端仍完成）→ 应改 arq 后台任务异步出片
+- [ ] 待补：素材落本地卷/MinIO（当前仅存 URL，火山 URL 24h 过期）；`MaterialAsset` 模型；图生视频（首帧）
 
 ### E8 — 真实集成 抖音（L，依赖：E3；⚠️ 接口权限待确认）
 - [ ] `integrations/publish/douyin.py` 适配器（OAuth 授权 + 视频上传/发布）

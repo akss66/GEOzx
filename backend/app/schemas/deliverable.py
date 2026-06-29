@@ -82,12 +82,16 @@ class ArtPromptPayload(DeliverablePayload):
 
 @register(DeliverableType.VIDEO_ASSET)
 class VideoAssetPayload(DeliverablePayload):
-    """04 视频创作专家：生成参数计划（真实出片在 E7 接 Seedance）。"""
+    """04 视频创作专家：生成参数计划 + 真实出片结果（Ark Seedance，E7）。"""
 
     tool: str
     clips: list[dict]
     resolution: str
     notes: str | None = None
+    # E7 真实生成结果（Ark 异步出片）
+    video_url: str | None = None
+    gen_task_id: str | None = None
+    gen_status: str | None = None
 
 
 @register(DeliverableType.EDITED_VIDEO)
