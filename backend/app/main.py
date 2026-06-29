@@ -25,9 +25,9 @@ from app.api import (
 from app.config import settings
 
 app = FastAPI(
-    title="DyFlow API",
+    title="同舟行 API",
     version=__version__,
-    description="抖音自媒体运营 Agent 编排系统 后端",
+    description="同舟行 · 自媒体 AI 运营系统 后端",
 )
 
 app.add_middleware(

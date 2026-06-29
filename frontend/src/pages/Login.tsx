@@ -56,19 +56,15 @@ export default function Login() {
         className="dy-login-brand"
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
-          <span
-            aria-hidden
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: 9,
-              background: "linear-gradient(135deg, #5b8cff, #6f6cff)",
-            }}
+          <img
+            src="/logo.png"
+            alt="同舟行"
+            style={{ width: 36, height: 36, borderRadius: 9, objectFit: "contain" }}
           />
-          <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: 0.4 }}>DyFlow</span>
+          <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: 0.4 }}>同舟行</span>
         </div>
         <Typography.Title level={2} style={{ margin: 0, maxWidth: 460, fontWeight: 650 }}>
-          抖音自媒体运营的 AI Agent 指挥中心
+          同舟行 · 自媒体 AI 运营系统
         </Typography.Title>
         <Typography.Paragraph type="secondary" style={{ fontSize: 15, marginTop: 12, maxWidth: 420 }}>
           把全流程交给协同的 AI Agent，团队只需在一个工作台里看数据、做决策、卡审核。

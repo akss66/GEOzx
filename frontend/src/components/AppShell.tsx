@@ -80,18 +80,13 @@ export function AppShell() {
             padding: "0 20px",
           }}
         >
-          <span
-            aria-hidden
-            style={{
-              width: 22,
-              height: 22,
-              borderRadius: 7,
-              background: "linear-gradient(135deg, #5b8cff, #6f6cff)",
-              display: "inline-block",
-            }}
+          <img
+            src="/logo.png"
+            alt="同舟行"
+            style={{ width: 24, height: 24, borderRadius: 6, objectFit: "contain" }}
           />
           <span style={{ fontWeight: 700, fontSize: 16, letterSpacing: 0.4 }}>
-            DyFlow
+            同舟行
           </span>
         </div>
         <Menu

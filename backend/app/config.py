@@ -10,7 +10,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "DyFlow"
+    app_name: str = "同舟行"
     environment: str = "development"
 
     # CORS：前端开发服务器与容器内 nginx 来源
