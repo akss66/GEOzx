@@ -101,6 +101,9 @@
   - [x] `PositioningAgent(LLMAgent)` 接入 PIPELINE 第一步；orchestrator 测试加 stub_llm fixture（不触网）
   - [x] 验证：51 passed+ruff；**真实端到端**：DeepSeek 现场生成定位策略(404 tok/$0.00024/2.2s)→schema 校验→落库 v1→自动门放行→强制门阻塞，链路完整
 - [ ] **02 编导**：topic_plan + video_script（已有 script schema，补 topic_plan schema）
+  - [x] `ContentAgent(LLMAgent)` 接入 PIPELINE 第三步（video_script）；读上游定位策略作输入
+  - [x] 验证：52 passed（+上游流转断言：编导 messages 含定位 payload）+ruff；**真实端到端**：定位→编导两个 DeepSeek 串跑(7.7s)，编导脚本顺应上游定位主题，证明上游交付物流转生效；两次调用均入账
+  - [ ] 待补：topic_plan（选题方案）schema + 输出（可后续补，当前 video_script 已跑通）
 - [ ] **03 美术**：art_prompt（视觉风格书 + 结构化 AI 提示词，输出喂 Seedance）
 - [ ] **04 视频**：video_asset（生成参数计划；真实出片在 E7 接 Seedance，此处先产计划）
 - [ ] **05 剪辑**：edited_video（剪辑说明 + 成片清单；真实素材处理在 E9）

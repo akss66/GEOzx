@@ -17,7 +17,7 @@ from app.models.enums import (
 )
 from app.orchestrator.engine import OrchestrationEngine
 
-# 定位 Agent 真实输出形状的占位（满足 PositioningStrategyPayload）。
+# 各 Agent 真实输出形状的占位（满足对应 payload schema）。
 _POSITIONING_JSON = json.dumps(
     {
         "account_persona": "硬核数码测评",
@@ -27,13 +27,26 @@ _POSITIONING_JSON = json.dumps(
     }
 )
 
+_SCRIPT_JSON = json.dumps(
+    {
+        "title": "新品开箱：三分钟看懂值不值",
+        "hook": "这台机器，贵的有道理吗？",
+        "scenes": ["开箱", "上手实测", "结论"],
+        "duration_seconds": 45,
+        "bgm_suggestion": "轻快电子",
+    }
+)
+
+_AGENT_OUTPUT = {"01-positioning": _POSITIONING_JSON, "02-content": _SCRIPT_JSON}
+
 
 @pytest.fixture(autouse=True)
 def _stub_llm(monkeypatch):
-    """拦截真实网关调用：PIPELINE 第一步是真实 PositioningAgent，测试不触网。"""
+    """拦截真实网关调用：PIPELINE 各步是真实 LLMAgent，测试不触网。按 agent_code 返回对应形状。"""
 
     async def fake_chat(self, session, org_id, agent_code, messages):
-        return CompletionResult(_POSITIONING_JSON, "deepseek-chat", 10, 20, 30), 0.0
+        content = _AGENT_OUTPUT.get(agent_code, _POSITIONING_JSON)
+        return CompletionResult(content, "deepseek-chat", 10, 20, 30), 0.0
 
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
@@ -156,3 +169,30 @@ async def test_advance_is_idempotent_while_blocked(session, content_item) -> Non
     ).all()
     assert len(tasks) == 2
     assert len(gates) == 2  # 1 auto_passed + 1 pending，无重复
+
+
+@pytest.mark.asyncio
+async def test_content_agent_receives_upstream_positioning(session, content_item, monkeypatch):
+    """验证上游定位交付物流转到编导 Agent 的输入（messages 含定位 payload）。"""
+    captured: dict[str, list] = {}
+
+    async def capturing_chat(self, sess, org_id, agent_code, messages):
+        captured[agent_code] = messages
+        return CompletionResult(_AGENT_OUTPUT[agent_code], "deepseek-chat", 10, 20, 30), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", capturing_chat)
+
+    engine = OrchestrationEngine(emit=FakeEmit())
+    await engine.start(session, content_item.id)
+
+    # 编导 Agent 的 user 消息里应含上游定位策略的关键字段
+    content_user_msg = next(
+        m["content"] for m in captured["02-content"] if m["role"] == "user"
+    )
+    assert "positioning_strategy" in content_user_msg
+    assert "硬核数码测评" in content_user_msg  # 来自定位 Agent 的输出
+    # 定位 Agent（首步）无上游
+    positioning_user_msg = next(
+        m["content"] for m in captured["01-positioning"] if m["role"] == "user"
+    )
+    assert "无上游输入" in positioning_user_msg
