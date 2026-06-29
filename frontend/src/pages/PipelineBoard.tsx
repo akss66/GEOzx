@@ -31,7 +31,7 @@ interface StageDef {
   name: string;
 }
 
-// 八阶段（对应 8 个 Agent）。当前 M0 编排仅推进前两阶段，其余预留。
+// 主链路六阶段（与后端 PIPELINE 一致）。投流/客服是并行/独立模块，不在主链路看板。
 const STAGES: StageDef[] = [
   { key: "positioning", index: "01", name: "账号定位" },
   { key: "content_direction", index: "02", name: "编导文案" },
@@ -39,8 +39,6 @@ const STAGES: StageDef[] = [
   { key: "video_creation", index: "04", name: "视频创作" },
   { key: "editing", index: "05", name: "剪辑" },
   { key: "operation", index: "06", name: "运营分发" },
-  { key: "advertising", index: "07", name: "投流" },
-  { key: "customer_service", index: "08", name: "客服" },
 ];
 
 // 内容状态 → 状态标记（色盲安全的颜色 + 图标 + 文字）。

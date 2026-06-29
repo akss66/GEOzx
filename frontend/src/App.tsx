@@ -6,9 +6,11 @@ import { getMe } from "./api/auth";
 import { AppShell } from "./components/AppShell";
 import { AdminRoute, ProtectedRoute } from "./components/RouteGuards";
 import Accounts from "./pages/Accounts";
+import Advertising from "./pages/Advertising";
 import Approvals from "./pages/Approvals";
 import Config from "./pages/Config";
 import Cost from "./pages/Cost";
+import CustomerService from "./pages/CustomerService";
 import Dashboard from "./pages/Dashboard";
 import Knowledge from "./pages/Knowledge";
 import Login from "./pages/Login";
@@ -48,6 +50,8 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="pipeline" element={<PipelineBoard />} />
           <Route path="approvals" element={<Approvals />} />
+          <Route path="customer-service" element={<CustomerService />} />
+          <Route path="advertising" element={<Advertising />} />
           <Route path="review" element={<ReviewDashboard />} />
           <Route path="cost" element={<Cost />} />
           <Route path="accounts" element={<Accounts />} />
