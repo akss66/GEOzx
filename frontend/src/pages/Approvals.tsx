@@ -1,18 +1,59 @@
 import { CheckOutlined, CloseOutlined, WarningFilled } from "@ant-design/icons";
-import { App as AntApp, Button, Empty, Tag } from "antd";
-import { useState } from "react";
+import { App as AntApp, Button, Empty, Spin, Tag } from "antd";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { approveGate, listPendingGates } from "../api/orchestrator";
 import { PageHeader } from "../components/ui";
-import { PENDING_GATES, type Gate } from "../mock/data";
+import { useEventStream } from "../hooks/useEventStream";
+import type { GateType } from "../types";
+
+const GATE_LABEL: Record<GateType, string> = {
+  positioning_review: "定位审核",
+  topic_review: "选题审核",
+  script_compliance: "脚本合规",
+  final_video_review: "成片审核",
+  pre_publish_review: "发布前审核",
+  large_ad_spend: "大额投放",
+};
+
+// 强制人工的质量门（SPEC 5.5：脚本合规 / 发布前 / 大额投放）。
+const FORCED_GATES = new Set<GateType>([
+  "script_compliance",
+  "pre_publish_review",
+  "large_ad_spend",
+]);
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时`;
+  return `${Math.floor(hr / 24)} 天`;
+}
 
 export default function Approvals() {
   const { message } = AntApp.useApp();
-  const [gates, setGates] = useState<Gate[]>(PENDING_GATES);
+  const qc = useQueryClient();
 
-  const decide = (id: number, ok: boolean) => {
-    setGates((prev) => prev.filter((g) => g.id !== id));
-    message.success(ok ? "已通过，链路继续流转" : "已打回，已通知对应 Agent");
-  };
+  const gatesQuery = useQuery({ queryKey: ["gates"], queryFn: listPendingGates });
+
+  // 编排事件（门待审/审批结果）到达即刷新。
+  useEventStream(() => qc.invalidateQueries({ queryKey: ["gates"] }));
+
+  const decideMutation = useMutation({
+    mutationFn: ({ id, approved }: { id: number; approved: boolean }) =>
+      approveGate(id, approved),
+    onSuccess: (_data, { approved }) => {
+      message.success(approved ? "已通过，链路继续流转" : "已打回，已通知对应 Agent");
+      qc.invalidateQueries({ queryKey: ["gates"] });
+      qc.invalidateQueries({ queryKey: ["content-items"] });
+    },
+    onError: () => message.error("操作失败，请重试"),
+  });
+
+  const gates = gatesQuery.data ?? [];
 
   return (
     <div>
@@ -26,70 +67,76 @@ export default function Approvals() {
         }
       />
 
-      {gates.length === 0 ? (
+      {gatesQuery.isLoading ? (
+        <div style={{ display: "grid", placeItems: "center", marginTop: 80 }}>
+          <Spin />
+        </div>
+      ) : gates.length === 0 ? (
         <Empty description="全部处理完毕 · 链路畅通" style={{ marginTop: 80 }} />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 880 }}>
-          {gates.map((g) => (
-            <div
-              key={g.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 16,
-                padding: "16px 18px",
-                background: "var(--dy-surface)",
-                border: "1px solid",
-                borderColor: g.forced ? "rgba(214,161,38,0.3)" : "var(--dy-border-subtle)",
-                borderRadius: 12,
-              }}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                  <Tag
-                    color={g.forced ? "warning" : "default"}
-                    icon={g.forced ? <WarningFilled /> : undefined}
-                    style={{ marginInlineEnd: 0 }}
-                  >
-                    {g.gate}
-                  </Tag>
-                  {g.forced && (
-                    <span style={{ fontSize: 12, color: "var(--dy-warning)" }}>强制人工</span>
-                  )}
-                  <span style={{ fontSize: 12, color: "var(--dy-faint)", marginLeft: "auto" }}>
-                    等待 {g.waiting}
-                  </span>
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 500, color: "var(--dy-text)" }}>
-                  {g.title}
-                </div>
-                <div style={{ fontSize: 12.5, color: "var(--dy-muted)", marginTop: 4 }}>
-                  @{g.account} · 内容 #{g.contentId}
-                  {g.risk && (
-                    <span style={{ color: "var(--dy-warning)", marginLeft: 8 }}>
-                      ⚠ {g.risk}
+          {gates.map((g) => {
+            const forced = FORCED_GATES.has(g.gate);
+            const pending =
+              decideMutation.isPending && decideMutation.variables?.id === g.id;
+            return (
+              <div
+                key={g.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 16,
+                  padding: "16px 18px",
+                  background: "var(--dy-surface)",
+                  border: "1px solid",
+                  borderColor: forced ? "rgba(214,161,38,0.3)" : "var(--dy-border-subtle)",
+                  borderRadius: 12,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <Tag
+                      color={forced ? "warning" : "default"}
+                      icon={forced ? <WarningFilled /> : undefined}
+                      style={{ marginInlineEnd: 0 }}
+                    >
+                      {GATE_LABEL[g.gate]}
+                    </Tag>
+                    {forced && (
+                      <span style={{ fontSize: 12, color: "var(--dy-warning)" }}>强制人工</span>
+                    )}
+                    <span style={{ fontSize: 12, color: "var(--dy-faint)", marginLeft: "auto" }}>
+                      等待 {relativeTime(g.created_at)}
                     </span>
-                  )}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--dy-text)" }}>
+                    {g.content_title}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--dy-muted)", marginTop: 4 }}>
+                    内容 #{g.content_item_id}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 8, flex: "none" }}>
+                  <Button
+                    danger
+                    icon={<CloseOutlined />}
+                    loading={pending}
+                    onClick={() => decideMutation.mutate({ id: g.id, approved: false })}
+                  >
+                    打回
+                  </Button>
+                  <Button
+                    type="primary"
+                    icon={<CheckOutlined />}
+                    loading={pending}
+                    onClick={() => decideMutation.mutate({ id: g.id, approved: true })}
+                  >
+                    通过
+                  </Button>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 8, flex: "none" }}>
-                <Button
-                  danger
-                  icon={<CloseOutlined />}
-                  onClick={() => decide(g.id, false)}
-                >
-                  打回
-                </Button>
-                <Button
-                  type="primary"
-                  icon={<CheckOutlined />}
-                  onClick={() => decide(g.id, true)}
-                >
-                  通过
-                </Button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

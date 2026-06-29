@@ -72,6 +72,17 @@ class GateApprovalOut(BaseModel):
     decided_at: datetime | None
 
 
+class PendingGateOut(BaseModel):
+    """待审质量门聚合视图（跨内容），供审批列表用。"""
+
+    id: int
+    gate: GateType
+    status: GateStatus
+    content_item_id: int
+    content_title: str
+    created_at: datetime
+
+
 class BoardOut(BaseModel):
     content_item: ContentItemOut
     tasks: list[AgentTaskOut]

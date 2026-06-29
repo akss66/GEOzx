@@ -20,3 +20,92 @@ export interface CreateUserInput {
   display_name: string;
   role: Role;
 }
+
+// —— 工作区域：项目 / 账号矩阵 ——
+
+export type Platform = "douyin" | "xiaohongshu" | "shipinhao";
+export type ProjectStatus = "active" | "paused" | "archived";
+export type AccountStatus = "active" | "inactive" | "banned";
+export type GroupDimension = "track" | "persona" | "platform";
+
+export interface Project {
+  id: number;
+  name: string;
+  description: string | null;
+  status: ProjectStatus;
+  created_at: string;
+}
+
+export interface AccountGroup {
+  id: number;
+  name: string;
+  dimension: GroupDimension;
+  created_at: string;
+}
+
+export interface Account {
+  id: number;
+  nickname: string;
+  platform: Platform;
+  group_id: number | null;
+  status: AccountStatus;
+  external_account_id: string | null;
+  created_at: string;
+}
+
+export interface CreateAccountInput {
+  nickname: string;
+  platform: Platform;
+  group_id?: number | null;
+  external_account_id?: string | null;
+}
+
+// —— 编排：内容流水线 / 质量门 ——
+
+export type ContentStage =
+  | "positioning"
+  | "content_direction"
+  | "art_direction"
+  | "video_creation"
+  | "editing"
+  | "operation"
+  | "advertising"
+  | "customer_service";
+
+export type ContentStatus =
+  | "draft"
+  | "in_progress"
+  | "blocked"
+  | "published"
+  | "archived";
+
+export type AgentTaskStatus = "pending" | "running" | "done" | "failed" | "blocked";
+
+export type GateType =
+  | "positioning_review"
+  | "topic_review"
+  | "script_compliance"
+  | "final_video_review"
+  | "pre_publish_review"
+  | "large_ad_spend";
+
+export type GateStatus = "pending" | "approved" | "rejected" | "auto_passed";
+
+export interface ContentItem {
+  id: number;
+  project_id: number;
+  account_id: number | null;
+  title: string;
+  current_stage: ContentStage;
+  status: ContentStatus;
+  created_at: string;
+}
+
+export interface PendingGate {
+  id: number;
+  gate: GateType;
+  status: GateStatus;
+  content_item_id: number;
+  content_title: string;
+  created_at: string;
+}

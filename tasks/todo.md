@@ -62,10 +62,12 @@
   - [x] 验证：`test_orchestrator` 4 例(流转/版本化/门阻塞/审批续跑/驳回/幂等)(共 35 passed)+ ruff；**端到端实测**：建内容(draft)→启动(2 Agent done+交付物 v1+自动门放行+强制门 pending=blocked)→审批(→published)；6 个编排事件经 arq 总线按序落库
 
 - [ ] **T8 前端流水线看板 + 项目/账号 CRUD + 实时**（L，依赖：T4/T7）
-  - [ ] 项目/账号(含 AccountGroup) CRUD，走 TanStack Query
-  - [ ] Kanban 看板按 ContentItem/AgentTask 渲染，WebSocket 实时刷新
-  - [ ] 待审质量门醒目高亮 + 一键审批
-  - [ ] 验证：`pnpm test` + `pnpm e2e` M0 冒烟；双窗口实时同步
+  - [x] 后端补 Project / AccountGroup / Account CRUD（RBAC：list 任意登录用户，增删改限 admin，org 隔离）+ 聚合 `GET /gates` 待审门视图
+  - [x] 项目/账号(含 AccountGroup) CRUD，走 TanStack Query；Accounts 页接真实账号 API（分组筛选/就地建组/授权弹窗）
+  - [x] Kanban 看板按 ContentItem/current_stage 渲染，新建内容即启动流水线，WebSocket 事件到达即 invalidate 刷新
+  - [x] 待审质量门页接真实 `GET /gates` + 一键审批（强制门高亮），审批结果实时刷新看板
+  - [x] 验证：后端 41 passed（+6 workspace CRUD/RBAC）+ ruff；前端 tsc + eslint + vite build 全绿
+  - [ ] 待补：`pnpm test`/`pnpm e2e` 冒烟（测试框架尚未搭）；双窗口 WebSocket 实时同步人工实测
 
 ### ⛳ 检查点 B（M0 完成）
 - [ ] `docker compose up` 一键全栈；登录 + 角色菜单

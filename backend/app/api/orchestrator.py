@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser
 from app.db import get_session
 from app.models import AgentTask, ContentItem, Deliverable, GateApproval, Project
+from app.models.enums import GateStatus
 from app.orchestrator.engine import engine
 from app.schemas.orchestrator import (
     AgentTaskOut,
@@ -18,6 +19,7 @@ from app.schemas.orchestrator import (
     CreateContentItemRequest,
     DeliverableOut,
     GateApprovalOut,
+    PendingGateOut,
 )
 
 router = APIRouter(tags=["orchestrator"])
@@ -93,6 +95,30 @@ async def start_pipeline(ci_id: int, user: CurrentUser, session: SessionDep) -> 
 @router.get("/content-items/{ci_id}", response_model=BoardOut)
 async def get_board(ci_id: int, user: CurrentUser, session: SessionDep) -> BoardOut:
     return await _board(session, ci_id)
+
+
+@router.get("/gates", response_model=list[PendingGateOut])
+async def list_pending_gates(user: CurrentUser, session: SessionDep) -> list[PendingGateOut]:
+    """跨内容列出待审质量门（含内容标题），供审批中心用。"""
+    rows = (
+        await session.execute(
+            select(GateApproval, ContentItem.title)
+            .join(ContentItem, GateApproval.content_item_id == ContentItem.id)
+            .where(GateApproval.status == GateStatus.PENDING)
+            .order_by(GateApproval.id)
+        )
+    ).all()
+    return [
+        PendingGateOut(
+            id=g.id,
+            gate=g.gate,
+            status=g.status,
+            content_item_id=g.content_item_id,
+            content_title=title,
+            created_at=g.created_at,
+        )
+        for g, title in rows
+    ]
 
 
 @router.post("/gates/{approval_id}/approve", response_model=BoardOut)

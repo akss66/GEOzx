@@ -8,7 +8,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api import auth, events, health, llm, orchestrator, users, ws
+from app.api import (
+    accounts,
+    auth,
+    events,
+    health,
+    llm,
+    orchestrator,
+    projects,
+    users,
+    ws,
+)
 from app.config import settings
 
 app = FastAPI(
@@ -32,6 +42,8 @@ app.include_router(llm.router)
 app.include_router(events.router)
 app.include_router(ws.router)
 app.include_router(orchestrator.router)
+app.include_router(projects.router)
+app.include_router(accounts.router)
 
 
 @app.get("/", tags=["system"])
