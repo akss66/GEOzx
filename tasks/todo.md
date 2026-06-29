@@ -98,6 +98,8 @@
 ### E2 — 六个创作 Agent（各自垂直切片：prompt + 输出 schema + 编排接入 + 测试）
 > 每个 = 注册 payload schema（`schemas/deliverable.py`）+ 草稿 prompt + LLMAgent 子类 + 接入 PIPELINE + 单测（mock 网关）。
 - [ ] **01 定位**：positioning_strategy（已有 schema，替换 DummyAgent 为真实 LLMAgent）
+  - [x] `PositioningAgent(LLMAgent)` 接入 PIPELINE 第一步；orchestrator 测试加 stub_llm fixture（不触网）
+  - [x] 验证：51 passed+ruff；**真实端到端**：DeepSeek 现场生成定位策略(404 tok/$0.00024/2.2s)→schema 校验→落库 v1→自动门放行→强制门阻塞，链路完整
 - [ ] **02 编导**：topic_plan + video_script（已有 script schema，补 topic_plan schema）
 - [ ] **03 美术**：art_prompt（视觉风格书 + 结构化 AI 提示词，输出喂 Seedance）
 - [ ] **04 视频**：video_asset（生成参数计划；真实出片在 E7 接 Seedance，此处先产计划）

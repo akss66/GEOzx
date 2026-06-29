@@ -1,9 +1,12 @@
-"""编排引擎测试：流转 / 版本化 / 质量门阻塞与审批（fake emit，SQLite）。"""
+"""编排引擎测试：流转 / 版本化 / 质量门阻塞与审批（fake emit + fake LLM，SQLite）。"""
+
+import json
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from app.llm.adapters import CompletionResult
 from app.models import AgentTask, ContentItem, Deliverable, GateApproval, Org, Project
 from app.models.enums import (
     AgentTaskStatus,
@@ -13,6 +16,26 @@ from app.models.enums import (
     GateStatus,
 )
 from app.orchestrator.engine import OrchestrationEngine
+
+# 定位 Agent 真实输出形状的占位（满足 PositioningStrategyPayload）。
+_POSITIONING_JSON = json.dumps(
+    {
+        "account_persona": "硬核数码测评",
+        "target_audience": "25-35 岁科技爱好者",
+        "differentiation": ["真机长测", "深度拆解"],
+        "content_pillars": ["新品首发", "横向对比"],
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm(monkeypatch):
+    """拦截真实网关调用：PIPELINE 第一步是真实 PositioningAgent，测试不触网。"""
+
+    async def fake_chat(self, session, org_id, agent_code, messages):
+        return CompletionResult(_POSITIONING_JSON, "deepseek-chat", 10, 20, 30), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
 
 class FakeEmit:
