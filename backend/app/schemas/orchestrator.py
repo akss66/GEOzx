@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.models.enums import (
     AgentTaskStatus,
+    ComplianceRisk,
     ContentStage,
     ContentStatus,
     DeliverableStatus,
@@ -76,6 +77,18 @@ class GateApprovalOut(BaseModel):
     decided_at: datetime | None
 
 
+class ComplianceCheckOut(BaseModel):
+    """合规预检结果（供审批参考）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    risk: ComplianceRisk
+    summary: str
+    findings: list | None
+    created_at: datetime
+
+
 class PendingGateOut(BaseModel):
     """待审质量门聚合视图（跨内容），供审批列表用。"""
 
@@ -85,6 +98,7 @@ class PendingGateOut(BaseModel):
     content_item_id: int
     content_title: str
     created_at: datetime
+    compliance: ComplianceCheckOut | None = None
 
 
 class BoardOut(BaseModel):
@@ -92,3 +106,4 @@ class BoardOut(BaseModel):
     tasks: list[AgentTaskOut]
     deliverables: list[DeliverableOut]
     gates: list[GateApprovalOut]
+    compliance: list[ComplianceCheckOut] = []

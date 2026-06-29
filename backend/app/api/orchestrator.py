@@ -8,13 +8,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.db import get_session
-from app.models import AgentTask, ContentItem, Deliverable, GateApproval, Project
-from app.models.enums import GateStatus
+from app.models import (
+    AgentTask,
+    ComplianceCheck,
+    ContentItem,
+    Deliverable,
+    GateApproval,
+    Project,
+)
+from app.models.enums import GateStatus, GateType
 from app.orchestrator.engine import engine
 from app.schemas.orchestrator import (
     AgentTaskOut,
     ApproveGateRequest,
     BoardOut,
+    ComplianceCheckOut,
     ContentItemOut,
     CreateContentItemRequest,
     DeliverableOut,
@@ -49,11 +57,19 @@ async def _board(session: AsyncSession, ci_id: int) -> BoardOut:
             .order_by(GateApproval.id)
         )
     ).all()
+    checks = (
+        await session.scalars(
+            select(ComplianceCheck)
+            .where(ComplianceCheck.content_item_id == ci_id)
+            .order_by(ComplianceCheck.id)
+        )
+    ).all()
     return BoardOut(
         content_item=ContentItemOut.model_validate(ci),
         tasks=[AgentTaskOut.model_validate(t) for t in tasks],
         deliverables=[DeliverableOut.model_validate(d) for d in deliverables],
         gates=[GateApprovalOut.model_validate(g) for g in gates],
+        compliance=[ComplianceCheckOut.model_validate(c) for c in checks],
     )
 
 
@@ -139,7 +155,7 @@ async def rollback_deliverable(
 
 @router.get("/gates", response_model=list[PendingGateOut])
 async def list_pending_gates(user: CurrentUser, session: SessionDep) -> list[PendingGateOut]:
-    """跨内容列出待审质量门（含内容标题），供审批中心用。"""
+    """跨内容列出待审质量门（含内容标题 + 脚本合规门的合规预检结果），供审批中心用。"""
     rows = (
         await session.execute(
             select(GateApproval, ContentItem.title)
@@ -148,17 +164,29 @@ async def list_pending_gates(user: CurrentUser, session: SessionDep) -> list[Pen
             .order_by(GateApproval.id)
         )
     ).all()
-    return [
-        PendingGateOut(
-            id=g.id,
-            gate=g.gate,
-            status=g.status,
-            content_item_id=g.content_item_id,
-            content_title=title,
-            created_at=g.created_at,
+    out: list[PendingGateOut] = []
+    for g, title in rows:
+        compliance = None
+        if g.gate == GateType.SCRIPT_COMPLIANCE:
+            check = await session.scalar(
+                select(ComplianceCheck)
+                .where(ComplianceCheck.content_item_id == g.content_item_id)
+                .order_by(ComplianceCheck.id.desc())
+            )
+            if check is not None:
+                compliance = ComplianceCheckOut.model_validate(check)
+        out.append(
+            PendingGateOut(
+                id=g.id,
+                gate=g.gate,
+                status=g.status,
+                content_item_id=g.content_item_id,
+                content_title=title,
+                created_at=g.created_at,
+                compliance=compliance,
+            )
         )
-        for g, title in rows
-    ]
+    return out
 
 
 @router.post("/gates/{approval_id}/approve", response_model=BoardOut)

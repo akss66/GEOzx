@@ -13,8 +13,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentContext
+from app.compliance.checker import check_script
 from app.core.events import publish_event
-from app.models import AgentTask, ContentItem, Deliverable, GateApproval, KnowledgeEntry, Project
+from app.models import (
+    AgentTask,
+    ComplianceCheck,
+    ContentItem,
+    Deliverable,
+    GateApproval,
+    KnowledgeEntry,
+    Project,
+)
 from app.models.enums import (
     AgentTaskStatus,
     ContentStage,
@@ -314,7 +323,40 @@ class OrchestrationEngine:
         ci.status = ContentStatus.BLOCKED
         await session.commit()
         if existing is None:
+            # 脚本合规门：阻塞时自动跑合规预检，结果落库供人工审批参考
+            if gate == GateType.SCRIPT_COMPLIANCE:
+                await self._run_compliance_check(session, ci.id)
             await self._emit("gate.pending", {"gate": gate.value}, content_item_id=ci.id)
+
+    async def _run_compliance_check(self, session: AsyncSession, ci_id: int) -> None:
+        """对最新生效的视频脚本跑合规预检，落 ComplianceCheck 记录。"""
+        script = await session.scalar(
+            select(Deliverable)
+            .where(
+                Deliverable.content_item_id == ci_id,
+                Deliverable.type == DeliverableType.VIDEO_SCRIPT,
+                Deliverable.status != DeliverableStatus.SUPERSEDED,
+            )
+            .order_by(Deliverable.version.desc())
+        )
+        if script is None:
+            return
+        risk, summary, findings = check_script(script.payload)
+        session.add(
+            ComplianceCheck(
+                content_item_id=ci_id,
+                deliverable_id=script.id,
+                risk=risk,
+                summary=summary,
+                findings=findings,
+            )
+        )
+        await session.commit()
+        await self._emit(
+            "compliance.checked",
+            {"risk": risk.value, "findings": len(findings)},
+            content_item_id=ci_id,
+        )
 
     async def _auto_pass_gate(self, session: AsyncSession, ci: ContentItem, gate: GateType) -> None:
         session.add(GateApproval(content_item_id=ci.id, gate=gate, status=GateStatus.AUTO_PASSED))

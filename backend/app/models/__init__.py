@@ -3,6 +3,7 @@
 导入全部模型，使 `app.db.Base.metadata` 完整（Alembic autogenerate 依赖于此）。
 """
 
+from app.models.compliance import ComplianceCheck
 from app.models.configuration import IntegrationConfig, ModelConfig
 from app.models.content import ContentItem, Deliverable
 from app.models.identity import Org, User
@@ -26,4 +27,5 @@ __all__ = [
     "ModelConfig",
     "IntegrationConfig",
     "LLMCall",
+    "ComplianceCheck",
 ]

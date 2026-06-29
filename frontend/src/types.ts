@@ -137,6 +137,23 @@ export interface PendingGate {
   content_item_id: number;
   content_title: string;
   created_at: string;
+  compliance: ComplianceCheck | null;
+}
+
+export type ComplianceRisk = "pass" | "warn" | "block";
+
+export interface ComplianceFinding {
+  word: string;
+  category: string;
+  level: "warn" | "block";
+}
+
+export interface ComplianceCheck {
+  id: number;
+  risk: ComplianceRisk;
+  summary: string;
+  findings: ComplianceFinding[] | null;
+  created_at: string;
 }
 
 // —— 模型配置：per-Agent 首选/兜底 ——

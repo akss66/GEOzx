@@ -117,3 +117,11 @@ class KnowledgeCategory(enum.StrEnum):
     USER_PERSONA = "user_persona"
     PROMPT_LIBRARY = "prompt_library"
     SCRIPT_LIBRARY = "script_library"
+
+
+class ComplianceRisk(enum.StrEnum):
+    """合规预检风险等级。pass=无风险；warn=疑似需人工确认；block=高危建议打回。"""
+
+    PASS = "pass"
+    WARN = "warn"
+    BLOCK = "block"
