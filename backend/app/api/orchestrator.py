@@ -20,6 +20,7 @@ from app.schemas.orchestrator import (
     DeliverableOut,
     GateApprovalOut,
     PendingGateOut,
+    RerunStageRequest,
 )
 
 router = APIRouter(tags=["orchestrator"])
@@ -95,6 +96,45 @@ async def start_pipeline(ci_id: int, user: CurrentUser, session: SessionDep) -> 
 @router.get("/content-items/{ci_id}", response_model=BoardOut)
 async def get_board(ci_id: int, user: CurrentUser, session: SessionDep) -> BoardOut:
     return await _board(session, ci_id)
+
+
+@router.get("/content-items/{ci_id}/deliverables", response_model=list[DeliverableOut])
+async def list_deliverable_history(
+    ci_id: int, user: CurrentUser, session: SessionDep
+) -> list[DeliverableOut]:
+    """交付物全量历史（含 superseded 旧版），按 type + version 排序，供版本对比/回滚。"""
+    rows = (
+        await session.scalars(
+            select(Deliverable)
+            .where(Deliverable.content_item_id == ci_id)
+            .order_by(Deliverable.type, Deliverable.version)
+        )
+    ).all()
+    return [DeliverableOut.model_validate(d) for d in rows]
+
+
+@router.post("/content-items/{ci_id}/rerun", response_model=BoardOut)
+async def rerun_stage(
+    ci_id: int, body: RerunStageRequest, user: CurrentUser, session: SessionDep
+) -> BoardOut:
+    """重跑某阶段 Agent，产新版交付物（旧版自动 superseded）。"""
+    try:
+        await engine.rerun_stage(session, ci_id, body.stage)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return await _board(session, ci_id)
+
+
+@router.post("/deliverables/{deliverable_id}/rollback", response_model=BoardOut)
+async def rollback_deliverable(
+    deliverable_id: int, user: CurrentUser, session: SessionDep
+) -> BoardOut:
+    """回滚到指定历史版本（设回 approved，其余同 type 版本 superseded）。"""
+    try:
+        d = await engine.rollback_deliverable(session, deliverable_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return await _board(session, d.content_item_id)
 
 
 @router.get("/gates", response_model=list[PendingGateOut])

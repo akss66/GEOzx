@@ -101,6 +101,35 @@ export interface ContentItem {
   created_at: string;
 }
 
+export type DeliverableType =
+  | "positioning_strategy"
+  | "topic_plan"
+  | "publish_calendar"
+  | "video_script"
+  | "art_prompt"
+  | "video_asset"
+  | "edited_video"
+  | "review_report"
+  | "ad_plan"
+  | "cs_record";
+
+export type DeliverableStatus =
+  | "draft"
+  | "pending_review"
+  | "approved"
+  | "rejected"
+  | "superseded";
+
+export interface Deliverable {
+  id: number;
+  agent_code: string;
+  type: DeliverableType;
+  version: number;
+  status: DeliverableStatus;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface PendingGate {
   id: number;
   gate: GateType;

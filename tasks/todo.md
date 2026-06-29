@@ -112,9 +112,10 @@
 - [x] 验证：`test_orchestrator` 扩展（六阶段全流转、Gate3/Gate5 阻塞与续跑、上游引用断言）52 passed+ruff；**真实端到端**：六阶段 DeepSeek 全跑通，2 道强制门审批续跑，6 份交付物各过 schema 校验，published；12 次调用累计 $0.0078 入账
 
 ### E4 — 交付物版本化 / 回滚 / 上游引用解析（M，依赖：E3）
-- [ ] 同 type 重跑产新 version（已有唯一约束），旧版置 superseded；回滚接口（指定 version 设回 approved）
-- [ ] 交付物历史 + 版本对比 API；前端交付物抽屉（看历史/对比/回滚）
-- [ ] 验证：版本递增、回滚、superseded 流转单测；前端 tsc+build
+- [x] 同 type 重跑产新 version（`rerun_stage`），旧版自动 superseded；`_upstream` 改为只取最新生效版（修多版本覆盖隐患）
+- [x] 回滚接口（`rollback_deliverable`：指定 version 设回 approved，其余 superseded）+ 历史 API（含 superseded）
+- [x] 前端交付物抽屉（DeliverableDrawer：按 type 分组看历史/payload/状态 + 重跑 + 回滚），看板卡片点击打开
+- [x] 验证：58 passed（+3：重跑 supersede/回滚/上游取最新版）+ruff；前端 tsc+eslint+build；**真实端到端**：启动 v1→重跑产 v2(v1 superseded)→回滚 v1(v1 approved/v2 superseded)，状态机正确
 
 ### E5 — 共享知识库读写 + 前端页（M，依赖：M0）
 - [x] `KnowledgeEntry` CRUD API（4 类：爆款/画像/提示词/话术），按 category 过滤，org 隔离（全体可读可写）

@@ -1,5 +1,5 @@
 import { api } from "./client";
-import type { ContentItem, PendingGate } from "../types";
+import type { ContentItem, ContentStage, Deliverable, PendingGate } from "../types";
 
 export async function listContentItems(projectId?: number): Promise<ContentItem[]> {
   const { data } = await api.get<ContentItem[]>("/content-items", {
@@ -32,4 +32,17 @@ export async function approveGate(
   comment?: string,
 ): Promise<void> {
   await api.post(`/gates/${approvalId}/approve`, { approved, comment });
+}
+
+export async function listDeliverableHistory(contentItemId: number): Promise<Deliverable[]> {
+  const { data } = await api.get<Deliverable[]>(`/content-items/${contentItemId}/deliverables`);
+  return data;
+}
+
+export async function rerunStage(contentItemId: number, stage: ContentStage): Promise<void> {
+  await api.post(`/content-items/${contentItemId}/rerun`, { stage });
+}
+
+export async function rollbackDeliverable(deliverableId: number): Promise<void> {
+  await api.post(`/deliverables/${deliverableId}/rollback`);
 }

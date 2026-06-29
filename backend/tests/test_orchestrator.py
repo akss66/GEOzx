@@ -12,6 +12,7 @@ from app.models.enums import (
     AgentTaskStatus,
     ContentStage,
     ContentStatus,
+    DeliverableStatus,
     DeliverableType,
     GateStatus,
     GateType,
@@ -231,6 +232,79 @@ async def test_advance_is_idempotent_while_blocked(session, content_item) -> Non
     ).all()
     assert len(tasks) == 2  # 定位 + 编导
     assert len(gates) == 3  # Gate1 + Gate2 auto_passed + Gate3 pending，无重复
+
+
+@pytest.mark.asyncio
+async def test_rerun_stage_supersedes_old_version(session, content_item):
+    """重跑定位阶段：产 version=2，旧版 version=1 置 superseded。"""
+    engine = OrchestrationEngine(emit=FakeEmit())
+    await engine.start(session, content_item.id)  # 跑到 Gate3，定位已产 v1
+
+    await engine.rerun_stage(session, content_item.id, ContentStage.POSITIONING)
+
+    delivs = (
+        await session.scalars(
+            select(Deliverable)
+            .where(
+                Deliverable.content_item_id == content_item.id,
+                Deliverable.type == DeliverableType.POSITIONING_STRATEGY,
+            )
+            .order_by(Deliverable.version)
+        )
+    ).all()
+    assert [d.version for d in delivs] == [1, 2]
+    assert delivs[0].status == DeliverableStatus.SUPERSEDED
+    assert delivs[1].status == DeliverableStatus.DRAFT
+
+
+@pytest.mark.asyncio
+async def test_rollback_restores_old_version(session, content_item):
+    """回滚到 v1：v1 设回 approved，v2 置 superseded。"""
+    engine = OrchestrationEngine(emit=FakeEmit())
+    await engine.start(session, content_item.id)
+    await engine.rerun_stage(session, content_item.id, ContentStage.POSITIONING)
+
+    v1 = await session.scalar(
+        select(Deliverable).where(
+            Deliverable.content_item_id == content_item.id,
+            Deliverable.type == DeliverableType.POSITIONING_STRATEGY,
+            Deliverable.version == 1,
+        )
+    )
+    await engine.rollback_deliverable(session, v1.id)
+
+    delivs = (
+        await session.scalars(
+            select(Deliverable)
+            .where(
+                Deliverable.content_item_id == content_item.id,
+                Deliverable.type == DeliverableType.POSITIONING_STRATEGY,
+            )
+            .order_by(Deliverable.version)
+        )
+    ).all()
+    assert delivs[0].status == DeliverableStatus.APPROVED  # v1 恢复生效
+    assert delivs[1].status == DeliverableStatus.SUPERSEDED  # v2 退场
+
+
+@pytest.mark.asyncio
+async def test_upstream_uses_latest_active_version(session, content_item, monkeypatch):
+    """下游只引用最新生效版：定位产出的新人设应出现在编导收到的上游输入里。"""
+    captured: dict[str, list] = {}
+
+    async def capturing_chat(self, sess, org_id, agent_code, messages):
+        captured[agent_code] = messages
+        if agent_code == "01-positioning":
+            payload = json.loads(_POSITIONING_JSON)
+            payload["account_persona"] = "最新生效人设"
+            return CompletionResult(json.dumps(payload), "deepseek-chat", 1, 1, 2), 0.0
+        return CompletionResult(_AGENT_OUTPUT[agent_code], "deepseek-chat", 1, 1, 2), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", capturing_chat)
+    engine = OrchestrationEngine(emit=FakeEmit())
+    await engine.start(session, content_item.id)
+    content_msg = next(m["content"] for m in captured["02-content"] if m["role"] == "user")
+    assert "最新生效人设" in content_msg
 
 
 @pytest.mark.asyncio

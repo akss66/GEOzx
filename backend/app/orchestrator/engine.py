@@ -17,6 +17,7 @@ from app.core.events import publish_event
 from app.models import AgentTask, ContentItem, Deliverable, GateApproval, KnowledgeEntry, Project
 from app.models.enums import (
     AgentTaskStatus,
+    ContentStage,
     ContentStatus,
     DeliverableStatus,
     DeliverableType,
@@ -76,6 +77,48 @@ class OrchestrationEngine:
             await session.commit()
             await self.advance(session, ci)
         return ci
+
+    async def rerun_stage(
+        self, session: AsyncSession, content_item_id: int, stage: ContentStage
+    ) -> ContentItem:
+        """重跑某阶段 Agent：产新版交付物（旧版自动 superseded），不重置下游。"""
+        ci = await session.get(ContentItem, content_item_id)
+        if ci is None:
+            raise ValueError(f"内容不存在: {content_item_id}")
+        step = next(
+            (s for s in PIPELINE if isinstance(s, AgentStep) and s.stage == stage), None
+        )
+        if step is None:
+            raise ValueError(f"阶段无对应 Agent: {stage.value}")
+        await self._run_agent(session, ci, step)
+        return ci
+
+    async def rollback_deliverable(
+        self, session: AsyncSession, deliverable_id: int
+    ) -> Deliverable:
+        """回滚：把指定历史版本设回生效（approved），同内容同 type 的其余版本置 superseded。"""
+        target = await session.get(Deliverable, deliverable_id)
+        if target is None:
+            raise ValueError("交付物不存在")
+        others = (
+            await session.scalars(
+                select(Deliverable).where(
+                    Deliverable.content_item_id == target.content_item_id,
+                    Deliverable.type == target.type,
+                    Deliverable.id != target.id,
+                )
+            )
+        ).all()
+        for d in others:
+            d.status = DeliverableStatus.SUPERSEDED
+        target.status = DeliverableStatus.APPROVED
+        await session.commit()
+        await self._emit(
+            "deliverable.rolledback",
+            {"type": target.type.value, "version": target.version},
+            content_item_id=target.content_item_id,
+        )
+        return target
 
     # —— 核心推进 ——
 
@@ -162,6 +205,8 @@ class OrchestrationEngine:
             raise
 
         version = await self._next_version(session, ci.id, step.agent.output_type)
+        # 同 type 的旧版标记 superseded（版本化：始终保留历史，仅最新版生效）
+        await self._supersede_prior(session, ci.id, step.agent.output_type)
         deliverable = Deliverable(
             content_item_id=ci.id,
             agent_code=step.agent.code,
@@ -185,10 +230,36 @@ class OrchestrationEngine:
         )
 
     async def _upstream(self, session: AsyncSession, ci_id: int) -> dict[str, dict]:
+        """上游交付物：每个 type 仅取当前生效版本（最高 version 且非 superseded）。"""
         rows = (
-            await session.scalars(select(Deliverable).where(Deliverable.content_item_id == ci_id))
+            await session.scalars(
+                select(Deliverable)
+                .where(
+                    Deliverable.content_item_id == ci_id,
+                    Deliverable.status != DeliverableStatus.SUPERSEDED,
+                )
+                .order_by(Deliverable.version)
+            )
         ).all()
+        # 按 version 升序遍历，后者（更高版本）覆盖前者，留下每 type 的最新生效版
         return {r.type.value: r.payload for r in rows}
+
+    async def _supersede_prior(
+        self, session: AsyncSession, ci_id: int, dtype: DeliverableType
+    ) -> None:
+        """把某内容某 type 的所有现存交付物标记 superseded（产新版前调用）。"""
+        prior = (
+            await session.scalars(
+                select(Deliverable).where(
+                    Deliverable.content_item_id == ci_id,
+                    Deliverable.type == dtype,
+                    Deliverable.status != DeliverableStatus.SUPERSEDED,
+                )
+            )
+        ).all()
+        for d in prior:
+            d.status = DeliverableStatus.SUPERSEDED
+        await session.flush()
 
     async def _org_id(self, session: AsyncSession, ci: ContentItem) -> int | None:
         """经 project 解析内容所属 org，供 Agent 按 org 路由 ModelConfig。"""

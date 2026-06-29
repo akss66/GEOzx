@@ -26,6 +26,10 @@ class ApproveGateRequest(BaseModel):
     comment: str | None = None
 
 
+class RerunStageRequest(BaseModel):
+    stage: ContentStage
+
+
 class ContentItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

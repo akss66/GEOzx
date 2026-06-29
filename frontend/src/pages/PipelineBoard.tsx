@@ -13,12 +13,17 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { createContentItem, listContentItems, startPipeline } from "../api/orchestrator";
+import {
+  createContentItem,
+  listContentItems,
+  startPipeline,
+} from "../api/orchestrator";
 import { listProjects } from "../api/workspace";
 import { PageHeader, StatusBadge } from "../components/ui";
 import { useEventStream } from "../hooks/useEventStream";
 import type { CardStatus } from "../mock/data";
 import type { ContentItem, ContentStage, ContentStatus } from "../types";
+import { DeliverableDrawer } from "./DeliverableDrawer";
 
 interface StageDef {
   key: ContentStage;
@@ -47,15 +52,17 @@ const STATUS_BADGE: Record<ContentStatus, CardStatus> = {
   archived: "done",
 };
 
-function Card({ item }: { item: ContentItem }) {
+function Card({ item, onClick }: { item: ContentItem; onClick: () => void }) {
   return (
     <article
       className="dy-rise"
+      onClick={onClick}
       style={{
         background: "var(--dy-elevated)",
         border: "1px solid var(--dy-border-subtle)",
         borderRadius: 10,
         padding: 12,
+        cursor: "pointer",
       }}
     >
       <div
@@ -88,6 +95,7 @@ export default function PipelineBoard() {
   const qc = useQueryClient();
   const [projectId, setProjectId] = useState<number | undefined>(undefined);
   const [modalOpen, setModalOpen] = useState(false);
+  const [selected, setSelected] = useState<ContentItem | null>(null);
   const [form] = Form.useForm<{ title: string }>();
 
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
@@ -243,7 +251,9 @@ export default function PipelineBoard() {
                       暂无在产内容
                     </div>
                   ) : (
-                    cards.map((c) => <Card key={c.id} item={c} />)
+                    cards.map((c) => (
+                      <Card key={c.id} item={c} onClick={() => setSelected(c)} />
+                    ))
                   )}
                 </div>
               </section>
@@ -279,6 +289,8 @@ export default function PipelineBoard() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <DeliverableDrawer item={selected} onClose={() => setSelected(null)} />
     </div>
   );
 }
