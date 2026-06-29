@@ -5,15 +5,20 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { getMe } from "./api/auth";
 import { AppShell } from "./components/AppShell";
 import { AdminRoute, ProtectedRoute } from "./components/RouteGuards";
+import Accounts from "./pages/Accounts";
+import Approvals from "./pages/Approvals";
+import Config from "./pages/Config";
+import Cost from "./pages/Cost";
 import Dashboard from "./pages/Dashboard";
+import Knowledge from "./pages/Knowledge";
 import Login from "./pages/Login";
-import Settings from "./pages/Settings";
+import PipelineBoard from "./pages/PipelineBoard";
+import ReviewDashboard from "./pages/ReviewDashboard";
 import Users from "./pages/Users";
 import { useAuth } from "./stores/auth";
 
 export default function App() {
   const { token, user, setUser, logout } = useAuth();
-  // 有令牌但还没拉到用户信息时，先 bootstrap 一次 /me
   const [booting, setBooting] = useState<boolean>(!!token && !user);
 
   useEffect(() => {
@@ -23,7 +28,7 @@ export default function App() {
         .catch(() => logout())
         .finally(() => setBooting(false));
     }
-    // 仅在首次挂载时 bootstrap
+    // 仅首次挂载 bootstrap
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -41,9 +46,15 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route index element={<Dashboard />} />
+          <Route path="pipeline" element={<PipelineBoard />} />
+          <Route path="approvals" element={<Approvals />} />
+          <Route path="review" element={<ReviewDashboard />} />
+          <Route path="cost" element={<Cost />} />
+          <Route path="accounts" element={<Accounts />} />
+          <Route path="knowledge" element={<Knowledge />} />
           <Route element={<AdminRoute />}>
+            <Route path="config" element={<Config />} />
             <Route path="users" element={<Users />} />
-            <Route path="settings" element={<Settings />} />
           </Route>
         </Route>
       </Route>

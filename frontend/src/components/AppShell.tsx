@@ -1,15 +1,22 @@
 import {
+  ApiOutlined,
+  AppstoreOutlined,
+  AuditOutlined,
   BulbOutlined,
   DashboardOutlined,
+  DatabaseOutlined,
+  LineChartOutlined,
   LogoutOutlined,
   MoonOutlined,
-  SettingOutlined,
+  PartitionOutlined,
   TeamOutlined,
+  WalletOutlined,
 } from "@ant-design/icons";
 import { Avatar, Dropdown, Layout, Menu, Tag, Tooltip, Typography } from "antd";
 import type { MenuProps } from "antd";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
+import { useEventStream } from "../hooks/useEventStream";
 import { useAuth } from "../stores/auth";
 import { useThemeMode } from "../stores/theme";
 
@@ -20,17 +27,29 @@ export function AppShell() {
   const { mode, toggle } = useThemeMode();
   const navigate = useNavigate();
   const location = useLocation();
+  const { connected } = useEventStream();
   const isAdmin = user?.role === "admin";
 
-  const menuItems: MenuProps["items"] = [
-    { key: "/", icon: <DashboardOutlined />, label: "工作台" },
-    ...(isAdmin
-      ? [
-          { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
-          { key: "/settings", icon: <SettingOutlined />, label: "系统配置" },
-        ]
-      : []),
+  const items: NonNullable<MenuProps["items"]> = [
+    { type: "group", label: "概览" },
+    { key: "/", icon: <DashboardOutlined />, label: "指挥台" },
+    { type: "group", label: "生产" },
+    { key: "/pipeline", icon: <PartitionOutlined />, label: "内容流水线" },
+    { key: "/approvals", icon: <AuditOutlined />, label: "质量门审批" },
+    { type: "group", label: "数据" },
+    { key: "/review", icon: <LineChartOutlined />, label: "复盘看板" },
+    { key: "/cost", icon: <WalletOutlined />, label: "成本" },
+    { type: "group", label: "资产" },
+    { key: "/accounts", icon: <AppstoreOutlined />, label: "账号矩阵" },
+    { key: "/knowledge", icon: <DatabaseOutlined />, label: "知识库" },
   ];
+  if (isAdmin) {
+    items.push(
+      { type: "group", label: "系统" },
+      { key: "/config", icon: <ApiOutlined />, label: "Agent 配置" },
+      { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
+    );
+  }
 
   const userMenu: MenuProps["items"] = [
     {
@@ -46,28 +65,36 @@ export function AppShell() {
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Sider theme={mode} width={208} style={{ borderRight: "1px solid var(--dy-border)" }}>
+      <Sider width={216} style={{ borderRight: "1px solid var(--dy-border-subtle)" }}>
         <div
           style={{
             height: 56,
             display: "flex",
             alignItems: "center",
-            gap: 8,
+            gap: 10,
             padding: "0 20px",
-            fontWeight: 700,
-            letterSpacing: 0.5,
-            fontSize: 17,
           }}
         >
-          DyFlow
+          <span
+            aria-hidden
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: 7,
+              background: "linear-gradient(135deg, #5b8cff, #6f6cff)",
+              display: "inline-block",
+            }}
+          />
+          <span style={{ fontWeight: 700, fontSize: 16, letterSpacing: 0.4 }}>
+            DyFlow
+          </span>
         </div>
         <Menu
-          theme={mode}
           mode="inline"
           selectedKeys={[location.pathname]}
-          items={menuItems}
+          items={items}
           onClick={({ key }) => navigate(key)}
-          style={{ borderInlineEnd: "none" }}
+          style={{ borderInlineEnd: "none", paddingTop: 4 }}
         />
       </Sider>
       <Layout>
@@ -76,41 +103,62 @@ export function AppShell() {
             display: "flex",
             alignItems: "center",
             justifyContent: "flex-end",
-            gap: 16,
-            paddingInline: 20,
-            borderBottom: "1px solid var(--dy-border)",
-            background: "transparent",
+            gap: 18,
+            borderBottom: "1px solid var(--dy-border-subtle)",
           }}
         >
+          <Tooltip title={connected ? "事件流已连接" : "事件流未连接"}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 7,
+                fontSize: 12,
+                color: "var(--dy-muted)",
+              }}
+            >
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: connected ? "var(--dy-success)" : "var(--dy-faint)",
+                  boxShadow: connected ? "0 0 0 3px rgba(63,185,80,0.18)" : "none",
+                }}
+              />
+              实时
+            </span>
+          </Tooltip>
           <Tooltip title={mode === "dark" ? "切换浅色" : "切换深色"}>
             <span
               role="button"
               tabIndex={0}
+              aria-label="切换主题"
               onClick={toggle}
               onKeyDown={(e) => e.key === "Enter" && toggle()}
-              style={{ cursor: "pointer", fontSize: 16, opacity: 0.75 }}
-              aria-label="切换主题"
+              style={{ cursor: "pointer", fontSize: 16, color: "var(--dy-muted)" }}
             >
               {mode === "dark" ? <BulbOutlined /> : <MoonOutlined />}
             </span>
           </Tooltip>
           <Dropdown menu={{ items: userMenu }} placement="bottomRight">
-            <span style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-              <Avatar size={28} style={{ background: "#4c8dff" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
+              <Avatar size={28} style={{ background: "#5b8cff", fontSize: 13 }}>
                 {user?.display_name?.[0] ?? "?"}
               </Avatar>
-              <span>
-                <Typography.Text style={{ marginInlineEnd: 6 }}>
-                  {user?.display_name}
-                </Typography.Text>
-                <Tag color={isAdmin ? "blue" : "default"} style={{ marginInlineEnd: 0 }}>
-                  {isAdmin ? "管理员" : "成员"}
-                </Tag>
-              </span>
+              <Typography.Text style={{ fontSize: 13 }}>
+                {user?.display_name}
+              </Typography.Text>
+              <Tag
+                color={isAdmin ? "blue" : "default"}
+                style={{ marginInlineEnd: 0, fontSize: 11 }}
+              >
+                {isAdmin ? "管理员" : "成员"}
+              </Tag>
             </span>
           </Dropdown>
         </Header>
-        <Content style={{ padding: 24 }}>
+        <Content style={{ padding: 24, overflow: "auto" }}>
           <Outlet />
         </Content>
       </Layout>

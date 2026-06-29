@@ -1,5 +1,5 @@
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
-import { App as AntApp, Button, Card, Form, Input, Typography } from "antd";
+import { App as AntApp, Button, Form, Input, Typography } from "antd";
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 
@@ -10,6 +10,13 @@ interface LoginForm {
   email: string;
   password: string;
 }
+
+const HIGHLIGHTS = [
+  "8 个 AI Agent 协同，覆盖定位到投放全链路",
+  "交付物版本化落库，上游产出自动触发下游",
+  "关键风险环节人工把关，其余自动通过",
+  "富可视化复盘，数据 → 洞察 → 优化闭环",
+];
 
 export default function Login() {
   const { token, setAuth } = useAuth();
@@ -33,42 +40,102 @@ export default function Login() {
   };
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-      }}
-    >
-      <Card style={{ width: 380 }} variant="borderless">
-        <div style={{ marginBottom: 24 }}>
-          <Typography.Title level={3} style={{ marginBottom: 4 }}>
-            DyFlow
-          </Typography.Title>
-          <Typography.Text type="secondary">运营工作台 · 登录</Typography.Text>
+    <div style={{ minHeight: "100vh", display: "flex", background: "var(--dy-canvas)" }}>
+      {/* 左侧品牌区 */}
+      <div
+        style={{
+          flex: "1 1 0",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          padding: "0 8%",
+          borderRight: "1px solid var(--dy-border-subtle)",
+          background:
+            "radial-gradient(120% 80% at 0% 0%, rgba(91,140,255,0.10), transparent 60%)",
+        }}
+        className="dy-login-brand"
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+          <span
+            aria-hidden
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 9,
+              background: "linear-gradient(135deg, #5b8cff, #6f6cff)",
+            }}
+          />
+          <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: 0.4 }}>DyFlow</span>
         </div>
-        <Form layout="vertical" onFinish={onFinish} requiredMark={false}>
-          <Form.Item
-            name="email"
-            label="邮箱"
-            rules={[{ required: true, message: "请输入邮箱" }]}
+        <Typography.Title level={2} style={{ margin: 0, maxWidth: 460, fontWeight: 650 }}>
+          抖音自媒体运营的 AI Agent 指挥中心
+        </Typography.Title>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 15, marginTop: 12, maxWidth: 420 }}>
+          把全流程交给协同的 AI Agent，团队只需在一个工作台里看数据、做决策、卡审核。
+        </Typography.Paragraph>
+        <ul style={{ listStyle: "none", padding: 0, margin: "20px 0 0", maxWidth: 420 }}>
+          {HIGHLIGHTS.map((h) => (
+            <li
+              key={h}
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "center",
+                color: "var(--dy-muted)",
+                fontSize: 14,
+                padding: "7px 0",
+              }}
+            >
+              <span
+                style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--dy-accent)", flex: "none" }}
+              />
+              {h}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* 右侧登录表单 */}
+      <div
+        style={{
+          flex: "0 0 480px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 32,
+        }}
+      >
+        <div style={{ width: 340 }}>
+          <Typography.Title level={3} style={{ marginBottom: 4 }}>
+            登录工作台
+          </Typography.Title>
+          <Typography.Text type="secondary">运营团队成员入口</Typography.Text>
+          <Form layout="vertical" onFinish={onFinish} requiredMark={false} style={{ marginTop: 24 }}>
+            <Form.Item name="email" label="邮箱" rules={[{ required: true, message: "请输入邮箱" }]}>
+              <Input prefix={<UserOutlined />} placeholder="admin@dyflow.local" size="large" />
+            </Form.Item>
+            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}>
+              <Input.Password prefix={<LockOutlined />} placeholder="••••••••" size="large" />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" block size="large" loading={loading}>
+              登录
+            </Button>
+          </Form>
+          <div
+            style={{
+              marginTop: 16,
+              padding: "10px 12px",
+              background: "var(--dy-elevated)",
+              border: "1px solid var(--dy-border-subtle)",
+              borderRadius: 8,
+              fontSize: 12,
+              color: "var(--dy-faint)",
+            }}
           >
-            <Input prefix={<UserOutlined />} placeholder="admin@dyflow.local" size="large" />
-          </Form.Item>
-          <Form.Item
-            name="password"
-            label="密码"
-            rules={[{ required: true, message: "请输入密码" }]}
-          >
-            <Input.Password prefix={<LockOutlined />} placeholder="••••••••" size="large" />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" block size="large" loading={loading}>
-            登录
-          </Button>
-        </Form>
-      </Card>
+            演示账号：admin@dyflow.local / admin12345
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

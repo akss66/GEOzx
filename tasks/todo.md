@@ -43,21 +43,23 @@
   - [x] 验证：后端 23 passed(security/auth/RBAC)+ ruff；前端 eslint+tsc+vite build(vendor 分块)；curl 实测 login/me/401/403/用户创建全绿；前端→nginx→后端 代理登录端到端通；五服务 healthy
 
 - [ ] **T5 模型网关 + DeepSeek + 成本记录**（M，依赖：T3）
-  - [ ] `LLMGateway` 接口 + `DeepSeekAdapter`（真实）+ 路由/兜底/重试骨架
-  - [ ] 每次调用记录模型/Token/成本；per-Agent ModelConfig 选模型
-  - [ ] 受保护 `POST /llm/ping` 联调端点
-  - [ ] 验证：`test_llm_gateway`（mock）通过；真实 Key ping 返回文本 + 入账
+  - [x] `LLMGateway` 接口 + `DeepSeekAdapter`（真实 httpx）+ 路由/兜底/重试骨架
+  - [x] 每次调用记录模型/Token/成本（`llm_calls` 表 + 迁移）；per-Agent ModelConfig 选模型
+  - [x] 受保护 `POST /llm/ping` 联调端点
+  - [x] 验证：`test_llm_gateway`(路由/兜底/成本记账/全失败)5 例通过(共 28 passed)；ruff；迁移往返干净
+  - [x] /llm/ping 链路实测：认证→网关→适配器→记账→错误处理通；**真实成功调用待填 DEEPSEEK_API_KEY**
 
 - [ ] **T6 事件总线 + arq Worker + 事件溯源**（M，依赖：T3）
-  - [ ] arq worker + 事件发布/订阅封装 + `Event` 落库 + 失败重试
-  - [ ] WebSocket 实时推送；前端 `useEventStream`
-  - [ ] 验证：`test_events`(integration) 发布→消费→落库→广播通过
+  - [x] arq worker + 事件发布/订阅封装 + `Event` 落库 + 失败重试(max_tries=3)
+  - [x] WebSocket `/ws/events`(订 Redis pub/sub 转发)；前端 `useEventStream`
+  - [x] compose 加 worker 服务(禁继承的 HTTP 健康检查)
+  - [x] 验证：单测 3 例(订阅/分发/入队 mock)(共 31 passed)+ ruff；**端到端实测**：POST /events/demo→arq 入队→worker 消费→Event 落库→WebSocket 客户端实时收到(id/type/payload)
 
 - [ ] **T7 编排引擎骨架（状态机 + Dummy Agent + 质量门）**（L，依赖：T6/T3/T5）
-  - [ ] `BaseAgent` + `DummyAgent`（产出 schema 校验交付物）
-  - [ ] ContentItem/AgentTask 状态机，事件驱动推进
-  - [ ] 质量门节点：blocked + GateApproval 待审 → 审批 → 继续
-  - [ ] 验证：`test_orchestrator` 流转/门/版本化通过；手动跑通链路
+  - [x] `BaseAgent` + `DummyAgent`（产出 schema 校验交付物）
+  - [x] ContentItem/AgentTask 状态机（PIPELINE：定位→自动门→编导→强制门），事件驱动推进
+  - [x] 质量门节点：强制门 blocked + GateApproval 待审 → 审批 → 续跑；自动门放行；幂等防重复
+  - [x] 验证：`test_orchestrator` 4 例(流转/版本化/门阻塞/审批续跑/驳回/幂等)(共 35 passed)+ ruff；**端到端实测**：建内容(draft)→启动(2 Agent done+交付物 v1+自动门放行+强制门 pending=blocked)→审批(→published)；6 个编排事件经 arq 总线按序落库
 
 - [ ] **T8 前端流水线看板 + 项目/账号 CRUD + 实时**（L，依赖：T4/T7）
   - [ ] 项目/账号(含 AccountGroup) CRUD，走 TanStack Query

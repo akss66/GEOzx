@@ -1,8 +1,32 @@
-:root {
-  --dy-border: rgba(255, 255, 255, 0.1);
+/* 指挥中心设计变量（供 antd 之外的自定义组件使用）。深色为默认。 */
+:root,
+:root[data-theme="dark"] {
+  --dy-canvas: #0b0e14;
+  --dy-surface: #11151d;
+  --dy-elevated: #161b24;
+  --dy-border: #232a36;
+  --dy-border-subtle: #1a202a;
+  --dy-text: #e7eaf0;
+  --dy-muted: #9aa4b4;
+  --dy-faint: #6a7384;
+  --dy-accent: #5b8cff;
+  --dy-success: #3fb950;
+  --dy-warning: #d6a126;
+  --dy-error: #f0566b;
+  --dy-info: #58a6ff;
+  --dy-accent-wash: rgba(91, 140, 255, 0.12);
 }
+
 :root[data-theme="light"] {
-  --dy-border: rgba(0, 0, 0, 0.08);
+  --dy-canvas: #f5f6f8;
+  --dy-surface: #ffffff;
+  --dy-elevated: #ffffff;
+  --dy-border: #e4e7ec;
+  --dy-border-subtle: #eef0f3;
+  --dy-text: #1a1f29;
+  --dy-muted: #586273;
+  --dy-faint: #8a94a6;
+  --dy-accent-wash: rgba(91, 140, 255, 0.08);
 }
 
 * {
@@ -15,4 +39,59 @@ body,
 }
 body {
   margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv01", "ss01";
+}
+
+/* 数字用等宽变体，表格/指标对齐更精确 */
+.dy-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 克制的滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--dy-border);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--dy-faint);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 微交互：仅传达状态，150–220ms，尊重 reduced-motion */
+.dy-rise {
+  transition:
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+.dy-rise:hover {
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+  .dy-rise:hover {
+    transform: none;
+  }
+}
+
+/* 窄屏隐藏登录页品牌区，仅留表单 */
+@media (max-width: 900px) {
+  .dy-login-brand {
+    display: none !important;
+  }
 }
