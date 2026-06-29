@@ -1,7 +1,10 @@
 """DummyAgent：产出固定的、经 schema 校验的占位交付物。
 
-用于 T7 验证编排链路骨架；M1 用真实创作 Agent（绑定 prompt+模型）替换。
+用于 T7 验证编排链路骨架；M1 用真实创作 Agent（LLMAgent 子类）替换。
+保留它供测试与无 Key 演示用，故跟随 BaseAgent 的新签名（忽略 session/org_id）。
 """
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentContext, BaseAgent
 from app.models.enums import DeliverableType
@@ -14,6 +17,8 @@ class DummyAgent(BaseAgent):
         self.output_type = output_type
         self._payload = payload
 
-    async def run(self, ctx: AgentContext) -> DeliverablePayload:
+    async def run(
+        self, session: AsyncSession, org_id: int | None, ctx: AgentContext
+    ) -> DeliverablePayload:
         # 经对应 type 的 Pydantic schema 校验，确保结构正确
         return validate_payload(self.output_type, self._payload)

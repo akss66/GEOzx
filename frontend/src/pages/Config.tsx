@@ -1,16 +1,24 @@
 import { ApiOutlined, CheckCircleFilled } from "@ant-design/icons";
-import { Select, Switch, Table, Tag } from "antd";
+import { App as AntApp, Select, Switch, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { listModelConfigs, updateModelConfig } from "../api/configuration";
 import { PageHeader, Panel } from "../components/ui";
-import { AGENT_CONFIGS, type AgentConfig } from "../mock/data";
+import { useAuth } from "../stores/auth";
+import type { ModelConfig } from "../types";
 
-const MODEL_OPTIONS = [
+const PRIMARY_OPTIONS = [
   { value: "deepseek-chat", label: "deepseek-chat" },
   { value: "deepseek-reasoner", label: "deepseek-reasoner" },
-  { value: "—", label: "无兜底" },
 ];
 
+const FALLBACK_OPTIONS = [
+  { value: "deepseek-chat", label: "deepseek-chat" },
+  { value: "deepseek-reasoner", label: "deepseek-reasoner" },
+];
+
+// 质量门策略 / 外部集成面板：M1 E3/E9（门策略）与 E7/E8（集成）落地前先以静态展示。
 const GATES = [
   { name: "定位审核", forced: false },
   { name: "选题审核", forced: false },
@@ -28,30 +36,71 @@ const INTEGRATIONS = [
 ];
 
 export default function Config() {
-  const columns: ColumnsType<AgentConfig> = [
-    { title: "Agent", dataIndex: "name", render: (v: string, r) => (
-      <span><span style={{ fontWeight: 500 }}>{v}</span>
-        <span className="dy-tabular" style={{ color: "var(--dy-faint)", fontSize: 12, marginLeft: 8 }}>{r.code}</span>
-      </span>
-    ) },
+  const { message } = AntApp.useApp();
+  const qc = useQueryClient();
+  const isAdmin = useAuth((s) => s.user?.role === "admin");
+
+  const configsQuery = useQuery({ queryKey: ["model-configs"], queryFn: listModelConfigs });
+
+  const updateMutation = useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: number;
+      patch: { primary_model?: string; fallback_model?: string | null };
+    }) => updateModelConfig(id, patch),
+    onSuccess: () => {
+      message.success("模型配置已更新");
+      qc.invalidateQueries({ queryKey: ["model-configs"] });
+    },
+    onError: () => message.error("更新失败，请重试"),
+  });
+
+  const columns: ColumnsType<ModelConfig> = [
+    {
+      title: "Agent",
+      dataIndex: "agent_code",
+      render: (v: string) => (
+        <span className="dy-tabular" style={{ fontWeight: 500 }}>
+          {v}
+        </span>
+      ),
+    },
     {
       title: "首选模型",
-      dataIndex: "primary",
-      width: 200,
-      render: (v: string) => (
-        <Select size="small" defaultValue={v} options={MODEL_OPTIONS} style={{ width: 180 }} />
+      dataIndex: "primary_model",
+      width: 220,
+      render: (v: string, r) => (
+        <Select
+          size="small"
+          value={v}
+          options={PRIMARY_OPTIONS}
+          style={{ width: 200 }}
+          disabled={!isAdmin || updateMutation.isPending}
+          onChange={(val) => updateMutation.mutate({ id: r.id, patch: { primary_model: val } })}
+        />
       ),
     },
     {
       title: "兜底模型",
-      dataIndex: "fallback",
-      width: 200,
-      render: (v: string) => (
-        <Select size="small" defaultValue={v} options={MODEL_OPTIONS} style={{ width: 180 }} />
+      dataIndex: "fallback_model",
+      width: 220,
+      render: (v: string | null, r) => (
+        <Select
+          size="small"
+          value={v ?? undefined}
+          placeholder="无兜底"
+          allowClear
+          options={FALLBACK_OPTIONS}
+          style={{ width: 200 }}
+          disabled={!isAdmin || updateMutation.isPending}
+          onChange={(val) =>
+            updateMutation.mutate({ id: r.id, patch: { fallback_model: val ?? null } })
+          }
+        />
       ),
     },
-    { title: "近 7 日调用", dataIndex: "calls7d", width: 120, align: "right", render: (v: number) => <span className="dy-tabular">{v.toLocaleString()}</span> },
-    { title: "成本", dataIndex: "cost7d", width: 100, align: "right", render: (v: number) => <span className="dy-tabular">${v.toFixed(2)}</span> },
   ];
 
   return (
@@ -62,7 +111,14 @@ export default function Config() {
       />
 
       <Panel title="模型配置 · 按 Agent 切换首选 / 兜底" style={{ marginBottom: 16 }}>
-        <Table rowKey="code" columns={columns} dataSource={AGENT_CONFIGS} pagination={false} size="middle" />
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={configsQuery.data ?? []}
+          loading={configsQuery.isLoading}
+          pagination={false}
+          size="middle"
+        />
       </Panel>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>

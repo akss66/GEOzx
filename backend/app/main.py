@@ -14,6 +14,7 @@ from app.api import (
     events,
     health,
     llm,
+    model_configs,
     orchestrator,
     projects,
     users,
@@ -44,6 +45,7 @@ app.include_router(ws.router)
 app.include_router(orchestrator.router)
 app.include_router(projects.router)
 app.include_router(accounts.router)
+app.include_router(model_configs.router)
 
 
 @app.get("/", tags=["system"])

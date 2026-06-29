@@ -109,3 +109,12 @@ export interface PendingGate {
   content_title: string;
   created_at: string;
 }
+
+// —— 模型配置：per-Agent 首选/兜底 ——
+
+export interface ModelConfig {
+  id: number;
+  agent_code: string;
+  primary_model: string;
+  fallback_model: string | null;
+}

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentContext
 from app.core.events import publish_event
-from app.models import AgentTask, ContentItem, Deliverable, GateApproval
+from app.models import AgentTask, ContentItem, Deliverable, GateApproval, Project
 from app.models.enums import (
     AgentTaskStatus,
     ContentStatus,
@@ -139,7 +139,7 @@ class OrchestrationEngine:
 
         ctx = AgentContext(content_item_id=ci.id, upstream=await self._upstream(session, ci.id))
         try:
-            result = await step.agent.run(ctx)
+            result = await step.agent.run(session, await self._org_id(session, ci), ctx)
         except Exception as exc:  # noqa: BLE001 — 记录失败并停下
             task.status = AgentTaskStatus.FAILED
             task.error = str(exc)
@@ -181,6 +181,11 @@ class OrchestrationEngine:
             await session.scalars(select(Deliverable).where(Deliverable.content_item_id == ci_id))
         ).all()
         return {r.type.value: r.payload for r in rows}
+
+    async def _org_id(self, session: AsyncSession, ci: ContentItem) -> int | None:
+        """经 project 解析内容所属 org，供 Agent 按 org 路由 ModelConfig。"""
+        project = await session.get(Project, ci.project_id)
+        return project.org_id if project else None
 
     async def _next_version(self, session: AsyncSession, ci_id: int, dtype: DeliverableType) -> int:
         current = await session.scalar(

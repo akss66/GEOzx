@@ -87,12 +87,13 @@
 > 标记 `# TODO: 待配置表校准`；② 抖音接口权限范围未确认（阻塞 E8 真实边界，见决策区）。
 
 ### E1 — Agent 基座完善 + Prompt 装载（M，依赖：M0；E2 的前置）
-- [ ] `BaseAgent` 升级：注入 `LLMGateway` + system prompt + 输出 schema，新增 `LLMAgent` 基类
-      （组装 messages→网关 chat→解析 JSON→`validate_payload` 校验→失败重试/兜底）
-- [ ] `app/prompts/` 建目录 + 6 个 `*.md`（01-06），先写草稿 prompt（角色/能力/流程/输出 JSON 标准/协作接口），标 TODO 待校准
-- [ ] Prompt 装载器：按 agent_code 读取 .md，缓存；`ModelConfig` 缺失时用默认 deepseek-chat
-- [ ] 8 个 Agent 的 `ModelConfig` 种子（seed 扩展，幂等）+ 前端 Config 页接真实模型配置 API
-- [ ] 验证：单测 LLMAgent（mock 网关返回合规/非法 JSON，校验通过与重试）；ruff
+- [x] `BaseAgent` 升级：`run(session, org_id, ctx)` 签名；新增 `LLMAgent` 基类
+      （组装 messages→网关 chat→`extract_json` 抽取→`validate_payload` 校验→失败带错误重试 1 次）
+- [x] `app/prompts/` 建目录 + 6 个草稿 prompt（01-06，含输出 JSON 标准），均标 TODO 待配置表校准
+- [x] Prompt 装载器 `agents/prompts.py`（按名读 .md + 缓存）；engine 调用点改传 session/org_id（经 project 解析 org）
+- [x] 8 个 Agent 的 `ModelConfig` 种子（seed 扩展，幂等，已入库验证）+ 后端 `/model-configs` API + 前端 Config 页接真实模型配置（首选/兜底可改并持久化）
+- [x] 验证：后端 51 passed（+10：LLMAgent JSON 抽取/校验/重试 + model-config CRUD/RBAC）+ ruff；前端 tsc+eslint+build 全绿；`/model-configs` 实测返回 8 条
+- [ ] 待补：DeepSeek 真实驱动单个 Agent 跑通（属 E2-01 切片）
 
 ### E2 — 六个创作 Agent（各自垂直切片：prompt + 输出 schema + 编排接入 + 测试）
 > 每个 = 注册 payload schema（`schemas/deliverable.py`）+ 草稿 prompt + LLMAgent 子类 + 接入 PIPELINE + 单测（mock 网关）。
