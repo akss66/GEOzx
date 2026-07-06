@@ -318,6 +318,98 @@ async def test_douyin_scan_add_oauth_callback_creates_matrix_account(
 
 
 @pytest.mark.asyncio
+async def test_douyin_worker_complete_requires_bridge_secret(client, admin, monkeypatch):
+    from app.api import platform_integrations as api_module
+
+    monkeypatch.setattr(api_module.settings, "douyin_oauth_worker_secret", "")
+
+    resp = await client.post(
+        "/platform-integrations/douyin/oauth/complete",
+        json={"code": "scan-code", "state": "signed-state"},
+    )
+
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_douyin_worker_complete_rejects_invalid_bridge_secret(client, admin, monkeypatch):
+    from app.api import platform_integrations as api_module
+
+    monkeypatch.setattr(api_module.settings, "douyin_oauth_worker_secret", "bridge-secret")
+
+    resp = await client.post(
+        "/platform-integrations/douyin/oauth/complete",
+        headers={"X-Dyflow-Worker-Secret": "wrong-secret"},
+        json={"code": "scan-code", "state": "signed-state"},
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_douyin_worker_complete_creates_scan_account_with_bridge_secret(
+    client, admin, session, monkeypatch
+):
+    from app.api import platform_integrations as api_module
+
+    async def fake_exchange(*, client_key, client_secret, code):
+        assert client_key == "douyin-client-key"
+        assert client_secret == "secret-from-env"
+        assert code == "scan-code"
+        return {
+            "open_id": "worker-open-id-1",
+            "union_id": "worker-union-id-1",
+            "scope": "user_info",
+            "expires_in": 7200,
+            "refresh_expires_in": 86400,
+        }
+
+    monkeypatch.setenv("DOUYIN_CLIENT_SECRET", "secret-from-env")
+    monkeypatch.setattr(api_module.settings, "douyin_oauth_worker_secret", "bridge-secret")
+    monkeypatch.setattr(api_module, "exchange_douyin_access_token", fake_exchange)
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://dyflow-douyin-callback.example.workers.dev/platform-integrations/douyin/oauth/callback",
+            "client_secret_ref": DEFAULT_DOUYIN_SECRET_REF,
+            "scopes": ["user_info"],
+        },
+    )
+    state = (
+        await client.post(
+            "/platform-integrations/douyin/oauth/scan-add",
+            headers=headers,
+            json={"nickname": "Worker scan account"},
+        )
+    ).json()["state"]
+
+    callback = await client.post(
+        "/platform-integrations/douyin/oauth/complete",
+        headers={"X-Dyflow-Worker-Secret": "bridge-secret"},
+        json={"code": "scan-code", "state": state},
+    )
+
+    assert callback.status_code == 200
+    body = callback.json()
+    assert body["external_open_id"] == "worker-open-id-1"
+    assert body["auth_status"] == "authorized"
+    assert body["token_configured"] is True
+
+    account = await session.scalar(
+        select(Account).where(Account.external_account_id == "worker-open-id-1")
+    )
+    assert account is not None
+    assert account.nickname == "Worker scan account"
+    assert account.platform == Platform.DOUYIN
+
+
+@pytest.mark.asyncio
 async def test_douyin_js_signature_uses_server_side_ticket(client, admin, monkeypatch):
     from app.api import platform_integrations as api_module
 

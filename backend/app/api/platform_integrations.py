@@ -1,11 +1,12 @@
 """Official platform integration configuration APIs."""
 
 from datetime import UTC, datetime, timedelta
+from hmac import compare_digest
 from typing import Annotated
 from urllib.parse import parse_qs, urlparse
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -218,6 +219,20 @@ def _decode_oauth_state(state: str) -> dict:
     if payload.get("purpose") != "douyin_oauth":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid state")
     return payload
+
+
+def _require_worker_secret(worker_secret: str | None) -> None:
+    configured_secret = settings.douyin_oauth_worker_secret
+    if not configured_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Douyin OAuth worker bridge is not configured",
+        )
+    if not worker_secret or not compare_digest(worker_secret, configured_secret):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="invalid worker secret",
+        )
 
 
 def _resolve_client_secret(integration: PlatformIntegration) -> str:
@@ -538,16 +553,11 @@ async def handle_douyin_oauth_callback(
 )
 async def complete_douyin_oauth_from_worker(
     body: DouyinOAuthCompleteRequest,
-    admin: AdminUser,
     session: SessionDep,
+    worker_secret: Annotated[str | None, Header(alias="X-Dyflow-Worker-Secret")] = None,
 ) -> DouyinOAuthCallbackOut:
+    _require_worker_secret(worker_secret)
     code, state = _extract_oauth_completion_params(body)
-    payload = _decode_oauth_state(state)
-    if int(payload["org_id"]) != admin.org_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="OAuth state does not belong to current organization",
-        )
     return await _complete_douyin_oauth(session=session, code=code, state=state)
 
 

@@ -42,5 +42,6 @@ frontend/playwright-report/
 .superpowers/
 .tools/
 .impeccable/
-cloudflare/
+cloudflare/**/.wrangler/
+cloudflare/**/.dev.vars
 抖音自媒体运营Agent团队配置表.xlsx
