@@ -29,6 +29,7 @@ class Project(Base, TimestampMixin):
     content_items: Mapped[list["ContentItem"]] = relationship(  # noqa: F821
         back_populates="project", cascade="all, delete-orphan"
     )
+    accounts: Mapped[list["Account"]] = relationship(back_populates="project")  # noqa: F821
 
 
 class AccountGroup(Base, TimestampMixin):
@@ -63,6 +64,9 @@ class Account(Base, TimestampMixin):
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("account_groups.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     platform: Mapped[Platform] = mapped_column(pg_enum(Platform, "platform"), nullable=False)
     external_account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     nickname: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -74,4 +78,26 @@ class Account(Base, TimestampMixin):
     auth: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
     org: Mapped["Org"] = relationship()  # noqa: F821
+    project: Mapped["Project | None"] = relationship(back_populates="accounts")
     group: Mapped["AccountGroup | None"] = relationship(back_populates="accounts")
+
+    @property
+    def integration_status(self) -> str:
+        meta = self.auth or {}
+        if meta.get("integration_status"):
+            return str(meta["integration_status"])
+        if self.platform == Platform.DOUYIN:
+            return "oauth_ready"
+        return "manual"
+
+    @property
+    def auth_status(self) -> str:
+        meta = self.auth or {}
+        if meta.get("auth_status"):
+            return str(meta["auth_status"])
+        return "authorized" if meta.get("access_token") else "unauthorized"
+
+    @property
+    def data_sync_status(self) -> str:
+        meta = self.auth or {}
+        return str(meta.get("data_sync_status") or "not_configured")

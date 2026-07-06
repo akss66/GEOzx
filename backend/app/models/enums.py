@@ -137,6 +137,14 @@ class MetricSource(enum.StrEnum):
     DEMO = "demo"
 
 
+class OptimizationSuggestionStatus(enum.StrEnum):
+    """闭环优化建议状态。suggested=新建议；accepted=已采纳；verified=已验证。"""
+
+    SUGGESTED = "suggested"
+    ACCEPTED = "accepted"
+    VERIFIED = "verified"
+
+
 class MaterialStatus(enum.StrEnum):
     """素材生成状态。queued=已入队；generating=生成中；ready=已就绪(落库)；failed=失败。"""
 
@@ -144,3 +152,68 @@ class MaterialStatus(enum.StrEnum):
     GENERATING = "generating"
     READY = "ready"
     FAILED = "failed"
+
+
+class AgentCode(enum.StrEnum):
+    DECISION = "00-decision"
+    POSITIONING = "01-positioning"
+    CONTENT_DIRECTOR = "02-content-director"
+    ART_DIRECTOR = "03-art-director"
+    VIDEO_CREATOR = "04-video-creator"
+    EDITOR = "05-editor"
+    OPERATOR = "06-operator"
+    ADVERTISER = "07-advertiser"
+    CUSTOMER_SERVICE = "08-customer-service"
+
+
+class AgentGroup(enum.StrEnum):
+    CONTROL = "control"
+    STRATEGY = "strategy"
+    CREATIVE = "creative"
+    OPERATION = "operation"
+    GROWTH = "growth"
+    FEEDBACK = "feedback"
+
+
+class BrainTaskType(enum.StrEnum):
+    CONTENT_CREATION = "content_creation"
+    ACCOUNT_DIAGNOSIS = "account_diagnosis"
+    REVIEW_OPTIMIZATION = "review_optimization"
+    MATRIX_DISTRIBUTION = "matrix_distribution"
+
+
+class BrainTaskStatus(enum.StrEnum):
+    DRAFT = "draft"
+    PENDING_CONFIRMATION = "pending_confirmation"
+    RUNNING = "running"
+    PENDING_ACCEPTANCE = "pending_acceptance"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class AgentInvocationStatus(enum.StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class DeliverableAcceptanceStatus(enum.StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    RERUN_REQUESTED = "rerun_requested"
+
+
+class RerunScope(enum.StrEnum):
+    CURRENT_AGENT = "current_agent"
+    UPSTREAM = "upstream"
+    DOWNSTREAM = "downstream"
+    FULL_CHAIN = "full_chain"
+
+
+class AutomationLevel(enum.StrEnum):
+    MANUAL = "manual"
+    CONFIRM = "confirm"
+    AUTO = "auto"

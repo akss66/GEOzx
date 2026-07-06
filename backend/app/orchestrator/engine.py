@@ -9,7 +9,7 @@
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentContext
@@ -22,6 +22,7 @@ from app.models import (
     Deliverable,
     GateApproval,
     KnowledgeEntry,
+    OptimizationSuggestion,
     Project,
 )
 from app.models.enums import (
@@ -32,6 +33,7 @@ from app.models.enums import (
     DeliverableType,
     GateStatus,
     GateType,
+    OptimizationSuggestionStatus,
 )
 from app.orchestrator.gates import is_forced
 from app.orchestrator.pipeline import PIPELINE, AgentStep
@@ -40,6 +42,7 @@ EmitFn = Callable[..., Awaitable[None]]
 
 # 注入 Agent 上下文的知识库条目上限（避免上下文过大；后续可按 category/相关性精选）。
 _KNOWLEDGE_LIMIT = 20
+_SUGGESTION_LIMIT = 20
 
 
 def _now() -> datetime:
@@ -197,6 +200,9 @@ class OrchestrationEngine:
             content_item_id=ci.id,
             upstream=await self._upstream(session, ci.id),
             knowledge=await self._knowledge(session, org_id),
+            optimization_suggestions=await self._accepted_suggestions(
+                session, org_id, step.stage
+            ),
         )
         try:
             result = await step.agent.run(session, org_id, ctx)
@@ -226,6 +232,9 @@ class OrchestrationEngine:
         )
         session.add(deliverable)
         await session.flush()
+        suggestions = await self._capture_optimization_suggestions(
+            session, ci, deliverable, org_id, result.model_dump()
+        )
 
         task.status = AgentTaskStatus.DONE
         task.finished_at = _now()
@@ -237,6 +246,49 @@ class OrchestrationEngine:
             {"stage": step.stage.value, "deliverable_id": deliverable.id},
             content_item_id=ci.id,
         )
+        for suggestion in suggestions:
+            await self._emit(
+                "optimization.suggestion",
+                {
+                    "suggestion_id": suggestion.id,
+                    "target_stage": str(suggestion.target_stage)
+                    if suggestion.target_stage is not None
+                    else None,
+                },
+                content_item_id=ci.id,
+            )
+
+    async def _capture_optimization_suggestions(
+        self,
+        session: AsyncSession,
+        ci: ContentItem,
+        deliverable: Deliverable,
+        org_id: int | None,
+        payload: dict,
+    ) -> list[OptimizationSuggestion]:
+        """从运营复盘报告抽取优化建议，落为可追踪闭环记录。"""
+        if deliverable.type != DeliverableType.REVIEW_REPORT or org_id is None:
+            return []
+        raw = payload.get("optimization_suggestions")
+        if not isinstance(raw, list):
+            return []
+
+        rows: list[OptimizationSuggestion] = []
+        for item in raw:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            row = OptimizationSuggestion(
+                org_id=org_id,
+                content_item_id=ci.id,
+                source_deliverable_id=deliverable.id,
+                target_stage=_suggestion_target_stage(item),
+                suggestion=item.strip(),
+            )
+            session.add(row)
+            rows.append(row)
+        if rows:
+            await session.flush()
+        return rows
 
     async def _upstream(self, session: AsyncSession, ci_id: int) -> dict[str, dict]:
         """上游交付物：每个 type 仅取当前生效版本（最高 version 且非 superseded）。"""
@@ -298,6 +350,37 @@ class OrchestrationEngine:
                 {"title": k.title, "payload": k.payload, "tags": k.tags}
             )
         return grouped
+
+    async def _accepted_suggestions(
+        self, session: AsyncSession, org_id: int | None, stage: ContentStage
+    ) -> list[dict]:
+        """加载已采纳优化建议，注入下一轮对应 Agent 的上下文。"""
+        if org_id is None:
+            return []
+        rows = (
+            await session.scalars(
+                select(OptimizationSuggestion)
+                .where(
+                    OptimizationSuggestion.org_id == org_id,
+                    OptimizationSuggestion.status == OptimizationSuggestionStatus.ACCEPTED,
+                    or_(
+                        OptimizationSuggestion.target_stage == stage.value,
+                        OptimizationSuggestion.target_stage.is_(None),
+                    ),
+                )
+                .order_by(OptimizationSuggestion.id.desc())
+                .limit(_SUGGESTION_LIMIT)
+            )
+        ).all()
+        return [
+            {
+                "suggestion": row.suggestion,
+                "target_stage": row.target_stage,
+                "source_content_item_id": row.content_item_id,
+                "note": row.note,
+            }
+            for row in rows
+        ]
 
     async def _next_version(self, session: AsyncSession, ci_id: int, dtype: DeliverableType) -> int:
         current = await session.scalar(
@@ -366,3 +449,21 @@ class OrchestrationEngine:
 
 # 默认引擎实例（事件经 arq 总线广播）
 engine = OrchestrationEngine()
+
+
+def _suggestion_target_stage(text: str) -> ContentStage | None:
+    """从建议文本粗略映射目标环节；无法判断则留空，交给人工分派。"""
+    mapping = {
+        "定位": ContentStage.POSITIONING,
+        "编导": ContentStage.CONTENT_DIRECTION,
+        "脚本": ContentStage.CONTENT_DIRECTION,
+        "美术": ContentStage.ART_DIRECTION,
+        "视觉": ContentStage.ART_DIRECTION,
+        "视频": ContentStage.VIDEO_CREATION,
+        "剪辑": ContentStage.EDITING,
+        "运营": ContentStage.OPERATION,
+    }
+    for keyword, stage in mapping.items():
+        if keyword in text:
+            return stage
+    return None

@@ -1,6 +1,7 @@
 """工作区域 schema：项目 / 账号分组 / 账号（矩阵）的请求与响应。"""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -54,14 +55,28 @@ class CreateAccountRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=200)
     platform: Platform
     group_id: int | None = None
+    project_id: int | None = None
     external_account_id: str | None = Field(default=None, max_length=128)
 
 
 class UpdateAccountRequest(BaseModel):
     nickname: str | None = Field(default=None, min_length=1, max_length=200)
     group_id: int | None = None
+    project_id: int | None = None
     status: AccountStatus | None = None
     external_account_id: str | None = Field(default=None, max_length=128)
+
+
+IntegrationStatus = Literal["oauth_ready", "connected", "manual", "disabled"]
+AuthStatus = Literal["unauthorized", "authorized", "expired", "manual"]
+DataSyncStatus = Literal["not_configured", "pending", "syncing", "healthy", "failed", "manual"]
+
+
+class UpdateAccountIntegrationRequest(BaseModel):
+    integration_status: IntegrationStatus | None = None
+    auth_status: AuthStatus | None = None
+    data_sync_status: DataSyncStatus | None = None
+    note: str | None = Field(default=None, max_length=500)
 
 
 class AccountOut(BaseModel):
@@ -71,6 +86,53 @@ class AccountOut(BaseModel):
     nickname: str
     platform: Platform
     group_id: int | None
+    project_id: int | None
     status: AccountStatus
     external_account_id: str | None
+    integration_status: str
+    auth_status: str
+    data_sync_status: str
+    created_at: datetime
+
+
+class AccountMatrixGroupOut(BaseModel):
+    id: int
+    name: str
+    dimension: GroupDimension
+    accounts: list[AccountOut]
+
+
+class PlatformMatrixSummaryOut(BaseModel):
+    platform: Platform
+    total: int
+    active: int
+    integration_status: str
+    auth_status: str
+    data_sync_status: str
+
+
+class AccountMatrixOut(BaseModel):
+    groups: list[AccountMatrixGroupOut]
+    ungrouped_accounts: list[AccountOut]
+    platforms: list[PlatformMatrixSummaryOut]
+
+
+class CreateDistributionActionRequest(BaseModel):
+    platform: Platform
+    account_ids: list[int] = Field(min_length=1)
+    action_type: str = Field(default="manual_publish", min_length=1, max_length=80)
+    content_item_id: int | None = None
+    project_id: int | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class DistributionActionOut(BaseModel):
+    id: int
+    platform: Platform
+    account_ids: list[int]
+    action_type: str
+    status: str
+    content_item_id: int | None
+    project_id: int | None
+    note: str | None
     created_at: datetime

@@ -1,5 +1,13 @@
 import { api } from "./client";
-import type { ContentItem, ContentStage, Deliverable, PendingGate } from "../types";
+import type {
+  ContentItem,
+  ContentStage,
+  Deliverable,
+  PendingGate,
+  PublishCapability,
+  PublishReadiness,
+  PublishReadinessInput,
+} from "../types";
 
 export async function listContentItems(projectId?: number): Promise<ContentItem[]> {
   const { data } = await api.get<ContentItem[]>("/content-items", {
@@ -36,6 +44,22 @@ export async function approveGate(
 
 export async function listDeliverableHistory(contentItemId: number): Promise<Deliverable[]> {
   const { data } = await api.get<Deliverable[]>(`/content-items/${contentItemId}/deliverables`);
+  return data;
+}
+
+export async function checkPublishReadiness(
+  contentItemId: number,
+  input: PublishReadinessInput,
+): Promise<PublishReadiness> {
+  const { data } = await api.post<PublishReadiness>(
+    `/content-items/${contentItemId}/publish-readiness`,
+    input,
+  );
+  return data;
+}
+
+export async function listPublishCapabilities(): Promise<PublishCapability[]> {
+  const { data } = await api.get<PublishCapability[]>("/publish-capabilities");
   return data;
 }
 

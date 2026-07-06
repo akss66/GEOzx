@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser
 from app.db import get_session
 from app.models import MetricSnapshot
+from app.models.enums import MetricSource
 from app.schemas.metrics import (
     EngagementPoint,
     IngestMetricRequest,
+    PerformanceSnapshotOut,
     RankItem,
     ReviewOverview,
     TrendPoint,
@@ -60,7 +62,10 @@ async def review_overview(
 ) -> ReviewOverview:
     """复盘聚合：近 N 天趋势 + 完播互动 + 内容排名 + 汇总。无数据时 has_data=False。"""
     since = date.today() - timedelta(days=days - 1)
-    base = MetricSnapshot.org_id == user.org_id
+    base = (
+        MetricSnapshot.org_id == user.org_id,
+        MetricSnapshot.source != MetricSource.DEMO.value,
+    )
 
     # 趋势 + 完播互动：按日期聚合
     by_date = (
@@ -72,7 +77,7 @@ async def review_overview(
                 func.avg(MetricSnapshot.completion_rate),
                 func.avg(MetricSnapshot.like_rate),
             )
-            .where(base, MetricSnapshot.stat_date >= since)
+            .where(*base, MetricSnapshot.stat_date >= since)
             .group_by(MetricSnapshot.stat_date)
             .order_by(MetricSnapshot.stat_date)
         )
@@ -99,7 +104,7 @@ async def review_overview(
                 func.avg(MetricSnapshot.completion_rate),
             )
             .where(
-                base,
+                *base,
                 MetricSnapshot.stat_date >= since,
                 MetricSnapshot.title.isnot(None),
             )
@@ -124,7 +129,7 @@ async def review_overview(
     follower_delta = (
         await session.scalar(
             select(func.coalesce(func.sum(MetricSnapshot.follower_delta), 0)).where(
-                base, MetricSnapshot.stat_date >= since
+                *base, MetricSnapshot.stat_date >= since
             )
         )
     ) or 0
@@ -139,3 +144,26 @@ async def review_overview(
         avg_completion_rate=avg_completion,
         follower_delta=int(follower_delta),
     )
+
+
+@router.get("/performance-snapshots", response_model=list[PerformanceSnapshotOut])
+async def list_performance_snapshots(
+    user: CurrentUser,
+    session: SessionDep,
+    account_id: int | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[PerformanceSnapshotOut]:
+    query = (
+        select(MetricSnapshot)
+        .where(
+            MetricSnapshot.org_id == user.org_id,
+            MetricSnapshot.source != MetricSource.DEMO.value,
+        )
+        .order_by(MetricSnapshot.stat_date.desc(), MetricSnapshot.id.desc())
+        .limit(limit)
+    )
+    if account_id is not None:
+        query = query.where(MetricSnapshot.account_id == account_id)
+
+    rows = (await session.scalars(query)).all()
+    return [PerformanceSnapshotOut.model_validate(row) for row in rows]

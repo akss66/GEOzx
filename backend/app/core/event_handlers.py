@@ -11,12 +11,6 @@ from app.models.enums import ContentStage
 log = logging.getLogger("dyflow.events")
 
 
-@subscribe("demo.ping")
-async def on_demo_ping(event: dict) -> None:
-    """T6 演示处理器：仅记录日志，证明订阅/分发链路可用。"""
-    log.info("demo.ping handler 收到事件: %s", event.get("payload"))
-
-
 @subscribe("agent.done")
 async def on_agent_done(event: dict) -> None:
     """视频创作阶段完成 → 入队后台出片任务（异步，不阻塞编排）。"""
@@ -29,4 +23,3 @@ async def on_agent_done(event: dict) -> None:
     pool = await get_arq_pool()
     await pool.enqueue_job("generate_video", deliverable_id)
     log.info("已入队出片任务 deliverable=%s", deliverable_id)
-

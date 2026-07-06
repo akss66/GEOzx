@@ -19,9 +19,8 @@ import {
   startPipeline,
 } from "../api/orchestrator";
 import { listProjects } from "../api/workspace";
-import { PageHeader, StatusBadge } from "../components/ui";
+import { PageHeader, StatusBadge, type StatusBadgeStatus } from "../components/ui";
 import { useEventStream } from "../hooks/useEventStream";
-import type { CardStatus } from "../mock/data";
 import type { ContentItem, ContentStage, ContentStatus } from "../types";
 import { DeliverableDrawer } from "./DeliverableDrawer";
 
@@ -42,7 +41,7 @@ const STAGES: StageDef[] = [
 ];
 
 // 内容状态 → 状态标记（色盲安全的颜色 + 图标 + 文字）。
-const STATUS_BADGE: Record<ContentStatus, CardStatus> = {
+const STATUS_BADGE: Record<ContentStatus, StatusBadgeStatus> = {
   draft: "review",
   in_progress: "running",
   blocked: "blocked",
@@ -134,8 +133,8 @@ export default function PipelineBoard() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <PageHeader
-        title="内容流水线"
-        subtitle="八个 Agent 协同 · 上游产出自动触发下游 · 质量门把关"
+        title="任务/验收"
+        subtitle="流程执行视图 · 交付物版本 · 质量门把关 · 分项验收"
         extra={
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <Tag
@@ -268,10 +267,10 @@ export default function PipelineBoard() {
         onOk={() => form.submit()}
         confirmLoading={createMutation.isPending}
         okText="创建并启动"
-        destroyOnClose
+        destroyOnHidden
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
-          创建后将自动触发编排：定位 → 编导，随后在强制质量门处等待人工审批。
+          创建后将进入默认参考链路；运营大脑仍可按目标跳过、并行或重跑部分环节。
         </Typography.Paragraph>
         <Form
           form={form}

@@ -10,16 +10,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.api import (
     accounts,
+    agents,
     auth,
-    events,
+    brain,
+    costs,
+    feedback,
     health,
     knowledge,
     llm,
+    matrix_distribution,
     materials,
     metrics,
     model_configs,
     orchestrator,
+    platform_integrations,
     projects,
+    risks,
     users,
     ws,
 )
@@ -42,16 +48,22 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(brain.router)
+app.include_router(costs.router)
+app.include_router(agents.router)
 app.include_router(llm.router)
-app.include_router(events.router)
 app.include_router(ws.router)
+app.include_router(feedback.router)
 app.include_router(orchestrator.router)
 app.include_router(projects.router)
 app.include_router(accounts.router)
+app.include_router(platform_integrations.router)
 app.include_router(model_configs.router)
 app.include_router(knowledge.router)
 app.include_router(metrics.router)
+app.include_router(matrix_distribution.router)
 app.include_router(materials.router)
+app.include_router(risks.router)
 
 
 @app.get("/", tags=["system"])

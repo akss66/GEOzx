@@ -3,7 +3,9 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
 WORKDIR /app
 
@@ -13,7 +15,7 @@ RUN pip install --no-cache-dir uv
 # 先装依赖（利用层缓存），再拷源码与迁移
 COPY pyproject.toml ./
 COPY app ./app
-RUN uv pip install --system --no-cache .
+RUN uv pip install --system --no-cache --index-url https://pypi.tuna.tsinghua.edu.cn/simple .
 
 # Alembic 迁移（在容器内执行 alembic upgrade head）
 COPY alembic.ini ./

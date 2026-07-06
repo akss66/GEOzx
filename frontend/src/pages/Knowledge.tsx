@@ -207,7 +207,7 @@ export default function Knowledge() {
         onOk={() => form.submit()}
         confirmLoading={saveMutation.isPending}
         okText={editing ? "保存" : "添加"}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form
           form={form}

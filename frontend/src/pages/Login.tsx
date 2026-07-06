@@ -1,4 +1,4 @@
-import { LockOutlined, UserOutlined } from "@ant-design/icons";
+import { QqOutlined, WechatOutlined } from "@ant-design/icons";
 import { App as AntApp, Button, Form, Input, Typography } from "antd";
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
@@ -11,17 +11,11 @@ interface LoginForm {
   password: string;
 }
 
-const HIGHLIGHTS = [
-  "8 个 AI Agent 协同，覆盖定位到投放全链路",
-  "交付物版本化落库，上游产出自动触发下游",
-  "关键风险环节人工把关，其余自动通过",
-  "富可视化复盘，数据 → 洞察 → 优化闭环",
-];
-
 export default function Login() {
   const { token, setAuth } = useAuth();
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
+  const [form] = Form.useForm<LoginForm>();
   const [loading, setLoading] = useState(false);
 
   if (token) return <Navigate to="/" replace />;
@@ -39,99 +33,120 @@ export default function Login() {
     }
   };
 
-  return (
-    <div style={{ minHeight: "100vh", display: "flex", background: "var(--dy-canvas)" }}>
-      {/* 左侧品牌区 */}
-      <div
-        style={{
-          flex: "1 1 0",
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "center",
-          padding: "0 8%",
-          borderRight: "1px solid var(--dy-border-subtle)",
-          background:
-            "radial-gradient(120% 80% at 0% 0%, rgba(91,140,255,0.10), transparent 60%)",
-        }}
-        className="dy-login-brand"
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
-          <img
-            src="/logo.png"
-            alt="同舟行"
-            style={{ width: 36, height: 36, borderRadius: 9, objectFit: "contain" }}
-          />
-          <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: 0.4 }}>同舟行</span>
-        </div>
-        <Typography.Title level={2} style={{ margin: 0, maxWidth: 460, fontWeight: 650 }}>
-          同舟行 · 自媒体 AI 运营系统
-        </Typography.Title>
-        <Typography.Paragraph type="secondary" style={{ fontSize: 15, marginTop: 12, maxWidth: 420 }}>
-          把全流程交给协同的 AI Agent，团队只需在一个工作台里看数据、做决策、卡审核。
-        </Typography.Paragraph>
-        <ul style={{ listStyle: "none", padding: 0, margin: "20px 0 0", maxWidth: 420 }}>
-          {HIGHLIGHTS.map((h) => (
-            <li
-              key={h}
-              style={{
-                display: "flex",
-                gap: 10,
-                alignItems: "center",
-                color: "var(--dy-muted)",
-                fontSize: 14,
-                padding: "7px 0",
-              }}
-            >
-              <span
-                style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--dy-accent)", flex: "none" }}
-              />
-              {h}
-            </li>
-          ))}
-        </ul>
-      </div>
+  const clearFieldError = (name: keyof LoginForm) => {
+    form.setFields([{ name, errors: [] }]);
+  };
 
-      {/* 右侧登录表单 */}
-      <div
+  return (
+    <main
+      className="dy-login-shell dy-login-quiet"
+      style={{
+        minHeight: "100vh",
+      }}
+    >
+      <section className="dy-login-brand dy-login-stage">
+        <div className="dy-login-brand-top">
+          <img src="/logo.png" alt="同舟行" className="dy-login-small-mark" />
+          <div className="dy-login-brand-name">
+            <span>同舟行AI新媒体运营平台</span>
+            <small>AI+Agent+运营</small>
+          </div>
+        </div>
+
+        <div className="dy-login-hero-copy">
+          <Typography.Title level={1} className="dy-login-title">
+            从一句话，
+            <br />
+            到一整套执行
+          </Typography.Title>
+          <Typography.Paragraph className="dy-login-hero-support">
+            主 Agent 理解目标，专家 Agent 接力推进，把新媒体运营变成可追踪的执行流。
+          </Typography.Paragraph>
+        </div>
+
+        <div className="dy-login-bottom-note">
+          <span>目标输入</span>
+          <span>Agent 编排</span>
+          <span>执行推进</span>
+        </div>
+      </section>
+
+      <section
+        className="dy-login-form-side"
         style={{
-          flex: "0 0 480px",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           padding: 32,
+          background: "#ffffff",
         }}
       >
-        <div style={{ width: 340 }}>
-          <Typography.Title level={3} style={{ marginBottom: 4 }}>
-            登录工作台
+        <div className="dy-login-form-panel">
+          <Typography.Title level={3} className="dy-login-form-title">
+            进入平台
           </Typography.Title>
-          <Typography.Text type="secondary">运营团队成员入口</Typography.Text>
-          <Form layout="vertical" onFinish={onFinish} requiredMark={false} style={{ marginTop: 24 }}>
-            <Form.Item name="email" label="邮箱" rules={[{ required: true, message: "请输入邮箱" }]}>
-              <Input prefix={<UserOutlined />} placeholder="admin@dyflow.local" size="large" />
+          <Form
+            form={form}
+            layout="vertical"
+            onFinish={onFinish}
+            requiredMark={false}
+            validateTrigger="onSubmit"
+            style={{ marginTop: 36 }}
+          >
+            <Form.Item
+              name="email"
+              label="邮箱"
+              className="dy-login-form-item dy-login-field-email"
+              rules={[{ required: true, message: "邮箱不能为空" }]}
+            >
+              <Input
+                autoComplete="email"
+                className="dy-login-control-input"
+                size="large"
+                onChange={() => clearFieldError("email")}
+                style={{ borderRadius: 16, height: 48 }}
+              />
             </Form.Item>
-            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}>
-              <Input.Password prefix={<LockOutlined />} placeholder="••••••••" size="large" />
+            <Form.Item
+              name="password"
+              label="密码"
+              className="dy-login-form-item dy-login-field-password"
+              rules={[{ required: true, message: "密码不能为空" }]}
+            >
+              <Input.Password
+                autoComplete="current-password"
+                className="dy-login-control-input"
+                size="large"
+                onChange={() => clearFieldError("password")}
+                style={{ borderRadius: 16, height: 48 }}
+              />
             </Form.Item>
-            <Button type="primary" htmlType="submit" block size="large" loading={loading}>
-              登录
+            <Button
+              type="primary"
+              htmlType="submit"
+              block
+              size="large"
+              loading={loading}
+              style={{ height: 48, borderRadius: 16, marginTop: 10 }}
+            >
+              进入系统
             </Button>
           </Form>
-          <div
-            style={{
-              marginTop: 16,
-              padding: "10px 12px",
-              background: "var(--dy-elevated)",
-              border: "1px solid var(--dy-border-subtle)",
-              borderRadius: 8,
-              fontSize: 12,
-              color: "var(--dy-faint)",
-            }}
-          >
-            演示账号：admin@dyflow.local / admin12345
+          <div className="dy-social-login" aria-label="第三方登录暂未开放">
+            <div className="dy-social-divider">
+              <span>其他方式登录</span>
+            </div>
+            <div className="dy-social-icons">
+              <button type="button" disabled aria-label="通过微信登录">
+                <WechatOutlined className="dy-social-brand-icon dy-social-wechat" />
+              </button>
+              <button type="button" disabled aria-label="通过QQ登录">
+                <QqOutlined className="dy-social-brand-icon dy-social-qq" />
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }

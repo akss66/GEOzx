@@ -4,10 +4,23 @@ import ReactECharts from "echarts-for-react";
 import { useNavigate } from "react-router-dom";
 
 import { Panel, PageHeader } from "../components/ui";
-import { ACTIVITY, KPI, PENDING_GATES, STAGES, CONTENT_CARDS } from "../mock/data";
-import { TREND_DAYS, TREND_PLAY } from "../mock/metrics";
 import { chartBase } from "../theme/echarts";
 import { useThemeMode } from "../stores/theme";
+
+const KPI = { pendingGates: 0, cost7d: 0, avgCompletion: 0 };
+const ACTIVITY: { id: number; text: string; time: string }[] = [];
+const PENDING_GATES: {
+  id: number;
+  title: string;
+  account: string;
+  waiting: string;
+  forced: boolean;
+  gate: string;
+}[] = [];
+const STAGES: { key: string; index: string; name: string }[] = [];
+const CONTENT_CARDS: { stage: string }[] = [];
+const TREND_DAYS: string[] = [];
+const TREND_PLAY: number[] = [];
 
 function Tile({
   label,
@@ -80,7 +93,7 @@ export default function Dashboard() {
         data: TREND_PLAY,
         smooth: true,
         symbol: "none",
-        lineStyle: { width: 2, color: "#5b8cff" },
+        lineStyle: { width: 2, color: "#c4c9d1" },
         areaStyle: {
           color: {
             type: "linear",
@@ -89,8 +102,8 @@ export default function Dashboard() {
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: "rgba(91,140,255,0.28)" },
-              { offset: 1, color: "rgba(91,140,255,0.01)" },
+              { offset: 0, color: "rgba(196,201,209,0.28)" },
+              { offset: 1, color: "rgba(196,201,209,0.01)" },
             ],
           },
         },
@@ -101,11 +114,11 @@ export default function Dashboard() {
   return (
     <div>
       <PageHeader
-        title="指挥台"
-        subtitle="全链路态势 · 数据驱动决策"
+        title="运营概览"
+        subtitle="全链路状态 · 数据驱动决策"
         extra={
           <Button type="primary" onClick={() => navigate("/pipeline")}>
-            进入流水线
+            查看流程执行
           </Button>
         }
       />

@@ -1,45 +1,79 @@
-import { DownloadOutlined } from "@ant-design/icons";
-import { Button, Empty, Segmented, Spin, Tag } from "antd";
-import { useQuery } from "@tanstack/react-query";
+import { DownloadOutlined, SendOutlined } from "@ant-design/icons";
+import { App as AntApp, Button, Empty, Segmented, Spin, Tag } from "antd";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import { useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
-import { getReviewOverview } from "../api/metrics";
-import { PageHeader, Panel } from "../components/ui";
 import {
-  FUNNEL,
-  HEATMAP,
-  HEATMAP_DAYS,
-  PLATFORM_RADAR,
-  ROI_DAYS,
-  ROI_SERIES,
-  SENTIMENT,
-} from "../mock/metrics";
+  listOptimizationSuggestions,
+  sendOptimizationSuggestionToBrain,
+  updateOptimizationSuggestion,
+} from "../api/feedback";
+import {
+  getReviewOverview,
+  listPerformanceSnapshots,
+  type PerformanceSnapshot,
+} from "../api/metrics";
+import { PageHeader, Panel } from "../components/ui";
+import { useCurrentWorkspace } from "../stores/currentWorkspace";
 import { useThemeMode } from "../stores/theme";
 import { chartBase } from "../theme/echarts";
+import { silverTagStyle } from "../theme/styles";
 import { CHART_COLORS } from "../theme/tokens";
+import type {
+  ContentStage,
+  OptimizationSuggestion,
+  OptimizationSuggestionStatus,
+} from "../types";
 
 const RANGE_DAYS: Record<string, number> = { day: 7, week: 30, month: 90 };
 const COMPLETION_THRESHOLD = 30;
 
-// 标注数据源尚未接入真实回流的图（M2 客服 / M3 投流 / 多平台回流到位后替换）。
-function MockTag() {
-  return (
-    <Tag style={{ marginInlineEnd: 0, fontSize: 11 }} color="default">
-      示例数据
-    </Tag>
-  );
-}
-
 export default function ReviewDashboard() {
+  const { message } = AntApp.useApp();
   const mode = useThemeMode((s) => s.mode);
+  const qc = useQueryClient();
+  const navigate = useNavigate();
   const [range, setRange] = useState("week");
+  const accountId = useCurrentWorkspace((s) => s.accountId);
   const base = chartBase(mode);
   const trendRef = useRef<ReactECharts>(null);
 
   const overviewQuery = useQuery({
     queryKey: ["review-overview", range],
     queryFn: () => getReviewOverview(RANGE_DAYS[range]),
+  });
+  const snapshotsQuery = useQuery({
+    queryKey: ["performance-snapshots", accountId],
+    queryFn: () => listPerformanceSnapshots(accountId),
+  });
+  const suggestionsQuery = useQuery({
+    queryKey: ["optimization-suggestions"],
+    queryFn: listOptimizationSuggestions,
+  });
+  const suggestionMutation = useMutation({
+    mutationFn: ({
+      id,
+      status,
+      note,
+    }: {
+      id: number;
+      status: OptimizationSuggestionStatus;
+      note?: string;
+    }) => updateOptimizationSuggestion(id, status, note),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["optimization-suggestions"] }),
+  });
+  const sendToBrainMutation = useMutation({
+    mutationFn: sendOptimizationSuggestionToBrain,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["optimization-suggestions"] }),
+        qc.invalidateQueries({ queryKey: ["brain-tasks"] }),
+      ]);
+      message.success("已生成下一轮任务 Brief");
+      navigate("/brain");
+    },
   });
   const data = overviewQuery.data;
 
@@ -84,8 +118,8 @@ export default function ReviewDashboard() {
               x2: 0,
               y2: 1,
               colorStops: [
-                { offset: 0, color: "rgba(91,140,255,0.25)" },
-                { offset: 1, color: "rgba(91,140,255,0.01)" },
+                { offset: 0, color: "rgba(196,201,209,0.25)" },
+                { offset: 1, color: "rgba(196,201,209,0.01)" },
               ],
             },
           },
@@ -166,129 +200,6 @@ export default function ReviewDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, mode]);
 
-  // —— 示例数据图（数据源未接入）——
-  const heatmap = {
-    ...base,
-    grid: { left: 8, right: 8, top: 10, bottom: 24, containLabel: true },
-    tooltip: {
-      ...base.tooltip,
-      formatter: (p: { value: [number, number, number] }) =>
-        `${HEATMAP_DAYS[p.value[1]]} ${p.value[0]}:00 · 效果 ${p.value[2]}`,
-    },
-    xAxis: {
-      type: "category",
-      data: Array.from({ length: 24 }, (_, i) => i),
-      ...base.categoryAxis,
-      axisLabel: { ...base.categoryAxis.axisLabel, interval: 3 },
-    },
-    yAxis: { type: "category", data: HEATMAP_DAYS, ...base.categoryAxis },
-    visualMap: {
-      min: 0,
-      max: 100,
-      calculable: true,
-      orient: "horizontal",
-      left: "center",
-      bottom: -4,
-      itemHeight: 80,
-      textStyle: { color: base.textStyle.color, fontSize: 11 },
-      inRange: { color: ["#11151d", "#23407a", "#5b8cff"] },
-    },
-    series: [
-      {
-        type: "heatmap",
-        data: HEATMAP,
-        itemStyle: { borderColor: "rgba(0,0,0,0.15)", borderWidth: 1 },
-      },
-    ],
-  };
-
-  const radar = {
-    ...base,
-    legend: { ...base.legend, data: PLATFORM_RADAR.series.map((s) => s.name), top: 0 },
-    tooltip: { ...base.tooltip },
-    radar: {
-      indicator: PLATFORM_RADAR.indicators,
-      radius: "62%",
-      axisName: { color: base.textStyle.color, fontSize: 11 },
-      splitLine: {
-        lineStyle: { color: mode === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)" },
-      },
-      splitArea: { show: false },
-      axisLine: {
-        lineStyle: { color: mode === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)" },
-      },
-    },
-    series: [
-      {
-        type: "radar",
-        data: PLATFORM_RADAR.series.map((s, i) => ({
-          name: s.name,
-          value: s.value,
-          lineStyle: { color: CHART_COLORS[i] },
-          areaStyle: { opacity: 0.12, color: CHART_COLORS[i] },
-        })),
-      },
-    ],
-  };
-
-  const roi = {
-    ...base,
-    tooltip: { ...base.tooltip, trigger: "axis" },
-    xAxis: cat(ROI_DAYS, 2),
-    yAxis: val(),
-    series: [
-      {
-        type: "line",
-        data: ROI_SERIES,
-        smooth: true,
-        symbol: "none",
-        lineStyle: { width: 2.5, color: CHART_COLORS[0] },
-        markLine: {
-          silent: true,
-          symbol: "none",
-          lineStyle: { color: CHART_COLORS[3], type: "dashed" },
-          data: [{ yAxis: 1, label: { formatter: "保本线" } }],
-        },
-      },
-    ],
-  };
-
-  const sentiment = {
-    ...base,
-    tooltip: { ...base.tooltip, trigger: "item", formatter: "{b}: {c}% " },
-    legend: { ...base.legend, bottom: 0 },
-    series: [
-      {
-        type: "pie",
-        radius: ["52%", "72%"],
-        center: ["50%", "45%"],
-        data: SENTIMENT.map((s, i) => ({
-          ...s,
-          itemStyle: { color: [CHART_COLORS[1], CHART_COLORS[2], CHART_COLORS[3]][i] },
-        })),
-        label: { color: base.textStyle.color, formatter: "{b}\n{c}%" },
-      },
-    ],
-  };
-
-  const funnel = {
-    ...base,
-    tooltip: { ...base.tooltip, trigger: "item", formatter: "{b}: {c}%" },
-    series: [
-      {
-        type: "funnel",
-        left: "8%",
-        right: "8%",
-        top: 8,
-        bottom: 8,
-        minSize: "24%",
-        gap: 3,
-        label: { color: "#fff", formatter: "{b} {c}%" },
-        data: FUNNEL.map((f, i) => ({ ...f, itemStyle: { color: CHART_COLORS[i] } })),
-      },
-    ],
-  };
-
   const exportTrend = () => {
     const inst = trendRef.current?.getEchartsInstance();
     if (!inst) return;
@@ -305,7 +216,7 @@ export default function ReviewDashboard() {
     <div>
       <PageHeader
         title="复盘看板"
-        subtitle="数据 → 洞察 → 优化 → 执行 闭环 · 内容指标接真实回流，其余示例数据待集成"
+        subtitle="数据 → 洞察 → 优化 → 执行闭环 · 仅展示已接入的真实回流和人工录入数据"
         extra={
           <Segmented
             value={range}
@@ -367,24 +278,248 @@ export default function ReviewDashboard() {
             <Empty description="暂无排名数据" style={{ padding: "50px 0" }} />
           )}
         </Panel>
-        <Panel title="发布时段效果 · 24h × 7天" extra={<MockTag />}>
-          <ReactECharts option={heatmap} style={{ height: 260 }} notMerge />
+        <Panel title="优化建议追踪">
+          <SuggestionTracker
+            loading={suggestionsQuery.isLoading}
+            suggestions={suggestionsQuery.data ?? []}
+            updatingId={
+              suggestionMutation.isPending
+                ? suggestionMutation.variables?.id
+                : undefined
+            }
+            sendingId={
+              sendToBrainMutation.isPending ? sendToBrainMutation.variables : undefined
+            }
+            onUpdate={(id, status, note) =>
+              suggestionMutation.mutate({ id, status, note })
+            }
+            onSendToBrain={(id) => sendToBrainMutation.mutate(id)}
+          />
         </Panel>
-        <Panel title="平台对比 · 核心指标" extra={<MockTag />}>
-          <ReactECharts option={radar} style={{ height: 260 }} notMerge />
+        <Panel title="发布闭环快照">
+          <PerformanceSnapshotsPanel
+            loading={snapshotsQuery.isLoading}
+            snapshots={snapshotsQuery.data ?? []}
+          />
         </Panel>
-        <Panel title="投流 ROI 趋势" extra={<MockTag />}>
-          <ReactECharts option={roi} style={{ height: 240 }} notMerge />
-        </Panel>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          <Panel title="评论情感" extra={<MockTag />}>
-            <ReactECharts option={sentiment} style={{ height: 240 }} notMerge />
-          </Panel>
-          <Panel title="私域转化漏斗" extra={<MockTag />}>
-            <ReactECharts option={funnel} style={{ height: 240 }} notMerge />
-          </Panel>
-        </div>
       </div>
+    </div>
+  );
+}
+
+const STAGE_LABEL: Record<ContentStage, string> = {
+  positioning: "定位",
+  content_direction: "编导",
+  art_direction: "美术",
+  video_creation: "视频",
+  editing: "剪辑",
+  operation: "运营",
+  advertising: "投流",
+  customer_service: "客服",
+};
+
+const SUGGESTION_STATUS: Record<
+  OptimizationSuggestionStatus,
+  { label: string; color: string }
+> = {
+  suggested: { label: "待采纳", color: "var(--dy-warning)" },
+  accepted: { label: "已采纳", color: "var(--dy-info)" },
+  verified: { label: "已验证", color: "var(--dy-success)" },
+};
+
+function PerformanceSnapshotsPanel({
+  loading,
+  snapshots,
+}: {
+  loading: boolean;
+  snapshots: PerformanceSnapshot[];
+}) {
+  if (loading) {
+    return (
+      <div style={{ display: "grid", placeItems: "center", height: 240 }}>
+        <Spin />
+      </div>
+    );
+  }
+  if (snapshots.length === 0) {
+    return (
+      <Empty
+        description="暂无发布回流数据 · 抖音数据同步或手动录入后显示"
+        style={{ padding: "50px 0" }}
+      />
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {snapshots.slice(0, 5).map((snapshot) => (
+        <div
+          key={snapshot.id}
+          style={{
+            display: "grid",
+            gap: 8,
+            padding: "10px 0",
+            borderBottom: "1px solid var(--dy-border-subtle)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <strong style={{ color: "var(--dy-text)", fontSize: 13 }}>
+              {snapshot.title ?? `内容 #${snapshot.content_item_id ?? snapshot.id}`}
+            </strong>
+            <Tag style={{ marginInlineEnd: 0, ...silverTagStyle }}>
+              {metricSourceLabel(snapshot.source)}
+            </Tag>
+            {snapshot.account_id != null && (
+              <Tag style={{ marginInlineEnd: 0 }}>账号 #{snapshot.account_id}</Tag>
+            )}
+            <span style={{ marginLeft: "auto", color: "var(--dy-faint)", fontSize: 12 }}>
+              {snapshot.stat_date}
+            </span>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+              gap: 8,
+              fontSize: 12,
+            }}
+          >
+            <SnapshotMetric label="播放" value={snapshot.play.toLocaleString()} />
+            <SnapshotMetric label="曝光" value={snapshot.exposure.toLocaleString()} />
+            <SnapshotMetric
+              label="完播"
+              value={`${(snapshot.completion_rate * 100).toFixed(1)}%`}
+            />
+            <SnapshotMetric
+              label="互动"
+              value={`${((snapshot.like_rate + snapshot.comment_rate + snapshot.share_rate) * 100).toFixed(1)}%`}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SnapshotMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ color: "var(--dy-faint)", marginBottom: 2 }}>{label}</div>
+      <div className="dy-tabular" style={{ color: "var(--dy-text)", fontWeight: 700 }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function metricSourceLabel(source: PerformanceSnapshot["source"]) {
+  const labels: Record<PerformanceSnapshot["source"], string> = {
+    douyin: "抖音回流",
+    xiaohongshu: "小红书回流",
+    shipinhao: "视频号回流",
+    manual: "手动录入",
+    demo: "示例数据",
+  };
+  return labels[source] ?? source;
+}
+
+function SuggestionTracker({
+  loading,
+  suggestions,
+  updatingId,
+  sendingId,
+  onUpdate,
+  onSendToBrain,
+}: {
+  loading: boolean;
+  suggestions: OptimizationSuggestion[];
+  updatingId?: number;
+  sendingId?: number;
+  onUpdate: (id: number, status: OptimizationSuggestionStatus, note?: string) => void;
+  onSendToBrain: (id: number) => void;
+}) {
+  if (loading) {
+    return (
+      <div style={{ display: "grid", placeItems: "center", height: 240 }}>
+        <Spin />
+      </div>
+    );
+  }
+  if (suggestions.length === 0) {
+    return <Empty description="暂无优化建议 · 运营复盘完成后自动生成" style={{ padding: "50px 0" }} />;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      {suggestions.slice(0, 5).map((item, index) => {
+        const status = SUGGESTION_STATUS[item.status];
+        const isUpdating = updatingId === item.id;
+        const isSending = sendingId === item.id;
+        return (
+          <div
+            key={item.id}
+            style={{
+              padding: index === 0 ? "0 0 12px" : "12px 0",
+              borderTop: index === 0 ? "none" : "1px solid var(--dy-border-subtle)",
+              display: "grid",
+              gap: 8,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Tag
+                style={{
+                  marginInlineEnd: 0,
+                  color: status.color,
+                  borderColor: "var(--dy-border)",
+                  background: "transparent",
+                }}
+              >
+                {status.label}
+              </Tag>
+              {item.target_stage && (
+                <Tag style={{ marginInlineEnd: 0, ...silverTagStyle }}>
+                  {STAGE_LABEL[item.target_stage]}
+                </Tag>
+              )}
+              <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>
+                {item.content_title}
+              </span>
+            </div>
+            <div style={{ color: "var(--dy-text)", fontSize: 13, lineHeight: 1.55 }}>
+              {item.suggestion}
+            </div>
+            {item.status !== "verified" && (
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<SendOutlined />}
+                  loading={isSending}
+                  onClick={() => onSendToBrain(item.id)}
+                >
+                  送入运营大脑
+                </Button>
+                {item.status === "suggested" && (
+                  <Button
+                    size="small"
+                    loading={isUpdating}
+                    onClick={() => onUpdate(item.id, "accepted", "下周期采用")}
+                  >
+                    仅采纳
+                  </Button>
+                )}
+                <Button
+                  size="small"
+                  loading={isUpdating}
+                  onClick={() => onUpdate(item.id, "verified", "已验证")}
+                >
+                  标记已验证
+                </Button>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

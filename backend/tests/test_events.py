@@ -38,10 +38,10 @@ async def test_publish_event_enqueues(monkeypatch) -> None:
 
     monkeypatch.setattr(ev, "get_arq_pool", _fake_pool)
 
-    await ev.publish_event("demo.ping", payload={"m": "hi"}, content_item_id=5)
+    await ev.publish_event("unit.ping", payload={"m": "hi"}, content_item_id=5)
 
     assert jobs[0][0] == "process_event"
     job_arg = jobs[0][1][0]
-    assert job_arg["type"] == "demo.ping"
+    assert job_arg["type"] == "unit.ping"
     assert job_arg["payload"] == {"m": "hi"}
     assert job_arg["content_item_id"] == 5

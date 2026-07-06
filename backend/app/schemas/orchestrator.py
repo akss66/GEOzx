@@ -1,8 +1,9 @@
 """编排相关 schema：内容创建、看板视图、质量门审批。"""
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
     AgentTaskStatus,
@@ -13,7 +14,9 @@ from app.models.enums import (
     DeliverableType,
     GateStatus,
     GateType,
+    Platform,
 )
+from app.schemas.brain import AgentToolCallOut
 
 
 class CreateContentItemRequest(BaseModel):
@@ -29,6 +32,59 @@ class ApproveGateRequest(BaseModel):
 
 class RerunStageRequest(BaseModel):
     stage: ContentStage
+
+
+class PublishReadinessRequest(BaseModel):
+    platform: Platform = Platform.DOUYIN
+    title: str = Field(min_length=1, max_length=120)
+    body: str = Field(default="", max_length=2000)
+    topics: list[str] = Field(default_factory=list, max_length=10)
+    scheduled_at: datetime | None = None
+    material_ids: list[int] = Field(default_factory=list)
+    cover_material_id: int | None = None
+    visibility: Literal["public", "friends", "private"] = "public"
+    allow_comment: bool = True
+
+
+class PublishCapabilityOut(BaseModel):
+    platform: Platform
+    content_types: list[Literal["video", "image_text"]]
+    supported_fields: list[str]
+    execution_mode: Literal["official_api", "manual_checklist", "browser_runner_disabled"]
+    permission_status: Literal["oauth_authorized", "pending_review", "prepare_only"]
+    browser_runner_enabled: bool = False
+
+
+class PublishPackageOut(BaseModel):
+    platform: Platform
+    account_id: int | None
+    content_type: Literal["video", "image_text"]
+    title: str
+    body: str
+    topics: list[str]
+    scheduled_at: datetime | None
+    material_ids: list[int]
+    cover_material_id: int | None
+    visibility: Literal["public", "friends", "private"]
+    allow_comment: bool
+    execution_mode: Literal["official_api", "manual_checklist", "browser_runner_disabled"]
+    manual_steps: list[str]
+
+
+class PublishReadinessFinding(BaseModel):
+    level: ComplianceRisk
+    code: str
+    message: str
+
+
+class PublishReadinessOut(BaseModel):
+    content_item_id: int
+    platform: Platform
+    ready: bool
+    risk: ComplianceRisk
+    package: PublishPackageOut
+    findings: list[PublishReadinessFinding]
+    tool_call: AgentToolCallOut
 
 
 class ContentItemOut(BaseModel):

@@ -20,11 +20,12 @@ from app.schemas.deliverable import DeliverablePayload, validate_payload
 
 
 class AgentContext(BaseModel):
-    """Agent 执行上下文：上游交付物（按 type→payload）+ 知识库切片（M1 E5 接入）。"""
+    """Agent 执行上下文：上游交付物、知识库切片、已采纳优化建议。"""
 
     content_item_id: int
     upstream: dict[str, dict] = {}
     knowledge: dict[str, list[dict]] = {}
+    optimization_suggestions: list[dict] = []
 
 
 class BaseAgent(ABC):
@@ -83,6 +84,9 @@ class LLMAgent(BaseAgent):
         if ctx.knowledge:
             dumped = json.dumps(ctx.knowledge, ensure_ascii=False, indent=2)
             parts.append("【知识库参考】\n" + dumped)
+        if ctx.optimization_suggestions:
+            dumped = json.dumps(ctx.optimization_suggestions, ensure_ascii=False, indent=2)
+            parts.append("【已采纳优化建议】\n" + dumped)
         if not parts:
             parts.append("（无上游输入，按 system prompt 直接产出。）")
         parts.append("请严格按要求输出唯一的 JSON 对象，不要附加解释文字。")

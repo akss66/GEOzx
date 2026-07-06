@@ -7,10 +7,18 @@ import {
 import { Tag, Typography } from "antd";
 import type { ReactNode } from "react";
 
-import { PLATFORM_LABEL, type CardStatus, type Platform } from "../mock/data";
+import type { Platform } from "../types";
+
+export type StatusBadgeStatus = "running" | "done" | "review" | "blocked";
+
+const PLATFORM_LABEL: Record<Platform, string> = {
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  shipinhao: "视频号",
+};
 
 const STATUS_META: Record<
-  CardStatus,
+  StatusBadgeStatus,
   { label: string; color: string; icon: ReactNode }
 > = {
   running: { label: "进行中", color: "var(--dy-info)", icon: <LoadingOutlined /> },
@@ -20,34 +28,28 @@ const STATUS_META: Record<
 };
 
 /** 状态标记：颜色 + 图标 + 文字三重冗余（色盲安全）。 */
-export function StatusBadge({ status }: { status: CardStatus }) {
+export function StatusBadge({ status }: { status: StatusBadgeStatus }) {
   const m = STATUS_META[status];
   return (
     <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        color: m.color,
-        fontSize: 12,
-        fontWeight: 500,
-      }}
+      className="dy-status-badge"
+      style={{ color: m.color }}
     >
-      <span style={{ fontSize: 11, display: "inline-flex" }}>{m.icon}</span>
+      <span className="dy-status-badge-icon">{m.icon}</span>
       {m.label}
     </span>
   );
 }
 
 const PLATFORM_COLOR: Record<Platform, string> = {
-  douyin: "blue",
-  xiaohongshu: "magenta",
-  shipinhao: "green",
+  douyin: "default",
+  xiaohongshu: "error",
+  shipinhao: "success",
 };
 
 export function PlatformTag({ platform }: { platform: Platform }) {
   return (
-    <Tag color={PLATFORM_COLOR[platform]} style={{ marginInlineEnd: 0 }}>
+    <Tag color={PLATFORM_COLOR[platform]} className="dy-platform-tag">
       {PLATFORM_LABEL[platform]}
     </Tag>
   );
@@ -64,26 +66,18 @@ export function PageHeader({
   extra?: ReactNode;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "flex-end",
-        justifyContent: "space-between",
-        gap: 16,
-        marginBottom: 20,
-      }}
-    >
-      <div>
-        <Typography.Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+    <div className="dy-page-header">
+      <div className="dy-page-header-copy">
+        <Typography.Title level={3} className="dy-page-title">
           {title}
         </Typography.Title>
         {subtitle && (
-          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+          <Typography.Text className="dy-page-subtitle">
             {subtitle}
           </Typography.Text>
         )}
       </div>
-      {extra}
+      {extra && <div className="dy-page-actions">{extra}</div>}
     </div>
   );
 }
@@ -94,32 +88,22 @@ export function Panel({
   extra,
   children,
   style,
+  className,
 }: {
   title?: string;
   extra?: ReactNode;
   children: ReactNode;
   style?: React.CSSProperties;
+  className?: string;
 }) {
   return (
     <section
-      style={{
-        background: "var(--dy-surface)",
-        border: "1px solid var(--dy-border-subtle)",
-        borderRadius: 12,
-        padding: 16,
-        ...style,
-      }}
+      className={["dy-panel", className].filter(Boolean).join(" ")}
+      style={style}
     >
       {(title || extra) && (
-        <header
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 12,
-          }}
-        >
-          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--dy-text)" }}>
+        <header className="dy-panel-header">
+          <span className="dy-panel-title">
             {title}
           </span>
           {extra}

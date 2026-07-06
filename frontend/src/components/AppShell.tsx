@@ -2,27 +2,81 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   AuditOutlined,
+  BookOutlined,
   BulbOutlined,
-  CustomerServiceOutlined,
-  DashboardOutlined,
-  DatabaseOutlined,
+  DeploymentUnitOutlined,
+  DownOutlined,
+  ForkOutlined,
+  FundProjectionScreenOutlined,
   LineChartOutlined,
   LogoutOutlined,
   MoonOutlined,
-  PartitionOutlined,
-  RiseOutlined,
+  PlusOutlined,
+  SearchOutlined,
   TeamOutlined,
+  UserOutlined,
   WalletOutlined,
 } from "@ant-design/icons";
-import { Avatar, Dropdown, Layout, Menu, Tag, Tooltip, Typography } from "antd";
+import { useQuery } from "@tanstack/react-query";
+import { Avatar, Button, Empty, Input, Layout, Menu, Popover, Tag, Tooltip, Typography } from "antd";
 import type { MenuProps } from "antd";
+import { useEffect, useMemo } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
+import { listAccounts } from "../api/workspace";
 import { useEventStream } from "../hooks/useEventStream";
 import { useAuth } from "../stores/auth";
+import { useCurrentWorkspace } from "../stores/currentWorkspace";
 import { useThemeMode } from "../stores/theme";
+import type { Account, AuthStatus, Platform } from "../types";
 
 const { Sider, Header, Content } = Layout;
+
+const PLATFORM_LABEL: Record<Platform, string> = {
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  shipinhao: "视频号",
+};
+
+const AUTH_LABEL: Record<AuthStatus, string> = {
+  unauthorized: "待授权",
+  authorized: "已授权",
+  expired: "已过期",
+  manual: "手动维护",
+};
+
+const AUTH_TONE: Record<AuthStatus, "success" | "warning" | "error" | "default"> = {
+  unauthorized: "warning",
+  authorized: "success",
+  expired: "error",
+  manual: "default",
+};
+
+export function buildAppShellMenuItems(isAdmin: boolean): NonNullable<MenuProps["items"]> {
+  const items: NonNullable<MenuProps["items"]> = [
+    { type: "group", label: "AI 运营" },
+    { key: "/", icon: <DeploymentUnitOutlined />, label: "运营大脑" },
+    { key: "/agents", icon: <ForkOutlined />, label: "专家团" },
+    { type: "group", label: "运营执行" },
+    { key: "/accounts", icon: <AppstoreOutlined />, label: "账号矩阵" },
+    { key: "/tasks", icon: <FundProjectionScreenOutlined />, label: "内容生产" },
+    { key: "/approvals", icon: <AuditOutlined />, label: "人工审批" },
+    { key: "/review", icon: <LineChartOutlined />, label: "运营复盘" },
+    { type: "group", label: "系统资产" },
+    { key: "/cost", icon: <WalletOutlined />, label: "使用成本" },
+    { key: "/knowledge", icon: <BookOutlined />, label: "知识库" },
+  ];
+
+  if (isAdmin) {
+    items.push(
+      { type: "group", label: "管理员" },
+      { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
+      { key: "/config", icon: <ApiOutlined />, label: "Agent 配置" },
+    );
+  }
+
+  return items;
+}
 
 export function AppShell() {
   const { user, logout } = useAuth();
@@ -31,137 +85,240 @@ export function AppShell() {
   const location = useLocation();
   const { connected } = useEventStream();
   const isAdmin = user?.role === "admin";
+  const selectedKey = location.pathname === "/brain" ? "/" : location.pathname;
 
-  const items: NonNullable<MenuProps["items"]> = [
-    { type: "group", label: "概览" },
-    { key: "/", icon: <DashboardOutlined />, label: "指挥台" },
-    { type: "group", label: "生产" },
-    { key: "/pipeline", icon: <PartitionOutlined />, label: "内容流水线" },
-    { key: "/approvals", icon: <AuditOutlined />, label: "质量门审批" },
-    { type: "group", label: "运营" },
-    { key: "/customer-service", icon: <CustomerServiceOutlined />, label: "客服" },
-    { key: "/advertising", icon: <RiseOutlined />, label: "投流" },
-    { type: "group", label: "数据" },
-    { key: "/review", icon: <LineChartOutlined />, label: "复盘看板" },
-    { key: "/cost", icon: <WalletOutlined />, label: "成本" },
-    { type: "group", label: "资产" },
-    { key: "/accounts", icon: <AppstoreOutlined />, label: "账号矩阵" },
-    { key: "/knowledge", icon: <DatabaseOutlined />, label: "知识库" },
-  ];
-  if (isAdmin) {
-    items.push(
-      { type: "group", label: "系统" },
-      { key: "/config", icon: <ApiOutlined />, label: "Agent 配置" },
-      { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
-    );
-  }
-
-  const userMenu: MenuProps["items"] = [
-    {
-      key: "logout",
-      icon: <LogoutOutlined />,
-      label: "退出登录",
-      onClick: () => {
-        logout();
-        navigate("/login");
-      },
-    },
-  ];
+  const items = buildAppShellMenuItems(isAdmin);
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <Sider width={216} style={{ borderRight: "1px solid var(--dy-border-subtle)" }}>
-        <div
-          style={{
-            height: 56,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "0 20px",
-          }}
-        >
-          <img
-            src="/logo.png"
-            alt="同舟行"
-            style={{ width: 24, height: 24, borderRadius: 6, objectFit: "contain" }}
-          />
-          <span style={{ fontWeight: 700, fontSize: 16, letterSpacing: 0.4 }}>
-            同舟行
+    <Layout className="dy-app-canvas dy-shell">
+      <Sider width={236} className="dy-shell-sider">
+        <button type="button" className="dy-shell-brand" onClick={() => navigate("/")}>
+          <img src="/logo.png" alt="同舟行" className="dy-shell-brand-mark" />
+          <span className="dy-shell-brand-copy">
+            <strong>同舟行</strong>
+            <small>AI+Agent+运营</small>
           </span>
-        </div>
+        </button>
+
         <Menu
           mode="inline"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[selectedKey]}
           items={items}
           onClick={({ key }) => navigate(key)}
-          style={{ borderInlineEnd: "none", paddingTop: 4 }}
+          className="dy-shell-menu"
         />
       </Sider>
-      <Layout>
-        <Header
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            gap: 18,
-            borderBottom: "1px solid var(--dy-border-subtle)",
-          }}
-        >
-          <Tooltip title={connected ? "事件流已连接" : "事件流未连接"}>
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 7,
-                fontSize: 12,
-                color: "var(--dy-muted)",
-              }}
-            >
-              <span
-                style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: "50%",
-                  background: connected ? "var(--dy-success)" : "var(--dy-faint)",
-                  boxShadow: connected ? "0 0 0 3px rgba(63,185,80,0.18)" : "none",
-                }}
+
+      <Layout className="dy-shell-main">
+        <Header className="dy-shell-header">
+          <CurrentAccountSwitcher />
+
+          <div className="dy-shell-header-tools">
+            <Input
+              aria-label="搜索任务、账号或专家"
+              prefix={<SearchOutlined className="dy-shell-search-icon" />}
+              placeholder="搜索任务、账号或专家"
+              className="dy-shell-search"
+            />
+
+            <Tooltip title={connected ? "实时事件流已连接" : "实时事件流未连接"}>
+              <span className="dy-shell-live" data-connected={connected}>
+                <span />
+                实时
+              </span>
+            </Tooltip>
+
+            <Tooltip title={mode === "dark" ? "切换浅色" : "切换深色"}>
+              <Button
+                type="text"
+                size="small"
+                aria-label="切换主题"
+                icon={mode === "dark" ? <BulbOutlined /> : <MoonOutlined />}
+                onClick={toggle}
+                className="dy-shell-icon-button"
               />
-              实时
-            </span>
-          </Tooltip>
-          <Tooltip title={mode === "dark" ? "切换浅色" : "切换深色"}>
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label="切换主题"
-              onClick={toggle}
-              onKeyDown={(e) => e.key === "Enter" && toggle()}
-              style={{ cursor: "pointer", fontSize: 16, color: "var(--dy-muted)" }}
+            </Tooltip>
+
+            <Popover
+              placement="bottomRight"
+              trigger="click"
+              content={
+                <div className="dy-user-popover">
+                  <div>
+                    <strong>{user?.display_name}</strong>
+                    <span>{user?.email}</span>
+                  </div>
+                  <Button
+                    type="text"
+                    icon={<LogoutOutlined />}
+                    onClick={() => {
+                      logout();
+                      navigate("/login");
+                    }}
+                  >
+                    退出登录
+                  </Button>
+                </div>
+              }
             >
-              {mode === "dark" ? <BulbOutlined /> : <MoonOutlined />}
-            </span>
-          </Tooltip>
-          <Dropdown menu={{ items: userMenu }} placement="bottomRight">
-            <span style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
-              <Avatar size={28} style={{ background: "#5b8cff", fontSize: 13 }}>
-                {user?.display_name?.[0] ?? "?"}
-              </Avatar>
-              <Typography.Text style={{ fontSize: 13 }}>
-                {user?.display_name}
-              </Typography.Text>
-              <Tag
-                color={isAdmin ? "blue" : "default"}
-                style={{ marginInlineEnd: 0, fontSize: 11 }}
-              >
-                {isAdmin ? "管理员" : "成员"}
-              </Tag>
-            </span>
-          </Dropdown>
+              <button type="button" className="dy-shell-user">
+                <Avatar size={30} className="dy-shell-avatar">
+                  {user?.display_name?.[0] ?? "?"}
+                </Avatar>
+                <span>{user?.display_name}</span>
+                <Tag className="dy-shell-role">{isAdmin ? "管理员" : "成员"}</Tag>
+              </button>
+            </Popover>
+
+            <Button
+              type="text"
+              size="small"
+              icon={<LogoutOutlined />}
+              onClick={() => {
+                logout();
+                navigate("/login");
+              }}
+              className="dy-shell-logout"
+            >
+              退出
+            </Button>
+          </div>
         </Header>
-        <Content style={{ padding: 24, overflow: "auto" }}>
-          <Outlet />
+
+        <Content className="dy-shell-content">
+          <main className="dy-shell-page">
+            <Outlet />
+          </main>
         </Content>
       </Layout>
     </Layout>
+  );
+}
+
+function CurrentAccountSwitcher() {
+  const navigate = useNavigate();
+  const { platform, accountId, setAccountId } = useCurrentWorkspace();
+  const accountsQuery = useQuery({ queryKey: ["shell-accounts"], queryFn: () => listAccounts() });
+  const douyinAccounts = useMemo(
+    () => (accountsQuery.data ?? []).filter((account) => account.platform === "douyin"),
+    [accountsQuery.data],
+  );
+  const currentAccount = douyinAccounts.find((account) => account.id === accountId) ?? null;
+
+  useEffect(() => {
+    if (accountId != null && accountsQuery.data && !douyinAccounts.some((account) => account.id === accountId)) {
+      setAccountId(null);
+    }
+  }, [accountId, accountsQuery.data, douyinAccounts, setAccountId]);
+
+  return (
+    <Popover
+      placement="bottomLeft"
+      trigger="click"
+      content={
+        <AccountSwitcherPanel
+          accounts={douyinAccounts}
+          loading={accountsQuery.isLoading}
+          selectedAccount={currentAccount}
+          onSelect={setAccountId}
+          onManage={() => navigate("/accounts")}
+        />
+      }
+    >
+      <button type="button" className="dy-account-context">
+        <span className="dy-account-platform">{PLATFORM_LABEL[platform]}</span>
+        <span className="dy-account-divider" />
+        {currentAccount ? (
+          <>
+            <span className="dy-account-name">{currentAccount.nickname}</span>
+            <StatusDot status={currentAccount.auth_status} />
+          </>
+        ) : (
+          <span className="dy-account-empty">选择抖音账号</span>
+        )}
+        <DownOutlined className="dy-account-caret" />
+      </button>
+    </Popover>
+  );
+}
+
+function AccountSwitcherPanel({
+  accounts,
+  loading,
+  selectedAccount,
+  onSelect,
+  onManage,
+}: {
+  accounts: Account[];
+  loading: boolean;
+  selectedAccount: Account | null;
+  onSelect: (accountId: number | null) => void;
+  onManage: () => void;
+}) {
+  return (
+    <section className="dy-account-panel">
+      <header>
+        <div>
+          <Typography.Text className="dy-account-panel-title">当前工作账号</Typography.Text>
+          <Typography.Text className="dy-account-panel-subtitle">先选账号，再开始 Agent 运营任务</Typography.Text>
+        </div>
+        <Tag className="dy-platform-live">抖音</Tag>
+      </header>
+
+      <div className="dy-platform-row" aria-label="平台切换">
+        <button type="button" className="is-active">抖音</button>
+        <button type="button" disabled>小红书</button>
+        <button type="button" disabled>视频号</button>
+      </div>
+
+      <div className="dy-account-list">
+        {loading ? (
+          <div className="dy-account-skeleton" aria-busy="true" />
+        ) : accounts.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无抖音账号" />
+        ) : (
+          accounts.map((account) => (
+            <button
+              key={account.id}
+              type="button"
+              className="dy-account-option"
+              data-selected={selectedAccount?.id === account.id}
+              onClick={() => onSelect(account.id)}
+            >
+              <span className="dy-account-option-avatar">
+                <UserOutlined />
+              </span>
+              <span className="dy-account-option-main">
+                <strong>{account.nickname}</strong>
+                <small>{account.external_account_id ?? "未绑定外部 ID"}</small>
+              </span>
+              <StatusTag status={account.auth_status} />
+            </button>
+          ))
+        )}
+      </div>
+
+      <footer>
+        <Button type="text" icon={<PlusOutlined />} onClick={onManage}>
+          去账号矩阵添加或重新授权
+        </Button>
+      </footer>
+    </section>
+  );
+}
+
+function StatusDot({ status }: { status: AuthStatus }) {
+  return (
+    <span className="dy-account-status-dot" data-status={status}>
+      {AUTH_LABEL[status]}
+    </span>
+  );
+}
+
+function StatusTag({ status }: { status: AuthStatus }) {
+  return (
+    <Tag className="dy-auth-tag" data-tone={AUTH_TONE[status]}>
+      {AUTH_LABEL[status]}
+    </Tag>
   );
 }

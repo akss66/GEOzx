@@ -1,6 +1,6 @@
 """复盘看板 schema：指标录入 + 聚合视图。"""
 
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -54,3 +54,24 @@ class ReviewOverview(BaseModel):
     total_play: int
     avg_completion_rate: float
     follower_delta: int
+
+
+class PerformanceSnapshotOut(BaseModel):
+    """A normalized content performance snapshot for review loops."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    content_item_id: int | None
+    account_id: int | None
+    source: MetricSource
+    stat_date: date
+    title: str | None
+    play: int
+    exposure: int
+    completion_rate: float
+    like_rate: float
+    comment_rate: float
+    share_rate: float
+    follower_delta: int
+    created_at: datetime

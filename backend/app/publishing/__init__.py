@@ -1,0 +1,2 @@
+"""Publishing adapter layer."""
+

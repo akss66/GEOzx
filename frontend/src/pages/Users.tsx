@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { createUser, listUsers } from "../api/auth";
+import { silverTagStyle } from "../theme/styles";
 import type { CreateUserInput, Role, User } from "../types";
 
 interface CreateForm {
@@ -53,7 +54,7 @@ export default function Users() {
       dataIndex: "role",
       width: 110,
       render: (role: Role) => (
-        <Tag color={role === "admin" ? "blue" : "default"}>
+        <Tag style={role === "admin" ? silverTagStyle : undefined}>
           {role === "admin" ? "管理员" : "成员"}
         </Tag>
       ),

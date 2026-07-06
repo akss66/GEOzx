@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # Seedance 独立 API（后期接入，与火山方舟是不同供应商）
     seedance_api_key: str = ""
 
+    # —— 抖音开放平台 ——
+    douyin_client_key: str = ""
+    douyin_client_secret: str = ""
+
     # —— 对象存储（v1 本地卷，MinIO 接口预留；T2 暂不接入实际读写）——
     storage_backend: str = "local"
     storage_local_dir: str = "/data/objects"

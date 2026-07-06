@@ -18,6 +18,8 @@ frontend/dist/
 .vite/
 *.tsbuildinfo
 .pnpm-store/
+frontend/test-results/
+frontend/playwright-report/
 
 # ── Docker / data volumes ────────────────────────
 .data/
@@ -36,3 +38,9 @@ frontend/dist/
 *.pem
 *.key
 !.env.example
+
+.superpowers/
+.tools/
+.impeccable/
+cloudflare/
+抖音自媒体运营Agent团队配置表.xlsx

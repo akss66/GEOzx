@@ -1,11 +1,15 @@
 """LLMGateway 测试：路由 / 兜底 / 成本记账（全 mock，无真实网络）。"""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import func, select
 
 from app.llm.adapters import CompletionResult
+from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.cost import compute_cost
-from app.llm.gateway import LLMError, LLMGateway
+from app.llm.gateway import LLMError, LLMGateway, provider_for
 from app.models import LLMCall, ModelConfig, Org
 
 
@@ -39,6 +43,41 @@ MSG = [{"role": "user", "content": "hi"}]
 def test_compute_cost() -> None:
     assert round(compute_cost("deepseek-chat", 1_000_000, 1_000_000), 4) == 1.37
     assert compute_cost("unknown-model", 100, 100) == 0.0
+
+
+def test_provider_for_routes_litellm_prefix() -> None:
+    assert provider_for("litellm:openai/gpt-4o-mini") == "litellm"
+    assert provider_for("deepseek-chat") == "deepseek"
+
+
+@pytest.mark.asyncio
+async def test_litellm_adapter_uses_lazy_import(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_acompletion(model: str, messages: list[dict]) -> dict:
+        captured["model"] = model
+        captured["messages"] = messages
+        return {
+            "choices": [{"message": {"content": "lite reply"}}],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 4,
+                "total_tokens": 7,
+            },
+        }
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=fake_acompletion))
+
+    result = await LiteLLMAdapter().complete("litellm:openai/gpt-4o-mini", MSG)
+
+    assert captured == {"model": "openai/gpt-4o-mini", "messages": MSG}
+    assert result == CompletionResult(
+        content="lite reply",
+        model="litellm:openai/gpt-4o-mini",
+        prompt_tokens=3,
+        completion_tokens=4,
+        total_tokens=7,
+    )
 
 
 @pytest.mark.asyncio

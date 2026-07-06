@@ -1,6 +1,7 @@
 import { Tag } from "antd";
 import type { ReactNode } from "react";
 
+import { silverTagStyle } from "../theme/styles";
 import { PageHeader } from "./ui";
 
 /** 即将上线模块的占位页：说明定位、所属阶段、规划能力。 */
@@ -23,7 +24,7 @@ export function ModulePlaceholder({
         title={title}
         subtitle={subtitle}
         extra={
-          <Tag color="processing" style={{ marginInlineEnd: 0 }}>
+          <Tag style={{ marginInlineEnd: 0, ...silverTagStyle }}>
             {phase}
           </Tag>
         }
@@ -32,7 +33,7 @@ export function ModulePlaceholder({
         style={{
           background: "var(--dy-surface)",
           border: "1px solid var(--dy-border-subtle)",
-          borderRadius: 12,
+          borderRadius: 24,
           padding: "40px 32px",
           display: "flex",
           flexDirection: "column",
@@ -60,7 +61,7 @@ export function ModulePlaceholder({
               style={{
                 background: "var(--dy-elevated)",
                 border: "1px solid var(--dy-border-subtle)",
-                borderRadius: 10,
+                borderRadius: 18,
                 padding: "14px 16px",
                 fontSize: 13,
                 color: "var(--dy-text)",

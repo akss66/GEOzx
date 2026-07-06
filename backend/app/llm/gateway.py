@@ -13,12 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.llm.adapters import CompletionResult, LLMAdapter
 from app.llm.adapters.deepseek import DeepSeekAdapter
+from app.llm.adapters.litellm import LITELLM_PREFIX, LiteLLMAdapter
 from app.llm.cost import compute_cost
 from app.models import LLMCall, ModelConfig
 
 
 def provider_for(model: str) -> str:
     """按模型名推断供应商。v1 仅 DeepSeek；后续扩展更多前缀映射。"""
+    if model.startswith(LITELLM_PREFIX):
+        return "litellm"
     return "deepseek"
 
 
@@ -28,7 +31,10 @@ class LLMError(RuntimeError):
 
 class LLMGateway:
     def __init__(self, adapters: dict[str, LLMAdapter] | None = None) -> None:
-        self._adapters: dict[str, LLMAdapter] = adapters or {"deepseek": DeepSeekAdapter()}
+        self._adapters: dict[str, LLMAdapter] = adapters or {
+            "deepseek": DeepSeekAdapter(),
+            "litellm": LiteLLMAdapter(),
+        }
 
     def _adapter(self, model: str) -> LLMAdapter:
         return self._adapters[provider_for(model)]
