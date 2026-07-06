@@ -347,6 +347,22 @@ async def test_douyin_worker_complete_rejects_invalid_bridge_secret(client, admi
 
 
 @pytest.mark.asyncio
+async def test_douyin_worker_complete_accepts_authorization_bearer(client, admin, monkeypatch):
+    from app.api import platform_integrations as api_module
+
+    monkeypatch.setattr(api_module.settings, "douyin_oauth_worker_secret", "bridge-secret")
+
+    resp = await client.post(
+        "/platform-integrations/douyin/oauth/complete",
+        headers={"Authorization": "Bearer bridge-secret"},
+        json={"code": "scan-code", "state": "not-a-valid-state"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid state"
+
+
+@pytest.mark.asyncio
 async def test_douyin_worker_complete_creates_scan_account_with_bridge_secret(
     client, admin, session, monkeypatch
 ):

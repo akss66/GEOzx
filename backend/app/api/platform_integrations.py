@@ -221,14 +221,24 @@ def _decode_oauth_state(state: str) -> dict:
     return payload
 
 
-def _require_worker_secret(worker_secret: str | None) -> None:
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
+
+
+def _require_worker_secret(worker_secret: str | None, authorization: str | None = None) -> None:
     configured_secret = settings.douyin_oauth_worker_secret
+    provided_secret = worker_secret or _extract_bearer_token(authorization)
     if not configured_secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Douyin OAuth worker bridge is not configured",
         )
-    if not worker_secret or not compare_digest(worker_secret, configured_secret):
+    if not provided_secret or not compare_digest(provided_secret, configured_secret):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="invalid worker secret",
@@ -555,8 +565,9 @@ async def complete_douyin_oauth_from_worker(
     body: DouyinOAuthCompleteRequest,
     session: SessionDep,
     worker_secret: Annotated[str | None, Header(alias="X-Dyflow-Worker-Secret")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> DouyinOAuthCallbackOut:
-    _require_worker_secret(worker_secret)
+    _require_worker_secret(worker_secret, authorization)
     code, state = _extract_oauth_completion_params(body)
     return await _complete_douyin_oauth(session=session, code=code, state=state)
 

@@ -67,7 +67,7 @@ async function completeOAuth({ env, code, state, callbackUrl }) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "X-Dyflow-Worker-Secret": env.DYFLOW_OAUTH_WORKER_SECRET,
+        "authorization": `Bearer ${env.DYFLOW_OAUTH_WORKER_SECRET}`,
       },
       body: JSON.stringify({ code, state, callback_url: callbackUrl }),
     });
