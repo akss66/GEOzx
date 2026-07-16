@@ -1,146 +1,132 @@
 import type { ThemeConfig } from "antd";
-import { theme as antdTheme } from "antd";
 
-export type Mode = "dark" | "light";
+// Kept for chart compatibility while the remaining report pages are migrated.
+export type Mode = "light" | "dark";
 
-const LIGHT = {
-  layout: "#f6f7f8",
-  container: "#ffffff",
-  elevated: "#fbfbfc",
-  sider: "#fbfbfc",
-  toolbar: "rgba(255,255,255,0.86)",
-  border: "#dfe2e6",
-  borderSubtle: "#eceef1",
-  text: "#111315",
-  textSecondary: "#4f5863",
-  textTertiary: "#747d88",
-  selectedBg: "#f0f1f3",
-  hoverBg: "#f3f4f5",
-};
+export const DESIGN_TOKENS = {
+  brandRed: "#C9161D",
+  brandRedHover: "#AE1218",
+  brandRedActive: "#941016",
+  brandFrame: "#EEE8DF",
+  brandFrameStrong: "#E4DCD0",
+  workCanvas: "#F6F6F3",
+  surface: "#FFFFFF",
+  surfaceSoft: "#F0F0ED",
+  ink: "#171614",
+  inkSoft: "#3C3935",
+  muted: "#625E58",
+  faint: "#837F78",
+  line: "#D9D7D1",
+  lineSubtle: "#E9E8E3",
+  success: "#2B8152",
+  warning: "#9A6300",
+  error: "#B92B36",
+  info: "#526774",
+} as const;
 
-const DARK = {
-  layout: "#101113",
-  container: "#17191c",
-  elevated: "#1d2024",
-  sider: "#141619",
-  toolbar: "rgba(20,22,25,0.92)",
-  border: "#2c3036",
-  borderSubtle: "#24282e",
-  text: "#f2f3f5",
-  textSecondary: "#b5bbc3",
-  textTertiary: "#858d97",
-  selectedBg: "#24272c",
-  hoverBg: "#202328",
-};
-
-export const ACCENT = "#111315";
-export const ACCENT_HOVER = "#2a2e33";
-export const ACCENT_ACTIVE = "#050607";
 export const FONT_SANS =
   '"OpenAI Sans", "Söhne", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
 
+export const ACCENT = DESIGN_TOKENS.brandRed;
+export const ACCENT_HOVER = DESIGN_TOKENS.brandRedHover;
+export const ACCENT_ACTIVE = DESIGN_TOKENS.brandRedActive;
+
 export const SEMANTIC = {
-  success: "#1f8f4d",
-  warning: "#a66a00",
-  error: "#c43d4b",
-  info: "#59616c",
+  success: DESIGN_TOKENS.success,
+  warning: DESIGN_TOKENS.warning,
+  error: DESIGN_TOKENS.error,
+  info: DESIGN_TOKENS.info,
 };
 
 export const CHART_COLORS = [
-  "#111315",
-  "#59616c",
-  "#8d949d",
-  "#c9ced6",
-  "#1f8f4d",
-  "#a66a00",
-  "#c43d4b",
-  "#3f6f6a",
+  DESIGN_TOKENS.ink,
+  DESIGN_TOKENS.brandRed,
+  DESIGN_TOKENS.info,
+  "#7F8D86",
+  DESIGN_TOKENS.success,
+  DESIGN_TOKENS.warning,
+  "#A6A29B",
+  "#C9C6BF",
 ];
 
 export const PLATFORM_COLORS: Record<string, string> = {
-  douyin: "#111315",
-  xiaohongshu: "#c43d4b",
-  shipinhao: "#1f8f4d",
+  douyin: DESIGN_TOKENS.ink,
+  xiaohongshu: DESIGN_TOKENS.brandRed,
+  shipinhao: DESIGN_TOKENS.success,
 };
 
-export function buildTheme(mode: Mode): ThemeConfig {
-  const c = mode === "dark" ? DARK : LIGHT;
+export function buildTheme(): ThemeConfig {
+  const c = DESIGN_TOKENS;
+
   return {
-    algorithm: mode === "dark" ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
     token: {
-      colorPrimary: ACCENT,
-      colorInfo: SEMANTIC.info,
-      colorSuccess: SEMANTIC.success,
-      colorWarning: SEMANTIC.warning,
-      colorError: SEMANTIC.error,
-      colorBgLayout: c.layout,
-      colorBgContainer: c.container,
-      colorBgElevated: c.elevated,
-      colorBorder: c.border,
-      colorBorderSecondary: c.borderSubtle,
-      colorText: c.text,
-      colorTextSecondary: c.textSecondary,
-      colorTextTertiary: c.textTertiary,
-      borderRadius: 14,
-      borderRadiusLG: 18,
+      colorPrimary: c.brandRed,
+      colorLink: c.ink,
+      colorInfo: c.info,
+      colorSuccess: c.success,
+      colorWarning: c.warning,
+      colorError: c.error,
+      colorBgLayout: c.workCanvas,
+      colorBgContainer: c.surface,
+      colorBgElevated: c.surface,
+      colorBorder: c.line,
+      colorBorderSecondary: c.lineSubtle,
+      colorText: c.ink,
+      colorTextSecondary: c.inkSoft,
+      colorTextTertiary: c.muted,
+      borderRadius: 10,
+      borderRadiusLG: 14,
       borderRadiusSM: 10,
-      borderRadiusXS: 8,
+      borderRadiusXS: 10,
       wireframe: false,
       fontFamily: FONT_SANS,
       fontSize: 14,
       controlHeight: 36,
       boxShadow: "none",
-      boxShadowSecondary: "none",
+      boxShadowSecondary: "0 8px 20px rgba(23, 22, 20, 0.08)",
     },
     components: {
       Layout: {
-        headerBg: c.toolbar,
-        siderBg: c.sider,
-        bodyBg: c.layout,
-        headerHeight: 54,
-        headerPadding: "0 20px",
+        headerBg: c.workCanvas,
+        siderBg: c.brandFrame,
+        bodyBg: c.workCanvas,
+        headerHeight: 62,
+        headerPadding: "0 22px",
       },
       Menu: {
         itemBg: "transparent",
-        itemHoverBg: c.hoverBg,
-        itemSelectedBg: c.selectedBg,
-        itemSelectedColor: c.text,
-        itemColor: c.textSecondary,
-        groupTitleColor: c.textTertiary,
-        itemHeight: 36,
+        itemHoverBg: "rgba(255, 255, 255, 0.42)",
+        itemSelectedBg: "rgba(255, 255, 255, 0.62)",
+        itemSelectedColor: c.ink,
+        itemColor: c.inkSoft,
+        groupTitleColor: c.muted,
+        itemHeight: 37,
         itemMarginInline: 10,
-        itemBorderRadius: 14,
+        itemBorderRadius: 10,
         iconSize: 16,
       },
-      Card: {
-        colorBgContainer: c.container,
-        borderRadiusLG: 18,
-      },
+      Card: { colorBgContainer: c.surface, borderRadiusLG: 14 },
       Table: {
-        headerBg: mode === "dark" ? c.elevated : "#f6f7f8",
-        headerColor: c.textSecondary,
-        rowHoverBg: c.hoverBg,
-        borderColor: c.borderSubtle,
+        headerBg: c.workCanvas,
+        headerColor: c.inkSoft,
+        rowHoverBg: c.surfaceSoft,
+        borderColor: c.lineSubtle,
         cellPaddingBlock: 11,
       },
       Statistic: { contentFontSize: 26 },
       Tag: { borderRadiusSM: 999 },
-      Segmented: {
-        trackBg: c.selectedBg,
-        itemSelectedBg: c.container,
-      },
+      Segmented: { trackBg: c.surfaceSoft, itemSelectedBg: c.surface },
       Button: {
+        colorPrimary: c.ink,
+        colorPrimaryHover: c.inkSoft,
+        colorPrimaryActive: "#0F0E0D",
+        primaryColor: c.surface,
         primaryShadow: "none",
         defaultShadow: "none",
         dangerShadow: "none",
       },
-      Input: {
-        activeBorderColor: ACCENT,
-        hoverBorderColor: mode === "dark" ? "#444a53" : "#c9ced6",
-      },
-      Select: {
-        optionSelectedBg: c.selectedBg,
-      },
+      Input: { activeBorderColor: c.ink, hoverBorderColor: c.faint },
+      Select: { optionSelectedBg: c.surfaceSoft },
     },
   };
 }

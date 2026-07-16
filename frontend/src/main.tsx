@@ -2,28 +2,23 @@
 import { App as AntApp, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import React, { useEffect } from "react";
+import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import App from "./App";
-import { useThemeMode } from "./stores/theme";
 import { buildTheme } from "./theme/tokens";
 import "./index.css";
+import "./styles/foundation.css";
+import "./styles/app-shell.css";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
 });
 
 function Root() {
-  const mode = useThemeMode((s) => s.mode);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = mode;
-  }, [mode]);
-
   return (
-    <ConfigProvider locale={zhCN} theme={buildTheme(mode)}>
+    <ConfigProvider locale={zhCN} theme={buildTheme()}>
       <AntApp>
         <QueryClientProvider client={queryClient}>
           <BrowserRouter>

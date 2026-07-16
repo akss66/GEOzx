@@ -1,0 +1,11 @@
+.tz-shell {
+  min-height: 100vh;
+  background: var(--tz-work-canvas);
+  color: var(--tz-ink);
+  font-family: var(--tz-font-sans);
+}
+
+.tz-shell .ant-input::placeholder,
+.tz-shell .ant-input-affix-wrapper input::placeholder {
+  color: var(--tz-muted);
+}
