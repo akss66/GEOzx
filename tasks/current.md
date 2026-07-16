@@ -21,8 +21,8 @@
 - [x] 重写 `DESIGN.md`。
 - [x] 重写 `SPEC.md`。
 - [x] 新增系统体验重构设计文档。
-- [ ] 用户验收本轮文档。
-- [ ] 文档批准后创建逐文件实施计划。
+- [x] 用户验收本轮文档。
+- [x] 创建 Slice 1 逐文件实施计划：`docs/superpowers/plans/2026-07-16-design-system-app-shell.md`。
 
 ## P1: Design System and App Shell
 
