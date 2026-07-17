@@ -13,7 +13,7 @@
 - Production must render real data only; no mock clients, tasks, notifications, accounts, or statuses.
 - Preserve current route URLs and existing Douyin OAuth/token records.
 - Keep the current primary navigation names and order for this slice.
-- Use warm brand frame `#F0E8DC`, work surface `#FBF8F2`, ink `#191714`, and brand red `#D3131A`.
+- Use the approved V2 palette: warm brand frame `#EEE8DF`, work canvas `#F6F6F3`, ink `#171614`, and brand red `#C9161D`.
 - Ship light theme only; remove the non-functional theme toggle from the shell.
 - Client/project scope must be enforced by backend dependencies, not only hidden in the frontend.
 - The Agent may suggest context changes but cannot switch client, project, platform, or account without confirmation.

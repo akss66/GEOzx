@@ -4,9 +4,12 @@ import httpx
 import pytest
 
 from app.integrations.douyin import (
+    DouyinIntegrationError,
+    fetch_douyin_user_info,
     fetch_douyin_video_list,
     normalize_douyin_user_profile,
     normalize_douyin_video_metrics,
+    refresh_douyin_access_token,
 )
 from app.models.enums import MetricSource
 
@@ -70,6 +73,90 @@ def test_normalize_douyin_video_metrics_maps_statistics_to_review_snapshot_field
             "external_item_id": "video-1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_douyin_user_info_uses_official_post_form_contract():
+    captured_request: httpx.Request | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "error_code": 0,
+                    "open_id": "open-id",
+                    "nickname": "Test account",
+                }
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await fetch_douyin_user_info(
+            access_token="access-token",
+            open_id="open-id",
+            client=client,
+        )
+
+    assert captured_request is not None
+    assert captured_request.method == "POST"
+    assert str(captured_request.url) == "https://open.douyin.com/oauth/userinfo/"
+    assert captured_request.content.decode() == "access_token=access-token&open_id=open-id"
+    assert result["nickname"] == "Test account"
+
+
+@pytest.mark.asyncio
+async def test_refresh_douyin_access_token_uses_official_form_contract():
+    captured_request: httpx.Request | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "error_code": 0,
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token",
+                    "expires_in": 7200,
+                }
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await refresh_douyin_access_token(
+            client_key="client-key",
+            refresh_token="refresh-token",
+            client=client,
+        )
+
+    assert captured_request is not None
+    assert captured_request.method == "POST"
+    assert str(captured_request.url) == "https://open.douyin.com/oauth/refresh_token/"
+    assert captured_request.content.decode() == (
+        "client_key=client-key&grant_type=refresh_token&refresh_token=refresh-token"
+    )
+    assert result["access_token"] == "new-access-token"
+
+
+@pytest.mark.asyncio
+async def test_douyin_transport_errors_are_exposed_as_integration_errors():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network unavailable", request=request)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(DouyinIntegrationError, match="request failed"):
+            await fetch_douyin_user_info(
+                access_token="access-token",
+                open_id="open-id",
+                client=client,
+            )
 
 
 @pytest.mark.asyncio

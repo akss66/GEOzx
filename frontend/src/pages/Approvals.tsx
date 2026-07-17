@@ -1,713 +1,473 @@
 import {
-  ApiOutlined,
   CheckOutlined,
+  ClockCircleOutlined,
   CloseOutlined,
   FileDoneOutlined,
+  ReloadOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
-  WarningFilled,
+  SendOutlined,
 } from "@ant-design/icons";
-import { App as AntApp, Button, Empty, Spin, Tag } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { App as AntApp, Button, Input, Segmented, Skeleton, Tag } from "antd";
+import { useEffect, useMemo, useState } from "react";
 
-import { approveToolCall, listPendingToolCallApprovals } from "../api/brain";
-import { approveGate, listPendingGates } from "../api/orchestrator";
+import { getApprovalWorkspace } from "../api/approvals";
+import {
+  approveDeliverableAcceptance,
+  approveToolCall,
+  rejectDeliverableAcceptance,
+} from "../api/brain";
+import { approveGate } from "../api/orchestrator";
+import {
+  APPROVAL_KIND_LABEL,
+  APPROVAL_RISK_LABEL,
+  approvalFindingCopy,
+  filterApprovalItems,
+  readApprovalAcceptance,
+  readApprovalDeliverable,
+  readApprovalPublishPackage,
+  relativeApprovalTime,
+  type ApprovalFilter,
+} from "../components/approvals/approvalPresentation";
+import {
+  deliverableLabel,
+  deliverableSections,
+  displayContentTitle,
+} from "../components/content/contentPresentation";
 import { PageHeader } from "../components/ui";
 import { useEventStream } from "../hooks/useEventStream";
-import type { AgentToolCall, ComplianceCheck, ComplianceRisk, GateType } from "../types";
+import { useCurrentWorkspace } from "../stores/currentWorkspace";
+import type {
+  ApprovalQueueItem,
+  Deliverable,
+  PublishPackage,
+  PublishReadinessFinding,
+} from "../types";
+import { businessToolName } from "../components/presentation/toolNames";
+import "../styles/approval-workbench.css";
 
-const GATE_LABEL: Record<GateType, string> = {
-  positioning_review: "定位审核",
-  topic_review: "选题审核",
-  script_compliance: "脚本合规",
-  final_video_review: "成片审核",
-  pre_publish_review: "发布前审核",
-  large_ad_spend: "大额投放",
+type DecisionInput = {
+  item: ApprovalQueueItem;
+  approved: boolean;
+  note: string;
 };
 
-const RISK_META: Record<ComplianceRisk, { color: string; bg: string; label: string }> = {
-  pass: { color: "var(--dy-success)", bg: "rgba(48,164,108,0.1)", label: "合规预检通过" },
-  warn: { color: "var(--dy-warning)", bg: "rgba(214,161,38,0.1)", label: "疑似风险" },
-  block: { color: "var(--dy-error)", bg: "rgba(220,80,80,0.1)", label: "高危违规" },
-};
-
-const FORCED_GATES = new Set<GateType>([
-  "script_compliance",
-  "pre_publish_review",
-  "large_ad_spend",
-]);
+const FILTER_OPTIONS: { label: string; value: ApprovalFilter }[] = [
+  { label: "全部", value: "all" },
+  { label: "高风险", value: "high_risk" },
+  { label: "内容", value: "content" },
+  { label: "外部动作", value: "external" },
+];
 
 export default function Approvals() {
   const { message } = AntApp.useApp();
   const qc = useQueryClient();
+  const { clientId, projectId, accountId } = useCurrentWorkspace();
+  const [filter, setFilter] = useState<ApprovalFilter>("all");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+  const [noteError, setNoteError] = useState(false);
 
-  const gatesQuery = useQuery({ queryKey: ["gates"], queryFn: listPendingGates });
-  const toolApprovalsQuery = useQuery({
-    queryKey: ["tool-call-approvals"],
-    queryFn: listPendingToolCallApprovals,
+  const query = useQuery({
+    queryKey: ["approval-workspace", clientId, projectId, accountId],
+    queryFn: () => getApprovalWorkspace({
+      client_id: clientId,
+      project_id: projectId,
+      account_id: accountId,
+    }),
   });
 
   useEventStream(() => {
-    qc.invalidateQueries({ queryKey: ["gates"] });
-    qc.invalidateQueries({ queryKey: ["tool-call-approvals"] });
+    qc.invalidateQueries({ queryKey: ["approval-workspace"] });
   });
 
-  const decideGateMutation = useMutation({
-    mutationFn: ({ id, approved }: { id: number; approved: boolean }) =>
-      approveGate(id, approved),
-    onSuccess: (_data, { approved }) => {
-      message.success(approved ? "质量门已通过" : "已打回，对应 Agent 会收到阻塞信号");
-      qc.invalidateQueries({ queryKey: ["gates"] });
+  const items = query.data?.items ?? [];
+  const visibleItems = useMemo(
+    () => filterApprovalItems(items, filter),
+    [filter, items],
+  );
+
+  useEffect(() => {
+    if (visibleItems.some((item) => item.key === selectedKey)) return;
+    setSelectedKey(visibleItems[0]?.key ?? null);
+  }, [selectedKey, visibleItems]);
+
+  const selected = visibleItems.find((item) => item.key === selectedKey) ?? null;
+
+  useEffect(() => {
+    setNote("");
+    setNoteError(false);
+  }, [selected?.key]);
+
+  const decisionMutation = useMutation({
+    mutationFn: async ({ item, approved, note: decisionNote }: DecisionInput) => {
+      if (item.kind === "gate") {
+        return approveGate(item.source_id, approved, decisionNote || undefined);
+      }
+      if (item.kind === "tool_call") {
+        return approveToolCall({
+          toolCallId: item.source_id,
+          approved,
+          comment: decisionNote || undefined,
+        });
+      }
+      const acceptance = readApprovalAcceptance(item);
+      if (!acceptance) throw new Error("成果验收数据不完整");
+      if (approved) return approveDeliverableAcceptance(acceptance, decisionNote || undefined);
+      return rejectDeliverableAcceptance({
+        acceptance,
+        reason: decisionNote,
+        rerun_scope: "current_agent",
+        ask_brain_rejudge: true,
+      });
+    },
+    onSuccess: (_result, variables) => {
+      const currentIndex = visibleItems.findIndex((item) => item.key === variables.item.key);
+      const next = visibleItems[currentIndex + 1] ?? visibleItems[currentIndex - 1] ?? null;
+      setSelectedKey(next?.key ?? null);
+      setNote("");
+      setNoteError(false);
+      qc.invalidateQueries({ queryKey: ["approval-workspace"] });
       qc.invalidateQueries({ queryKey: ["content-items"] });
-    },
-    onError: () => message.error("质量门处理失败，请重试"),
-  });
-
-  const decideToolMutation = useMutation({
-    mutationFn: ({ id, approved }: { id: number; approved: boolean }) =>
-      approveToolCall({
-        toolCallId: id,
-        approved,
-        comment: approved ? "人工确认通过" : "人工确认打回",
-      }),
-    onSuccess: (_data, { approved }) => {
-      message.success(approved ? "Agent 工具调用已确认" : "Agent 工具调用已打回");
-      qc.invalidateQueries({ queryKey: ["tool-call-approvals"] });
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
+      message.success(variables.approved ? "审批已通过，已进入下一项" : "修改意见已提交");
     },
-    onError: () => message.error("Agent 工具确认失败，请重试"),
+    onError: (error) => message.error(errorMessage(error)),
   });
 
-  const gates = gatesQuery.data ?? [];
-  const toolApprovals = toolApprovalsQuery.data ?? [];
-  const loading = gatesQuery.isLoading || toolApprovalsQuery.isLoading;
-  const pendingCount = gates.length + toolApprovals.length;
+  const decide = (approved: boolean) => {
+    if (!selected || !selected.can_decide) return;
+    const cleanNote = note.trim();
+    if (!approved && !cleanNote) {
+      setNoteError(true);
+      return;
+    }
+    decisionMutation.mutate({ item: selected, approved, note: cleanNote });
+  };
 
   return (
-    <div>
+    <div className="approval-page">
       <PageHeader
         title="人工审批"
-        subtitle="人在关键处把关：Agent 工具确认、质量门、发布前风险控制统一进入这里。"
+        subtitle="在外部动作发生前确认风险，在正式成果进入下游前给出明确判断"
         extra={
-          <Tag color="warning" style={{ marginInlineEnd: 0 }}>
-            待处理 {pendingCount}
-          </Tag>
+          <div className="approval-header-status">
+            <span><i />真实队列</span>
+            <strong>{query.data?.counts.total ?? 0}</strong>
+          </div>
         }
       />
 
-      {loading ? (
-        <div style={{ display: "grid", placeItems: "center", marginTop: 80 }}>
-          <Spin />
-        </div>
-      ) : pendingCount === 0 ? (
-        <Empty description="全部处理完毕，链路畅通" style={{ marginTop: 80 }} />
-      ) : (
-        <div style={{ display: "grid", gap: 18, maxWidth: 980 }}>
-          {toolApprovals.length > 0 && (
-            <section>
-              <SectionTitle icon={<RobotOutlined />} title="Agent 工具确认" count={toolApprovals.length} />
-              <div style={{ display: "grid", gap: 12 }}>
-                {toolApprovals.map((toolCall) => (
-                  <ToolApprovalCard
-                    key={toolCall.id}
-                    toolCall={toolCall}
-                    loading={
-                      decideToolMutation.isPending &&
-                      decideToolMutation.variables?.id === toolCall.id
-                    }
-                    onApprove={() => decideToolMutation.mutate({ id: toolCall.id, approved: true })}
-                    onReject={() => decideToolMutation.mutate({ id: toolCall.id, approved: false })}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {gates.length > 0 && (
-            <section>
-              <SectionTitle icon={<ApiOutlined />} title="质量门审批" count={gates.length} />
-              <div style={{ display: "grid", gap: 12 }}>
-                {gates.map((gate) => {
-                  const forced = FORCED_GATES.has(gate.gate);
-                  const loadingGate =
-                    decideGateMutation.isPending && decideGateMutation.variables?.id === gate.id;
-                  return (
-                    <div
-                      key={gate.id}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 16,
-                        padding: "16px 18px",
-                        background: "var(--dy-surface)",
-                        border: "1px solid",
-                        borderColor: forced ? "rgba(214,161,38,0.3)" : "var(--dy-border-subtle)",
-                        borderRadius: 18,
-                      }}
-                    >
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            marginBottom: 6,
-                          }}
-                        >
-                          <Tag
-                            color={forced ? "warning" : "default"}
-                            icon={forced ? <WarningFilled /> : undefined}
-                            style={{ marginInlineEnd: 0 }}
-                          >
-                            {GATE_LABEL[gate.gate]}
-                          </Tag>
-                          {forced && (
-                            <span style={{ fontSize: 12, color: "var(--dy-warning)" }}>
-                              强制人工
-                            </span>
-                          )}
-                          <span
-                            style={{ fontSize: 12, color: "var(--dy-faint)", marginLeft: "auto" }}
-                          >
-                            等待 {relativeTime(gate.created_at)}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--dy-text)" }}>
-                          {gate.content_title}
-                        </div>
-                        <div style={{ fontSize: 12.5, color: "var(--dy-muted)", marginTop: 4 }}>
-                          内容 #{gate.content_item_id}
-                        </div>
-                        {gate.compliance && <ComplianceBanner check={gate.compliance} />}
-                      </div>
-                      <ApprovalActions
-                        loading={loadingGate}
-                        onApprove={() =>
-                          decideGateMutation.mutate({ id: gate.id, approved: true })
-                        }
-                        onReject={() =>
-                          decideGateMutation.mutate({ id: gate.id, approved: false })
-                        }
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          )}
-        </div>
-      )}
+      <section className="approval-workbench">
+        <ApprovalQueue
+          loading={query.isLoading}
+          error={query.isError}
+          items={visibleItems}
+          total={query.data?.counts.total ?? 0}
+          selectedKey={selectedKey}
+          filter={filter}
+          onFilter={setFilter}
+          onSelect={setSelectedKey}
+          onRetry={() => void query.refetch()}
+        />
+        <ApprovalPreview item={selected} loading={query.isLoading} />
+        <ApprovalDecision
+          item={selected}
+          note={note}
+          noteError={noteError}
+          loading={decisionMutation.isPending}
+          onNoteChange={(value) => {
+            setNote(value);
+            if (value.trim()) setNoteError(false);
+          }}
+          onApprove={() => decide(true)}
+          onReject={() => decide(false)}
+        />
+      </section>
     </div>
   );
 }
 
-function ToolApprovalCard({
-  toolCall,
+function ApprovalQueue({
   loading,
-  onApprove,
-  onReject,
+  error,
+  items,
+  total,
+  selectedKey,
+  filter,
+  onFilter,
+  onSelect,
+  onRetry,
 }: {
-  toolCall: AgentToolCall;
   loading: boolean;
-  onApprove: () => void;
-  onReject: () => void;
+  error: boolean;
+  items: ApprovalQueueItem[];
+  total: number;
+  selectedKey: string | null;
+  filter: ApprovalFilter;
+  onFilter: (value: ApprovalFilter) => void;
+  onSelect: (key: string) => void;
+  onRetry: () => void;
 }) {
-  if (toolCall.tool_code === "publish_package_prepare" || toolCall.tool_code === "publish_readiness_check") {
-    return (
-      <PublishReadinessApprovalCard
-        toolCall={toolCall}
-        loading={loading}
-        onApprove={onApprove}
-        onReject={onReject}
+  return (
+    <aside className="approval-queue" aria-label="待审批队列">
+      <header className="approval-pane-header">
+        <div><span>待审批队列</span><strong>{total}</strong></div>
+        <small>按进入时间排序</small>
+      </header>
+      <Segmented
+        block
+        size="small"
+        value={filter}
+        options={FILTER_OPTIONS}
+        onChange={(value) => onFilter(value as ApprovalFilter)}
       />
+      <div className="approval-queue-list">
+        {loading ? (
+          Array.from({ length: 5 }).map((_, index) => <Skeleton.Button key={index} active block />)
+        ) : error ? (
+          <div className="approval-queue-state">
+            <strong>审批队列加载失败</strong>
+            <Button type="link" icon={<ReloadOutlined />} onClick={onRetry}>重新加载</Button>
+          </div>
+        ) : items.length === 0 ? (
+          <div className="approval-queue-state">
+            <CheckOutlined />
+            <strong>当前筛选已处理完</strong>
+            <span>新审批进入后会自动出现在这里。</span>
+          </div>
+        ) : items.map((item) => (
+          <button
+            type="button"
+            key={item.key}
+            className={`approval-queue-item${item.key === selectedKey ? " is-selected" : ""}`}
+            onClick={() => onSelect(item.key)}
+          >
+            <span className="approval-queue-item__rail" data-risk={item.risk_level} />
+            <span className="approval-queue-item__meta">
+              <span>{APPROVAL_KIND_LABEL[item.kind]}</span>
+              <i data-risk={item.risk_level}>{APPROVAL_RISK_LABEL[item.risk_level]}</i>
+            </span>
+            <strong>{approvalItemTitle(item)}</strong>
+            <small>{item.project_name}{item.account_name ? ` · ${item.account_name}` : ""}</small>
+            <time><ClockCircleOutlined /> {relativeApprovalTime(item.created_at)}</time>
+          </button>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function ApprovalPreview({ item, loading }: { item: ApprovalQueueItem | null; loading: boolean }) {
+  if (loading) {
+    return <main className="approval-preview"><Skeleton active paragraph={{ rows: 12 }} /></main>;
+  }
+  if (!item) {
+    return (
+      <main className="approval-preview approval-preview--empty">
+        <span>审</span>
+        <strong>选择一项查看完整内容</strong>
+        <p>正式成果、发布包和工具影响会在这里完整展开。</p>
+      </main>
     );
   }
-
+  const deliverable = readApprovalDeliverable(item);
+  const publishPackage = readApprovalPublishPackage(item);
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 16,
-        padding: "16px 18px",
-        background: "var(--dy-surface)",
-        border: "1px solid rgba(214,161,38,0.3)",
-        borderRadius: 18,
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <Tag color="warning" icon={<RobotOutlined />} style={{ marginInlineEnd: 0 }}>
-            {toolCall.tool_name}
-          </Tag>
-          <Tag style={{ marginInlineEnd: 0 }}>{toolCall.permission_mode}</Tag>
-          <span style={{ fontSize: 12, color: "var(--dy-faint)", marginLeft: "auto" }}>
-            任务 #{toolCall.task_id}
-          </span>
+    <main className="approval-preview">
+      <header className="approval-preview-header">
+        <div className="approval-preview-context">
+          <span>{item.project_name}</span><i />
+          <span>{item.account_name ?? "未绑定账号"}</span><i />
+          <span>{item.category}</span>
         </div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--dy-text)" }}>
-          {toolCall.meta?.agent_name ? String(toolCall.meta.agent_name) : toolCall.agent_code}
-        </div>
-        <div style={{ display: "grid", gap: 6, marginTop: 8, fontSize: 12.5 }}>
-          <ApprovalLine label="输入" value={toolCall.input_summary || "暂无输入摘要"} />
-          <ApprovalLine label="输出" value={toolCall.output_summary || "暂无输出摘要"} />
-        </div>
-      </div>
-      <ApprovalActions loading={loading} onApprove={onApprove} onReject={onReject} />
-    </div>
-  );
-}
-
-function PublishReadinessApprovalCard({
-  toolCall,
-  loading,
-  onApprove,
-  onReject,
-}: {
-  toolCall: AgentToolCall;
-  loading: boolean;
-  onApprove: () => void;
-  onReject: () => void;
-}) {
-  const meta = readPublishReadinessMeta(toolCall);
-  const riskColor =
-    meta.risk === "block" ? "error" : meta.risk === "warn" ? "warning" : "success";
-
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) auto",
-        gap: 18,
-        padding: "18px 20px",
-        background: "var(--dy-surface)",
-        border: "1px solid rgba(214,161,38,0.34)",
-        borderRadius: 20,
-      }}
-    >
-      <div style={{ minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <Tag color="warning" icon={<SafetyCertificateOutlined />} style={{ marginInlineEnd: 0 }}>
-            发布包人工确认
-          </Tag>
-          <Tag color={riskColor} style={{ marginInlineEnd: 0 }}>
-            {meta.risk}
-          </Tag>
-          <Tag style={{ marginInlineEnd: 0 }}>{contentTypeLabel(meta.contentType)}</Tag>
-          {meta.accountId != null && (
-            <Tag style={{ marginInlineEnd: 0 }}>账号 #{meta.accountId}</Tag>
-          )}
-          {meta.matrixPlanId != null && (
-            <Tag color="processing" style={{ marginInlineEnd: 0 }}>
-              矩阵计划 #{meta.matrixPlanId}
-            </Tag>
-          )}
-          {meta.matrixItemId != null && (
-            <Tag color="processing" style={{ marginInlineEnd: 0 }}>
-              子任务 #{meta.matrixItemId}
-            </Tag>
-          )}
-          <Tag icon={<RobotOutlined />} style={{ marginInlineEnd: 0 }}>
-            {toolCall.agent_code ?? "06-operator"}
-          </Tag>
-          <span style={{ fontSize: 12, color: "var(--dy-faint)", marginLeft: "auto" }}>
-            等待 {relativeTime(toolCall.created_at)}
-          </span>
-        </div>
-
-        <div style={{ marginTop: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <FileDoneOutlined style={{ color: "var(--dy-accent)" }} />
-            <strong style={{ color: "var(--dy-text)", fontSize: 15 }}>
-              {meta.contentTitle}
-            </strong>
-          </div>
-          <div
-            style={{
-              marginTop: 6,
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              color: "var(--dy-muted)",
-              fontSize: 12.5,
-            }}
-          >
-            <span>平台：{meta.platform}</span>
-            <span>内容 #{meta.contentItemId}</span>
-            <span>任务 #{toolCall.task_id}</span>
-          </div>
-        </div>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-            gap: 10,
-            marginTop: 14,
-          }}
-        >
-          <ApprovalMetric label="发布标题" value={meta.publishTitle} />
-          <ApprovalMetric label="执行模式" value={executionModeLabel(meta.executionMode)} />
-          <ApprovalMetric label="定时发布" value={meta.scheduledAt ?? "立即发布"} />
-          <ApprovalMetric label="话题" value={meta.topics.length ? meta.topics.join(" / ") : "未设置"} />
-          <ApprovalMetric label="可见范围" value={visibilityLabel(meta.visibility)} />
-          <ApprovalMetric label="评论" value={meta.allowComment ? "允许评论" : "关闭评论"} />
-          <ApprovalMetric label="封面" value={meta.coverMaterialId ? `#${meta.coverMaterialId}` : "未指定"} />
-          <ApprovalMetric
-            label="素材"
-            value={meta.materialIds.length ? meta.materialIds.map((id) => `#${id}`).join(" / ") : "未选择"}
-          />
-        </div>
-
-        <div style={{ marginTop: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--dy-text)", marginBottom: 8 }}>
-            人工发布清单
-          </div>
-          <div style={{ display: "grid", gap: 6 }}>
-            {meta.manualSteps.map((step, index) => (
-              <div
-                key={`${step}-${index}`}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "24px minmax(0, 1fr)",
-                  gap: 8,
-                  alignItems: "start",
-                  padding: "8px 10px",
-                  border: "1px solid var(--dy-border-subtle)",
-                  borderRadius: 12,
-                  background: "var(--dy-elevated)",
-                }}
-              >
-                <span
-                  className="dy-tabular"
-                  style={{ fontSize: 12, fontWeight: 700, color: "var(--dy-accent)" }}
-                >
-                  {index + 1}
-                </span>
-                <span style={{ color: "var(--dy-text)", fontSize: 12.5, lineHeight: 1.5 }}>
-                  {step}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
-          {meta.findings.map((finding) => (
-            <div
-              key={`${finding.code}-${finding.message}`}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "70px minmax(0, 1fr)",
-                gap: 10,
-                alignItems: "start",
-                padding: "8px 10px",
-                border: "1px solid var(--dy-border-subtle)",
-                borderRadius: 12,
-                background: "var(--dy-elevated)",
-              }}
-            >
-              <Tag
-                color={
-                  finding.level === "block"
-                    ? "error"
-                    : finding.level === "warn"
-                      ? "warning"
-                      : "success"
-                }
-                style={{ marginInlineEnd: 0, textAlign: "center" }}
-              >
-                {finding.level}
-              </Tag>
-              <div>
-                <div style={{ fontWeight: 600, color: "var(--dy-text)", fontSize: 12.5 }}>
-                  {finding.code}
-                </div>
-                <div style={{ color: "var(--dy-muted)", fontSize: 12.5, lineHeight: 1.5 }}>
-                  {finding.message}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <ApprovalActions loading={loading} onApprove={onApprove} onReject={onReject} />
-    </div>
-  );
-}
-
-function ApprovalMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div
-      style={{
-        padding: "10px 12px",
-        borderRadius: 14,
-        background: "var(--dy-elevated)",
-        border: "1px solid var(--dy-border-subtle)",
-        minWidth: 0,
-      }}
-    >
-      <div style={{ fontSize: 12, color: "var(--dy-faint)", marginBottom: 4 }}>{label}</div>
-      <div
-        style={{
-          color: "var(--dy-text)",
-          fontSize: 13,
-          fontWeight: 600,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-        title={value}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function ApprovalActions({
-  loading,
-  onApprove,
-  onReject,
-}: {
-  loading: boolean;
-  onApprove: () => void;
-  onReject: () => void;
-}) {
-  return (
-    <div style={{ display: "flex", gap: 8, flex: "none" }}>
-      <Button danger icon={<CloseOutlined />} loading={loading} onClick={onReject}>
-        打回
-      </Button>
-      <Button type="primary" icon={<CheckOutlined />} loading={loading} onClick={onApprove}>
-        通过
-      </Button>
-    </div>
-  );
-}
-
-function SectionTitle({
-  icon,
-  title,
-  count,
-}: {
-  icon: ReactNode;
-  title: string;
-  count: number;
-}) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "0 0 10px" }}>
-      <span style={{ color: "var(--dy-text)" }}>{icon}</span>
-      <strong style={{ color: "var(--dy-text)", fontSize: 15 }}>{title}</strong>
-      <Tag style={{ marginInlineEnd: 0 }}>{count}</Tag>
-    </div>
-  );
-}
-
-function ApprovalLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "40px minmax(0, 1fr)", gap: 8 }}>
-      <span style={{ color: "var(--dy-faint)" }}>{label}</span>
-      <span style={{ color: "var(--dy-text)", lineHeight: 1.45 }}>{value}</span>
-    </div>
-  );
-}
-
-function ComplianceBanner({ check }: { check: ComplianceCheck }) {
-  const meta = RISK_META[check.risk];
-  return (
-    <div
-      style={{
-        marginTop: 10,
-        padding: "8px 10px",
-        borderRadius: 14,
-        background: meta.bg,
-        border: `1px solid ${meta.color}33`,
-      }}
-    >
-      <div style={{ fontSize: 12.5, fontWeight: 600, color: meta.color }}>
-        {meta.label} · {check.summary}
-      </div>
-      {check.findings && check.findings.length > 0 && (
-        <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {check.findings.map((finding, index) => (
-            <Tag
-              key={`${finding.word}-${index}`}
-              color={finding.level === "block" ? "error" : "warning"}
-              style={{ marginInlineEnd: 0, fontSize: 11 }}
-            >
-              {finding.word}（{finding.category}）
-            </Tag>
-          ))}
-        </div>
+        <h1>{approvalItemTitle(item)}</h1>
+        <p>{item.summary}</p>
+      </header>
+      {publishPackage ? (
+        <PublishPackagePreview item={item} publishPackage={publishPackage} />
+      ) : deliverable ? (
+        <DeliverablePreview deliverable={deliverable} />
+      ) : item.kind === "deliverable" ? (
+        <AcceptancePreview item={item} />
+      ) : (
+        <ToolPreview item={item} />
       )}
-    </div>
+    </main>
   );
 }
 
-type PublishFinding = {
-  level: "pass" | "warn" | "block";
-  code: string;
-  message: string;
-};
-
-function readPublishReadinessMeta(toolCall: AgentToolCall): {
-  contentItemId: string;
-  contentTitle: string;
-  platform: string;
-  publishTitle: string;
-  scheduledAt: string | null;
-  topics: string[];
-  materialIds: number[];
-  coverMaterialId: number | null;
-  visibility: "public" | "friends" | "private";
-  allowComment: boolean;
-  risk: "pass" | "warn" | "block";
-  findings: PublishFinding[];
-  accountId: number | null;
-  matrixPlanId: number | null;
-  matrixItemId: number | null;
-  contentType: "video" | "image_text";
-  executionMode: "official_api" | "manual_checklist" | "browser_runner_disabled";
-  manualSteps: string[];
-} {
-  const meta = toolCall.meta ?? {};
-  const rawPackage =
-    meta.publish_package && typeof meta.publish_package === "object"
-      ? (meta.publish_package as Record<string, unknown>)
-      : {};
-  const rawRisk = typeof meta.risk === "string" ? meta.risk : "warn";
-  const risk = rawRisk === "pass" || rawRisk === "block" ? rawRisk : "warn";
-  const rawTopics = Array.isArray(rawPackage.topics) ? rawPackage.topics : meta.topics;
-  const topics = Array.isArray(rawTopics)
-    ? rawTopics.filter((topic): topic is string => typeof topic === "string")
-    : [];
-  const rawMaterialIds = Array.isArray(rawPackage.material_ids)
-    ? rawPackage.material_ids
-    : meta.material_ids;
-  const materialIds = Array.isArray(rawMaterialIds)
-    ? rawMaterialIds.filter((id): id is number => typeof id === "number")
-    : [];
-  const rawVisibility =
-    typeof rawPackage.visibility === "string"
-      ? rawPackage.visibility
-      : typeof meta.visibility === "string"
-        ? meta.visibility
-        : "public";
-  const visibility =
-    rawVisibility === "friends" || rawVisibility === "private" ? rawVisibility : "public";
-  const coverMaterialId =
-    typeof rawPackage.cover_material_id === "number"
-      ? rawPackage.cover_material_id
-      : typeof meta.cover_material_id === "number"
-        ? meta.cover_material_id
-        : null;
-  const allowComment =
-    typeof rawPackage.allow_comment === "boolean"
-      ? rawPackage.allow_comment
-      : typeof meta.allow_comment === "boolean"
-        ? meta.allow_comment
-        : true;
-  const accountId =
-    typeof rawPackage.account_id === "number"
-      ? rawPackage.account_id
-      : typeof meta.account_id === "number"
-        ? meta.account_id
-        : null;
-  const matrixPlanId = typeof meta.matrix_plan_id === "number" ? meta.matrix_plan_id : null;
-  const matrixItemId = typeof meta.matrix_item_id === "number" ? meta.matrix_item_id : null;
-  const rawContentType =
-    typeof rawPackage.content_type === "string" ? rawPackage.content_type : "video";
-  const contentType = rawContentType === "image_text" ? rawContentType : "video";
-  const rawExecutionMode =
-    typeof rawPackage.execution_mode === "string"
-      ? rawPackage.execution_mode
-      : "manual_checklist";
-  const executionMode =
-    rawExecutionMode === "official_api" || rawExecutionMode === "browser_runner_disabled"
-      ? rawExecutionMode
-      : "manual_checklist";
-  const manualSteps = Array.isArray(rawPackage.manual_steps)
-    ? rawPackage.manual_steps.filter((step): step is string => typeof step === "string")
-    : [];
-  const findings = Array.isArray(meta.findings)
-    ? meta.findings
-        .map((item): PublishFinding | null => {
-          if (!item || typeof item !== "object") return null;
-          const record = item as Record<string, unknown>;
-          const level = record.level;
-          if (level !== "pass" && level !== "warn" && level !== "block") return null;
-          return {
-            level,
-            code: typeof record.code === "string" ? record.code : "unknown",
-            message: typeof record.message === "string" ? record.message : "",
-          };
-        })
-        .filter((item): item is PublishFinding => item != null)
-    : [];
-
-  return {
-    contentItemId:
-      typeof meta.content_item_id === "number" ? String(meta.content_item_id) : "-",
-    contentTitle:
-      typeof meta.content_title === "string" ? meta.content_title : toolCall.tool_name,
-    platform: typeof meta.platform === "string" ? meta.platform : "douyin",
-    publishTitle:
-      typeof rawPackage.title === "string"
-        ? rawPackage.title
-        : typeof meta.publish_title === "string"
-          ? meta.publish_title
-          : toolCall.input_summary,
-    scheduledAt: typeof meta.scheduled_at === "string" ? meta.scheduled_at : null,
-    topics,
-    materialIds,
-    coverMaterialId,
-    visibility,
-    allowComment,
-    risk,
-    findings,
-    accountId,
-    matrixPlanId,
-    matrixItemId,
-    contentType,
-    executionMode,
-    manualSteps,
-  };
+function DeliverablePreview({ deliverable }: { deliverable: Deliverable }) {
+  return (
+    <article className="approval-document">
+      <header><FileDoneOutlined /><div><span>正式成果</span><strong>{deliverableLabel(deliverable.type)} · v{deliverable.version}</strong></div></header>
+      {deliverableSections(deliverable).map((section) => (
+        <section key={section.label}>
+          <h2>{section.label}</h2>
+          {section.value ? <p>{section.value}</p> : null}
+          {section.items ? <ol>{section.items.map((value, index) => <li key={`${index}-${value}`}>{value}</li>)}</ol> : null}
+          {section.metrics ? <dl>{section.metrics.map((value) => <div key={value.label}><dt>{value.label}</dt><dd>{value.value}</dd></div>)}</dl> : null}
+        </section>
+      ))}
+    </article>
+  );
 }
 
-function contentTypeLabel(value: "video" | "image_text"): string {
-  return {
-    video: "视频",
-    image_text: "图文",
-  }[value];
+function AcceptancePreview({ item }: { item: ApprovalQueueItem }) {
+  const acceptance = readApprovalAcceptance(item);
+  if (!acceptance) return <ToolPreview item={item} />;
+  return (
+    <article className="approval-document">
+      <header><FileDoneOutlined /><div><span>{acceptance.agent_name}</span><strong>{acceptance.title} · v{acceptance.version}</strong></div></header>
+      <section><h2>成果摘要</h2><p>{acceptance.summary}</p></section>
+      <section>
+        <h2>验收标准</h2>
+        <ol>{acceptance.acceptance_items.map((row, index) => <li key={`${index}-${row.label}`}><strong>{row.label}</strong><span>{row.note}</span></li>)}</ol>
+      </section>
+    </article>
+  );
 }
 
-function executionModeLabel(
-  value: "official_api" | "manual_checklist" | "browser_runner_disabled",
-): string {
-  return {
-    official_api: "官方接口",
-    manual_checklist: "人工发布",
-    browser_runner_disabled: "浏览器自动化已关闭",
-  }[value];
+function PublishPackagePreview({
+  item,
+  publishPackage,
+}: {
+  item: ApprovalQueueItem;
+  publishPackage: PublishPackage;
+}) {
+  const findings = Array.isArray(item.preview.findings)
+    ? item.preview.findings.filter(isPublishFinding)
+    : [];
+  return (
+    <article className="approval-publish-preview">
+      <div className="approval-publish-facts">
+        <Fact label="发布账号" value={item.account_name ?? `账号 #${publishPackage.account_id ?? "-"}`} />
+        <Fact label="内容形式" value={publishPackage.content_type === "video" ? "视频" : "图文"} />
+        <Fact label="发布时间" value={publishPackage.scheduled_at ? formatDate(publishPackage.scheduled_at) : "人工选择发布时间"} />
+        <Fact label="可见范围" value={visibilityLabel(publishPackage.visibility)} />
+      </div>
+      <section><span>发布标题</span><h2>{publishPackage.title}</h2></section>
+      <section><span>正文</span><p>{publishPackage.body || "未填写正文"}</p></section>
+      <section><span>话题</span><div className="approval-topic-list">{publishPackage.topics.length ? publishPackage.topics.map((topic) => <Tag key={topic}>#{topic}</Tag>) : <small>未设置话题</small>}</div></section>
+      <section className="approval-material-line"><span>素材与封面</span><p>素材 {publishPackage.material_ids.map((id) => `#${id}`).join(" / ") || "未选择"} · 封面 {publishPackage.cover_material_id ? `#${publishPackage.cover_material_id}` : "未指定"} · {publishPackage.allow_comment ? "允许评论" : "关闭评论"}</p></section>
+      <section>
+        <span>人工发布步骤</span>
+        <ol className="approval-manual-steps">{publishPackage.manual_steps.map((step, index) => <li key={`${index}-${step}`}><b>{String(index + 1).padStart(2, "0")}</b><p>{step}</p></li>)}</ol>
+      </section>
+      {findings.length ? <section><span>发布前检查</span><div className="approval-finding-list">{findings.map((finding) => <p key={`${finding.code}-${finding.message}`} data-level={finding.level}>{finding.level === "pass" ? "通过" : finding.level === "warn" ? "注意" : "阻断"}<span>{approvalFindingCopy(finding.code, finding.message)}</span></p>)}</div></section> : null}
+    </article>
+  );
 }
 
-function visibilityLabel(value: "public" | "friends" | "private"): string {
-  return {
-    public: "公开",
-    friends: "朋友可见",
-    private: "私密",
-  }[value];
+function ToolPreview({ item }: { item: ApprovalQueueItem }) {
+  const toolName = readString(item.preview.tool_name);
+  return (
+    <article className="approval-tool-preview">
+      <RobotOutlined />
+      <span>Agent 请求执行</span>
+      <h2>{toolName ? businessToolName("", toolName) : item.title}</h2>
+      <dl>
+        <div><dt>输入</dt><dd>{readString(item.preview.input_summary) || "未提供输入摘要"}</dd></div>
+        <div><dt>预期结果</dt><dd>{readString(item.preview.output_summary) || item.summary}</dd></div>
+      </dl>
+    </article>
+  );
 }
 
-function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时`;
-  return `${Math.floor(hours / 24)} 天`;
+function approvalItemTitle(item: ApprovalQueueItem) {
+  const title = displayContentTitle(item.title);
+  if (item.kind !== "tool_call" || /[\u3400-\u9fff]/u.test(title)) return title;
+  return businessToolName("", readString(item.preview.tool_name) || title);
+}
+
+function ApprovalDecision({
+  item,
+  note,
+  noteError,
+  loading,
+  onNoteChange,
+  onApprove,
+  onReject,
+}: {
+  item: ApprovalQueueItem | null;
+  note: string;
+  noteError: boolean;
+  loading: boolean;
+  onNoteChange: (value: string) => void;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <aside className="approval-decision" aria-label="风险与审批操作">
+      <header className="approval-pane-header"><div><span>判断与影响</span></div><small>人工决策</small></header>
+      {!item ? (
+        <div className="approval-decision-empty"><SafetyCertificateOutlined /><strong>暂无待判断对象</strong></div>
+      ) : (
+        <>
+          <div className="approval-risk-heading" data-risk={item.risk_level}>
+            <SafetyCertificateOutlined />
+            <div><span>风险等级</span><strong>{APPROVAL_RISK_LABEL[item.risk_level]}</strong></div>
+          </div>
+          <DecisionSection title="为什么需要你确认" items={item.risk_reasons} />
+          <DecisionSection title="决策影响" items={item.impact} />
+          <section className="approval-agent-explanation">
+            <span><RobotOutlined /> Agent 解释</span><p>{item.agent_explanation}</p>
+          </section>
+          <div className={`approval-note${noteError ? " has-error" : ""}`}>
+            <label htmlFor="approval-note">修改意见</label>
+            <Input.TextArea
+              id="approval-note"
+              value={note}
+              maxLength={1000}
+              autoSize={{ minRows: 4, maxRows: 8 }}
+              placeholder="通过时可补充备注；驳回时必须写明修改要求。"
+              onChange={(event) => onNoteChange(event.target.value)}
+            />
+            {noteError ? <span>请先写明修改意见，再驳回并重跑。</span> : null}
+          </div>
+          {!item.can_decide ? <p className="approval-readonly">你可以查看此审批，但当前项目角色没有决策权限。</p> : null}
+          <div className="approval-decision-actions">
+            <Button danger icon={<CloseOutlined />} disabled={!item.can_decide} loading={loading} onClick={onReject}>
+              {item.kind === "deliverable" ? "驳回并重跑" : "驳回"}
+            </Button>
+            <Button type="primary" icon={item.kind === "tool_call" ? <SendOutlined /> : <CheckOutlined />} disabled={!item.can_decide} loading={loading} onClick={onApprove}>
+              {item.kind === "tool_call" ? "允许执行" : "通过"}
+            </Button>
+          </div>
+        </>
+      )}
+    </aside>
+  );
+}
+
+function DecisionSection({ title, items }: { title: string; items: string[] }) {
+  return <section className="approval-decision-section"><h2>{title}</h2><ul>{items.map((item) => <li key={item}>{item}</li>)}</ul></section>;
+}
+
+function Fact({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function visibilityLabel(value: PublishPackage["visibility"]) {
+  return { public: "公开", friends: "朋友可见", private: "私密" }[value];
+}
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function isPublishFinding(value: unknown): value is PublishReadinessFinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Partial<PublishReadinessFinding>;
+  return typeof row.code === "string" && typeof row.message === "string" && ["pass", "warn", "block"].includes(String(row.level));
+}
+
+function readString(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error && error.message) return error.message;
+  return "审批处理失败，请重试";
 }

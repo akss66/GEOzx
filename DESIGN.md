@@ -4,35 +4,39 @@ description: 以登录页为品牌原点，扩展为暖纸框架、柔白画布�
 version: 2.0
 status: accepted-design-baseline
 colors:
-  brand_red: "#D3131A"
-  brand_red_hover: "#B91117"
-  warm_canvas: "#F0E8DC"
-  warm_canvas_deep: "#E7DDCE"
-  work_surface: "#FBF8F2"
+  brand_red: "#C9161D"
+  brand_red_hover: "#AE1218"
+  warm_canvas: "#EEE8DF"
+  warm_canvas_deep: "#E4DCD0"
+  work_surface: "#F7F7F4"
   surface_white: "#FFFFFF"
-  surface_muted: "#F4EFE7"
-  ink: "#191714"
-  ink_soft: "#403B35"
-  ink_muted: "#6F675D"
-  line: "#D8CDBD"
-  line_subtle: "#E8E0D5"
-  success: "#248A50"
-  warning: "#A86800"
-  error: "#C52B36"
-  info: "#4F6473"
+  surface_muted: "#F0F0ED"
+  ink: "#171614"
+  ink_soft: "#4A4640"
+  ink_muted: "#666159"
+  line: "#DDD8CF"
+  line_subtle: "#EBE7DF"
+  success: "#2B8152"
+  warning: "#9A6300"
+  error: "#B92B36"
+  info: "#526774"
 typography:
-  family: '"OpenAI Sans", "Söhne", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif'
+  family: '"Geist Variable", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif'
   body: "14px / 1.62 / 400"
   ui: "13px / 1.4 / 500"
   title: "24px / 1.25 / 650"
   display: "40px / 1.08 / 700"
 radius:
-  control: "10px"
-  object: "14px"
-  floating: "18px"
+  control: "8px"
+  object: "10px"
+  floating: "12px"
 ---
 
 # Design System: 同舟行 2.0
+
+> 2026-07-17 起，系统 UI 唯一高保真基准为
+> `docs/superpowers/specs/2026-07-17-high-fidelity-system-ui-design.md`。
+> 旧模块局部样式只能补充业务布局，不得覆盖该基准的色彩、壳层、圆角和层级。
 
 ## 1. Design North Star
 
@@ -59,23 +63,23 @@ radius:
 
 #### Brand frame
 
-- `Warm Canvas #F0E8DC`：应用外围、导航、品牌区域和低密度背景。
-- `Warm Canvas Deep #E7DDCE`：选中区域、分组和次级背景。
-- `Brand Red #D3131A`：Logo、主焦点、关键操作、专家字标和关键进度。
+- `Warm Canvas #EEE8DF`：应用外围、导航、品牌区域和低密度背景。
+- `Warm Canvas Deep #E4DCD0`：选中区域、分组和次级背景。
+- `Brand Red #C9161D`：Logo、主焦点、关键操作、专家字标和关键进度。
 
 #### Work surfaces
 
-- `Work Surface #FBF8F2`：主要内容画布。
+- `Work Surface #F7F7F4`：主要内容画布。
 - `Surface White #FFFFFF`：编辑器、表格、浮层和需要最高对比度的区域。
-- `Surface Muted #F4EFE7`：输入区、次级分组、只读内容。
+- `Surface Muted #F0F0ED`：输入区、次级分组、只读内容。
 
 #### Ink and lines
 
-- `Ink #191714`：标题、正文、主按钮和关键状态。
-- `Ink Soft #403B35`：次级正文。
-- `Ink Muted #6F675D`：元信息；必须满足可读性，禁止过浅灰。
-- `Line #D8CDBD`：对象边界。
-- `Line Subtle #E8E0D5`：表格行、文档区块和轻分隔。
+- `Ink #171614`：标题、正文、主按钮和关键状态。
+- `Ink Soft #4A4640`：次级正文。
+- `Ink Muted #666159`：元信息；必须满足可读性，禁止过浅灰。
+- `Line #DDD8CF`：对象边界。
+- `Line Subtle #EBE7DF`：表格行、文档区块和轻分隔。
 
 #### Semantic color
 
@@ -90,7 +94,8 @@ radius:
 
 ### 2.3 Typography
 
-- 继续使用接近 ChatGPT 的系统字体栈。
+- 字体随前端打包：拉丁字符、数字和 UI 符号使用 `Geist Variable`，中文使用 `Noto Sans SC Variable`，避免不同电脑回退到不同系统字体。
+- 正文使用 400，操作和标签使用 520/620，标题使用 700；不使用伪造粗体或过度细碎的字重。
 - 中文正文优先保证 `PingFang SC` / `Microsoft YaHei` 可用。
 - 不使用随视口缩放的字号。
 - 字间距固定为 `0`。
@@ -173,6 +178,7 @@ radius:
 - 输入框固定在底部并保持可用。
 - 侧边导航只承担系统模块，不常驻风险卡、任务卡和专家列表。
 - 客户、项目、平台和账号以紧凑上下文显示。
+- 顶部账号切换器与对话运行时必须共享同一账号 ID；未明确选择时保持空状态，禁止默认取第一个账号。
 - 普通问候直接自然回复，不启动专家流程。
 - 正式目标由主 Agent 自主编排专家和工具。
 
@@ -195,13 +201,21 @@ Agent 时间线默认只展示：
 - 不使用虚构真人头像或卡通员工。
 - 专家入场、并行、交接、暂停和完成具有明显空间与节奏变化。
 
+#### Decision and permission interaction
+
+- 方案选择是对话内容：使用 2-4 个结构化选项，显示一句说明、收益、代价和主 Agent 建议；用户也可要求重给方案或输入自己的方向。
+- 权限确认不是独立弹窗：底部对话输入器原位切换为紧凑确认模式，首屏只显示动作、对象、影响和风险。
+- 确认模式提供“驳回 / 修改要求 / 允许”；修改要求在同一输入器内展开，完成后恢复普通输入模式。
+- 方案选择不等于权限授权；后续高风险动作仍须单独确认。
+- 完整工具参数、耗时、成本与审计信息只进入执行详情。
+
 #### Motion
 
 运营大脑允许强表现力：
 
 - 专家字标从对话层级中清晰浮现。
 - 并行专家形成可理解的空间编排。
-- 人工确认时页面节奏暂停，确认面板悬浮于输入框上方。
+- 人工确认时页面节奏暂停，底部输入器平滑切换为确认模式，不新增遮挡对话的大浮层。
 - 成果完成时从专家输出过渡为正式成果文档。
 - 不使用流程图、粒子、霓虹、持续脉冲或无意义装饰运动。
 - 必须提供 `prefers-reduced-motion` 降级方案。
@@ -269,6 +283,13 @@ Agent 时间线默认只展示：
 - 专家管理面向业务管理员。
 - 模型基础设施面向技术管理员。
 - 模型名、Token、Prompt 和供应商日志不出现在普通业务页面。
+- 专家管理采用桌面双栏治理工作台：左侧为专家目录与启停状态，右侧编辑中文职责、组织补充指令、工具权限和质量门。
+- 工具权限必须使用明确的 `自动执行 / 每次确认 / 仅人工执行 / 禁用` 业务语义，不展示内部枚举。
+- 质量门区分组织可选规则和系统强制规则；强制规则不可关闭，并解释其审批影响。
+- 保存和恢复操作固定在工作区底部，切换专家时不得静默丢弃未保存变更。
+- 模型基础设施采用独立桌面技术工作台，不与业务专家配置混排；顶部只展示就绪供应商、专家路由、24 小时调用和失败数。
+- 供应商、路由策略、调用账本使用三个明确视图：供应商配置仅接受服务器密钥引用；路由按专家编辑首选、兜底和运行参数；调用账本只读且错误信息脱敏。
+- 技术配置使用高密度目录与编辑器布局，不使用 Dashboard 卡片墙；供应商状态、路由来源和失败结果必须可扫描、可定位、可审计。
 
 ## 6. Components
 
@@ -299,11 +320,18 @@ Agent 时间线默认只展示：
 - 定位、策略、脚本、发布包和复盘生成正式成果文档。
 - 成果必须支持版本、编辑、采用、审批、保存、导出和交给主 Agent。
 
-### Confirmation panel
+### Conversation decisions
 
-- 悬浮在对话输入框上方，不跳转到独立页面。
-- 显示完整待确认内容和影响。
-- 提供允许、驳回、输入修改意见并重跑。
+- 方案选择直接位于主 Agent 对话之后，不跳转、不弹窗。
+- 默认展示 2-4 个互斥选项，并清晰标记建议方案、收益和代价。
+- 用户可选择、要求再给一组方案，或输入自己的方向。
+- 选择完成后保留在时间线中，并转为只读决定记录。
+
+### Composer confirmation mode
+
+- 权限请求到来时，底部输入器原位变为紧凑确认条，不在其上方堆叠大面板。
+- 首屏显示动作、对象、影响和风险；完整参数进入执行详情。
+- 提供允许、驳回和修改要求；修改要求在当前输入器内展开并触发重跑。
 - 高风险动作明确标注对象、范围和不可逆后果。
 
 ### Empty, loading and error

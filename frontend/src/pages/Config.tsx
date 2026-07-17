@@ -1,182 +1,297 @@
-import { ApiOutlined, CheckCircleFilled } from "@ant-design/icons";
-import { App as AntApp, Select, Switch, Table, Tag } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import {
+  CheckOutlined,
+  ClockCircleOutlined,
+  SaveOutlined,
+  SafetyCertificateOutlined,
+  ToolOutlined,
+} from "@ant-design/icons";
+import { App as AntApp, Button, Input, Skeleton, Switch } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 
-import { listModelConfigs, updateModelConfig } from "../api/configuration";
-import { PageHeader, Panel } from "../components/ui";
-import { useAuth } from "../stores/auth";
-import type { ModelConfig } from "../types";
+import { listAgentManagement, updateAgentManagement } from "../api/agents";
+import { presentApiError } from "../api/errors";
+import { OperationalState } from "../components/ui";
+import type {
+  AgentCode,
+  AgentManagement,
+  ToolPermissionMode,
+  UpdateAgentManagementInput,
+} from "../types";
 
-const PRIMARY_OPTIONS = [
-  { value: "deepseek-chat", label: "deepseek-chat" },
-  { value: "deepseek-reasoner", label: "deepseek-reasoner" },
+const GROUP_LABEL: Record<AgentManagement["group"], string> = {
+  control: "主控",
+  strategy: "策略",
+  creative: "创作",
+  operation: "运营",
+  growth: "增长",
+  feedback: "反馈",
+};
+
+const PERMISSION_OPTIONS: Array<{ value: ToolPermissionMode; label: string }> = [
+  { value: "auto", label: "自动执行" },
+  { value: "confirm", label: "执行前确认" },
+  { value: "manual", label: "仅人工执行" },
+  { value: "disabled", label: "停用工具" },
 ];
 
-const FALLBACK_OPTIONS = [
-  { value: "deepseek-chat", label: "deepseek-chat" },
-  { value: "deepseek-reasoner", label: "deepseek-reasoner" },
-];
-
-// 质量门策略 / 外部集成面板：M1 E3/E9（门策略）与 E7/E8（集成）落地前先以静态展示。
-const GATES = [
-  { name: "定位审核", forced: false },
-  { name: "选题审核", forced: false },
-  { name: "脚本合规", forced: true },
-  { name: "成片审核", forced: false },
-  { name: "发布前审核", forced: true },
-  { name: "大额投放（日耗 > ¥2000）", forced: true },
-];
-
-const INTEGRATIONS = [
-  { name: "DeepSeek", desc: "大模型 · v1 默认", connected: true },
-  { name: "Seedance", desc: "AI 视频生成", connected: false },
-  { name: "抖音开放平台", desc: "发布 / 数据回流", connected: false },
-  { name: "巨量千川", desc: "投流", connected: false },
-];
+type Draft = UpdateAgentManagementInput;
 
 export default function Config() {
   const { message } = AntApp.useApp();
-  const qc = useQueryClient();
-  const isAdmin = useAuth((s) => s.user?.role === "admin");
+  const queryClient = useQueryClient();
+  const [selectedCode, setSelectedCode] = useState<AgentCode | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
 
-  const configsQuery = useQuery({ queryKey: ["model-configs"], queryFn: listModelConfigs });
+  const expertsQuery = useQuery({
+    queryKey: ["agent-management"],
+    queryFn: listAgentManagement,
+  });
+  const experts = useMemo(() => expertsQuery.data ?? [], [expertsQuery.data]);
+  const selected = useMemo(
+    () => experts.find((expert) => expert.code === selectedCode) ?? experts[0] ?? null,
+    [experts, selectedCode],
+  );
+
+  useEffect(() => {
+    if (!selectedCode && experts[0]) setSelectedCode(experts[0].code);
+  }, [experts, selectedCode]);
+
+  useEffect(() => {
+    if (selected) setDraft(toDraft(selected));
+  }, [selected]);
 
   const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      patch,
-    }: {
-      id: number;
-      patch: { primary_model?: string; fallback_model?: string | null };
-    }) => updateModelConfig(id, patch),
-    onSuccess: () => {
-      message.success("模型配置已更新");
-      qc.invalidateQueries({ queryKey: ["model-configs"] });
+    mutationFn: ({ code, input }: { code: AgentCode; input: Draft }) =>
+      updateAgentManagement(code, input),
+    onSuccess: (saved) => {
+      queryClient.setQueryData<AgentManagement[]>(["agent-management"], (current = []) =>
+        current.map((item) => (item.code === saved.code ? saved : item)),
+      );
+      setDraft(toDraft(saved));
+      message.success("专家配置已保存并应用到运行时");
     },
-    onError: () => message.error("更新失败，请重试"),
+    onError: () => message.error("保存失败，请检查配置后重试"),
   });
 
-  const columns: ColumnsType<ModelConfig> = [
-    {
-      title: "Agent",
-      dataIndex: "agent_code",
-      render: (v: string) => (
-        <span className="dy-tabular" style={{ fontWeight: 500 }}>
-          {v}
-        </span>
-      ),
-    },
-    {
-      title: "首选模型",
-      dataIndex: "primary_model",
-      width: 220,
-      render: (v: string, r) => (
-        <Select
-          size="small"
-          value={v}
-          options={PRIMARY_OPTIONS}
-          style={{ width: 200 }}
-          disabled={!isAdmin || updateMutation.isPending}
-          onChange={(val) => updateMutation.mutate({ id: r.id, patch: { primary_model: val } })}
+  const enabledCount = experts.filter((expert) => expert.enabled).length;
+  const confirmToolCount = experts.reduce(
+    (total, expert) => total + Object.values(expert.tool_permissions).filter(
+      (mode) => mode === "confirm" || mode === "manual",
+    ).length,
+    0,
+  );
+  const dirty = Boolean(selected && draft && JSON.stringify(draft) !== JSON.stringify(toDraft(selected)));
+
+  if (expertsQuery.isError) {
+    const failure = presentApiError(expertsQuery.error, "专家配置暂时不可用。");
+    return (
+      <main className="expert-admin">
+        <OperationalState
+          kind="error"
+          title="专家配置加载失败"
+          description={failure.message}
+          diagnostic={failure.diagnostic}
+          actionLabel="重新加载"
+          onAction={() => void expertsQuery.refetch()}
         />
-      ),
-    },
-    {
-      title: "兜底模型",
-      dataIndex: "fallback_model",
-      width: 220,
-      render: (v: string | null, r) => (
-        <Select
-          size="small"
-          value={v ?? undefined}
-          placeholder="无兜底"
-          allowClear
-          options={FALLBACK_OPTIONS}
-          style={{ width: 200 }}
-          disabled={!isAdmin || updateMutation.isPending}
-          onChange={(val) =>
-            updateMutation.mutate({ id: r.id, patch: { fallback_model: val ?? null } })
-          }
-        />
-      ),
-    },
-  ];
+      </main>
+    );
+  }
+
+  if (expertsQuery.isLoading || !selected || !draft) {
+    return <div className="expert-admin-loading"><Skeleton active paragraph={{ rows: 12 }} /></div>;
+  }
+
+  const save = () => {
+    if (!draft.responsibility.trim()) {
+      message.warning("请填写专家职责");
+      return;
+    }
+    updateMutation.mutate({ code: selected.code, input: draft });
+  };
 
   return (
-    <div>
-      <PageHeader
-        title="Agent 配置"
-        subtitle="每个 Agent 独立绑定模型 · 质量门策略 · 外部集成（仅管理员）"
-      />
+    <main className="expert-admin">
+      <header className="expert-admin__masthead">
+        <div>
+          <span>专家治理</span>
+          <h1>专家管理</h1>
+          <p>统一定义专家职责、执行边界、工具权限与质量门。</p>
+        </div>
+        <dl aria-label="专家管理概览">
+          <div><dt>专家</dt><dd>{experts.length}</dd></div>
+          <div><dt>已启用</dt><dd>{enabledCount}</dd></div>
+          <div><dt>人工权限点</dt><dd>{confirmToolCount}</dd></div>
+        </dl>
+      </header>
 
-      <Panel title="模型配置 · 按 Agent 切换首选 / 兜底" style={{ marginBottom: 16 }}>
-        <Table
-          rowKey="id"
-          columns={columns}
-          dataSource={configsQuery.data ?? []}
-          loading={configsQuery.isLoading}
-          pagination={false}
-          size="middle"
-        />
-      </Panel>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <Panel title="质量门策略 · 强制人工开关">
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {GATES.map((g, i) => (
-              <div
-                key={g.name}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "11px 4px",
-                  borderBottom: i < GATES.length - 1 ? "1px solid var(--dy-border-subtle)" : "none",
-                }}
+      <div className="expert-admin__workspace">
+        <aside className="expert-admin__directory">
+          <header><strong>专家目录</strong><span>{experts.length}</span></header>
+          <nav aria-label="专家目录">
+            {experts.map((expert, index) => (
+              <button
+                key={expert.code}
+                type="button"
+                className={expert.code === selected.code ? "is-active" : ""}
+                aria-label={`${expert.name}，${expert.enabled ? "已启用" : "已停用"}`}
+                onClick={() => setSelectedCode(expert.code)}
               >
-                <span style={{ fontSize: 13.5, color: "var(--dy-text)" }}>{g.name}</span>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>
-                    {g.forced ? "强制人工" : "自动通过"}
-                  </span>
-                  <Switch defaultChecked={g.forced} size="small" />
-                </div>
-              </div>
+                <span className="expert-admin__index">{String(index).padStart(2, "0")}</span>
+                <span className="expert-admin__avatar">{monogram(expert)}</span>
+                <span className="expert-admin__directory-copy">
+                  <strong>{expert.name}</strong>
+                  <small>{GROUP_LABEL[expert.group]} · {expert.available_tools.length} 个工具</small>
+                </span>
+                <i className={expert.enabled ? "is-online" : ""} aria-hidden="true" />
+              </button>
             ))}
-          </div>
-        </Panel>
+          </nav>
+        </aside>
 
-        <Panel title="外部集成">
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {INTEGRATIONS.map((it, i) => (
-              <div
-                key={it.name}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  padding: "12px 4px",
-                  borderBottom: i < INTEGRATIONS.length - 1 ? "1px solid var(--dy-border-subtle)" : "none",
-                }}
-              >
-                <ApiOutlined style={{ color: "var(--dy-muted)" }} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13.5, color: "var(--dy-text)" }}>{it.name}</div>
-                  <div style={{ fontSize: 12, color: "var(--dy-faint)" }}>{it.desc}</div>
-                </div>
-                {it.connected ? (
-                  <Tag color="success" icon={<CheckCircleFilled />} style={{ marginInlineEnd: 0 }}>
-                    已连接
-                  </Tag>
-                ) : (
-                  <Tag style={{ marginInlineEnd: 0 }}>待接入</Tag>
-                )}
+        <section className="expert-admin__editor">
+          <header className="expert-admin__identity">
+            <span className="expert-admin__hero-avatar">{monogram(selected)}</span>
+            <div>
+              <span>{GROUP_LABEL[selected.group]} EXPERT</span>
+              <h2>{selected.name}</h2>
+              <p>{selected.code}</p>
+            </div>
+            <label className="expert-admin__availability">
+              <span><strong>{draft.enabled ? "参与工作流" : "暂停调度"}</strong><small>{draft.enabled ? "可被主 Agent 和独立入口调用" : "保存后停止新任务调用"}</small></span>
+              <Switch
+                aria-label={`启用${selected.name}`}
+                checked={draft.enabled}
+                onChange={(enabled) => setDraft({ ...draft, enabled })}
+              />
+            </label>
+          </header>
+
+          <div className="expert-admin__editor-body">
+            <section className="expert-admin__section expert-admin__section--copy">
+              <header><span>01</span><div><h3>职责与指令</h3><p>职责用于界定业务边界，补充指令会进入该专家的真实 system prompt。</p></div></header>
+              <label>
+                <span>专家职责</span>
+                <Input.TextArea
+                  aria-label="专家职责"
+                  value={draft.responsibility}
+                  maxLength={500}
+                  autoSize={{ minRows: 2, maxRows: 4 }}
+                  onChange={(event) => setDraft({ ...draft, responsibility: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>运行时补充指令</span>
+                <Input.TextArea
+                  aria-label="运行时补充指令"
+                  value={draft.system_prompt}
+                  maxLength={8000}
+                  autoSize={{ minRows: 4, maxRows: 9 }}
+                  placeholder="例如：不得编造账号数据；结论必须引用当前项目知识库。"
+                  onChange={(event) => setDraft({ ...draft, system_prompt: event.target.value })}
+                />
+              </label>
+            </section>
+
+            <section className="expert-admin__section">
+              <header><span>02</span><div><h3>工具权限</h3><p>权限会直接决定工具是否执行，以及运行时是否暂停等待人工确认。</p></div></header>
+              <div className="expert-admin__policy-list">
+                {selected.available_tools.map((tool) => (
+                  <div key={tool.code} className="expert-admin__policy-row">
+                    <ToolOutlined />
+                    <div><strong>{tool.name}</strong><p>{tool.description}</p><small>{tool.code}</small></div>
+                    <select
+                      aria-label={`${tool.name}权限`}
+                      value={draft.tool_permissions[tool.code] ?? "auto"}
+                      onChange={(event) => setDraft({
+                        ...draft,
+                        tool_permissions: {
+                          ...draft.tool_permissions,
+                          [tool.code]: event.target.value as ToolPermissionMode,
+                        },
+                      })}
+                    >
+                      {PERMISSION_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
               </div>
-            ))}
+            </section>
+
+            <section className="expert-admin__section">
+              <header><span>03</span><div><h3>质量门</h3><p>命中的质量门会随专家计划进入任务账本，并在必要时进入人工审批。</p></div></header>
+              {selected.available_quality_gates.length === 0 ? (
+                <div className="expert-admin__quiet-state">
+                  <CheckOutlined /><span>该专家当前没有独立质量门，由上游或主 Agent 统一验收。</span>
+                </div>
+              ) : (
+                <div className="expert-admin__gate-grid">
+                  {selected.available_quality_gates.map((gate) => {
+                    const checked = draft.quality_gates.includes(gate.code);
+                    return (
+                      <label key={gate.code} className={checked ? "is-checked" : ""}>
+                        <input
+                          type="checkbox"
+                          aria-label={gate.name}
+                          checked={checked}
+                          disabled={gate.forced}
+                          onChange={(event) => setDraft({
+                            ...draft,
+                            quality_gates: event.target.checked
+                              ? [...draft.quality_gates, gate.code]
+                              : draft.quality_gates.filter((code) => code !== gate.code),
+                          })}
+                        />
+                        <SafetyCertificateOutlined />
+                        <span><strong>{gate.name}</strong><small>{gate.description}</small></span>
+                        {gate.forced && <em>强制</em>}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
           </div>
-        </Panel>
+
+          <footer className="expert-admin__actions">
+            <span><ClockCircleOutlined /> {selected.updated_at ? "已有组织配置" : "使用系统默认策略"}</span>
+            <Button disabled={!dirty || updateMutation.isPending} onClick={() => setDraft(toDraft(selected))}>撤销更改</Button>
+            <Button
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={updateMutation.isPending}
+              disabled={!dirty}
+              onClick={save}
+            >
+              保存专家配置
+            </Button>
+          </footer>
+        </section>
       </div>
-    </div>
+    </main>
   );
+}
+
+function toDraft(expert: AgentManagement): Draft {
+  const toolPermissions = Object.fromEntries(
+    expert.available_tools.map((tool) => [
+      tool.code,
+      expert.tool_permissions[tool.code] ?? "auto",
+    ]),
+  ) as Record<string, ToolPermissionMode>;
+  return {
+    enabled: expert.enabled,
+    responsibility: expert.responsibility,
+    system_prompt: expert.system_prompt,
+    tool_permissions: toolPermissions,
+    quality_gates: [...expert.quality_gates],
+  };
+}
+
+function monogram(expert: AgentManagement): string {
+  if (expert.code === "00-decision") return "主";
+  return expert.name.replace("专家", "").slice(0, 2);
 }

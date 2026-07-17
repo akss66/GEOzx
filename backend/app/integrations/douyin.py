@@ -24,9 +24,10 @@ from app.models.enums import MetricSource, Platform
 
 DOUYIN_AUTHORIZE_URL = "https://open.douyin.com/platform/oauth/connect/"
 DOUYIN_ACCESS_TOKEN_URL = "https://open.douyin.com/oauth/access_token/"
+DOUYIN_REFRESH_TOKEN_URL = "https://open.douyin.com/oauth/refresh_token/"
 DOUYIN_CLIENT_TOKEN_URL = "https://open.douyin.com/oauth/client_token/"
 DOUYIN_JSB_TICKET_URL = "https://open.douyin.com/js/getticket/"
-DOUYIN_USER_INFO_URL = "https://open.douyin.com/oauth/oauth/userinfo"
+DOUYIN_USER_INFO_URL = "https://open.douyin.com/oauth/userinfo/"
 DOUYIN_VIDEO_LIST_URL = "https://open.douyin.com/video/list"
 DOUYIN_VIDEO_DATA_URL = "https://open.douyin.com/video/data"
 DEFAULT_DOUYIN_SECRET_REF = "vault://dyflow/douyin/client-secret"
@@ -164,17 +165,35 @@ def _vault_env_candidates(secret_ref: str, *, platform: Platform) -> list[str]:
 async def exchange_douyin_access_token(
     *, client_key: str, client_secret: str, code: str
 ) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            DOUYIN_ACCESS_TOKEN_URL,
-            data={
-                "client_key": client_key,
-                "client_secret": client_secret,
-                "code": code,
-                "grant_type": "authorization_code",
-            },
-        )
-    return _extract_douyin_data(resp.json(), "access_token")
+    return await _post_form_douyin_data(
+        DOUYIN_ACCESS_TOKEN_URL,
+        data={
+            "client_key": client_key,
+            "client_secret": client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+        },
+        required_field="access_token",
+    )
+
+
+async def refresh_douyin_access_token(
+    *,
+    client_key: str,
+    refresh_token: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    data = {
+        "client_key": client_key,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    return await _post_form_douyin_data(
+        DOUYIN_REFRESH_TOKEN_URL,
+        data=data,
+        required_field="access_token",
+        client=client,
+    )
 
 
 async def get_douyin_client_token(
@@ -240,12 +259,12 @@ async def fetch_douyin_user_info(
 ) -> dict[str, Any]:
     """Fetch public user info from Douyin OpenAPI.
 
-    This mirrors the official `/oauth/oauth/userinfo` capability and keeps
+    This mirrors the official `/oauth/userinfo/` capability and keeps
     transport injectable so tests never hit the real platform.
     """
-    return await _get_douyin_data(
+    return await _post_form_douyin_data(
         DOUYIN_USER_INFO_URL,
-        params={"access_token": access_token, "open_id": open_id},
+        data={"access_token": access_token, "open_id": open_id},
         required_field="open_id",
         client=client,
     )
@@ -344,12 +363,15 @@ async def _get_douyin_data(
     required_field: str,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    if client is not None:
-        resp = await client.get(url, params=params)
-        return _extract_response_data(resp, required_field)
-    async with httpx.AsyncClient(timeout=10) as owned_client:
-        resp = await owned_client.get(url, params=params)
-        return _extract_response_data(resp, required_field)
+    try:
+        if client is not None:
+            resp = await client.get(url, params=params)
+            return _extract_response_data(resp, required_field)
+        async with httpx.AsyncClient(timeout=10) as owned_client:
+            resp = await owned_client.get(url, params=params)
+            return _extract_response_data(resp, required_field)
+    except httpx.RequestError as exc:
+        raise DouyinIntegrationError(f"Douyin OpenAPI request failed: {exc}") from exc
 
 
 async def _post_douyin_data(
@@ -360,18 +382,43 @@ async def _post_douyin_data(
     required_field: str,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    if client is not None:
-        resp = await client.post(url, params=params, json=json)
-        return _extract_response_data(resp, required_field)
-    async with httpx.AsyncClient(timeout=10) as owned_client:
-        resp = await owned_client.post(url, params=params, json=json)
-        return _extract_response_data(resp, required_field)
+    try:
+        if client is not None:
+            resp = await client.post(url, params=params, json=json)
+            return _extract_response_data(resp, required_field)
+        async with httpx.AsyncClient(timeout=10) as owned_client:
+            resp = await owned_client.post(url, params=params, json=json)
+            return _extract_response_data(resp, required_field)
+    except httpx.RequestError as exc:
+        raise DouyinIntegrationError(f"Douyin OpenAPI request failed: {exc}") from exc
+
+
+async def _post_form_douyin_data(
+    url: str,
+    *,
+    data: dict[str, Any],
+    required_field: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    try:
+        if client is not None:
+            resp = await client.post(url, data=data)
+            return _extract_response_data(resp, required_field)
+        async with httpx.AsyncClient(timeout=10) as owned_client:
+            resp = await owned_client.post(url, data=data)
+            return _extract_response_data(resp, required_field)
+    except httpx.RequestError as exc:
+        raise DouyinIntegrationError(f"Douyin OpenAPI request failed: {exc}") from exc
 
 
 def _extract_response_data(resp: httpx.Response, required_field: str) -> dict[str, Any]:
     if resp.status_code != 200:
         raise DouyinIntegrationError(f"Douyin OpenAPI request failed: status={resp.status_code}")
-    return _extract_douyin_data(resp.json(), required_field)
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise DouyinIntegrationError("Douyin OpenAPI returned invalid JSON") from exc
+    return _extract_douyin_data(payload, required_field)
 
 
 def _as_int(value: object) -> int:

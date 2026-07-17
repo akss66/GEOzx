@@ -1,0 +1,551 @@
+/*
+ * System-wide high-fidelity layer.
+ * This file is intentionally imported last: it keeps business layouts intact
+ * while making every module speak the same visual language as the approved UI.
+ */
+
+:root {
+  --dy-canvas: var(--tz-work-canvas);
+  --dy-canvas-soft: #fbfaf7;
+  --dy-surface: var(--tz-surface);
+  --dy-elevated: #fbfaf7;
+  --dy-sidebar: var(--tz-brand-frame);
+  --dy-toolbar: rgba(247, 247, 244, 0.96);
+  --dy-border: var(--tz-line);
+  --dy-border-subtle: var(--tz-line-subtle);
+  --dy-border-strong: #cbc4b9;
+  --dy-text: var(--tz-ink);
+  --dy-muted: var(--tz-muted);
+  --dy-faint: var(--tz-faint);
+  --dy-accent: var(--tz-brand-red);
+  --dy-accent-hover: var(--tz-brand-red-hover);
+  --dy-radius-sm: 6px;
+  --dy-radius-md: 8px;
+  --dy-radius-lg: 10px;
+  --dy-radius-xl: 12px;
+  --dy-shadow: none;
+  --tz-header-height: 64px;
+  --tz-paper: #fff;
+  --tz-paper-warm: #f7f3ed;
+  --tz-red: var(--tz-brand-red);
+  --tz-ink-muted: var(--tz-muted);
+  --tz-ink-faint: var(--tz-faint);
+  --tz-radius-lg: 10px;
+  --tz-shadow-sm: 0 5px 18px rgba(42, 35, 27, 0.07);
+}
+
+html,
+body,
+#root {
+  min-width: 1180px;
+  min-height: 100%;
+  background: var(--tz-work-canvas);
+}
+
+body {
+  letter-spacing: 0;
+  font-weight: var(--tz-weight-regular);
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+}
+
+.tz-shell :where(button, input, textarea, select, .ant-typography, .ant-table, .ant-menu) {
+  letter-spacing: 0;
+}
+
+::selection {
+  background: rgba(205, 24, 34, 0.16);
+  color: var(--tz-ink);
+}
+
+.tz-shell {
+  background: var(--tz-work-canvas);
+}
+
+.tz-shell-sidebar {
+  flex-basis: 248px;
+  width: 248px;
+  border-right-color: #d5cec4;
+  background: #eee8df;
+}
+
+.tz-shell-brand {
+  min-height: 82px;
+  gap: 13px;
+  padding-inline: 24px 18px;
+}
+
+.tz-shell-brand-mark {
+  width: 38px;
+  height: 38px;
+}
+
+.tz-shell-brand strong {
+  font-size: 16px;
+  font-weight: var(--tz-weight-bold);
+}
+
+.tz-shell-brand small {
+  color: var(--tz-ink);
+  font-size: 11px;
+  font-weight: var(--tz-weight-medium);
+}
+
+.tz-shell-workspace {
+  padding: 16px 14px 12px;
+}
+
+.tz-workspace-trigger {
+  min-height: 56px;
+  border-color: #cec5b9;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.tz-workspace-trigger:hover {
+  border-color: #bfb5a8;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.tz-shell-nav-scroll {
+  padding-top: 5px;
+}
+
+.tz-shell-nav .ant-menu-item-group-title {
+  padding: 14px 26px 6px !important;
+  color: #655e55 !important;
+  font-size: 11px !important;
+  font-weight: var(--tz-weight-semibold);
+}
+
+.tz-shell-nav .ant-menu-item {
+  width: calc(100% - 28px) !important;
+  height: 40px;
+  margin-inline: 14px !important;
+  padding-inline: 14px !important;
+  border-radius: 8px !important;
+  color: #3f3a34;
+  font-size: 13px;
+  font-weight: var(--tz-weight-medium);
+}
+
+.tz-shell-nav .ant-menu-item:hover {
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: var(--tz-ink) !important;
+}
+
+.tz-shell-nav .ant-menu-item-selected {
+  background: rgba(255, 255, 255, 0.72) !important;
+}
+
+.tz-shell-nav .ant-menu-item-selected::after {
+  bottom: 4px;
+  left: 14px !important;
+  width: 14px;
+  height: 2px;
+}
+
+.tz-shell-profile {
+  min-height: 64px;
+  padding-inline: 16px 13px;
+}
+
+.tz-shell-header {
+  min-height: var(--tz-header-height);
+  padding: 0 28px;
+  border-bottom-color: var(--tz-line-subtle);
+  background: rgba(247, 247, 244, 0.95);
+  backdrop-filter: blur(18px);
+}
+
+.tz-account-trigger,
+.tz-global-search-trigger,
+.tz-shell-icon {
+  border-color: transparent;
+  background: #efeee9;
+}
+
+.tz-account-trigger:hover,
+.tz-global-search-trigger:hover,
+.tz-shell-icon:hover {
+  border-color: var(--tz-line);
+  background: var(--tz-surface);
+}
+
+.tz-account-trigger {
+  min-height: 38px;
+  padding-right: 13px;
+}
+
+.tz-shell-page {
+  max-width: 1500px;
+  min-height: calc(100vh - var(--tz-header-height));
+  padding: 30px 36px 44px;
+}
+
+.dy-page-header {
+  min-height: 52px;
+  margin-bottom: 22px;
+}
+
+.dy-page-title.ant-typography {
+  margin: 0 !important;
+  color: var(--tz-ink);
+  font-size: 26px !important;
+  font-weight: var(--tz-weight-bold) !important;
+  line-height: 1.15 !important;
+}
+
+.dy-page-subtitle.ant-typography {
+  display: block;
+  max-width: 760px;
+  margin-top: 6px;
+  color: var(--tz-ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.tz-shell .ant-btn,
+.tz-shell .ant-segmented-item-label,
+.tz-shell .ant-tabs-tab,
+.tz-shell .ant-tag {
+  font-weight: var(--tz-weight-medium);
+}
+
+.tz-shell .ant-form,
+.tz-shell .ant-input,
+.tz-shell .ant-select,
+.tz-shell .ant-picker {
+  font-size: 13px;
+}
+
+.tz-shell .ant-table {
+  font-size: 12px;
+}
+
+.tz-shell .ant-table-cell :where(.ant-tag, .ant-badge-status-text) {
+  white-space: nowrap;
+}
+
+.tz-shell .ant-btn,
+.tz-shell .ant-input,
+.tz-shell .ant-input-affix-wrapper,
+.tz-shell .ant-select-selector,
+.tz-shell .ant-segmented,
+.tz-shell .ant-picker {
+  border-radius: 8px !important;
+}
+
+.tz-shell .ant-btn-primary {
+  border-color: var(--tz-ink);
+  background: var(--tz-ink);
+  box-shadow: none;
+}
+
+.tz-shell .ant-btn-primary:not(:disabled):hover {
+  border-color: #292622;
+  background: #292622;
+}
+
+.tz-shell .ant-btn-default {
+  border-color: var(--tz-line);
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: none;
+}
+
+.tz-shell .ant-btn-default:not(:disabled):hover {
+  border-color: #bfb7ac;
+  background: #fff;
+  color: var(--tz-ink);
+}
+
+.tz-shell .ant-input,
+.tz-shell .ant-input-affix-wrapper,
+.tz-shell .ant-select-selector,
+.tz-shell .ant-picker {
+  border-color: var(--tz-line) !important;
+  background: rgba(255, 255, 255, 0.78) !important;
+  box-shadow: none !important;
+}
+
+.tz-shell .ant-input:hover,
+.tz-shell .ant-input-affix-wrapper:hover,
+.tz-shell .ant-select-selector:hover,
+.tz-shell .ant-picker:hover {
+  border-color: #bdb4a8 !important;
+}
+
+.tz-shell .ant-input:focus,
+.tz-shell .ant-input-affix-wrapper-focused,
+.tz-shell .ant-select-focused .ant-select-selector,
+.tz-shell .ant-picker-focused {
+  border-color: var(--tz-ink) !important;
+  box-shadow: 0 0 0 2px rgba(23, 22, 20, 0.08) !important;
+}
+
+.tz-shell .ant-segmented {
+  padding: 3px;
+  background: #eceae5;
+}
+
+.tz-shell .ant-segmented-item-selected {
+  box-shadow: 0 1px 3px rgba(42, 35, 27, 0.08);
+}
+
+.tz-shell .ant-card,
+.dy-panel {
+  border-color: var(--tz-line);
+  border-radius: 10px;
+  background: var(--tz-surface);
+  box-shadow: none;
+}
+
+.tz-shell .ant-table-wrapper .ant-table {
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 10px;
+  background: var(--tz-surface);
+}
+
+.tz-shell .ant-table-thead > tr > th {
+  border-bottom-color: var(--tz-line);
+  background: #f3f1ec;
+  color: var(--tz-ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tz-shell .ant-table-tbody > tr > td {
+  border-bottom-color: var(--tz-line-subtle);
+  color: var(--tz-ink-soft);
+}
+
+.tz-shell .ant-table-tbody > tr:hover > td {
+  background: #faf8f4 !important;
+}
+
+.tz-shell .ant-tag {
+  border-color: var(--tz-line);
+  border-radius: 999px;
+  background: #f7f5f0;
+  color: var(--tz-ink-soft);
+}
+
+.tz-shell .ant-modal-content,
+.tz-shell .ant-drawer-content,
+.tz-switcher-panel,
+.tz-account-panel,
+.tz-global-search-panel,
+.tz-notification-panel {
+  border-radius: 12px;
+  box-shadow: var(--tz-shadow-floating);
+}
+
+.tz-operational-state {
+  border-color: var(--tz-line-subtle);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.tz-agent-fab {
+  min-height: 46px;
+  padding: 0 14px 0 9px;
+  border-radius: 9px;
+  background: var(--tz-ink);
+  box-shadow: 0 12px 28px rgba(23, 22, 20, 0.18);
+}
+
+.tz-agent-fab:hover {
+  background: #292622;
+}
+
+.tz-agent-fab > .anticon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--tz-brand-red);
+  color: #fff;
+}
+
+/* Module canvases: one system, different jobs. */
+.account-summary-strip,
+.account-workbench-surface,
+.content-workspace,
+.approval-workbench,
+.review-report,
+.expert-workspace,
+.expert-admin__workspace,
+.model-infra__provider-workspace,
+.model-infra__route-workspace,
+.model-infra__ledger,
+.knowledge-index,
+.knowledge-canvas,
+.cost-workspace__body,
+.tz-user-table-wrap {
+  border-color: var(--tz-line) !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+.account-summary-strip {
+  margin-bottom: 20px;
+  border: 1px solid var(--tz-line);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.account-summary-metric {
+  padding: 15px 18px;
+  border-right-color: var(--tz-line);
+}
+
+.account-object-card,
+.account-project-card,
+.account-matrix-project {
+  border-color: var(--tz-line) !important;
+  border-radius: 10px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.account-object-card:hover,
+.account-project-card:hover {
+  border-color: #bdb4a8 !important;
+  box-shadow: 0 7px 22px rgba(42, 35, 27, 0.06) !important;
+}
+
+.account-workbench-toolbar {
+  padding: 14px;
+  border: 1px solid var(--tz-line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.content-production-page,
+.approval-page,
+.review-page,
+.expert-studio,
+.expert-admin,
+.model-infra,
+.knowledge-studio,
+.cost-workspace,
+.tz-user-workspace {
+  color: var(--tz-ink);
+}
+
+.content-workspace,
+.approval-workbench {
+  overflow: hidden;
+  background: #fff;
+}
+
+.content-rail,
+.approval-queue,
+.approval-decision,
+.knowledge-navigation,
+.expert-admin__directory,
+.model-infra__route-directory {
+  background: #f5f1eb !important;
+}
+
+.approval-queue-item,
+.expert-directory-item,
+.knowledge-index__list button,
+.expert-admin__directory button {
+  border-radius: 8px !important;
+}
+
+.approval-queue-item.is-selected,
+.knowledge-index__list button.is-active,
+.expert-admin__directory button.is-active {
+  border-color: rgba(205, 24, 34, 0.2) !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+.review-conclusion,
+.review-empty-conclusion {
+  border-color: var(--tz-line) !important;
+  background: #f5f1eb !important;
+  box-shadow: none !important;
+}
+
+.review-section,
+.review-readiness,
+.review-goal-summary,
+.review-change-row,
+.review-attribution-row,
+.review-suggestion-row {
+  border-color: var(--tz-line-subtle) !important;
+  border-radius: 10px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+.expert-studio,
+.knowledge-studio,
+.expert-admin,
+.model-infra,
+.cost-workspace,
+.tz-user-workspace {
+  max-width: 1440px;
+  margin-inline: auto;
+}
+
+.expert-workspace,
+.knowledge-studio,
+.expert-admin__workspace,
+.model-infra__provider-workspace,
+.model-infra__route-workspace {
+  background: #fff !important;
+}
+
+.expert-workspace__header,
+.expert-admin__masthead,
+.model-infra__masthead,
+.cost-workspace__header,
+.tz-user-page-header {
+  border-bottom-color: var(--tz-line-subtle) !important;
+}
+
+.expert-avatar,
+.expert-admin__avatar,
+.expert-admin__hero-avatar {
+  border-radius: 8px !important;
+  background: var(--tz-ink) !important;
+  color: #fff !important;
+}
+
+.knowledge-document,
+.knowledge-editor {
+  color: var(--tz-ink-soft);
+}
+
+.knowledge-document h1,
+.knowledge-document h2,
+.knowledge-editor h2 {
+  color: var(--tz-ink);
+}
+
+.cost-stat,
+.cost-ledger,
+.tz-user-summary-card,
+.tz-member-detail,
+.model-infra__summary > div {
+  border-color: var(--tz-line) !important;
+  border-radius: 10px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+@media (max-width: 1280px) {
+  .tz-shell-sidebar {
+    flex-basis: 228px;
+    width: 228px;
+  }
+
+  .tz-shell-page {
+    padding-inline: 28px;
+  }
+}

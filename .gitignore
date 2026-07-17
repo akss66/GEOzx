@@ -10,6 +10,9 @@ venv/
 .ruff_cache/
 htmlcov/
 .coverage
+*.log
+backend/*.db
+ruff-*.txt
 
 # ── Node / frontend ──────────────────────────────
 node_modules/
@@ -20,6 +23,8 @@ frontend/dist/
 .pnpm-store/
 frontend/test-results/
 frontend/playwright-report/
+.artifacts/
+frontend/.artifacts/
 
 # ── Docker / data volumes ────────────────────────
 .data/

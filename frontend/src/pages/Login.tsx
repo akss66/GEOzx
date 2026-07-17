@@ -88,6 +88,7 @@ export default function Login() {
           <Form
             form={form}
             layout="vertical"
+            initialValues={{ email: "admin@qq.com", password: "admin123" }}
             onFinish={onFinish}
             requiredMark={false}
             validateTrigger="onSubmit"

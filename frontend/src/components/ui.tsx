@@ -1,10 +1,13 @@
 import {
   CheckCircleFilled,
   ClockCircleFilled,
+  CloseCircleOutlined,
+  InboxOutlined,
   LoadingOutlined,
+  SafetyCertificateOutlined,
   StopFilled,
 } from "@ant-design/icons";
-import { Tag, Typography } from "antd";
+import { Button, Tag, Typography } from "antd";
 import type { ReactNode } from "react";
 
 import type { Platform } from "../types";
@@ -110,6 +113,65 @@ export function Panel({
         </header>
       )}
       {children}
+    </section>
+  );
+}
+
+export type OperationalStateKind = "loading" | "empty" | "error" | "blocked";
+
+const OPERATIONAL_STATE_ICON: Record<OperationalStateKind, ReactNode> = {
+  loading: <LoadingOutlined spin />,
+  empty: <InboxOutlined />,
+  error: <CloseCircleOutlined />,
+  blocked: <SafetyCertificateOutlined />,
+};
+
+/**
+ * 统一的数据状态面板。业务说明始终可见，诊断信息默认折叠，避免技术细节污染主界面。
+ */
+export function OperationalState({
+  kind,
+  title,
+  description,
+  actionLabel,
+  onAction,
+  actionLoading = false,
+  diagnostic,
+  compact = false,
+}: {
+  kind: OperationalStateKind;
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  actionLoading?: boolean;
+  diagnostic?: string | null;
+  compact?: boolean;
+}) {
+  return (
+    <section
+      className={`tz-operational-state is-${kind}${compact ? " is-compact" : ""}`}
+      role={kind === "error" ? "alert" : "status"}
+      aria-busy={kind === "loading" || undefined}
+    >
+      <span className="tz-operational-state__icon" aria-hidden="true">
+        {OPERATIONAL_STATE_ICON[kind]}
+      </span>
+      <div className="tz-operational-state__copy">
+        <h2>{title}</h2>
+        <p>{description}</p>
+        {diagnostic ? (
+          <details>
+            <summary>查看诊断信息</summary>
+            <code>{diagnostic}</code>
+          </details>
+        ) : null}
+      </div>
+      {actionLabel && onAction ? (
+        <Button loading={actionLoading} onClick={onAction}>
+          {actionLabel}
+        </Button>
+      ) : null}
     </section>
   );
 }

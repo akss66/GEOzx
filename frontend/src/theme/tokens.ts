@@ -9,15 +9,15 @@ export const DESIGN_TOKENS = {
   brandRedActive: "#941016",
   brandFrame: "#EEE8DF",
   brandFrameStrong: "#E4DCD0",
-  workCanvas: "#F6F6F3",
+  workCanvas: "#F7F7F4",
   surface: "#FFFFFF",
   surfaceSoft: "#F0F0ED",
   ink: "#171614",
-  inkSoft: "#3C3935",
-  muted: "#625E58",
-  faint: "#837F78",
-  line: "#D9D7D1",
-  lineSubtle: "#E9E8E3",
+  inkSoft: "#4A4640",
+  muted: "#666159",
+  faint: "#827C73",
+  line: "#DDD8CF",
+  lineSubtle: "#EBE7DF",
   success: "#2B8152",
   warning: "#9A6300",
   error: "#B92B36",
@@ -25,7 +25,7 @@ export const DESIGN_TOKENS = {
 } as const;
 
 export const FONT_SANS =
-  '"OpenAI Sans", "Söhne", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+  '"Geist Variable", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif';
 
 export const ACCENT = DESIGN_TOKENS.brandRed;
 export const ACCENT_HOVER = DESIGN_TOKENS.brandRedHover;
@@ -74,16 +74,16 @@ export function buildTheme(): ThemeConfig {
       colorText: c.ink,
       colorTextSecondary: c.inkSoft,
       colorTextTertiary: c.muted,
-      borderRadius: 10,
-      borderRadiusLG: 14,
-      borderRadiusSM: 10,
-      borderRadiusXS: 10,
+      borderRadius: 8,
+      borderRadiusLG: 10,
+      borderRadiusSM: 8,
+      borderRadiusXS: 6,
       wireframe: false,
       fontFamily: FONT_SANS,
       fontSize: 14,
       controlHeight: 36,
       boxShadow: "none",
-      boxShadowSecondary: "0 8px 20px rgba(23, 22, 20, 0.08)",
+      boxShadowSecondary: "0 12px 34px rgba(42, 35, 27, 0.10)",
     },
     components: {
       Layout: {
@@ -102,10 +102,10 @@ export function buildTheme(): ThemeConfig {
         groupTitleColor: c.muted,
         itemHeight: 37,
         itemMarginInline: 10,
-        itemBorderRadius: 10,
+        itemBorderRadius: 8,
         iconSize: 16,
       },
-      Card: { colorBgContainer: c.surface, borderRadiusLG: 14 },
+      Card: { colorBgContainer: c.surface, borderRadiusLG: 10 },
       Table: {
         headerBg: c.workCanvas,
         headerColor: c.inkSoft,

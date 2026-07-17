@@ -2,6 +2,7 @@ import { api } from "./client";
 import type {
   AgentInvocation,
   AgentToolCall,
+  BrainRuntime,
   BrainTask,
   DeliverableAcceptance,
   DraftBrainTaskInput,
@@ -21,6 +22,50 @@ export async function draftBrainTask(input: string | DraftBrainTaskInput): Promi
 
 export async function confirmBrainTask(task: BrainTask): Promise<BrainTask> {
   const { data } = await api.post<BrainTask>(`/brain/tasks/${task.id}/confirm`);
+  return data;
+}
+
+export async function getBrainTaskRuntime(taskId: number): Promise<BrainRuntime> {
+  const { data } = await api.get<BrainRuntime>(`/brain/tasks/${taskId}/runtime`);
+  return data;
+}
+
+export async function sendBrainMessage(input: {
+  message: string;
+  task_id?: number;
+  project_id?: number | null;
+  account_id?: number | null;
+  platform?: "douyin";
+}): Promise<BrainRuntime> {
+  const { data } = await api.post<BrainRuntime>("/brain/messages", input);
+  return data;
+}
+
+export async function selectBrainDecision(input: {
+  taskId: number;
+  decisionId: string;
+  choiceId: string;
+}): Promise<BrainRuntime> {
+  const { data } = await api.post<BrainRuntime>(
+    `/brain/tasks/${input.taskId}/decisions/${input.decisionId}/select`,
+    { choice_id: input.choiceId },
+  );
+  return data;
+}
+
+export async function reviseBrainDecision(input: {
+  taskId: number;
+  decisionId: string;
+  comment: string;
+  requestNewOptions?: boolean;
+}): Promise<BrainRuntime> {
+  const { data } = await api.post<BrainRuntime>(
+    `/brain/tasks/${input.taskId}/decisions/${input.decisionId}/revise`,
+    {
+      comment: input.comment,
+      request_new_options: input.requestNewOptions ?? false,
+    },
+  );
   return data;
 }
 

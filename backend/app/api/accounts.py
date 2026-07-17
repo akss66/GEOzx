@@ -1,24 +1,50 @@
 """账号路由：账号矩阵 + 分组 CRUD。
 
-账号与分组属系统配置/矩阵管理职责，增删改限 admin；list/get 任意登录用户可用。
-均按当前用户 org 隔离。
+账号与分组属系统配置/矩阵管理职责，增删改限 admin；list/get 按客户与项目授权过滤。
+所有操作同时按当前用户 org 隔离。
 """
 
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.auth import AdminUser, CurrentUser
+from app.core.workspace_access import (
+    accessible_account_clause,
+    require_account_access,
+    require_client_access,
+    require_project_access,
+)
+from app.core.workspace_defaults import get_or_create_default_client
 from app.db import get_session
-from app.models import Account, AccountGroup, ContentItem, Event, PlatformAccountAuth, Project
-from app.models.enums import AccountStatus
+from app.models import (
+    Account,
+    AccountGroup,
+    BrainTask,
+    ContentItem,
+    Event,
+    PlatformAccountAuth,
+    Project,
+    ProjectAccount,
+    User,
+)
+from app.models.enums import (
+    AccountStatus,
+    BrainTaskStatus,
+    DeliverableAcceptanceStatus,
+    DeliverableType,
+    UserRole,
+    WorkspaceRole,
+)
 from app.schemas.workspace import (
     AccountGroupOut,
     AccountMatrixGroupOut,
     AccountMatrixOut,
     AccountOut,
+    BatchUpdateAccountsRequest,
     CreateAccountGroupRequest,
     CreateAccountRequest,
     CreateDistributionActionRequest,
@@ -26,6 +52,7 @@ from app.schemas.workspace import (
     PlatformMatrixSummaryOut,
     UpdateAccountIntegrationRequest,
     UpdateAccountRequest,
+    account_out,
 )
 
 router = APIRouter(tags=["accounts"])
@@ -92,42 +119,182 @@ async def _validate_project(session: AsyncSession, project_id: int | None, org_i
 
 
 async def _validate_content_item(
-    session: AsyncSession, content_item_id: int | None, org_id: int
+    session: AsyncSession, content_item_id: int | None, user: User
 ) -> None:
     if content_item_id is None:
         return
     item = await session.scalar(
         select(ContentItem)
         .join(Project, ContentItem.project_id == Project.id)
-        .where(ContentItem.id == content_item_id, Project.org_id == org_id)
+        .where(ContentItem.id == content_item_id, Project.org_id == user.org_id)
     )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
+    await require_project_access(session, user, item.project_id)
+
+
+async def _project_ids_by_account(
+    session: AsyncSession, account_ids: list[int]
+) -> dict[int, list[int]]:
+    if not account_ids:
+        return {}
+    rows = await session.execute(
+        select(ProjectAccount.account_id, ProjectAccount.project_id).where(
+            ProjectAccount.account_id.in_(account_ids)
+        )
+    )
+    result: dict[int, list[int]] = {}
+    for account_id, project_id in rows:
+        result.setdefault(account_id, []).append(project_id)
+    return result
+
+
+async def _account_operational_context(
+    session: AsyncSession,
+    accounts: list[Account],
+    org_id: int,
+) -> dict[int, dict]:
+    """Assemble the real operational state shown by every account-matrix view."""
+    if not accounts:
+        return {}
+
+    account_by_id = {account.id: account for account in accounts}
+    account_ids = set(account_by_id)
+    auth_rows = (
+        await session.scalars(
+            select(PlatformAccountAuth).where(
+                PlatformAccountAuth.org_id == org_id,
+                PlatformAccountAuth.account_id.in_(account_ids),
+            )
+        )
+    ).all()
+    auth_by_account = {row.account_id: row for row in auth_rows}
+
+    tasks = (
+        await session.scalars(
+            select(BrainTask)
+            .options(selectinload(BrainTask.brief), selectinload(BrainTask.acceptances))
+            .where(BrainTask.org_id == org_id)
+            .order_by(BrainTask.updated_at.desc(), BrainTask.id.desc())
+        )
+    ).all()
+
+    result: dict[int, dict] = {}
+    for account_id, account in account_by_id.items():
+        auth = auth_by_account.get(account_id)
+        raw_profile = auth.raw_profile if auth and isinstance(auth.raw_profile, dict) else {}
+        account_auth = account.auth if isinstance(account.auth, dict) else {}
+        auth_status = auth.auth_status if auth is not None else account.auth_status
+        if auth_status == "authorized":
+            publish_capability = "prepare_only"
+        elif auth_status == "manual" or account.integration_status == "manual":
+            publish_capability = "manual_only"
+        else:
+            publish_capability = "unavailable"
+
+        result[account_id] = {
+            "avatar_url": raw_profile.get("avatar")
+            or raw_profile.get("avatar_url")
+            or account_auth.get("avatar")
+            or account_auth.get("avatar_url"),
+            "positioning_summary": None,
+            "current_task": None,
+            "risk_count": 0,
+            "last_sync_at": auth.last_sync_at if auth is not None else None,
+            "publish_capability": publish_capability,
+        }
+
+    active_statuses = {
+        BrainTaskStatus.DRAFT,
+        BrainTaskStatus.PENDING_CONFIRMATION,
+        BrainTaskStatus.RUNNING,
+        BrainTaskStatus.PENDING_ACCEPTANCE,
+    }
+    for task in tasks:
+        brief_account_ids = set(task.brief.account_ids if task.brief is not None else [])
+        scoped_account_ids = account_ids.intersection(brief_account_ids)
+        if not scoped_account_ids:
+            continue
+
+        approved_positioning = next(
+            (
+                acceptance
+                for acceptance in sorted(
+                    task.acceptances,
+                    key=lambda item: (item.updated_at, item.id),
+                    reverse=True,
+                )
+                if acceptance.deliverable_type == DeliverableType.POSITIONING_STRATEGY
+                and acceptance.status == DeliverableAcceptanceStatus.APPROVED
+                and acceptance.summary
+            ),
+            None,
+        )
+        for account_id in scoped_account_ids:
+            context = result[account_id]
+            if context["positioning_summary"] is None and approved_positioning is not None:
+                context["positioning_summary"] = approved_positioning.summary
+            if task.status in active_statuses:
+                if context["current_task"] is None:
+                    context["current_task"] = {
+                        "id": task.id,
+                        "title": task.title,
+                        "status": task.status.value,
+                        "progress": task.progress,
+                        "current_focus": task.current_focus,
+                    }
+                    context["risk_count"] = task.risk_count
+
+    return result
+
+
+async def _account_response(session: AsyncSession, account: Account) -> AccountOut:
+    project_ids = await _project_ids_by_account(session, [account.id])
+    operational = await _account_operational_context(session, [account], account.org_id)
+    return account_out(account, project_ids.get(account.id), operational.get(account.id))
 
 
 async def _load_distribution_accounts(
     session: AsyncSession,
     account_ids: list[int],
-    org_id: int,
+    user: User,
 ) -> list[Account]:
     unique_ids = sorted(set(account_ids))
+    accessible_accounts = await accessible_account_clause(session, user)
     accounts = (
         await session.scalars(
-            select(Account).where(Account.org_id == org_id, Account.id.in_(unique_ids))
+            select(Account).where(
+                Account.org_id == user.org_id,
+                Account.id.in_(unique_ids),
+                accessible_accounts,
+            )
         )
     ).all()
     if len(accounts) != len(unique_ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
     if any(account.status != AccountStatus.ACTIVE for account in accounts):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号不可用于分发")
+    for account in accounts:
+        await require_account_access(
+            session,
+            user,
+            account.id,
+            roles={WorkspaceRole.LEAD, WorkspaceRole.OPERATOR},
+        )
     return accounts
 
 
 @router.get("/account-groups", response_model=list[AccountGroupOut])
 async def list_account_groups(user: CurrentUser, session: SessionDep) -> list[AccountGroupOut]:
-    rows = await session.scalars(
-        select(AccountGroup).where(AccountGroup.org_id == user.org_id).order_by(AccountGroup.id)
-    )
+    q = select(AccountGroup).where(AccountGroup.org_id == user.org_id)
+    accessible_accounts = await accessible_account_clause(session, user)
+    if user.role != UserRole.ADMIN:
+        visible_group_ids = select(Account.group_id).where(
+            accessible_accounts,
+            Account.group_id.is_not(None),
+        )
+        q = q.where(AccountGroup.id.in_(visible_group_ids))
+    rows = await session.scalars(q.order_by(AccountGroup.id))
     return [AccountGroupOut.model_validate(g) for g in rows]
 
 
@@ -154,14 +321,26 @@ async def list_accounts(
     group_id: Annotated[int | None, Query()] = None,
     project_id: Annotated[int | None, Query()] = None,
 ) -> list[AccountOut]:
-    q = select(Account).where(Account.org_id == user.org_id).order_by(Account.id)
+    accessible_accounts = await accessible_account_clause(session, user)
+    q = (
+        select(Account)
+        .where(Account.org_id == user.org_id, accessible_accounts)
+        .order_by(Account.id)
+    )
     if group_id is not None:
         q = q.where(Account.group_id == group_id)
     if project_id is not None:
-        await _validate_project(session, project_id, user.org_id)
-        q = q.where(Account.project_id == project_id)
-    rows = await session.scalars(q)
-    return [AccountOut.model_validate(a) for a in rows]
+        await require_project_access(session, user, project_id)
+        linked_accounts = select(ProjectAccount.account_id).where(
+            ProjectAccount.project_id == project_id
+        )
+        q = q.where(or_(Account.project_id == project_id, Account.id.in_(linked_accounts)))
+    rows = (await session.scalars(q)).all()
+    project_ids = await _project_ids_by_account(session, [row.id for row in rows])
+    operational = await _account_operational_context(session, rows, user.org_id)
+    return [
+        account_out(row, project_ids.get(row.id), operational.get(row.id)) for row in rows
+    ]
 
 
 @router.get("/account-matrix", response_model=AccountMatrixOut)
@@ -170,16 +349,35 @@ async def get_account_matrix(
     session: SessionDep,
     project_id: Annotated[int | None, Query()] = None,
 ) -> AccountMatrixOut:
+    accessible_accounts = await accessible_account_clause(session, user)
+    visible_group_ids = select(Account.group_id).where(
+        accessible_accounts,
+        Account.group_id.is_not(None),
+    )
     groups = (
         await session.scalars(
-            select(AccountGroup).where(AccountGroup.org_id == user.org_id).order_by(AccountGroup.id)
+            select(AccountGroup)
+            .where(
+                AccountGroup.org_id == user.org_id,
+                AccountGroup.id.in_(visible_group_ids),
+            )
+            .order_by(AccountGroup.id)
         )
     ).all()
-    q = select(Account).where(Account.org_id == user.org_id).order_by(Account.id)
+    q = (
+        select(Account)
+        .where(Account.org_id == user.org_id, accessible_accounts)
+        .order_by(Account.id)
+    )
     if project_id is not None:
-        await _validate_project(session, project_id, user.org_id)
-        q = q.where(Account.project_id == project_id)
+        await require_project_access(session, user, project_id)
+        linked_accounts = select(ProjectAccount.account_id).where(
+            ProjectAccount.project_id == project_id
+        )
+        q = q.where(or_(Account.project_id == project_id, Account.id.in_(linked_accounts)))
     accounts = (await session.scalars(q)).all()
+    project_ids = await _project_ids_by_account(session, [row.id for row in accounts])
+    operational = await _account_operational_context(session, accounts, user.org_id)
 
     accounts_by_group: dict[int | None, list[Account]] = {}
     for account in accounts:
@@ -221,14 +419,15 @@ async def get_account_matrix(
                 name=group.name,
                 dimension=group.dimension,
                 accounts=[
-                    AccountOut.model_validate(row)
+                    account_out(row, project_ids.get(row.id), operational.get(row.id))
                     for row in accounts_by_group.get(group.id, [])
                 ],
             )
             for group in groups
         ],
         ungrouped_accounts=[
-            AccountOut.model_validate(row) for row in accounts_by_group.get(None, [])
+            account_out(row, project_ids.get(row.id), operational.get(row.id))
+            for row in accounts_by_group.get(None, [])
         ],
         platforms=platform_rows,
     )
@@ -240,8 +439,21 @@ async def create_account(
 ) -> AccountOut:
     await _validate_group(session, body.group_id, admin.org_id)
     await _validate_project(session, body.project_id, admin.org_id)
+    client = (
+        await require_client_access(session, admin, body.client_id)
+        if body.client_id is not None
+        else await get_or_create_default_client(session, admin.org_id)
+    )
+    if body.project_id is not None:
+        project = await session.get(Project, body.project_id)
+        if project is None or project.client_id != client.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="项目不属于当前客户",
+            )
     account = Account(
         org_id=admin.org_id,
+        client_id=client.id,
         nickname=body.nickname,
         platform=body.platform,
         group_id=body.group_id,
@@ -249,9 +461,90 @@ async def create_account(
         external_account_id=body.external_account_id,
     )
     session.add(account)
+    await session.flush()
+    if body.project_id is not None:
+        session.add(ProjectAccount(project_id=body.project_id, account_id=account.id))
     await session.commit()
     await session.refresh(account)
-    return AccountOut.model_validate(account)
+    return await _account_response(session, account)
+
+
+@router.patch("/accounts/batch", response_model=list[AccountOut])
+async def batch_update_accounts(
+    body: BatchUpdateAccountsRequest,
+    admin: AdminUser,
+    session: SessionDep,
+) -> list[AccountOut]:
+    account_ids = sorted(set(body.account_ids))
+    accounts = (
+        await session.scalars(
+            select(Account)
+            .where(Account.org_id == admin.org_id, Account.id.in_(account_ids))
+            .order_by(Account.id)
+        )
+    ).all()
+    if len(accounts) != len(account_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+
+    fields = body.model_fields_set
+    if "group_id" in fields:
+        await _validate_group(session, body.group_id, admin.org_id)
+    project = None
+    if "project_id" in fields:
+        await _validate_project(session, body.project_id, admin.org_id)
+        if body.project_id is not None:
+            project = await session.get(Project, body.project_id)
+            wrong_client = project is not None and any(
+                project.client_id != account.client_id for account in accounts
+            )
+            if project is None or wrong_client:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="项目不属于所选账号的当前客户",
+                )
+
+    existing_links: set[tuple[int, int]] = set()
+    if project is not None:
+        rows = await session.execute(
+            select(ProjectAccount.account_id, ProjectAccount.project_id).where(
+                ProjectAccount.account_id.in_(account_ids),
+                ProjectAccount.project_id == project.id,
+            )
+        )
+        existing_links = set(rows)
+
+    for account in accounts:
+        if "group_id" in fields:
+            account.group_id = body.group_id
+        if "project_id" in fields:
+            account.project_id = body.project_id
+            if project is not None and (account.id, project.id) not in existing_links:
+                session.add(ProjectAccount(project_id=project.id, account_id=account.id))
+        if "status" in fields and body.status is not None:
+            account.status = body.status
+
+    event_payload = body.model_dump(exclude={"account_ids"}, exclude_unset=True)
+    session.add(
+        Event(
+            type="accounts.batch_updated",
+            payload={
+                "account_ids": account_ids,
+                "updated_by": admin.id,
+                **{
+                    key: value.value if hasattr(value, "value") else value
+                    for key, value in event_payload.items()
+                },
+            },
+        )
+    )
+    await session.commit()
+
+    project_ids = await _project_ids_by_account(session, account_ids)
+    operational = await _account_operational_context(session, accounts, admin.org_id)
+    return [
+        account_out(account, project_ids.get(account.id), operational.get(account.id))
+        for account in accounts
+    ]
 
 
 @router.patch("/accounts/{account_id}", response_model=AccountOut)
@@ -264,11 +557,26 @@ async def update_account(
         await _validate_group(session, data["group_id"], admin.org_id)
     if "project_id" in data:
         await _validate_project(session, data["project_id"], admin.org_id)
+        if data["project_id"] is not None:
+            project = await session.get(Project, data["project_id"])
+            if project is None or project.client_id != account.client_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="项目不属于当前客户",
+                )
+            existing = await session.scalar(
+                select(ProjectAccount).where(
+                    ProjectAccount.project_id == project.id,
+                    ProjectAccount.account_id == account.id,
+                )
+            )
+            if existing is None:
+                session.add(ProjectAccount(project_id=project.id, account_id=account.id))
     for key, value in data.items():
         setattr(account, key, value)
     await session.commit()
     await session.refresh(account)
-    return AccountOut.model_validate(account)
+    return await _account_response(session, account)
 
 
 @router.patch("/accounts/{account_id}/integration", response_model=AccountOut)
@@ -279,9 +587,28 @@ async def update_account_integration(
     session: SessionDep,
 ) -> AccountOut:
     account = await _get_owned_account(session, account_id, admin.org_id)
-    meta = dict(account.auth or {})
     data = body.model_dump(exclude_unset=True)
     note = data.pop("note", None)
+    manual_status = {
+        "integration_status": "manual",
+        "auth_status": "manual",
+        "data_sync_status": "manual",
+    }
+    if data != manual_status:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="官方授权和同步状态只能由平台回调或同步任务更新",
+        )
+    if (
+        account.integration_status not in {"oauth_ready", "manual"}
+        or account.auth_status not in {"unauthorized", "manual"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已存在官方接入状态，不能切换为开发模式",
+        )
+
+    meta = dict(account.auth or {})
     meta.update({key: value for key, value in data.items() if value is not None})
     if note is not None:
         meta["note"] = note
@@ -308,7 +635,7 @@ async def update_account_integration(
     )
     await session.commit()
     await session.refresh(account)
-    return AccountOut.model_validate(account)
+    return await _account_response(session, account)
 
 
 @router.post(
@@ -321,9 +648,10 @@ async def create_distribution_action(
     user: CurrentUser,
     session: SessionDep,
 ) -> DistributionActionOut:
-    await _validate_project(session, body.project_id, user.org_id)
-    await _validate_content_item(session, body.content_item_id, user.org_id)
-    accounts = await _load_distribution_accounts(session, body.account_ids, user.org_id)
+    if body.project_id is not None:
+        await require_project_access(session, user, body.project_id)
+    await _validate_content_item(session, body.content_item_id, user)
+    accounts = await _load_distribution_accounts(session, body.account_ids, user)
     if any(account.platform != body.platform for account in accounts):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号平台不匹配")
 

@@ -7,11 +7,17 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, status
+from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.auth import AdminUser, CurrentUser
+from app.core.credential_crypto import (
+    CredentialEncryptionError,
+    decrypt_credential,
+    encrypt_credential,
+)
 from app.db import get_session
 from app.integrations.douyin import (
     DEFAULT_DOUYIN_SECRET_REF,
@@ -21,10 +27,9 @@ from app.integrations.douyin import (
     create_js_signature,
     exchange_douyin_access_token,
     fetch_douyin_user_info,
-    fetch_douyin_video_list,
     get_douyin_jsb_ticket,
     normalize_douyin_user_profile,
-    normalize_douyin_video_metrics,
+    refresh_douyin_access_token,
     resolve_douyin_account_token_ref,
     resolve_secret_ref,
 )
@@ -32,7 +37,6 @@ from app.models import (
     Account,
     AccountGroup,
     Event,
-    MetricSnapshot,
     PlatformAccountAuth,
     PlatformIntegration,
     Project,
@@ -74,6 +78,7 @@ DOUYIN_DEFAULT_CAPABILITIES = {
 
 DEFAULT_DOUYIN_SCOPES = ["user_info"]
 DOUYIN_TRIAL_WHITELIST_SCOPE = "trial.whitelist"
+DOUYIN_TRIAL_WHITELIST_SCOPES = [DOUYIN_TRIAL_WHITELIST_SCOPE, "user_info"]
 
 
 def _default_capabilities(platform: Platform) -> dict[str, str]:
@@ -142,12 +147,12 @@ def _to_out(row: PlatformIntegration) -> PlatformIntegrationOut:
 
 @router.get("/platform-integrations", response_model=list[PlatformIntegrationOut])
 async def list_platform_integrations(
-    user: CurrentUser, session: SessionDep
+    admin: AdminUser, session: SessionDep
 ) -> list[PlatformIntegrationOut]:
     rows = (
         await session.scalars(
             select(PlatformIntegration)
-            .where(PlatformIntegration.org_id == user.org_id)
+            .where(PlatformIntegration.org_id == admin.org_id)
             .order_by(PlatformIntegration.platform)
         )
     ).all()
@@ -361,11 +366,11 @@ async def _get_or_create_douyin_scan_account(
 
 @router.get("/platform-integrations/{platform}", response_model=PlatformIntegrationOut)
 async def get_platform_integration(
-    platform: Annotated[Platform, Path()], user: CurrentUser, session: SessionDep
+    platform: Annotated[Platform, Path()], admin: AdminUser, session: SessionDep
 ) -> PlatformIntegrationOut:
     row = await session.scalar(
         select(PlatformIntegration).where(
-            PlatformIntegration.org_id == user.org_id,
+            PlatformIntegration.org_id == admin.org_id,
             PlatformIntegration.platform == platform.value,
         )
     )
@@ -441,12 +446,12 @@ async def upsert_platform_integration(
 )
 async def create_douyin_oauth_authorize_url(
     body: DouyinAuthorizeRequest,
-    user: CurrentUser,
+    admin: AdminUser,
     session: SessionDep,
 ) -> DouyinAuthorizeOut:
-    integration = await _get_integration_or_404(session, user.org_id, Platform.DOUYIN)
+    integration = await _get_integration_or_404(session, admin.org_id, Platform.DOUYIN)
     _require_douyin_app(integration)
-    account = await _get_owned_douyin_account(session, body.account_id, user.org_id)
+    account = await _get_owned_douyin_account(session, body.account_id, admin.org_id)
     redirect_uri = integration.redirect_uri
     if not redirect_uri:
         raise HTTPException(
@@ -454,7 +459,7 @@ async def create_douyin_oauth_authorize_url(
             detail="redirect_uri is required",
         )
     scopes = integration.scopes or DEFAULT_DOUYIN_SCOPES
-    state = _create_oauth_state(org_id=user.org_id, account_id=account.id)
+    state = _create_oauth_state(org_id=admin.org_id, account_id=account.id)
     return DouyinAuthorizeOut(
         platform=Platform.DOUYIN,
         client_key=integration.client_key or "",
@@ -530,17 +535,23 @@ async def create_douyin_trial_whitelist_authorize_url(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="redirect_uri is required",
         )
+    state = _create_oauth_state(
+        org_id=admin.org_id,
+        account_id=None,
+        flow="trial_whitelist",
+        initiated_by=admin.id,
+    )
     authorization_url = build_douyin_authorization_url(
         client_key=integration.client_key or "",
         redirect_uri=redirect_uri,
-        scopes=[DOUYIN_TRIAL_WHITELIST_SCOPE],
-        state="",
-    ).replace("&state=", "")
+        scopes=DOUYIN_TRIAL_WHITELIST_SCOPES,
+        state=state,
+    )
     return DouyinTrialWhitelistOut(
         platform=Platform.DOUYIN,
         client_key=integration.client_key or "",
         redirect_uri=redirect_uri,
-        scopes=[DOUYIN_TRIAL_WHITELIST_SCOPE],
+        scopes=DOUYIN_TRIAL_WHITELIST_SCOPES,
         authorization_url=authorization_url,
     )
 
@@ -552,9 +563,111 @@ async def create_douyin_trial_whitelist_authorize_url(
 async def handle_douyin_oauth_callback(
     session: SessionDep,
     code: Annotated[str, Query(min_length=1)],
-    state: Annotated[str, Query(min_length=1)],
-) -> DouyinOAuthCallbackOut:
-    return await _complete_douyin_oauth(session=session, code=code, state=state)
+    state: Annotated[str | None, Query()] = None,
+    scopes: Annotated[str | None, Query()] = None,
+) -> DouyinOAuthCallbackOut | HTMLResponse:
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="state is required for account authorization",
+        )
+    payload = _decode_oauth_state(state)
+    if payload.get("flow") == "trial_whitelist":
+        await _complete_douyin_trial_whitelist(
+            session=session,
+            code=code,
+            payload=payload,
+        )
+        return _trial_whitelist_completed_page()
+    await _complete_douyin_oauth(session=session, code=code, state=state)
+    return _account_authorization_completed_page(flow=str(payload.get("flow") or ""))
+
+
+def _trial_whitelist_completed_page() -> HTMLResponse:
+    return HTMLResponse(
+        content="""<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>测试白名单已完成</title></head>
+<body style="margin:0;font-family:system-ui,sans-serif;background:#f7f7f7;color:#111">
+<main style="max-width:520px;margin:15vh auto;padding:32px;background:#fff;
+border:1px solid #ddd;border-radius:18px">
+<h1 style="font-size:24px;margin:0 0 12px">测试白名单已完成</h1>
+<p style="line-height:1.7;margin:0">
+这个步骤只添加测试资格，不会创建账号。现在可以关闭页面，回到同舟行的“账号矩阵”，
+点击“添加账号”进行正式扫码授权。
+</p>
+</main></body></html>""",
+        status_code=status.HTTP_200_OK,
+    )
+
+
+def _account_authorization_completed_page(*, flow: str) -> HTMLResponse:
+    title = "抖音账号添加成功" if flow == "scan_add" else "抖音账号授权成功"
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title></head>
+<body style="margin:0;font-family:system-ui,sans-serif;background:#f7f7f7;color:#111">
+<main style="max-width:520px;margin:15vh auto;padding:32px;background:#fff;
+border:1px solid #ddd;border-radius:18px">
+<h1 style="font-size:24px;margin:0 0 12px">{title}</h1>
+<p style="line-height:1.7;margin:0 0 24px">
+账号已完成官方授权并进入账号矩阵。现在可以关闭这个页面，返回同舟行继续操作。
+</p>
+<a href="/accounts" style="display:inline-block;padding:12px 18px;border-radius:12px;
+background:#111;color:#fff;text-decoration:none">返回账号矩阵</a>
+</main></body></html>""",
+        status_code=status.HTTP_200_OK,
+    )
+
+
+async def _complete_douyin_trial_whitelist(
+    *,
+    session: AsyncSession,
+    code: str,
+    payload: dict,
+) -> None:
+    org_id = int(payload["org_id"])
+    integration = await _get_integration_or_404(session, org_id, Platform.DOUYIN)
+    _require_douyin_app(integration)
+    try:
+        token_data = await exchange_douyin_access_token(
+            client_key=integration.client_key or "",
+            client_secret=_resolve_client_secret(integration),
+            code=code,
+        )
+    except DouyinIntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    external_open_id = str(token_data.get("open_id") or token_data.get("openid") or "")
+    granted_scopes = _parse_scopes(token_data.get("scope"))
+    missing_scopes = set(DOUYIN_TRIAL_WHITELIST_SCOPES) - set(granted_scopes)
+    if not external_open_id:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Douyin response missing open_id",
+        )
+    if missing_scopes:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Douyin response missing scopes: {','.join(sorted(missing_scopes))}",
+        )
+
+    session.add(
+        Event(
+            type="platform.douyin.trial_whitelist.authorized",
+            payload={
+                "platform": Platform.DOUYIN.value,
+                "org_id": org_id,
+                "external_open_id": external_open_id,
+                "scopes": granted_scopes,
+                "initiated_by": payload.get("initiated_by"),
+            },
+        )
+    )
+    await session.commit()
 
 
 @router.post(
@@ -616,6 +729,13 @@ async def _complete_douyin_oauth(
             detail="Douyin response missing open_id",
         )
     scopes = _parse_scopes(token_data.get("scope")) or integration.scopes or DEFAULT_DOUYIN_SCOPES
+    access_token = str(token_data.get("access_token") or "")
+    refresh_token = str(token_data.get("refresh_token") or "")
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Douyin response missing access_token",
+        )
     if flow == "scan_add":
         await _validate_group(session, payload.get("group_id"), org_id)
         await _validate_project(session, payload.get("project_id"), org_id)
@@ -646,7 +766,27 @@ async def _complete_douyin_oauth(
         scopes=scopes,
         expires_in=int(token_data.get("expires_in") or 0),
         refresh_expires_in=int(token_data.get("refresh_expires_in") or 0),
+        access_token=access_token,
+        refresh_token=refresh_token or None,
     )
+    if "user_info" in scopes:
+        try:
+            profile = await fetch_douyin_user_info(
+                access_token=access_token,
+                open_id=external_open_id,
+            )
+        except DouyinIntegrationError as exc:
+            auth.last_error = f"Profile sync pending: {exc}"
+        else:
+            normalized_profile = normalize_douyin_user_profile(profile)
+            auth.raw_profile = normalized_profile["raw_profile"]
+            auth.union_id = normalized_profile.get("union_id") or auth.union_id
+            if normalized_profile.get("nickname"):
+                account.nickname = str(normalized_profile["nickname"])
+            account.auth = {
+                **(account.auth or {}),
+                "avatar": normalized_profile.get("avatar"),
+            }
     session.add(
         Event(
             type="platform.douyin.oauth.authorized",
@@ -683,6 +823,8 @@ async def _upsert_platform_account_auth(
     scopes: list[str],
     expires_in: int,
     refresh_expires_in: int,
+    access_token: str,
+    refresh_token: str | None,
 ) -> PlatformAccountAuth:
     row = None
     row = await session.scalar(
@@ -701,8 +843,18 @@ async def _upsert_platform_account_auth(
     row.auth_status = "authorized"
     row.data_sync_status = "pending"
     row.scopes = scopes
-    row.token_secret_ref = f"vault://dyflow/douyin/accounts/{external_open_id}/access-token"
-    row.refresh_secret_ref = f"vault://dyflow/douyin/accounts/{external_open_id}/refresh-token"
+    try:
+        row.access_token_encrypted = encrypt_credential(access_token)
+        row.refresh_token_encrypted = (
+            encrypt_credential(refresh_token) if refresh_token else None
+        )
+    except CredentialEncryptionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    row.token_secret_ref = None
+    row.refresh_secret_ref = None
     row.token_expires_at = now + timedelta(seconds=expires_in) if expires_in > 0 else None
     row.refresh_expires_at = (
         now + timedelta(seconds=refresh_expires_in) if refresh_expires_in > 0 else None
@@ -747,19 +899,23 @@ async def create_douyin_js_signature(
 )
 async def sync_douyin_account_metrics(
     account_id: int,
-    user: CurrentUser,
+    admin: AdminUser,
     session: SessionDep,
 ) -> DouyinDataSyncOut:
-    account = await _get_owned_douyin_account(session, account_id, user.org_id)
-    auth = await _get_douyin_account_auth_or_conflict(session, account.id, user.org_id)
+    account = await _get_owned_douyin_account(session, account_id, admin.org_id)
+    auth = await _get_douyin_account_auth_or_conflict(session, account.id, admin.org_id)
     if auth.auth_status != "authorized" or not auth.external_open_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Douyin account is not authorized",
         )
     try:
-        access_token = resolve_douyin_account_token_ref(auth.token_secret_ref)
-    except SecretNotConfiguredError as exc:
+        access_token = await _resolve_douyin_sync_access_token(
+            session=session,
+            auth=auth,
+            org_id=admin.org_id,
+        )
+    except (CredentialEncryptionError, SecretNotConfiguredError, DouyinIntegrationError) as exc:
         auth.data_sync_status = "failed"
         auth.last_error = str(exc)
         await session.commit()
@@ -772,12 +928,6 @@ async def sync_douyin_account_metrics(
             access_token=access_token,
             open_id=auth.external_open_id,
         )
-        video_list = await fetch_douyin_video_list(
-            access_token=access_token,
-            open_id=auth.external_open_id,
-            cursor=0,
-            count=20,
-        )
     except DouyinIntegrationError as exc:
         auth.data_sync_status = "failed"
         auth.last_error = str(exc)
@@ -788,31 +938,30 @@ async def sync_douyin_account_metrics(
     auth.raw_profile = normalized_profile["raw_profile"]
     auth.union_id = normalized_profile.get("union_id") or auth.union_id
     account.external_account_id = auth.external_open_id
+    if normalized_profile.get("nickname"):
+        account.nickname = str(normalized_profile["nickname"])
     account.auth = {
         **(account.auth or {}),
+        "avatar": normalized_profile.get("avatar"),
         "integration_status": "connected",
         "auth_status": "authorized",
-        "data_sync_status": "healthy",
+        "data_sync_status": "pending",
+        "metrics_sync_mode": "posting_task_required",
+        "metrics_sync_note": "抖音作品列表接口已下线，作品数据需通过投稿任务回收。",
     }
 
-    videos = video_list.get("list") if isinstance(video_list.get("list"), list) else []
-    snapshot_payloads = normalize_douyin_video_metrics(videos, account_id=account.id)
-    for payload in snapshot_payloads:
-        metric_payload = dict(payload)
-        metric_payload.pop("external_item_id", None)
-        session.add(MetricSnapshot(org_id=user.org_id, **metric_payload))
-
     now = datetime.now(UTC)
-    auth.data_sync_status = "healthy"
+    auth.data_sync_status = "pending"
     auth.last_sync_at = now
     session.add(
         Event(
-            type="platform.douyin.metrics.synced",
+            type="platform.douyin.profile.synced",
             payload={
                 "platform": Platform.DOUYIN.value,
                 "account_id": account.id,
-                "video_count": len(videos),
-                "snapshot_count": len(snapshot_payloads),
+                "video_count": 0,
+                "snapshot_count": 0,
+                "metrics_sync_mode": "posting_task_required",
             },
         )
     )
@@ -823,10 +972,59 @@ async def sync_douyin_account_metrics(
         platform=Platform.DOUYIN,
         data_sync_status=auth.data_sync_status,
         profile_synced=bool(profile),
-        video_count=len(videos),
-        snapshot_count=len(snapshot_payloads),
+        video_count=0,
+        snapshot_count=0,
         last_sync_at=auth.last_sync_at or now,
     )
+
+
+async def _resolve_douyin_sync_access_token(
+    *,
+    session: AsyncSession,
+    auth: PlatformAccountAuth,
+    org_id: int,
+) -> str:
+    if auth.access_token_encrypted:
+        access_token = decrypt_credential(auth.access_token_encrypted)
+    else:
+        access_token = resolve_douyin_account_token_ref(auth.token_secret_ref)
+
+    if not _credential_expires_soon(auth.token_expires_at):
+        return access_token
+    if not auth.refresh_token_encrypted:
+        raise SecretNotConfiguredError("Douyin refresh token is not configured")
+    if auth.refresh_expires_at and _credential_expires_soon(auth.refresh_expires_at, seconds=0):
+        auth.auth_status = "expired"
+        raise SecretNotConfiguredError("Douyin refresh token has expired; authorize again")
+
+    integration = await _get_integration_or_404(session, org_id, Platform.DOUYIN)
+    _require_douyin_app(integration)
+    refresh_token = decrypt_credential(auth.refresh_token_encrypted)
+    token_data = await refresh_douyin_access_token(
+        client_key=integration.client_key or "",
+        refresh_token=refresh_token,
+    )
+    new_access_token = str(token_data.get("access_token") or "")
+    if not new_access_token:
+        raise DouyinIntegrationError("Douyin response missing access_token")
+    new_refresh_token = str(token_data.get("refresh_token") or refresh_token)
+    now = datetime.now(UTC)
+    expires_in = int(token_data.get("expires_in") or 0)
+    refresh_expires_in = int(token_data.get("refresh_expires_in") or 0)
+    auth.access_token_encrypted = encrypt_credential(new_access_token)
+    auth.refresh_token_encrypted = encrypt_credential(new_refresh_token)
+    auth.token_expires_at = now + timedelta(seconds=expires_in) if expires_in > 0 else None
+    if refresh_expires_in > 0:
+        auth.refresh_expires_at = now + timedelta(seconds=refresh_expires_in)
+    auth.auth_status = "authorized"
+    return new_access_token
+
+
+def _credential_expires_soon(value: datetime | None, *, seconds: int = 300) -> bool:
+    if value is None:
+        return False
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return normalized <= datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 async def _get_douyin_account_auth_or_conflict(

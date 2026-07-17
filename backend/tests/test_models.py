@@ -16,6 +16,8 @@ from app.models import (
     Account,
     AccountGroup,
     AgentTask,
+    Client,
+    ClientMembership,
     ContentItem,
     Deliverable,
     Event,
@@ -29,6 +31,7 @@ from app.models.enums import (
     GateType,
     Platform,
     UserRole,
+    WorkspaceRole,
 )
 
 
@@ -128,3 +131,32 @@ def test_task_event_gate(session: Session) -> None:
     assert session.scalar(select(Event)).type == "content.created"
     assert session.scalar(select(GateApproval)).status.value == "pending"
     assert session.scalar(select(Event)).created_at is not None
+
+
+def test_client_project_account_and_membership_graph(session: Session) -> None:
+    org = Org(name="同舟行")
+    user = User(
+        org=org,
+        email="operator@example.com",
+        hashed_password="x",
+        display_name="运营",
+    )
+    client = Client(org=org, name="云帆科技")
+    project = Project(org=org, client=client, name="品牌增长")
+    account = Account(
+        org=org,
+        client=client,
+        platform=Platform.DOUYIN,
+        nickname="阿燊",
+    )
+    project.accounts.append(account)
+    client.memberships.append(
+        ClientMembership(user=user, role=WorkspaceRole.OPERATOR)
+    )
+    session.add(org)
+    session.commit()
+
+    assert project.client_id == client.id
+    assert account.client_id == client.id
+    assert project.accounts == [account]
+    assert client.memberships[0].role == WorkspaceRole.OPERATOR

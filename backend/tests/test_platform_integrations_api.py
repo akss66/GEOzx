@@ -1,9 +1,12 @@
 """Platform integration API tests."""
 
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 from sqlalchemy import select
 
-from app.models import Account, Event, MetricSnapshot, PlatformAccountAuth, PlatformIntegration
+from app.core.credential_crypto import decrypt_credential, encrypt_credential
+from app.models import Account, Event, PlatformAccountAuth, PlatformIntegration
 from app.models.enums import Platform
 
 DEFAULT_DOUYIN_SECRET_REF = "vault://dyflow/douyin/client-secret"
@@ -87,17 +90,14 @@ async def test_complete_platform_config_auto_promotes_status(client, admin):
 
 
 @pytest.mark.asyncio
-async def test_member_can_list_but_not_configure_platform_integrations(client, member):
+async def test_member_cannot_read_or_configure_platform_integrations(client, member):
     token = await _token(client, "user@test.com", "user-pw-123")
     headers = _auth(token)
 
     listing = await client.get("/platform-integrations", headers=headers)
-    assert listing.status_code == 200
-    assert {row["platform"] for row in listing.json()} == {
-        "douyin",
-        "xiaohongshu",
-        "shipinhao",
-    }
+    detail = await client.get("/platform-integrations/douyin", headers=headers)
+    assert listing.status_code == 403
+    assert detail.status_code == 403
 
     resp = await client.patch(
         "/platform-integrations/douyin",
@@ -105,6 +105,43 @@ async def test_member_can_list_but_not_configure_platform_integrations(client, m
         json={"status": "configured", "client_key": "nope"},
     )
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_member_cannot_authorize_or_sync_douyin_account(client, admin, member):
+    admin_token = await _token(client, "admin@test.com", "admin-pw-123")
+    admin_headers = _auth(admin_token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=admin_headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://console.example.com/douyin/callback",
+        },
+    )
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=admin_headers,
+            json={"nickname": "管理员账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    member_token = await _token(client, "user@test.com", "user-pw-123")
+    member_headers = _auth(member_token)
+
+    authorize = await client.post(
+        "/platform-integrations/douyin/oauth/authorize",
+        headers=member_headers,
+        json={"account_id": account_id},
+    )
+    sync = await client.post(
+        f"/platform-integrations/douyin/accounts/{account_id}/sync-metrics",
+        headers=member_headers,
+    )
+
+    assert authorize.status_code == 403
+    assert sync.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -146,7 +183,7 @@ async def test_douyin_authorize_url_uses_configured_app_and_signed_state(client,
 
 
 @pytest.mark.asyncio
-async def test_douyin_trial_whitelist_url_uses_template_scope(client, admin):
+async def test_douyin_trial_whitelist_url_includes_required_user_info_scope(client, admin):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     await client.patch(
@@ -166,17 +203,72 @@ async def test_douyin_trial_whitelist_url_uses_template_scope(client, admin):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["scopes"] == ["trial.whitelist"]
+    assert body["scopes"] == ["trial.whitelist", "user_info"]
     assert body["authorization_url"].startswith(
         "https://open.douyin.com/platform/oauth/connect/?"
     )
     assert "client_key=douyin-client-key" in body["authorization_url"]
-    assert "scope=trial.whitelist" in body["authorization_url"]
+    assert "scope=trial.whitelist%2Cuser_info" in body["authorization_url"]
     assert "redirect_uri=https%3A%2F%2Fconsole.example.com%2Fdouyin%2Fcallback" in body[
         "authorization_url"
     ]
-    assert "state=" not in body["authorization_url"]
+    query = parse_qs(urlparse(body["authorization_url"]).query)
+    assert query["state"][0]
     assert "client_secret" not in body["authorization_url"]
+
+
+@pytest.mark.asyncio
+async def test_douyin_trial_whitelist_callback_exchanges_code(client, admin, session, monkeypatch):
+    from app.api import platform_integrations as api_module
+
+    async def fake_exchange(*, client_key, client_secret, code):
+        assert client_key == "douyin-client-key"
+        assert client_secret == "secret-from-env"
+        assert code == "trial-code"
+        return {
+            "open_id": "trial-open-id",
+            "scope": "user_info,trial.whitelist",
+            "access_token": "trial-access-token",
+            "refresh_token": "trial-refresh-token",
+        }
+
+    monkeypatch.setenv("DOUYIN_CLIENT_SECRET", "secret-from-env")
+    monkeypatch.setattr(api_module, "exchange_douyin_access_token", fake_exchange)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://console.example.com/douyin/callback",
+        },
+    )
+    authorize = await client.post(
+        "/platform-integrations/douyin/oauth/trial-whitelist",
+        headers=headers,
+    )
+    state = parse_qs(urlparse(authorize.json()["authorization_url"]).query)["state"][0]
+
+    response = await client.get(
+        "/platform-integrations/douyin/oauth/callback",
+        params={
+            "code": "trial-code",
+            "state": state,
+            "scopes": "user_info,trial.whitelist",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "测试白名单已完成" in response.text
+    event = await session.scalar(
+        select(Event).where(Event.type == "platform.douyin.trial_whitelist.authorized")
+    )
+    assert event is not None
+    assert event.payload["external_open_id"] == "trial-open-id"
+    assert event.payload["scopes"] == ["user_info", "trial.whitelist"]
 
 
 @pytest.mark.asyncio
@@ -199,8 +291,24 @@ async def test_douyin_oauth_callback_stores_account_auth_without_token_leak(
             "refresh_token": "never-return-this-either",
         }
 
+    async def fake_user_info(*, access_token, open_id):
+        assert access_token == "never-return-this"
+        assert open_id == "open-id-1"
+        return {
+            "open_id": "open-id-1",
+            "union_id": "union-id-1",
+            "nickname": "Real Douyin nickname",
+            "avatar": "https://example.com/douyin-avatar.png",
+        }
+
     monkeypatch.setenv("DOUYIN_CLIENT_SECRET", "secret-from-env")
+    monkeypatch.setattr(
+        api_module.settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
     monkeypatch.setattr(api_module, "exchange_douyin_access_token", fake_exchange)
+    monkeypatch.setattr(api_module, "fetch_douyin_user_info", fake_user_info)
 
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
@@ -236,20 +344,29 @@ async def test_douyin_oauth_callback_stores_account_auth_without_token_leak(
     )
 
     assert callback.status_code == 200
-    body = callback.json()
-    assert body["account_id"] == account_id
-    assert body["external_open_id"] == "open-id-1"
-    assert body["auth_status"] == "authorized"
-    assert body["token_configured"] is True
-    assert "access_token" not in body
+    assert callback.headers["content-type"].startswith("text/html")
+    assert "抖音账号授权成功" in callback.text
+    assert "返回账号矩阵" in callback.text
+    assert "never-return-this" not in callback.text
 
     auth = await session.scalar(
         select(PlatformAccountAuth).where(PlatformAccountAuth.account_id == account_id)
     )
     assert auth is not None
-    assert auth.token_secret_ref == "vault://dyflow/douyin/accounts/open-id-1/access-token"
-    assert auth.refresh_secret_ref == "vault://dyflow/douyin/accounts/open-id-1/refresh-token"
-    assert auth.raw_profile == {"open_id": "open-id-1", "union_id": "union-id-1"}
+    assert auth.token_secret_ref is None
+    assert auth.refresh_secret_ref is None
+    assert auth.access_token_encrypted is not None
+    assert auth.refresh_token_encrypted is not None
+    assert "never-return-this" not in auth.access_token_encrypted
+    assert "never-return-this-either" not in auth.refresh_token_encrypted
+    assert decrypt_credential(auth.access_token_encrypted) == "never-return-this"
+    assert decrypt_credential(auth.refresh_token_encrypted) == "never-return-this-either"
+    assert auth.raw_profile["nickname"] == "Real Douyin nickname"
+
+    account = await session.get(Account, account_id)
+    assert account is not None
+    assert account.nickname == "Real Douyin nickname"
+    assert account.auth["avatar"] == "https://example.com/douyin-avatar.png"
 
 
 @pytest.mark.asyncio
@@ -268,10 +385,22 @@ async def test_douyin_scan_add_oauth_callback_creates_matrix_account(
             "scope": "user_info",
             "expires_in": 7200,
             "refresh_expires_in": 86400,
+            "access_token": "scan-access-token",
+            "refresh_token": "scan-refresh-token",
         }
 
+    async def fake_user_info(*, access_token, open_id):
+        assert access_token == "scan-access-token"
+        return {"open_id": open_id}
+
     monkeypatch.setenv("DOUYIN_CLIENT_SECRET", "secret-from-env")
+    monkeypatch.setattr(
+        api_module.settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
     monkeypatch.setattr(api_module, "exchange_douyin_access_token", fake_exchange)
+    monkeypatch.setattr(api_module, "fetch_douyin_user_info", fake_user_info)
 
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
@@ -300,10 +429,10 @@ async def test_douyin_scan_add_oauth_callback_creates_matrix_account(
     )
 
     assert callback.status_code == 200
-    body = callback.json()
-    assert body["external_open_id"] == "scan-open-id-1"
-    assert body["auth_status"] == "authorized"
-    assert body["token_configured"] is True
+    assert callback.headers["content-type"].startswith("text/html")
+    assert "抖音账号添加成功" in callback.text
+    assert "返回账号矩阵" in callback.text
+    assert "scan-access-token" not in callback.text
 
     account = await session.scalar(
         select(Account).where(Account.external_account_id == "scan-open-id-1")
@@ -314,7 +443,12 @@ async def test_douyin_scan_add_oauth_callback_creates_matrix_account(
     assert account.integration_status == "connected"
     assert account.auth_status == "authorized"
     assert account.data_sync_status == "pending"
-    assert body["account_id"] == account.id
+    auth = await session.scalar(
+        select(PlatformAccountAuth).where(PlatformAccountAuth.account_id == account.id)
+    )
+    assert auth is not None
+    assert auth.auth_status == "authorized"
+    assert auth.token_configured is True
 
 
 @pytest.mark.asyncio
@@ -378,11 +512,23 @@ async def test_douyin_worker_complete_creates_scan_account_with_bridge_secret(
             "scope": "user_info",
             "expires_in": 7200,
             "refresh_expires_in": 86400,
+            "access_token": "worker-access-token",
+            "refresh_token": "worker-refresh-token",
         }
+
+    async def fake_user_info(*, access_token, open_id):
+        assert access_token == "worker-access-token"
+        return {"open_id": open_id}
 
     monkeypatch.setenv("DOUYIN_CLIENT_SECRET", "secret-from-env")
     monkeypatch.setattr(api_module.settings, "douyin_oauth_worker_secret", "bridge-secret")
+    monkeypatch.setattr(
+        api_module.settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
     monkeypatch.setattr(api_module, "exchange_douyin_access_token", fake_exchange)
+    monkeypatch.setattr(api_module, "fetch_douyin_user_info", fake_user_info)
 
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
@@ -467,7 +613,9 @@ async def test_douyin_js_signature_uses_server_side_ticket(client, admin, monkey
 
 
 @pytest.mark.asyncio
-async def test_account_integration_update_syncs_formal_account_auth(client, admin, session):
+async def test_manual_account_integration_update_syncs_formal_account_auth(
+    client, admin, session
+):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     account_id = (
@@ -486,9 +634,9 @@ async def test_account_integration_update_syncs_formal_account_auth(client, admi
         f"/accounts/{account_id}/integration",
         headers=headers,
         json={
-            "integration_status": "connected",
-            "auth_status": "authorized",
-            "data_sync_status": "healthy",
+            "integration_status": "manual",
+            "auth_status": "manual",
+            "data_sync_status": "manual",
         },
     )
 
@@ -499,12 +647,12 @@ async def test_account_integration_update_syncs_formal_account_auth(client, admi
     assert auth is not None
     assert auth.platform == "douyin"
     assert auth.external_open_id == "open-id-1"
-    assert auth.auth_status == "authorized"
-    assert auth.data_sync_status == "healthy"
+    assert auth.auth_status == "manual"
+    assert auth.data_sync_status == "manual"
 
 
 @pytest.mark.asyncio
-async def test_douyin_sync_metrics_fetches_profile_and_writes_snapshots(
+async def test_douyin_sync_updates_profile_without_calling_retired_video_list(
     client, admin, session, monkeypatch
 ):
     from app.api import platform_integrations as api_module
@@ -519,31 +667,21 @@ async def test_douyin_sync_metrics_fetches_profile_and_writes_snapshots(
             "avatar": "https://example.com/avatar.png",
         }
 
-    async def fake_video_list(*, access_token, open_id, cursor=0, count=20):
-        assert access_token == "access-token-from-env"
-        assert open_id == "open-id-1"
-        return {
-            "list": [
-                {
-                    "item_id": "video-1",
-                    "title": "从一句话，到一整套执行",
-                    "create_time": 1783339200,
-                    "statistics": {
-                        "play_count": 1000,
-                        "digg_count": 80,
-                        "comment_count": 25,
-                        "share_count": 10,
-                    },
-                }
-            ]
-        }
+    async def retired_video_list_must_not_run(**kwargs):
+        raise AssertionError("retired /video/list endpoint must not be called")
 
-    monkeypatch.setenv(
-        "DYFLOW_VAULT_DYFLOW_DOUYIN_ACCOUNTS_OPEN_ID_1_ACCESS_TOKEN",
-        "access-token-from-env",
+    monkeypatch.setattr(
+        api_module.settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
     )
     monkeypatch.setattr(api_module, "fetch_douyin_user_info", fake_user_info)
-    monkeypatch.setattr(api_module, "fetch_douyin_video_list", fake_video_list)
+    monkeypatch.setattr(
+        api_module,
+        "fetch_douyin_video_list",
+        retired_video_list_must_not_run,
+        raising=False,
+    )
 
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
@@ -562,8 +700,8 @@ async def test_douyin_sync_metrics_fetches_profile_and_writes_snapshots(
         union_id="union-id-1",
         auth_status="authorized",
         data_sync_status="pending",
-        scopes=["user_info", "video.list"],
-        token_secret_ref="vault://dyflow/douyin/accounts/open-id-1/access-token",
+        scopes=["user_info"],
+        access_token_encrypted=encrypt_credential("access-token-from-env"),
     )
     session.add(auth)
     await session.commit()
@@ -577,26 +715,99 @@ async def test_douyin_sync_metrics_fetches_profile_and_writes_snapshots(
     body = resp.json()
     assert body["account_id"] == account["id"]
     assert body["platform"] == "douyin"
-    assert body["data_sync_status"] == "healthy"
+    assert body["data_sync_status"] == "pending"
     assert body["profile_synced"] is True
-    assert body["video_count"] == 1
-    assert body["snapshot_count"] == 1
+    assert body["video_count"] == 0
+    assert body["snapshot_count"] == 0
 
     await session.refresh(auth)
-    assert auth.data_sync_status == "healthy"
+    assert auth.data_sync_status == "pending"
     assert auth.raw_profile["nickname"] == "同舟行测试号"
     assert auth.last_sync_at is not None
+    refreshed_account = await session.get(Account, account["id"])
+    assert refreshed_account is not None
+    assert refreshed_account.auth["metrics_sync_mode"] == "posting_task_required"
 
-    snapshots = (
-        await session.scalars(
-            select(MetricSnapshot).where(MetricSnapshot.account_id == account["id"])
+
+@pytest.mark.asyncio
+async def test_douyin_sync_refreshes_expired_encrypted_access_token(
+    client, admin, session, monkeypatch
+):
+    from datetime import UTC, datetime, timedelta
+
+    from app.api import platform_integrations as api_module
+
+    async def fake_refresh(*, client_key, refresh_token):
+        assert client_key == "douyin-client-key"
+        assert refresh_token == "old-refresh-token"
+        return {
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_in": 7200,
+            "refresh_expires_in": 86400,
+        }
+
+    async def fake_user_info(*, access_token, open_id):
+        assert access_token == "new-access-token"
+        return {"open_id": open_id, "nickname": "Refreshed account"}
+
+    monkeypatch.setattr(
+        api_module.settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    monkeypatch.setattr(api_module, "refresh_douyin_access_token", fake_refresh)
+    monkeypatch.setattr(api_module, "fetch_douyin_user_info", fake_user_info)
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "client_secret_ref": DEFAULT_DOUYIN_SECRET_REF,
+            "redirect_uri": "https://tzxai.top/platform-integrations/douyin/oauth/callback",
+        },
+    )
+    account = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "Expired token account", "platform": "douyin"},
         )
-    ).all()
-    assert len(snapshots) == 1
-    assert snapshots[0].source == "douyin"
-    assert snapshots[0].title == "从一句话，到一整套执行"
-    assert snapshots[0].play == 1000
-    assert snapshots[0].like_rate == 0.08
+    ).json()
+    auth = PlatformAccountAuth(
+        org_id=admin.org_id,
+        account_id=account["id"],
+        platform="douyin",
+        external_open_id="open-id-refresh",
+        auth_status="authorized",
+        data_sync_status="pending",
+        scopes=["user_info"],
+        access_token_encrypted=encrypt_credential("old-access-token"),
+        refresh_token_encrypted=encrypt_credential("old-refresh-token"),
+        token_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        refresh_expires_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    session.add(auth)
+    await session.commit()
+
+    resp = await client.post(
+        f"/platform-integrations/douyin/accounts/{account['id']}/sync-metrics",
+        headers=headers,
+    )
+
+    assert resp.status_code == 200
+    await session.refresh(auth)
+    assert decrypt_credential(auth.access_token_encrypted) == "new-access-token"
+    assert decrypt_credential(auth.refresh_token_encrypted) == "new-refresh-token"
+    token_expires_at = auth.token_expires_at
+    assert token_expires_at is not None
+    if token_expires_at.tzinfo is None:
+        token_expires_at = token_expires_at.replace(tzinfo=UTC)
+    assert token_expires_at > datetime.now(UTC)
 
 
 @pytest.mark.asyncio

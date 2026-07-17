@@ -1,12 +1,20 @@
 import {
+  AppstoreOutlined,
+  ApartmentOutlined,
   CheckCircleFilled,
+  CheckOutlined,
   ClockCircleFilled,
   ExclamationCircleFilled,
+  FolderOpenOutlined,
   LinkOutlined,
+  PauseOutlined,
   PlusOutlined,
   QrcodeOutlined,
   SettingOutlined,
   SyncOutlined,
+  TableOutlined,
+  TeamOutlined,
+  UngroupOutlined,
 } from "@ant-design/icons";
 import {
   App as AntApp,
@@ -16,6 +24,8 @@ import {
   Input,
   Modal,
   QRCode,
+  Radio,
+  Segmented,
   Space,
   Select,
   Table,
@@ -26,6 +36,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import {
+  batchUpdateAccounts,
   createAccount,
   createAccountGroup,
   createDouyinAuthorizeUrl,
@@ -40,9 +51,23 @@ import {
   updateAccountIntegration,
   updatePlatformIntegration,
 } from "../api/workspace";
-import { PageHeader, Panel } from "../components/ui";
+import { presentApiError } from "../api/errors";
+import { OperationalState, PageHeader, Panel } from "../components/ui";
+import {
+  AccountCardsView,
+  AccountProjectsView,
+  AccountSummaryStrip,
+} from "../components/accounts/AccountViews";
+import { getAccountActionMode } from "../components/accounts/accountActionMode";
 import { useAuth } from "../stores/auth";
+import {
+  loadAccountMatrixPreferences,
+  saveAccountMatrixPreferences,
+  type AccountMatrixView,
+} from "../stores/accountMatrixPreferences";
+import { useCurrentWorkspace } from "../stores/currentWorkspace";
 import { PLATFORM_COLORS } from "../theme/tokens";
+import "../styles/accounts-v2.css";
 import type {
   Account,
   AccountGroup,
@@ -108,7 +133,16 @@ const PLATFORM_INTEGRATION_LABEL: Record<PlatformIntegrationStatus, string> = {
   disabled: "停用",
 };
 
+const PUBLISH_CAPABILITY_LABEL = {
+  prepare_only: "可准备发布包",
+  manual_only: "人工发布",
+  unavailable: "暂不可用",
+} as const;
+
 const DEFAULT_DOUYIN_SECRET_REF = "vault://dyflow/douyin/client-secret";
+const DEFAULT_DOUYIN_REDIRECT_URI =
+  "https://tzxai.top/platform-integrations/douyin/oauth/callback";
+const DEFAULT_DOUYIN_JS_SDK_DOMAIN = "tzxai.top";
 
 const PLATFORM_DEFAULT_STATUS: Record<Platform, PlatformMatrixSummary> = {
   douyin: {
@@ -140,6 +174,7 @@ const PLATFORM_DEFAULT_STATUS: Record<Platform, PlatformMatrixSummary> = {
 interface AccountFormValues {
   nickname?: string;
   platform: Platform;
+  douyin_add_mode?: "scan" | "manual";
   group_id?: number;
   project_id?: number;
   external_account_id?: string;
@@ -204,19 +239,31 @@ export default function Accounts() {
   const { message } = AntApp.useApp();
   const qc = useQueryClient();
   const isAdmin = useAuth((s) => s.user?.role === "admin");
+  const currentAccountId = useCurrentWorkspace((s) => s.accountId);
+  const setCurrentPlatform = useCurrentWorkspace((s) => s.setPlatform);
+  const setCurrentAccountId = useCurrentWorkspace((s) => s.setAccountId);
 
-  const [projectId, setProjectId] = useState<number | null>(null);
-  const [dimension, setDimension] = useState<GroupDimension | "all">("all");
-  const [platform, setPlatform] = useState<Platform | "all">("all");
-  const [groupId, setGroupId] = useState<number | null>(null);
+  const [initialPreferences] = useState(loadAccountMatrixPreferences);
+  const [view, setView] = useState<AccountMatrixView>(initialPreferences.view);
+  const [projectId, setProjectId] = useState<number | null>(initialPreferences.projectId);
+  const [dimension, setDimension] = useState<GroupDimension | "all">(
+    initialPreferences.dimension,
+  );
+  const [platform, setPlatform] = useState<Platform | "all">(initialPreferences.platform);
+  const [groupId, setGroupId] = useState<number | null>(initialPreferences.groupId);
   const [selected, setSelected] = useState<number[]>([]);
+  const [batchModal, setBatchModal] = useState<"project" | "group" | null>(null);
+  const [batchValue, setBatchValue] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [platformBoardOpen, setPlatformBoardOpen] = useState(false);
   const [integrationPlatform, setIntegrationPlatform] = useState<Platform | null>(null);
   const [whitelistUrl, setWhitelistUrl] = useState<string | null>(null);
   const [form] = Form.useForm<AccountFormValues>();
   const [integrationForm] = Form.useForm<PlatformIntegrationFormValues>();
   const accountModalPlatform = Form.useWatch("platform", form);
-  const isDouyinScanAdd = accountModalPlatform === "douyin";
+  const douyinAddMode = Form.useWatch("douyin_add_mode", form) ?? "scan";
+  const isDouyin = accountModalPlatform === "douyin";
+  const isDouyinScanAdd = isDouyin && douyinAddMode === "scan";
 
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
   const groupsQuery = useQuery({ queryKey: ["account-groups"], queryFn: listAccountGroups });
@@ -231,6 +278,7 @@ export default function Accounts() {
   const platformIntegrationsQuery = useQuery({
     queryKey: ["platform-integrations"],
     queryFn: listPlatformIntegrations,
+    enabled: isAdmin,
   });
 
   const groupName = useMemo(() => {
@@ -284,10 +332,25 @@ export default function Accounts() {
     });
   }, [rows]);
 
+  useEffect(() => {
+    saveAccountMatrixPreferences({ view, projectId, dimension, platform, groupId });
+  }, [dimension, groupId, platform, projectId, view]);
+
   const openAccountModal = (initialPlatform?: Platform) => {
     form.resetFields();
-    if (initialPlatform) form.setFieldsValue({ platform: initialPlatform });
+    form.setFieldsValue({
+      platform: initialPlatform,
+      douyin_add_mode: initialPlatform === "douyin" ? "scan" : undefined,
+    });
     setModalOpen(true);
+  };
+
+  const selectWorkspaceAccount = (accountId: number) => {
+    const account = rows.find((item) => item.id === accountId);
+    if (!account) return;
+    setCurrentPlatform(account.platform);
+    setCurrentAccountId(account.id);
+    message.success(`已切换到 ${account.nickname}`);
   };
 
   const openIntegrationModal = (target: Platform) => {
@@ -299,8 +362,12 @@ export default function Accounts() {
         integration?.client_secret_configured || target !== "douyin"
           ? undefined
           : DEFAULT_DOUYIN_SECRET_REF,
-      redirect_uri: integration?.redirect_uri ?? undefined,
-      js_sdk_domain: integration?.js_sdk_domain ?? undefined,
+      redirect_uri:
+        integration?.redirect_uri ??
+        (target === "douyin" ? DEFAULT_DOUYIN_REDIRECT_URI : undefined),
+      js_sdk_domain:
+        integration?.js_sdk_domain ??
+        (target === "douyin" ? DEFAULT_DOUYIN_JS_SDK_DOMAIN : undefined),
       scopes: integration?.scopes ?? [],
       note: integration?.note ?? undefined,
     });
@@ -314,9 +381,41 @@ export default function Accounts() {
       setModalOpen(false);
       form.resetFields();
       qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["shell-accounts"] });
       qc.invalidateQueries({ queryKey: ["account-matrix"] });
     },
     onError: () => message.error("账号接入失败，请重试"),
+  });
+
+  const createManualDouyinMutation = useMutation({
+    mutationFn: async (value: AccountFormValues) => {
+      const nickname = blankToNull(value.nickname) ?? "抖音开发测试账号";
+      const account = await createAccount({
+        nickname,
+        platform: "douyin",
+        group_id: value.group_id ?? null,
+        project_id: value.project_id ?? null,
+        external_account_id:
+          blankToNull(value.external_account_id) ??
+          `manual-douyin-${Date.now().toString(36)}`,
+      });
+      return updateAccountIntegration(account.id, {
+        integration_status: "manual",
+        auth_status: "manual",
+        data_sync_status: "manual",
+        note: "本地开发模式账号：用于运营大脑验收，不代表抖音官方 OAuth 已授权。",
+      });
+    },
+    onSuccess: (account) => {
+      setCurrentAccountId(account.id);
+      message.success("已创建抖音开发模式账号，可用于运营大脑本地验收");
+      setModalOpen(false);
+      form.resetFields();
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["shell-accounts"] });
+      qc.invalidateQueries({ queryKey: ["account-matrix"] });
+    },
+    onError: () => message.error("开发模式账号创建失败，请重试"),
   });
 
   const douyinScanAddMutation = useMutation({
@@ -330,20 +429,22 @@ export default function Accounts() {
     onError: () => message.error("扫码添加链接生成失败，请先检查抖音平台配置"),
   });
 
-  const integrationMutation = useMutation({
-    mutationFn: ({
-      id,
-      patch,
-    }: {
-      id: number;
-      patch: Parameters<typeof updateAccountIntegration>[1];
-    }) => updateAccountIntegration(id, patch),
-    onSuccess: () => {
-      message.success("接入状态已更新");
+  const batchMutation = useMutation({
+    mutationFn: (patch: {
+      group_id?: number | null;
+      project_id?: number | null;
+      status?: AccountStatus;
+    }) => batchUpdateAccounts({ account_ids: selected, ...patch }),
+    onSuccess: (updated) => {
+      message.success(`已更新 ${updated.length} 个账号`);
+      setSelected([]);
+      setBatchModal(null);
+      setBatchValue(null);
       qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["shell-accounts"] });
       qc.invalidateQueries({ queryKey: ["account-matrix"] });
     },
-    onError: () => message.error("状态更新失败，请重试"),
+    onError: () => message.error("批量更新失败，请检查账号与项目归属"),
   });
 
   const platformIntegrationMutation = useMutation({
@@ -375,8 +476,13 @@ export default function Accounts() {
   const douyinSyncMutation = useMutation({
     mutationFn: syncDouyinAccountMetrics,
     onSuccess: (result) => {
-      message.success(`抖音数据已同步：${result.snapshot_count} 条作品快照`);
+      if (result.data_sync_status === "pending" && result.snapshot_count === 0) {
+        message.success("抖音账号资料已同步；作品数据等待投稿任务权限");
+      } else {
+        message.success(`抖音数据已同步：${result.snapshot_count} 条作品快照`);
+      }
       qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["shell-accounts"] });
       qc.invalidateQueries({ queryKey: ["account-matrix"] });
       qc.invalidateQueries({ queryKey: ["platform-integrations"] });
     },
@@ -396,12 +502,20 @@ export default function Accounts() {
     {
       title: "账号",
       dataIndex: "nickname",
+      width: 280,
       render: (value: string, account) => (
-        <div style={{ display: "grid", gap: 3 }}>
-          <span style={{ fontWeight: 600, color: "var(--dy-text)" }}>{value}</span>
-          <span className="dy-tabular" style={{ fontSize: 12, color: "var(--dy-faint)" }}>
-            {account.external_account_id ?? "未绑定外部 ID"}
-          </span>
+        <div className="account-identity">
+          {account.avatar_url ? (
+            <img src={account.avatar_url} alt="" className="account-identity__avatar" />
+          ) : (
+            <span className="account-identity__avatar account-identity__avatar--fallback">
+              {value.slice(0, 1)}
+            </span>
+          )}
+          <div>
+            <strong>{value}</strong>
+            <span>{account.external_account_id ?? "未绑定平台 ID"}</span>
+          </div>
         </div>
       ),
     },
@@ -413,7 +527,7 @@ export default function Accounts() {
     },
     {
       title: "归属",
-      width: 210,
+      width: 180,
       render: (_, account) => (
         <div style={{ display: "grid", gap: 5 }}>
           <span style={{ fontSize: 12.5, color: "var(--dy-text)" }}>
@@ -426,30 +540,71 @@ export default function Accounts() {
       ),
     },
     {
+      title: "定位 / 当前任务",
+      width: 300,
+      render: (_, account) => (
+        <div style={{ display: "grid", gap: 4 }}>
+          <span
+            title={account.positioning_summary ?? undefined}
+            style={{ color: "var(--dy-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {account.positioning_summary || "待账号定位专家分析"}
+          </span>
+          <span
+            title={account.current_task?.title}
+            style={{ color: "var(--dy-muted)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {account.current_task
+              ? `${account.current_task.title} · ${account.current_task.progress}%`
+              : "暂无运行任务"}
+          </span>
+        </div>
+      ),
+    },
+    {
       title: "账号状态",
       dataIndex: "status",
       width: 104,
       render: (value: AccountStatus) => <StatePill label={STATUS_LABEL[value]} tone={accountStatusTone(value)} />,
     },
     {
-      title: "接入",
-      dataIndex: "integration_status",
-      width: 104,
-      render: (value: IntegrationStatus) => (
-        <StatePill label={INTEGRATION_LABEL[value]} tone={integrationTone(value)} />
+      title: "授权 / 数据",
+      width: 130,
+      render: (_, account) => (
+        <div style={{ display: "grid", gap: 5, justifyItems: "start" }}>
+          <StatePill label={AUTH_LABEL[account.auth_status]} tone={authTone(account.auth_status)} />
+          <StatePill label={SYNC_LABEL[account.data_sync_status]} tone={syncTone(account.data_sync_status)} />
+        </div>
       ),
     },
     {
-      title: "授权",
-      dataIndex: "auth_status",
-      width: 96,
-      render: (value: AuthStatus) => <StatePill label={AUTH_LABEL[value]} tone={authTone(value)} />,
+      title: "风险",
+      width: 80,
+      render: (_, account) =>
+        (account.risk_count ?? 0) > 0 ? (
+          <StatePill label={`${account.risk_count} 项`} tone="warning" />
+        ) : (
+          <StatePill label="正常" tone="success" />
+        ),
     },
     {
-      title: "数据回流",
-      dataIndex: "data_sync_status",
-      width: 116,
-      render: (value: DataSyncStatus) => <StatePill label={SYNC_LABEL[value]} tone={syncTone(value)} />,
+      title: "发布能力",
+      width: 124,
+      render: (_, account) => {
+        const capability = account.publish_capability ?? "unavailable";
+        return (
+          <StatePill
+            label={PUBLISH_CAPABILITY_LABEL[capability]}
+            tone={
+              capability === "prepare_only"
+                ? "success"
+                : capability === "manual_only"
+                  ? "warning"
+                  : "muted"
+            }
+          />
+        );
+      },
     },
     {
       title: "动作",
@@ -458,31 +613,10 @@ export default function Accounts() {
         isAdmin ? (
           <AccountActions
             account={account}
-            loading={integrationMutation.isPending}
             authorizeLoading={douyinAuthorizeMutation.isPending}
             syncLoading={douyinSyncMutation.isPending}
             onOfficialAuthorize={() => douyinAuthorizeMutation.mutate(account.id)}
             onSyncMetrics={() => douyinSyncMutation.mutate(account.id)}
-            onMarkAuthorized={() =>
-              integrationMutation.mutate({
-                id: account.id,
-                patch: {
-                  integration_status: "connected",
-                  auth_status: "authorized",
-                  data_sync_status: "pending",
-                  note: "手动标记授权完成",
-                },
-              })
-            }
-            onMarkHealthy={() =>
-              integrationMutation.mutate({
-                id: account.id,
-                patch: {
-                  data_sync_status: "healthy",
-                  note: "手动标记数据回流正常",
-                },
-              })
-            }
           />
         ) : (
           <span style={{ color: "var(--dy-faint)" }}>只读</span>
@@ -495,39 +629,69 @@ export default function Accounts() {
     matrixQuery.isLoading ||
     groupsQuery.isLoading ||
     projectsQuery.isLoading;
+  const failedQuery = [
+    accountsQuery,
+    matrixQuery,
+    groupsQuery,
+    projectsQuery,
+  ].find((query) => query.isError);
+
+  if (failedQuery) {
+    const failure = presentApiError(
+      failedQuery.error,
+      "账号矩阵暂时不可用，请稍后重新加载。",
+    );
+    return (
+      <div>
+        <PageHeader
+          title="账号矩阵"
+          subtitle="围绕客户、项目和平台组织账号，让每个账号都带着定位、任务与真实状态工作"
+        />
+        <OperationalState
+          kind="error"
+          title="账号矩阵加载失败"
+          description={`${failure.message} 当前筛选和顶部账号选择均会保留。`}
+          diagnostic={failure.diagnostic}
+          actionLabel="重新加载"
+          actionLoading={failedQuery.isFetching}
+          onAction={() => {
+            void Promise.all([
+              accountsQuery.refetch(),
+              matrixQuery.refetch(),
+              groupsQuery.refetch(),
+              projectsQuery.refetch(),
+            ]);
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>
       <PageHeader
         title="账号矩阵"
-        subtitle="平台接入、账号归属、授权状态与数据回流的统一控制台"
+        subtitle="围绕客户、项目和平台组织账号，让每个账号都带着定位、任务与真实状态工作"
         extra={
-          isAdmin && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => openAccountModal()}>
-              接入账号
-            </Button>
-          )
+          <Space>
+            {isAdmin && (
+              <>
+                <Button icon={<SettingOutlined />} onClick={() => setPlatformBoardOpen(true)}>
+                  平台接入
+                </Button>
+                <Button type="primary" icon={<PlusOutlined />} onClick={() => openAccountModal()}>
+                  接入账号
+                </Button>
+              </>
+            )}
+          </Space>
         }
       />
 
-      <PlatformAccessBoard
-        summaries={platformSummaries}
-        integrations={platformIntegrations}
-        isAdmin={isAdmin}
-        onAddAccount={openAccountModal}
-        onConfigure={openIntegrationModal}
-        onWhitelist={() => douyinWhitelistMutation.mutate()}
-        whitelistLoading={douyinWhitelistMutation.isPending}
-      />
+      <AccountSummaryStrip accounts={rows} />
 
-      <Panel style={{ marginBottom: 16 }}>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-            gap: 12,
-          }}
-        >
+      <div className="account-workbench-toolbar">
+        <div className="account-workbench-toolbar__filters">
           <FilterField label="项目 / 品牌">
             <Select
               allowClear
@@ -574,39 +738,188 @@ export default function Accounts() {
             />
           </FilterField>
         </div>
-      </Panel>
-
-      <MatrixBoard sections={matrixSections} loading={loading} />
-
-      <Panel
-        title={`账号明细 · ${rows.length}`}
-        extra={
-          selected.length > 0 ? (
-            <span style={{ fontSize: 12, color: "var(--dy-muted)" }}>
-              已选 {selected.length} 个账号
-            </span>
-          ) : null
-        }
-      >
-        <Table
-          rowKey="id"
-          columns={columns}
-          dataSource={rows}
-          loading={accountsQuery.isLoading}
-          pagination={{ pageSize: 12, showSizeChanger: false }}
-          rowSelection={{
-            selectedRowKeys: selected,
-            onChange: (keys) => setSelected(keys as number[]),
-          }}
+        <Segmented<AccountMatrixView>
+          className="account-workbench-toolbar__views"
+          value={view}
+          onChange={setView}
+          options={[
+            { label: "表格", value: "table", icon: <TableOutlined /> },
+            { label: "矩阵", value: "matrix", icon: <UngroupOutlined /> },
+            { label: "账号卡", value: "cards", icon: <AppstoreOutlined /> },
+            { label: "按项目", value: "projects", icon: <ApartmentOutlined /> },
+          ]}
         />
-      </Panel>
+      </div>
+
+      {isAdmin && selected.length > 0 && (
+        <div className="account-batch-bar">
+          <strong>已选择 {selected.length} 个账号</strong>
+          <Space size={6}>
+            <Button
+              size="small"
+              icon={<FolderOpenOutlined />}
+              onClick={() => {
+                setBatchValue(null);
+                setBatchModal("project");
+              }}
+            >
+              绑定项目
+            </Button>
+            <Button
+              size="small"
+              icon={<TeamOutlined />}
+              onClick={() => {
+                setBatchValue(null);
+                setBatchModal("group");
+              }}
+            >
+              移动分组
+            </Button>
+            <Button
+              size="small"
+              icon={<CheckOutlined />}
+              loading={batchMutation.isPending}
+              onClick={() => batchMutation.mutate({ status: "active" })}
+            >
+              启用
+            </Button>
+            <Button
+              size="small"
+              icon={<PauseOutlined />}
+              loading={batchMutation.isPending}
+              onClick={() => batchMutation.mutate({ status: "inactive" })}
+            >
+              停用
+            </Button>
+            <Button size="small" type="text" onClick={() => setSelected([])}>
+              取消选择
+            </Button>
+          </Space>
+        </div>
+      )}
+
+      <div className="account-workbench-surface">
+        {view === "matrix" && (
+          <MatrixBoard
+            sections={matrixSections}
+            loading={loading}
+            currentAccountId={currentAccountId}
+            onSelectAccount={selectWorkspaceAccount}
+          />
+        )}
+        {view === "cards" && (
+          <AccountCardsView
+            accounts={rows}
+            projects={projectsQuery.data ?? []}
+            groups={groupsQuery.data ?? []}
+            currentAccountId={currentAccountId}
+            onSelectAccount={selectWorkspaceAccount}
+          />
+        )}
+        {view === "projects" && (
+          <AccountProjectsView
+            accounts={rows}
+            projects={projectsQuery.data ?? []}
+            groups={groupsQuery.data ?? []}
+            currentAccountId={currentAccountId}
+            onSelectAccount={selectWorkspaceAccount}
+          />
+        )}
+        {view === "table" && (
+          <Panel
+            title={`账号明细 · ${rows.length}`}
+            extra={
+              selected.length > 0 ? (
+                <span style={{ fontSize: 12, color: "var(--dy-muted)" }}>
+                  已选 {selected.length} 个账号
+                </span>
+              ) : null
+            }
+          >
+            <Table
+              rowKey="id"
+              columns={columns}
+              dataSource={rows}
+              loading={accountsQuery.isLoading}
+              pagination={{ pageSize: 12, showSizeChanger: false }}
+              rowSelection={{
+                selectedRowKeys: selected,
+                onChange: (keys) => setSelected(keys as number[]),
+              }}
+            />
+          </Panel>
+        )}
+      </div>
+
+      <Modal
+        title={batchModal === "project" ? "批量绑定项目" : "批量移动分组"}
+        open={batchModal !== null}
+        onCancel={() => {
+          setBatchModal(null);
+          setBatchValue(null);
+        }}
+        onOk={() => {
+          if (batchModal === "project") batchMutation.mutate({ project_id: batchValue });
+          if (batchModal === "group") batchMutation.mutate({ group_id: batchValue });
+        }}
+        confirmLoading={batchMutation.isPending}
+        okText="应用到所选账号"
+        destroyOnHidden
+      >
+        <p style={{ color: "var(--dy-muted)", marginTop: 0 }}>
+          将同时更新 {selected.length} 个账号；留空表示移除当前归属。
+        </p>
+        <Select
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          style={{ width: "100%" }}
+          placeholder={batchModal === "project" ? "选择项目" : "选择账号组"}
+          value={batchValue ?? undefined}
+          onChange={(value) => setBatchValue(value ?? null)}
+          options={
+            batchModal === "project"
+              ? (projectsQuery.data ?? []).map((project) => ({
+                  label: project.name,
+                  value: project.id,
+                }))
+              : (groupsQuery.data ?? []).map((group) => ({
+                  label: `${group.name} · ${DIMENSION_LABEL[group.dimension]}`,
+                  value: group.id,
+                }))
+          }
+        />
+      </Modal>
+
+      <Modal
+        title="平台接入"
+        open={platformBoardOpen}
+        onCancel={() => setPlatformBoardOpen(false)}
+        footer={null}
+        width={1120}
+        destroyOnHidden
+      >
+        <PlatformAccessBoard
+          summaries={platformSummaries}
+          integrations={platformIntegrations}
+          isAdmin={isAdmin}
+          onAddAccount={openAccountModal}
+          onConfigure={openIntegrationModal}
+          onWhitelist={() => douyinWhitelistMutation.mutate()}
+          whitelistLoading={douyinWhitelistMutation.isPending}
+        />
+      </Modal>
 
       <Modal
         title={isDouyinScanAdd ? "抖音扫码添加账号" : "接入矩阵账号"}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={() => form.submit()}
-        confirmLoading={createMutation.isPending || douyinScanAddMutation.isPending}
+        confirmLoading={
+          createMutation.isPending ||
+          douyinScanAddMutation.isPending ||
+          createManualDouyinMutation.isPending
+        }
         okText={isDouyinScanAdd ? "打开抖音扫码" : "加入矩阵"}
         destroyOnHidden
       >
@@ -616,6 +929,10 @@ export default function Accounts() {
           requiredMark={false}
           onFinish={(value) => {
             if (value.platform === "douyin") {
+              if ((value.douyin_add_mode ?? "scan") === "manual") {
+                createManualDouyinMutation.mutate(value);
+                return;
+              }
               douyinScanAddMutation.mutate({
                 nickname: blankToNull(value.nickname),
                 group_id: value.group_id ?? null,
@@ -661,6 +978,27 @@ export default function Accounts() {
           >
             <Select options={PLATFORM_OPTIONS} placeholder="选择平台" />
           </Form.Item>
+          {isDouyin && (
+            <Form.Item
+              name="douyin_add_mode"
+              label="抖音接入方式"
+              initialValue="scan"
+              extra={
+                douyinAddMode === "manual"
+                  ? "用于本地开发和运营大脑验收，不代表抖音官方 OAuth 已授权。"
+                  : "需要可公网访问的 HTTPS 回调域名，并已在抖音开放平台配置。"
+              }
+            >
+              <Radio.Group
+                optionType="button"
+                buttonStyle="solid"
+                options={[
+                  { label: "扫码官方授权", value: "scan" },
+                  { label: "本地开发账号", value: "manual" },
+                ]}
+              />
+            </Form.Item>
+          )}
           {!isDouyinScanAdd && (
             <Form.Item name="external_account_id" label="外部账号 ID">
               <Input placeholder="平台侧账号 ID，授权完成后可自动回填" maxLength={128} />
@@ -762,7 +1100,7 @@ export default function Accounts() {
       </Modal>
 
       <Modal
-        title="抖音测试白名单授权"
+        title="抖音测试白名单（仅需一次）"
         open={whitelistUrl != null}
         onCancel={() => setWhitelistUrl(null)}
         footer={[
@@ -784,6 +1122,9 @@ export default function Accounts() {
       >
         {whitelistUrl && (
           <div style={{ display: "grid", justifyItems: "center", gap: 14 }}>
+            <div style={{ lineHeight: 1.7 }}>
+              这里只添加测试资格，不会把抖音号添加到账号矩阵。完成后请点击“添加账号”重新扫码授权。
+            </div>
             <QRCode value={whitelistUrl} size={220} />
             <div
               style={{
@@ -894,7 +1235,7 @@ function PlatformAccessBoard({
                         loading={whitelistLoading}
                         onClick={onWhitelist}
                       >
-                        白名单
+                        测试白名单
                       </Button>
                     )}
                     <Button
@@ -905,7 +1246,7 @@ function PlatformAccessBoard({
                       配置
                     </Button>
                     <Button size="small" icon={<PlusOutlined />} onClick={() => onAddAccount(option.value)}>
-                      账号
+                      添加账号
                     </Button>
                   </div>
                 )}
@@ -938,108 +1279,107 @@ function ConfigLine({
 function MatrixBoard({
   sections,
   loading,
+  currentAccountId,
+  onSelectAccount,
 }: {
   sections: MatrixProjectSection[];
   loading: boolean;
+  currentAccountId: number | null;
+  onSelectAccount: (accountId: number) => void;
 }) {
   if (loading) {
     return (
-      <Panel style={{ marginBottom: 16 }}>
-        <div aria-hidden style={{ height: 130, borderRadius: 10, background: "var(--dy-elevated)", opacity: 0.72 }} />
-      </Panel>
+      <div className="account-matrix-view account-matrix-view--loading" aria-hidden />
     );
   }
 
   return (
-    <Panel title="矩阵结构" style={{ marginBottom: 16 }}>
+    <div className="account-matrix-view">
       {sections.length === 0 ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选下暂无账号" />
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
+        <div className="account-matrix-view__sections">
           {sections.map((section) => (
-            <MatrixProject key={section.id ?? "unbound"} section={section} />
+            <MatrixProject
+              key={section.id ?? "unbound"}
+              section={section}
+              currentAccountId={currentAccountId}
+              onSelectAccount={onSelectAccount}
+            />
           ))}
         </div>
       )}
-    </Panel>
+    </div>
   );
 }
 
-function MatrixProject({ section }: { section: MatrixProjectSection }) {
+function MatrixProject({
+  section,
+  currentAccountId,
+  onSelectAccount,
+}: {
+  section: MatrixProjectSection;
+  currentAccountId: number | null;
+  onSelectAccount: (accountId: number) => void;
+}) {
   const accountCount = section.groups.reduce(
     (sum, group) => sum + group.platforms.reduce((total, node) => total + node.accounts.length, 0),
     0,
   );
 
   return (
-    <section style={{ display: "grid", gap: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-        <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--dy-text)" }}>{section.name}</span>
-        <span className="dy-tabular" style={{ fontSize: 12, color: "var(--dy-faint)" }}>
-          {accountCount} 个账号
-        </span>
+    <section className="account-matrix-project">
+      <header className="account-matrix-project__header">
+        <div>
+          <span>客户 / 项目</span>
+          <strong>{section.name}</strong>
+        </div>
+        <span>{accountCount} 个账号</span>
+      </header>
+      <div className="account-matrix-grid account-matrix-grid--header" aria-hidden>
+        <span>账号分组</span>
+        {PLATFORM_OPTIONS.map((option) => (
+          <span key={option.value}>{option.label}</span>
+        ))}
+        <span>合计</span>
       </div>
-      <div style={{ display: "grid", gap: 8 }}>
+      <div className="account-matrix-project__rows">
         {section.groups.map((group) => (
-          <div
-            key={group.id ?? "ungrouped"}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "minmax(120px, 168px) minmax(0, 1fr)",
-              gap: 10,
-              alignItems: "start",
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, color: "var(--dy-text)", fontWeight: 500 }}>{group.name}</div>
-              <div style={{ fontSize: 12, color: "var(--dy-faint)", marginTop: 2 }}>
+          <div className="account-matrix-grid account-matrix-grid--row" key={group.id ?? "ungrouped"}>
+            <div className="account-matrix-group-label">
+              <strong>{group.name}</strong>
+              <span>
                 {group.dimension === "ungrouped" ? "未分组" : DIMENSION_LABEL[group.dimension]}
-              </div>
+              </span>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {group.platforms.map((node) => (
-                <div
-                  key={node.platform}
-                  style={{
-                    minWidth: 176,
-                    border: "1px solid var(--dy-border-subtle)",
-                    borderRadius: 8,
-                    padding: "8px 10px",
-                    background: "var(--dy-elevated)",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <PlatformBadge platform={node.platform} />
-                    <span className="dy-tabular" style={{ fontSize: 12, color: "var(--dy-faint)" }}>
-                      {node.accounts.length}
-                    </span>
-                  </div>
-                  <div style={{ display: "grid", gap: 4, marginTop: 7 }}>
-                    {node.accounts.slice(0, 3).map((account) => (
-                      <span
+            {PLATFORM_OPTIONS.map((option) => {
+              const accounts =
+                group.platforms.find((node) => node.platform === option.value)?.accounts ?? [];
+              return (
+                <div className="account-matrix-cell" key={option.value}>
+                  {accounts.length === 0 ? (
+                    <span className="account-matrix-cell__empty">—</span>
+                  ) : (
+                    accounts.map((account) => (
+                      <button
+                        type="button"
                         key={account.id}
                         title={account.nickname}
-                        style={{
-                          minWidth: 0,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          fontSize: 12.5,
-                          color: "var(--dy-muted)",
-                        }}
+                        className={`account-matrix-account${currentAccountId === account.id ? " is-current" : ""}`}
+                        onClick={() => onSelectAccount(account.id)}
                       >
-                        {account.nickname}
-                      </span>
-                    ))}
-                    {node.accounts.length > 3 && (
-                      <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>
-                        +{node.accounts.length - 3} 个
-                      </span>
-                    )}
-                  </div>
+                        <span>{account.nickname.slice(0, 1)}</span>
+                        <strong>{account.nickname}</strong>
+                        <i className={account.auth_status === "authorized" ? "is-authorized" : ""} />
+                      </button>
+                    ))
+                  )}
                 </div>
-              ))}
-            </div>
+              );
+            })}
+            <strong className="account-matrix-row-total">
+              {group.platforms.reduce((total, node) => total + node.accounts.length, 0)}
+            </strong>
           </div>
         ))}
       </div>
@@ -1049,64 +1389,43 @@ function MatrixProject({ section }: { section: MatrixProjectSection }) {
 
 function AccountActions({
   account,
-  loading,
   authorizeLoading,
   syncLoading,
   onOfficialAuthorize,
   onSyncMetrics,
-  onMarkAuthorized,
-  onMarkHealthy,
 }: {
   account: Account;
-  loading: boolean;
   authorizeLoading: boolean;
   syncLoading: boolean;
   onOfficialAuthorize: () => void;
   onSyncMetrics: () => void;
-  onMarkAuthorized: () => void;
-  onMarkHealthy: () => void;
 }) {
-  if (account.auth_status !== "authorized") {
-    if (account.platform === "douyin") {
-      return (
-        <Space size={6} wrap>
-          <Button size="small" type="primary" loading={authorizeLoading} onClick={onOfficialAuthorize}>
-            官方授权
-          </Button>
-          <Button size="small" loading={loading} onClick={onMarkAuthorized}>
-            手动标记
-          </Button>
-        </Space>
-      );
-    }
+  const mode = getAccountActionMode(account);
+  if (mode === "official_authorize") {
     return (
-      <Button size="small" loading={loading} onClick={onMarkAuthorized}>
-        标记授权
+      <Button
+        size="small"
+        type="primary"
+        loading={authorizeLoading}
+        onClick={onOfficialAuthorize}
+      >
+        官方授权
       </Button>
     );
   }
-  if (account.platform === "douyin") {
+  if (mode === "sync_metrics") {
     return (
-      <Space size={6} wrap>
-        <Button size="small" icon={<SyncOutlined />} loading={syncLoading} onClick={onSyncMetrics}>
-          同步数据
-        </Button>
-        {account.data_sync_status !== "healthy" ? (
-          <Button size="small" loading={loading} onClick={onMarkHealthy}>
-            手动标记
-          </Button>
-        ) : null}
-      </Space>
-    );
-  }
-  if (account.data_sync_status !== "healthy") {
-    return (
-      <Button size="small" icon={<SyncOutlined />} loading={loading} onClick={onMarkHealthy}>
-        回流正常
+      <Button
+        size="small"
+        icon={<SyncOutlined />}
+        loading={syncLoading}
+        onClick={onSyncMetrics}
+      >
+        同步数据
       </Button>
     );
   }
-  return <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>已就绪</span>;
+  return <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>待接入</span>;
 }
 
 function FilterField({ label, children }: { label: string; children: ReactNode }) {
@@ -1155,7 +1474,7 @@ function StatePill({
     muted: <span style={{ width: 6, height: 6, borderRadius: "50%", background: color }} />,
   }[tone];
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color, fontSize: 12 }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color, fontSize: 12, whiteSpace: "nowrap" }}>
       <span style={{ display: "inline-flex", fontSize: 11 }}>{icon}</span>
       {label}
     </span>

@@ -1,11 +1,16 @@
 """应用配置（pydantic-settings）。所有值来自环境变量 / `.env`。"""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_REPO_ROOT = _BACKEND_DIR.parent
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(_REPO_ROOT / ".env", _BACKEND_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -36,7 +41,7 @@ class Settings(BaseSettings):
 
     # —— 初始管理员种子（app/seed.py 用）——
     admin_email: str = "admin@dyflow.local"
-    admin_password: str = "admin12345"
+    admin_password: str = "change-me-admin-password"
     default_org_name: str = "DyFlow"
 
     # —— 大模型网关（v1 默认 DeepSeek）——
@@ -56,6 +61,7 @@ class Settings(BaseSettings):
     douyin_client_key: str = ""
     douyin_client_secret: str = ""
     douyin_oauth_worker_secret: str = ""
+    credential_encryption_key: str = ""
 
     # —— 对象存储（v1 本地卷，MinIO 接口预留；T2 暂不接入实际读写）——
     storage_backend: str = "local"

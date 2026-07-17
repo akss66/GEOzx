@@ -34,18 +34,29 @@ class PlatformPublisherAdapter:
             return "unauthorized"
         return "prepare_only"
 
-    def validate_package(self, account: Account, material: MaterialAsset, draft: PublishDraft) -> None:
+    def validate_package(
+        self,
+        account: Account,
+        material: MaterialAsset,
+        draft: PublishDraft,
+    ) -> None:
         publish_status = self.get_account_publish_status(account)
         if publish_status == "platform_mismatch":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号平台不匹配")
         if publish_status == "unauthorized":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号尚未授权，无法进入发布准备")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="账号尚未授权，无法进入发布准备",
+            )
         if material.status.value != "ready":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="素材尚未就绪")
         if material.kind not in {"video", "image"}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="素材类型不可发布")
         if not draft.title.strip():
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="标题不能为空")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="标题不能为空",
+            )
 
     def prepare_publish_package(
         self,

@@ -4,9 +4,11 @@
 落 Event 表 + 跑订阅处理器 + 经 Redis pub/sub 广播给 WebSocket 订阅者。
 """
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import redis.asyncio as aioredis
 from arq import create_pool
 from arq.connections import RedisSettings
 
@@ -75,3 +77,33 @@ async def publish_event(
             "project_id": project_id,
         },
     )
+
+
+async def publish_realtime_event(
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    content_item_id: int | None = None,
+    project_id: int | None = None,
+) -> None:
+    """Broadcast an ephemeral event directly to WebSocket subscribers.
+
+    Token deltas can be very frequent, so they should not be queued through arq
+    or persisted as Event rows. Durable checkpoints still use publish_event or
+    explicit Event inserts.
+    """
+    event = {
+        "type": event_type,
+        "payload": payload,
+        "content_item_id": content_item_id,
+        "project_id": project_id,
+    }
+    await dispatch(event_type, event)
+    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        await redis.publish(EVENTS_CHANNEL, json.dumps(event, ensure_ascii=False))
+    except Exception:
+        # Realtime token streaming is best-effort; durable checkpoints are
+        # recorded separately and must not fail because Redis is unavailable.
+        return
+    finally:
+        await redis.aclose()

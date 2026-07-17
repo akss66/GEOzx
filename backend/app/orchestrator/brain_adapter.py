@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -10,10 +9,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.approval_audit import add_approval_requested
 from app.models import (
     AgentInvocation,
-    AgentToolCall,
     AgentTask,
+    AgentToolCall,
     BrainTask,
     ContentItem,
     Deliverable,
@@ -98,6 +98,15 @@ _RERUN_STAGE = {
     DeliverableType.REVIEW_REPORT: ContentStage.OPERATION,
 }
 
+_RUNTIME_STAGE_BY_CODE = {
+    AgentCode.POSITIONING.value: ContentStage.POSITIONING,
+    AgentCode.CONTENT_DIRECTOR.value: ContentStage.CONTENT_DIRECTION,
+    AgentCode.ART_DIRECTOR.value: ContentStage.ART_DIRECTION,
+    AgentCode.VIDEO_CREATOR.value: ContentStage.VIDEO_CREATION,
+    AgentCode.EDITOR.value: ContentStage.EDITING,
+    AgentCode.OPERATOR.value: ContentStage.OPERATION,
+}
+
 
 async def _noop_emit(
     event_type: str,
@@ -116,6 +125,27 @@ async def run_brain_task_pipeline(session: AsyncSession, task: BrainTask) -> Bra
 
     content_item = await ensure_content_item(session, task)
     await _engine.start(session, content_item.id)
+    await sync_brain_task_from_pipeline(session, task)
+    await session.commit()
+    return task
+
+
+async def run_brain_task_steps(
+    session: AsyncSession,
+    task: BrainTask,
+    agent_codes: list[str],
+) -> BrainTask:
+    """Run only the expert stages selected for the current smart-runtime round."""
+
+    stages = {
+        _RUNTIME_STAGE_BY_CODE[code]
+        for code in agent_codes
+        if code in _RUNTIME_STAGE_BY_CODE
+    }
+    if not stages:
+        return task
+    content_item = await ensure_content_item(session, task)
+    await _engine.start(session, content_item.id, allowed_stages=stages)
     await sync_brain_task_from_pipeline(session, task)
     await session.commit()
     return task
@@ -279,6 +309,7 @@ async def _sync_acceptances(session: AsyncSession, task: BrainTask) -> None:
     for deliverable in deliverables:
         code = _map_agent_code(deliverable.agent_code)
         acceptance = existing.get(deliverable.id)
+        is_new = acceptance is None
         if acceptance is None:
             acceptance = DeliverableAcceptance(
                 task_id=task.id,
@@ -302,6 +333,17 @@ async def _sync_acceptances(session: AsyncSession, task: BrainTask) -> None:
             "该验收项来自既有内容流水线的版本化交付物。",
             "如用户要求重跑，运营大脑会优先限定在当前交付物及受影响下游。",
         ]
+        if is_new and acceptance.status == DeliverableAcceptanceStatus.PENDING:
+            await session.flush()
+            await add_approval_requested(
+                session,
+                org_id=task.org_id,
+                project_id=await _task_project_id(session, task),
+                content_item_id=task.content_item_id,
+                approval_kind="deliverable",
+                source_id=acceptance.id,
+                title=acceptance.title,
+            )
 
 
 async def _sync_tool_calls(session: AsyncSession, task: BrainTask) -> None:
@@ -315,9 +357,7 @@ async def _sync_tool_calls(session: AsyncSession, task: BrainTask) -> None:
     existing = {
         (row.invocation_id, row.tool_code): row
         for row in (
-            await session.scalars(
-                select(AgentToolCall).where(AgentToolCall.task_id == task.id)
-            )
+            await session.scalars(select(AgentToolCall).where(AgentToolCall.task_id == task.id))
         ).all()
     }
     step_by_agent = {
@@ -330,11 +370,12 @@ async def _sync_tool_calls(session: AsyncSession, task: BrainTask) -> None:
         agent_code = _agent_code_value(invocation.agent_code)
         step = step_by_agent.get(agent_code)
         tool_codes = step.get("tool_codes") if step else None
-        if not tool_codes:
+        if tool_codes is None:
             tool_codes = ["agent_runtime"]
         for tool_code in tool_codes:
             key = (invocation.id, tool_code)
             current = existing.get(key)
+            previous_status = current.status if current is not None else None
             if current is None:
                 current = AgentToolCall(
                     org_id=task.org_id,
@@ -348,13 +389,21 @@ async def _sync_tool_calls(session: AsyncSession, task: BrainTask) -> None:
                 session.add(current)
                 existing[key] = current
 
-            requires_confirmation = bool(step and step.get("human_gate"))
+            configured_mode = (
+                (step.get("tool_permissions") or {}).get(tool_code)
+                if step is not None
+                else None
+            )
+            permission_mode = configured_mode or (
+                "confirm" if step and step.get("human_gate") else "auto"
+            )
+            requires_confirmation = permission_mode in {"confirm", "manual"}
             current.org_id = task.org_id
             current.task_id = task.id
             current.invocation_id = invocation.id
             current.agent_code = agent_code
             current.status = _tool_status(invocation.status, requires_confirmation, task.status)
-            current.permission_mode = "confirm" if requires_confirmation else "auto"
+            current.permission_mode = permission_mode
             current.requires_human_confirmation = requires_confirmation
             current.input_summary = invocation.input_summary
             current.output_summary = (
@@ -368,9 +417,30 @@ async def _sync_tool_calls(session: AsyncSession, task: BrainTask) -> None:
                 "execution_kind": step.get("execution_kind") if step else "agent_runtime",
                 "agent_name": invocation.agent_name,
                 "source": "pipeline_sync",
+                "quality_gates": step.get("quality_gates", []) if step else [],
             }
             current.started_at = invocation.started_at
             current.finished_at = invocation.finished_at
+            if current.status == "waiting_approval" and previous_status != "waiting_approval":
+                await session.flush()
+                await add_approval_requested(
+                    session,
+                    org_id=task.org_id,
+                    project_id=await _task_project_id(session, task),
+                    content_item_id=task.content_item_id,
+                    approval_kind="tool_call",
+                    source_id=current.id,
+                    title=current.tool_name,
+                )
+
+
+async def _task_project_id(session: AsyncSession, task: BrainTask) -> int | None:
+    if task.brief and task.brief.project_id is not None:
+        return task.brief.project_id
+    if task.content_item_id is None:
+        return None
+    content_item = await session.get(ContentItem, task.content_item_id)
+    return content_item.project_id if content_item is not None else None
 
 
 async def _sync_task_status(
@@ -458,8 +528,41 @@ def _map_agent_code(agent_code: str) -> AgentCode:
 
 
 def _payload_summary(payload: dict[str, Any]) -> str:
-    text = json.dumps(payload, ensure_ascii=False, default=str)
-    return text if len(text) <= 260 else f"{text[:260]}..."
+    labels = {
+        "account_persona": "账号定位",
+        "target_audience": "目标人群",
+        "differentiation": "差异化方向",
+        "content_pillars": "内容支柱",
+        "title": "标题",
+        "hook": "开场钩子",
+        "scenes": "内容结构",
+        "body": "正文",
+        "topics": "话题",
+        "summary": "核心结论",
+        "optimization_suggestions": "优化建议",
+        "issues": "主要问题",
+        "highlights": "表现亮点",
+    }
+    lines: list[str] = []
+    for key, value in payload.items():
+        if value in (None, "", [], {}):
+            continue
+        label = labels.get(key, key.replace("_", " "))
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value[:4] if str(item).strip()]
+            if items:
+                lines.append(f"{label}：\n" + "\n".join(f"- {item}" for item in items))
+            continue
+        if isinstance(value, dict):
+            compact = "；".join(
+                f"{item_key}：{item_value}" for item_key, item_value in value.items()
+            )
+            if compact:
+                lines.append(f"{label}：{compact}")
+            continue
+        lines.append(f"{label}：{value}")
+    text = "\n\n".join(lines)
+    return text if len(text) <= 900 else f"{text[:900]}..."
 
 
 def _input_summary(stage: ContentStage) -> str:

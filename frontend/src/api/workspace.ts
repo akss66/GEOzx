@@ -151,6 +151,16 @@ export async function updateAccount(
   return data;
 }
 
+export async function batchUpdateAccounts(input: {
+  account_ids: number[];
+  group_id?: number | null;
+  project_id?: number | null;
+  status?: Account["status"];
+}): Promise<Account[]> {
+  const { data } = await api.patch<Account[]>("/accounts/batch", input);
+  return data;
+}
+
 export async function updateAccountIntegration(
   id: number,
   patch: {

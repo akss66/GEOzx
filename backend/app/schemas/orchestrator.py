@@ -17,6 +17,7 @@ from app.models.enums import (
     Platform,
 )
 from app.schemas.brain import AgentToolCallOut
+from app.schemas.material import MaterialAssetOut
 
 
 class CreateContentItemRequest(BaseModel):
@@ -32,6 +33,11 @@ class ApproveGateRequest(BaseModel):
 
 class RerunStageRequest(BaseModel):
     stage: ContentStage
+
+
+class CreateDeliverableRevisionRequest(BaseModel):
+    payload: dict
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class PublishReadinessRequest(BaseModel):
@@ -99,6 +105,13 @@ class ContentItemOut(BaseModel):
     created_at: datetime
 
 
+class ContentWorkspaceAccountOut(BaseModel):
+    id: int
+    nickname: str
+    platform: Platform
+    auth_status: str
+
+
 class AgentTaskOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -162,4 +175,11 @@ class BoardOut(BaseModel):
     tasks: list[AgentTaskOut]
     deliverables: list[DeliverableOut]
     gates: list[GateApprovalOut]
-    compliance: list[ComplianceCheckOut] = []
+    compliance: list[ComplianceCheckOut] = Field(default_factory=list)
+
+
+class ContentWorkspaceOut(BoardOut):
+    project_name: str
+    account: ContentWorkspaceAccountOut | None = None
+    materials: list[MaterialAssetOut] = Field(default_factory=list)
+    publish_tool_calls: list[AgentToolCallOut] = Field(default_factory=list)

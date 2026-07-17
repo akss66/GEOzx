@@ -2,6 +2,7 @@ import { api } from "./client";
 import type {
   ContentItem,
   ContentStage,
+  ContentWorkspace,
   Deliverable,
   PendingGate,
   PublishCapability,
@@ -13,6 +14,13 @@ export async function listContentItems(projectId?: number): Promise<ContentItem[
   const { data } = await api.get<ContentItem[]>("/content-items", {
     params: projectId != null ? { project_id: projectId } : undefined,
   });
+  return data;
+}
+
+export async function getContentWorkspace(contentItemId: number): Promise<ContentWorkspace> {
+  const { data } = await api.get<ContentWorkspace>(
+    `/content-items/${contentItemId}/workspace`,
+  );
   return data;
 }
 
@@ -44,6 +52,17 @@ export async function approveGate(
 
 export async function listDeliverableHistory(contentItemId: number): Promise<Deliverable[]> {
   const { data } = await api.get<Deliverable[]>(`/content-items/${contentItemId}/deliverables`);
+  return data;
+}
+
+export async function createDeliverableRevision(
+  deliverableId: number,
+  input: { payload: Record<string, unknown>; note?: string | null },
+): Promise<Deliverable> {
+  const { data } = await api.post<Deliverable>(
+    `/deliverables/${deliverableId}/revisions`,
+    input,
+  );
   return data;
 }
 

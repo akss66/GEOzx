@@ -51,6 +51,10 @@ class BrainTask(Base, TimestampMixin):
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_focus: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     risk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    runtime_mode: Mapped[str] = mapped_column(
+        String(40), default="legacy", server_default="legacy", nullable=False
+    )
+    thread_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
     context_closed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -17,6 +17,9 @@ class Org(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
 
     users: Mapped[list["User"]] = relationship(back_populates="org", cascade="all, delete-orphan")
+    clients: Mapped[list["Client"]] = relationship(  # noqa: F821
+        back_populates="org", cascade="all, delete-orphan"
+    )
 
 
 class User(Base, TimestampMixin):
@@ -37,3 +40,9 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     org: Mapped["Org"] = relationship(back_populates="users")
+    client_memberships: Mapped[list["ClientMembership"]] = relationship(  # noqa: F821
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    project_memberships: Mapped[list["ProjectMembership"]] = relationship(  # noqa: F821
+        back_populates="user", cascade="all, delete-orphan"
+    )

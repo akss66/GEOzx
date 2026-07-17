@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
-from app.models import MaterialAsset
+from app.models import Account, Event, MaterialAsset
 from app.models.enums import MaterialStatus
 
 
@@ -15,7 +16,14 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _account(client, headers: dict[str, str], nickname: str, *, authorized: bool) -> int:
+async def _account(
+    client,
+    headers: dict[str, str],
+    session,
+    nickname: str,
+    *,
+    authorized: bool,
+) -> int:
     account = (
         await client.post(
             "/accounts",
@@ -24,15 +32,14 @@ async def _account(client, headers: dict[str, str], nickname: str, *, authorized
         )
     ).json()
     if authorized:
-        await client.patch(
-            f"/accounts/{account['id']}/integration",
-            headers=headers,
-            json={
-                "integration_status": "connected",
-                "auth_status": "authorized",
-                "data_sync_status": "pending",
-            },
-        )
+        row = await session.get(Account, account["id"])
+        assert row is not None
+        row.auth = {
+            "integration_status": "connected",
+            "auth_status": "authorized",
+            "data_sync_status": "pending",
+        }
+        await session.commit()
     return account["id"]
 
 
@@ -59,7 +66,7 @@ async def test_matrix_distribution_plan_requires_accounts(client, admin):
 async def test_matrix_distribution_plan_rejects_unauthorized_accounts(client, admin, session):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    account_id = await _account(client, headers, "未授权账号", authorized=False)
+    account_id = await _account(client, headers, session, "未授权账号", authorized=False)
 
     project = (await client.post("/projects", headers=headers, json={"name": "矩阵"})).json()
     content = (
@@ -103,10 +110,17 @@ async def test_matrix_distribution_plan_creates_publish_packages_and_tool_calls(
 ):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    account_a = await _account(client, headers, "A 账号", authorized=True)
-    account_b = await _account(client, headers, "B 账号", authorized=True)
+    account_a = await _account(client, headers, session, "A 账号", authorized=True)
+    account_b = await _account(client, headers, session, "B 账号", authorized=True)
 
     project = (await client.post("/projects", headers=headers, json={"name": "矩阵"})).json()
+    for account_id in (account_a, account_b):
+        bound = await client.patch(
+            f"/accounts/{account_id}",
+            headers=headers,
+            json={"project_id": project["id"]},
+        )
+        assert bound.status_code == 200
     content = (
         await client.post(
             "/content-items",
@@ -126,7 +140,7 @@ async def test_matrix_distribution_plan_creates_publish_packages_and_tool_calls(
     await session.commit()
     await session.refresh(material)
 
-    scheduled_at = datetime.now(timezone.utc) + timedelta(hours=3)
+    scheduled_at = datetime.now(UTC) + timedelta(hours=3)
     resp = await client.post(
         "/matrix-distribution-plans",
         headers=headers,
@@ -151,24 +165,43 @@ async def test_matrix_distribution_plan_creates_publish_packages_and_tool_calls(
     assert {item["account_id"] for item in body["items"]} == {account_a, account_b}
     assert all(item["status"] == "waiting_manual" for item in body["items"])
     assert all(item["tool_call_id"] for item in body["items"])
-    assert all(item["publish_package"]["execution_mode"] == "manual_checklist" for item in body["items"])
+    assert all(
+        item["publish_package"]["execution_mode"] == "manual_checklist" for item in body["items"]
+    )
     assert all(item["publish_package"]["manual_steps"] for item in body["items"])
 
     queue = await client.get("/brain/tool-calls/pending-approvals", headers=headers)
-    package_calls = [
-        row for row in queue.json() if row["tool_code"] == "publish_package_prepare"
-    ]
+    package_calls = [row for row in queue.json() if row["tool_code"] == "publish_package_prepare"]
     assert len(package_calls) >= 2
     assert {row["meta"]["matrix_plan_id"] for row in package_calls} == {body["id"]}
+    approval_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.type == "approval.requested",
+                Event.content_item_id == content["id"],
+            )
+        )
+    )
+    matrix_events = [
+        row for row in approval_events if row.payload.get("approval_kind") == "matrix_plan"
+    ]
+    assert len(matrix_events) == 1
+    assert matrix_events[0].payload["source_id"] == body["id"]
 
 
 @pytest.mark.asyncio
 async def test_approving_all_matrix_publish_packages_queues_plan(client, admin, session):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    account_id = await _account(client, headers, "A 账号", authorized=True)
+    account_id = await _account(client, headers, session, "A 账号", authorized=True)
 
     project = (await client.post("/projects", headers=headers, json={"name": "矩阵"})).json()
+    bound = await client.patch(
+        f"/accounts/{account_id}",
+        headers=headers,
+        json={"project_id": project["id"]},
+    )
+    assert bound.status_code == 200
     content = (
         await client.post(
             "/content-items",

@@ -11,6 +11,7 @@ export type AppPage =
   | "accounts"
   | "knowledge"
   | "config"
+  | "models"
   | "users";
 
 export interface AppRouteItem {
@@ -35,6 +36,7 @@ export const APP_ROUTES: readonly AppRouteItem[] = [
   { path: "accounts", page: "accounts" },
   { path: "knowledge", page: "knowledge" },
   { path: "config", page: "config", adminOnly: true },
+  { path: "models", page: "models", adminOnly: true },
   { path: "users", page: "users", adminOnly: true },
 ] as const;
 

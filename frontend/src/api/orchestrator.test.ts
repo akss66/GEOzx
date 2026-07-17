@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   checkPublishReadiness,
+  createDeliverableRevision,
   createContentItem,
+  getContentWorkspace,
   listPublishCapabilities,
   listContentItems,
   listDeliverableHistory,
@@ -43,6 +45,24 @@ describe("orchestrator api", () => {
       title: "Title",
     });
     expect(apiGet).toHaveBeenNthCalledWith(2, "/content-items/1/deliverables");
+  });
+
+  it("loads the aggregate workspace and creates a deliverable revision", async () => {
+    const workspace = { content_item: { id: 7 }, deliverables: [] };
+    const revision = { id: 12, version: 2, payload: { hook: "new" } };
+    apiGet.mockResolvedValueOnce({ data: workspace });
+    apiPost.mockResolvedValueOnce({ data: revision });
+
+    await expect(getContentWorkspace(7)).resolves.toEqual(workspace);
+    await expect(
+      createDeliverableRevision(11, { payload: { hook: "new" }, note: "画布修订" }),
+    ).resolves.toEqual(revision);
+
+    expect(apiGet).toHaveBeenCalledWith("/content-items/7/workspace");
+    expect(apiPost).toHaveBeenCalledWith("/deliverables/11/revisions", {
+      payload: { hook: "new" },
+      note: "画布修订",
+    });
   });
 
   it("calls publish readiness endpoint", async () => {

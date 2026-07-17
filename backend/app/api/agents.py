@@ -1,39 +1,48 @@
 """专家团 API。"""
 
-from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import AdminUser, CurrentUser
 from app.db import get_session
 from app.models import (
-    AgentInvocation,
     AgentToolCall,
-    BrainTask,
     ModelConfig,
-    OrchestrationPlan,
-    TaskBrief,
 )
 from app.models.enums import (
     AgentCode,
     AgentGroup,
-    AgentInvocationStatus,
     AutomationLevel,
-    BrainTaskStatus,
     DeliverableType,
-    Platform,
 )
 from app.schemas.brain import (
-    AgentCurrentTaskOut,
+    AgentHandoffOut,
+    AgentManagementOut,
     AgentProfileOut,
     AgentToolCallSummaryItem,
     AgentToolCallSummaryOut,
     InvokeAgentOut,
     InvokeAgentRequest,
     UpdateAgentConfigRequest,
+    UpdateAgentManagementRequest,
+)
+from app.schemas.knowledge import KnowledgeSuggestionOut
+from app.services.agent_management import (
+    available_quality_gates,
+    available_tools,
+    get_business_config,
+    save_business_config,
+)
+from app.services.agent_workspace import (
+    AgentExecutionError,
+    AgentRunBundle,
+    create_direct_agent_run,
+    handoff_agent_run,
+    list_agent_runs,
+    suggest_agent_run_knowledge,
 )
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -139,18 +148,6 @@ async def _profile(session: AsyncSession, org_id: int, raw: dict) -> AgentProfil
     if cfg is not None and cfg.params and cfg.params.get("automation_level"):
         automation_level = AutomationLevel(cfg.params["automation_level"])
 
-    current_task = AgentCurrentTaskOut(
-        task_id=0,
-        title="等待运营大脑调度",
-        project_name="未绑定项目",
-        account_group_name="未绑定账号组",
-        platforms=[Platform.DOUYIN],
-        progress=0,
-        risk_level="low",
-        blockers=[],
-        next_action="等待任务确认",
-        output_summary="暂无进行中的专家任务。",
-    )
     return AgentProfileOut(
         code=raw["code"],
         name=raw["name"],
@@ -162,7 +159,7 @@ async def _profile(session: AsyncSession, org_id: int, raw: dict) -> AgentProfil
         tools=raw["tools"],
         typical_tasks=raw["typical_tasks"],
         standard_outputs=raw["standard_outputs"],
-        current_task=current_task,
+        current_task=None,
         tool_summary=await _tool_summary(session, org_id, raw["code"]),
     )
 
@@ -207,6 +204,53 @@ def _find_raw(code: AgentCode) -> dict:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="专家不存在")
 
 
+async def _management(
+    session: AsyncSession,
+    org_id: int,
+    raw: dict,
+) -> AgentManagementOut:
+    code: AgentCode = raw["code"]
+    config = await get_business_config(
+        session,
+        org_id,
+        code,
+        responsibility=raw["one_liner"],
+    )
+    row = await session.scalar(
+        select(ModelConfig).where(
+            ModelConfig.org_id == org_id,
+            ModelConfig.agent_code == code.value,
+        )
+    )
+    automation_level = AutomationLevel.CONFIRM
+    if row is not None and row.params and row.params.get("automation_level"):
+        automation_level = AutomationLevel(row.params["automation_level"])
+    return AgentManagementOut(
+        code=code,
+        name=raw["name"],
+        group=raw["group"],
+        enabled=config["enabled"],
+        responsibility=config["responsibility"],
+        system_prompt=config["system_prompt"],
+        automation_level=automation_level,
+        tool_permissions=config["tool_permissions"],
+        quality_gates=config["quality_gates"],
+        available_tools=available_tools(code),
+        available_quality_gates=available_quality_gates(code),
+        typical_tasks=raw["typical_tasks"],
+        standard_outputs=raw["standard_outputs"],
+        updated_at=row.updated_at if row is not None else None,
+    )
+
+
+@router.get("/management", response_model=list[AgentManagementOut])
+async def list_agent_management(
+    user: AdminUser,
+    session: SessionDep,
+) -> list[AgentManagementOut]:
+    return [await _management(session, user.org_id, raw) for raw in AGENT_PROFILES]
+
+
 @router.get("", response_model=list[AgentProfileOut])
 async def list_agents(user: CurrentUser, session: SessionDep) -> list[AgentProfileOut]:
     return [await _profile(session, user.org_id, raw) for raw in AGENT_PROFILES]
@@ -215,6 +259,37 @@ async def list_agents(user: CurrentUser, session: SessionDep) -> list[AgentProfi
 @router.get("/{code}", response_model=AgentProfileOut)
 async def get_agent(code: AgentCode, user: CurrentUser, session: SessionDep) -> AgentProfileOut:
     return await _profile(session, user.org_id, _find_raw(code))
+
+
+@router.get("/{code}/management", response_model=AgentManagementOut)
+async def get_agent_management(
+    code: AgentCode,
+    user: AdminUser,
+    session: SessionDep,
+) -> AgentManagementOut:
+    return await _management(session, user.org_id, _find_raw(code))
+
+
+@router.put("/{code}/management", response_model=AgentManagementOut)
+async def update_agent_management(
+    code: AgentCode,
+    body: UpdateAgentManagementRequest,
+    user: AdminUser,
+    session: SessionDep,
+) -> AgentManagementOut:
+    raw = _find_raw(code)
+    await save_business_config(
+        session,
+        org_id=user.org_id,
+        user_id=user.id,
+        code=code,
+        enabled=body.enabled,
+        responsibility=body.responsibility,
+        system_prompt=body.system_prompt,
+        tool_permissions={key: value for key, value in body.tool_permissions.items()},
+        quality_gates=body.quality_gates,
+    )
+    return await _management(session, user.org_id, raw)
 
 
 @router.patch("/{code}/config", response_model=AgentProfileOut)
@@ -243,69 +318,93 @@ async def update_agent_config(
     return await _profile(session, user.org_id, raw)
 
 
-@router.post("/{code}/invoke", response_model=InvokeAgentOut)
+@router.post(
+    "/{code}/invoke",
+    response_model=InvokeAgentOut,
+    status_code=status.HTTP_201_CREATED,
+)
 async def invoke_agent(
     code: AgentCode,
     body: InvokeAgentRequest,
     user: CurrentUser,
     session: SessionDep,
 ) -> InvokeAgentOut:
-    raw = _find_raw(code)
-    task_id = body.task_id
-    if task_id is not None:
-        task = await session.get(BrainTask, task_id)
-        if task is None or task.org_id != user.org_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="运营大脑任务不存在")
-    else:
-        task = BrainTask(
-            org_id=user.org_id,
-            title=f"直接调用：{raw['name']}",
-            status=BrainTaskStatus.RUNNING,
-            current_focus="直接调用结果回流运营大脑",
+    _find_raw(code)
+    try:
+        bundle = await create_direct_agent_run(
+            session,
+            user=user,
+            code=code,
+            project_id=body.project_id,
+            account_id=body.account_id,
+            prompt=body.prompt,
+            source_task_id=body.source_task_id,
         )
-        task.brief = TaskBrief(
-            goal=body.prompt,
-            platforms=[Platform.DOUYIN.value],
-            cycle="直接调用",
-            content_goal="完成一次专家直接调用，并把结果回流运营大脑。",
-        )
-        task.plan = OrchestrationPlan(
-            summary="直接调用子 Agent，结果回流运营大脑。",
-            steps=[
-                {
-                    "id": f"direct-{code.value}",
-                    "agent_code": code.value,
-                    "agent_name": raw["name"],
-                    "phase": "直接调用",
-                    "intent": body.prompt,
-                    "status": "done",
-                    "depends_on": [],
-                    "expected_output": "专家输出摘要",
-                    "risk_level": "low",
-                }
-            ],
-            quality_gates=[],
-        )
-        session.add(task)
-        await session.flush()
-        task_id = task.id
+    except AgentExecutionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="专家执行失败，请检查模型配置后重试",
+        ) from exc
+    return _bundle_out(bundle)
 
-    invocation = AgentInvocation(
-        task_id=task_id,
-        agent_code=code,
-        agent_name=raw["name"],
-        status=AgentInvocationStatus.DONE,
-        input_summary=body.prompt,
-        output_summary="直接调用已完成，结果已回流运营大脑。",
-        model="deepseek-chat",
-        token_count=1200,
-        cost=Decimal("0.03"),
-        upstream=[],
+
+@router.get("/{code}/runs", response_model=list[InvokeAgentOut])
+async def get_agent_runs(
+    code: AgentCode,
+    user: CurrentUser,
+    session: SessionDep,
+    project_id: Annotated[int, Query(gt=0)],
+    account_id: Annotated[int, Query(gt=0)],
+) -> list[InvokeAgentOut]:
+    _find_raw(code)
+    bundles = await list_agent_runs(
+        session,
+        user=user,
+        code=code,
+        project_id=project_id,
+        account_id=account_id,
     )
-    session.add(invocation)
-    await session.commit()
-    await session.refresh(invocation)
+    return [_bundle_out(bundle) for bundle in bundles]
+
+
+@router.post("/runs/{task_id}/handoff", response_model=AgentHandoffOut)
+async def handoff_run(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> AgentHandoffOut:
+    task, prompt = await handoff_agent_run(session, user=user, task_id=task_id)
+    return AgentHandoffOut(
+        task_id=task.id,
+        project_id=task.brief.project_id,
+        account_id=task.brief.account_ids[0],
+        prompt=prompt,
+    )
+
+
+@router.post(
+    "/runs/{task_id}/knowledge-suggestion",
+    response_model=KnowledgeSuggestionOut,
+)
+async def suggest_run_knowledge(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> KnowledgeSuggestionOut:
+    suggestion = await suggest_agent_run_knowledge(
+        session,
+        user=user,
+        task_id=task_id,
+    )
+    return KnowledgeSuggestionOut.model_validate(suggestion)
+
+
+def _bundle_out(bundle: AgentRunBundle) -> InvokeAgentOut:
     return InvokeAgentOut(
-        invocation=invocation,
-        message="子 Agent 调用完成，结果已回流运营大脑。",
+        task=bundle.task,
+        invocation=bundle.invocation,
+        deliverable=bundle.deliverable,
+        acceptance=bundle.acceptance,
+        knowledge_sources=bundle.knowledge_sources,
+        message="专家已完成本轮处理，成果等待你确认是否采用。",
     )

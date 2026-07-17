@@ -5,7 +5,7 @@ schema 校验，确保结构正确。这里建立注册表骨架 + 注册 1~2 �
 其余 8 类交付物在 M1 各 Agent 落地时补全。
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import DeliverableType
 
@@ -115,3 +115,37 @@ class ReviewReportPayload(DeliverablePayload):
     highlights: list[str]
     issues: list[str]
     optimization_suggestions: list[str]
+
+
+@register(DeliverableType.TOPIC_PLAN)
+class TopicPlanPayload(DeliverablePayload):
+    theme: str
+    topics: list[dict]
+    posting_notes: list[str] = Field(default_factory=list)
+
+
+@register(DeliverableType.PUBLISH_CALENDAR)
+class PublishCalendarPayload(DeliverablePayload):
+    period: str
+    items: list[dict]
+    operating_notes: list[str] = Field(default_factory=list)
+
+
+@register(DeliverableType.AD_PLAN)
+class AdPlanPayload(DeliverablePayload):
+    objective: str
+    target_audience: str
+    budget_strategy: str
+    creative_directions: list[str]
+    risk_controls: list[str]
+    measurement: dict
+
+
+@register(DeliverableType.CS_RECORD)
+class CustomerServiceRecordPayload(DeliverablePayload):
+    period: str
+    summary: str
+    common_questions: list[str]
+    sentiment: dict
+    response_guidelines: list[str]
+    content_opportunities: list[str]

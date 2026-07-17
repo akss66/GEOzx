@@ -128,7 +128,7 @@ export function AgentTraceFlow({
   );
 }
 
-function TraceDetails({ data }: { data: TraceNodeData }) {
+export function TraceDetails({ data }: { data: TraceNodeData }) {
   const invocation = data.invocation;
   const toolCall = data.toolCall;
   const acceptance = data.acceptance;
@@ -170,14 +170,14 @@ function TraceDetails({ data }: { data: TraceNodeData }) {
         </div>
       ) : data.kind === "tool" && toolCall ? (
         <div style={{ display: "grid", gap: 6, fontSize: 12 }}>
-          <TraceLine label="宸ュ叿" value={toolCall.tool_code} />
-          <TraceLine label="鏉冮檺" value={toolCall.permission_mode} />
-          <TraceLine label="杈撳叆" value={toolCall.input_summary || "鏆傛棤杈撳叆鎽樿"} />
-          <TraceLine label="杈撳嚭" value={toolCall.output_summary || "鏆傛棤杈撳嚭鎽樿"} />
+          <TraceLine label="工具" value={toolCall.tool_name || toolCall.tool_code} />
+          <TraceLine label="权限" value={permissionLabel(toolCall.permission_mode)} />
+          <TraceLine label="输入" value={toolCall.input_summary || "暂无输入摘要"} />
+          <TraceLine label="输出" value={toolCall.output_summary || "暂无输出摘要"} />
           {toolCall.requires_human_confirmation && (
-            <TraceLine label="瀹℃壒" value="闇€瑕佷汉宸ョ‘璁ゅ悗缁х画" />
+            <TraceLine label="审批" value="需要人工确认后继续" />
           )}
-          {toolCall.error && <TraceLine label="澶辫触" value={toolCall.error} />}
+          {toolCall.error && <TraceLine label="失败" value={toolCall.error} />}
         </div>
       ) : data.kind === "deliverable" && acceptance ? (
         <div style={{ display: "grid", gap: 6, fontSize: 12 }}>
@@ -203,6 +203,11 @@ function TraceDetails({ data }: { data: TraceNodeData }) {
       )}
     </div>
   );
+}
+
+function permissionLabel(value: string) {
+  return ({ auto: "自动执行", confirm: "需要确认", manual: "人工执行" } as Record<string, string>)[value]
+    ?? "按配置执行";
 }
 
 function TraceLine({ label, value }: { label: string; value: string }) {

@@ -64,7 +64,9 @@ class MatrixDistributionItem(Base, TimestampMixin):
         ForeignKey("material_assets.id", ondelete="CASCADE"), index=True, nullable=False
     )
     platform: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
-    status: Mapped[str] = mapped_column(String(40), default="waiting_manual", index=True, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default="waiting_manual", index=True, nullable=False
+    )
     tool_call_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_tool_calls.id", ondelete="SET NULL"), nullable=True
     )

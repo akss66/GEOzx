@@ -6,6 +6,7 @@ import {
   closeTaskMemory,
   confirmBrainTask,
   draftBrainTask,
+  getBrainTaskRuntime,
   listBrainTasks,
   listDeliverableAcceptances,
   listPendingToolCallApprovals,
@@ -13,9 +14,12 @@ import {
   listTaskToolCalls,
   rejudgeDeliverableAcceptance,
   rejectDeliverableAcceptance,
+  reviseBrainDecision,
+  selectBrainDecision,
+  sendBrainMessage,
 } from "./brain";
 import { api } from "./client";
-import type { AgentToolCall, BrainTask, DeliverableAcceptance } from "../types";
+import type { AgentToolCall, BrainRuntime, BrainTask, DeliverableAcceptance } from "../types";
 
 vi.mock("./client", () => ({
   api: {
@@ -59,6 +63,8 @@ const task = {
   progress: 0,
   current_focus: "待确认",
   risk_count: 0,
+  runtime_mode: "legacy",
+  thread_id: null,
   context_closed_at: null,
   created_at: "2026-07-01T00:00:00Z",
   updated_at: "2026-07-01T00:00:00Z",
@@ -107,6 +113,29 @@ const toolCall = {
   updated_at: "2026-07-01T00:00:00Z",
 } satisfies AgentToolCall;
 
+const runtime = {
+  task: { ...task, runtime_mode: "langgraph", thread_id: "brain-task-12" },
+  thread_id: "brain-task-12",
+  status: "waiting_permission",
+  timeline: [
+    {
+      id: 1,
+      type: "brain.runtime.started",
+      payload: {
+        task_id: 12,
+        thread_id: "brain-task-12",
+        message: "主 Agent 已接收目标，开始建立运行时上下文。",
+      },
+      created_at: "2026-07-01T00:00:00Z",
+    },
+  ],
+  invocations: [],
+  tool_calls: [toolCall],
+  acceptances: [acceptance],
+  pending_permissions: [toolCall],
+  next_actions: ["review_pending_permissions"],
+} satisfies BrainRuntime;
+
 describe("brain api", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -145,16 +174,19 @@ describe("brain api", () => {
 
   it("calls task execution endpoints with task ids", async () => {
     apiPost.mockResolvedValueOnce({ data: task });
+    apiGet.mockResolvedValueOnce({ data: runtime });
     apiGet.mockResolvedValueOnce({ data: [] });
     apiGet.mockResolvedValueOnce({ data: [toolCall] });
     apiGet.mockResolvedValueOnce({ data: [acceptance] });
 
     await expect(confirmBrainTask(task)).resolves.toEqual(task);
+    await expect(getBrainTaskRuntime(task.id)).resolves.toEqual(runtime);
     await expect(listTaskInvocations(task.id)).resolves.toEqual([]);
     await expect(listTaskToolCalls(task.id)).resolves.toEqual([toolCall]);
     await expect(listDeliverableAcceptances(task.id)).resolves.toEqual([acceptance]);
 
     expect(apiPost).toHaveBeenCalledWith("/brain/tasks/12/confirm");
+    expect(apiGet).toHaveBeenCalledWith("/brain/tasks/12/runtime");
     expect(apiGet).toHaveBeenCalledWith("/brain/tasks/12/invocations");
     expect(apiGet).toHaveBeenCalledWith("/brain/tasks/12/tool-calls");
     expect(apiGet).toHaveBeenCalledWith("/brain/tasks/12/acceptances");
@@ -174,6 +206,41 @@ describe("brain api", () => {
       approved: true,
       comment: "通过",
     });
+  });
+
+  it("routes messages and strategy decisions through the smart runtime API", async () => {
+    apiPost.mockResolvedValue({ data: runtime });
+
+    await sendBrainMessage({
+      message: "分析账号并给我两个内容方向",
+      project_id: 7,
+      account_id: 3,
+      platform: "douyin",
+    });
+    await selectBrainDecision({ taskId: 12, decisionId: "direction-1", choiceId: "steady" });
+    await reviseBrainDecision({
+      taskId: 12,
+      decisionId: "direction-1",
+      comment: "换一组更大胆的方向",
+      requestNewOptions: true,
+    });
+
+    expect(apiPost).toHaveBeenNthCalledWith(1, "/brain/messages", {
+      message: "分析账号并给我两个内容方向",
+      project_id: 7,
+      account_id: 3,
+      platform: "douyin",
+    });
+    expect(apiPost).toHaveBeenNthCalledWith(
+      2,
+      "/brain/tasks/12/decisions/direction-1/select",
+      { choice_id: "steady" },
+    );
+    expect(apiPost).toHaveBeenNthCalledWith(
+      3,
+      "/brain/tasks/12/decisions/direction-1/revise",
+      { comment: "换一组更大胆的方向", request_new_options: true },
+    );
   });
 
   it("calls acceptance action endpoints with acceptance ids", async () => {

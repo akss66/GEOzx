@@ -7,7 +7,7 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from app.llm.adapters import CompletionResult
-from app.models import AgentTask, ContentItem, Deliverable, GateApproval, Org, Project
+from app.models import AgentTask, ContentItem, Deliverable, Event, GateApproval, Org, Project
 from app.models.enums import (
     AgentTaskStatus,
     ContentStage,
@@ -170,6 +170,15 @@ async def test_pipeline_runs_until_forced_gate(session, content_item) -> None:
     assert content_item.status == ContentStatus.BLOCKED
     assert "gate.pending" in emit.events
     assert "agent.done" in emit.events
+    approval_event = await session.scalar(
+        select(Event).where(
+            Event.type == "approval.requested",
+            Event.content_item_id == content_item.id,
+        )
+    )
+    assert approval_event is not None
+    assert approval_event.payload["approval_kind"] == "gate"
+    assert approval_event.payload["source_id"] == pending.id
 
 
 @pytest.mark.asyncio
@@ -324,9 +333,7 @@ async def test_content_agent_receives_upstream_positioning(session, content_item
     await engine.start(session, content_item.id)
 
     # 编导 Agent 的 user 消息里应含上游定位策略的关键字段
-    content_user_msg = next(
-        m["content"] for m in captured["02-content"] if m["role"] == "user"
-    )
+    content_user_msg = next(m["content"] for m in captured["02-content"] if m["role"] == "user")
     assert "positioning_strategy" in content_user_msg
     assert "硬核数码测评" in content_user_msg  # 来自定位 Agent 的输出
     # 定位 Agent（首步）无上游

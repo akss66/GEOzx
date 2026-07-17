@@ -21,6 +21,50 @@ export interface CreateUserInput {
   role: Role;
 }
 
+export type WorkspaceRole = "lead" | "operator" | "editor" | "reviewer";
+
+export interface ClientMembership {
+  client_id: number;
+  client_name: string;
+  role: WorkspaceRole;
+}
+
+export interface ProjectMembership {
+  project_id: number;
+  project_name: string;
+  client_id: number | null;
+  client_name: string | null;
+  role: WorkspaceRole;
+}
+
+export interface UserDetail extends User {
+  has_global_access: boolean;
+  client_memberships: ClientMembership[];
+  project_memberships: ProjectMembership[];
+}
+
+export interface UserAccessCatalog {
+  clients: Array<{ id: number; name: string; status: "active" | "archived" }>;
+  projects: Array<{
+    id: number;
+    client_id: number | null;
+    name: string;
+    status: "active" | "paused" | "archived";
+  }>;
+}
+
+export interface UpdateUserInput {
+  email?: string;
+  display_name?: string;
+  role?: Role;
+  is_active?: boolean;
+}
+
+export interface UpdateUserAccessInput {
+  clients: Array<{ client_id: number; role: WorkspaceRole }>;
+  projects: Array<{ project_id: number; role: WorkspaceRole }>;
+}
+
 // —— 运营大脑 / 专家团 ——
 
 export type AgentCode =
@@ -93,6 +137,8 @@ export interface OrchestrationPlanStep {
   execution_kind?: string;
   human_gate?: boolean;
   tool_codes?: string[];
+  tool_permissions?: Record<string, ToolPermissionMode>;
+  quality_gates?: string[];
 }
 
 export interface OrchestrationPlan {
@@ -115,6 +161,8 @@ export interface BrainTask {
   progress: number;
   current_focus: string;
   risk_count: number;
+  runtime_mode: "legacy" | "langgraph" | string;
+  thread_id: string | null;
   context_closed_at: string | null;
   created_at: string;
   updated_at: string;
@@ -144,6 +192,68 @@ export interface AgentProfile {
     output_summary: string;
   } | null;
   tool_summary: AgentToolCallSummary;
+}
+
+export type ToolPermissionMode = "auto" | "confirm" | "manual" | "disabled";
+
+export interface AgentManagementTool {
+  code: string;
+  name: string;
+  description: string;
+}
+
+export interface AgentManagementGate {
+  code: string;
+  name: string;
+  description: string;
+  forced: boolean;
+}
+
+export interface AgentManagement {
+  code: AgentCode;
+  name: string;
+  group: AgentGroup;
+  enabled: boolean;
+  responsibility: string;
+  system_prompt: string;
+  automation_level: AutomationLevel;
+  tool_permissions: Record<string, ToolPermissionMode>;
+  quality_gates: string[];
+  available_tools: AgentManagementTool[];
+  available_quality_gates: AgentManagementGate[];
+  typical_tasks: string[];
+  standard_outputs: DeliverableType[];
+  updated_at: string | null;
+}
+
+export interface UpdateAgentManagementInput {
+  enabled: boolean;
+  responsibility: string;
+  system_prompt: string;
+  tool_permissions: Record<string, ToolPermissionMode>;
+  quality_gates: string[];
+}
+
+export interface AgentDirectRun {
+  task: BrainTask;
+  invocation: AgentInvocation;
+  deliverable: Deliverable;
+  acceptance: DeliverableAcceptance;
+  knowledge_sources: Array<{
+    id: number;
+    category: KnowledgeCategory;
+    title: string;
+    source_label: string;
+    version: number;
+  }>;
+  message: string;
+}
+
+export interface AgentHandoff {
+  task_id: number;
+  project_id: number;
+  account_id: number;
+  prompt: string;
 }
 
 export interface AgentInvocation {
@@ -215,6 +325,62 @@ export interface AgentToolCall {
   updated_at: string;
 }
 
+export interface RuntimeEvent {
+  id: number;
+  type: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export type BrainIntentKind =
+  | "conversation"
+  | "clarification"
+  | "analysis"
+  | "workflow"
+  | "action";
+
+export interface BrainIntentDecision {
+  intent: BrainIntentKind;
+  confidence: number;
+  reason: string;
+  missing_field: string | null;
+  clarifying_question: string | null;
+  suggested_expert_codes: AgentCode[];
+  requires_account_context: boolean;
+}
+
+export interface BrainDecisionChoice {
+  id: string;
+  title: string;
+  description: string;
+  benefit: string;
+  tradeoff: string;
+  recommended: boolean;
+}
+
+export interface BrainDecisionRequest {
+  id: string;
+  title: string;
+  summary: string;
+  choices: BrainDecisionChoice[];
+  allow_custom_input: boolean;
+  status: "pending" | "selected" | "revised";
+}
+
+export interface BrainRuntime {
+  task: BrainTask;
+  thread_id: string | null;
+  status: "legacy" | "running" | "waiting_permission" | "completed" | "failed" | string;
+  timeline: RuntimeEvent[];
+  invocations: AgentInvocation[];
+  tool_calls: AgentToolCall[];
+  acceptances: DeliverableAcceptance[];
+  pending_permissions: AgentToolCall[];
+  intent?: BrainIntentDecision | null;
+  pending_decisions?: BrainDecisionRequest[];
+  next_actions: string[];
+}
+
 export interface DeliverableAcceptance {
   id: number;
   task_id: number;
@@ -227,7 +393,7 @@ export interface DeliverableAcceptance {
   summary: string;
   acceptance_items: {
     label: string;
-    status: "pass" | "warn" | "fail";
+    status: "pass" | "warn" | "fail" | "pending";
     note: string;
   }[];
   history_versions: {
@@ -252,46 +418,101 @@ export interface AutomationPolicy {
   level: AutomationLevel;
 }
 
-export interface CostModelRow {
-  model: string;
-  calls: number;
-  tokens: number;
-  cost: number;
-}
-
-export interface CostAgentRow {
-  agent_code: string;
-  agent_name: string;
-  calls: number;
-  tokens: number;
-  cost: number;
-}
-
-export interface CostTaskRow {
-  task_id: number;
-  title: string;
-  type: BrainTask["type"];
-  calls: number;
-  tokens: number;
-  cost: number;
-}
-
-export interface CostBrainRow {
-  type: BrainTask["type"];
-  tasks: number;
-  calls: number;
-  tokens: number;
-  cost: number;
-}
+export type BudgetStatus = "no_budget" | "healthy" | "warning" | "exceeded";
 
 export interface CostOverview {
-  total_cost: number;
-  total_calls: number;
-  total_tokens: number;
-  by_brain: CostBrainRow[];
-  by_model: CostModelRow[];
-  by_agent: CostAgentRow[];
-  by_task: CostTaskRow[];
+  scope: {
+    client_id: number;
+    client_name: string;
+    project_id: number | null;
+    project_name: string | null;
+    period_days: number;
+    period_start: string;
+    period_end: string;
+  };
+  summary: {
+    actual_cost: number;
+    budget: number | null;
+    budget_usage: number | null;
+    remaining_budget: number | null;
+    task_count: number;
+    agent_calls: number;
+    tool_calls: number;
+    failed_operations: number;
+    budget_status: BudgetStatus;
+  };
+  by_project: Array<{
+    project_id: number;
+    project_name: string;
+    budget: number | null;
+    actual_cost: number;
+    budget_usage: number | null;
+    budget_status: BudgetStatus;
+    task_count: number;
+  }>;
+  by_agent: Array<{
+    agent_code: string;
+    agent_name: string;
+    calls: number;
+    cost: number;
+    failed_calls: number;
+  }>;
+  by_task: Array<{
+    task_id: number;
+    title: string;
+    type: BrainTask["type"];
+    status: string;
+    agent_calls: number;
+    tool_calls: number;
+    cost: number;
+  }>;
+  by_tool: Array<{
+    tool_code: string;
+    tool_name: string;
+    calls: number;
+    cost: number;
+    failed_calls: number;
+  }>;
+  daily: Array<{ date: string; cost: number }>;
+}
+
+export interface TechnicalCostOverview {
+  period_days: number;
+  period_start: string;
+  period_end: string;
+  summary: {
+    total_cost: number;
+    total_calls: number;
+    total_tokens: number;
+    failed_calls: number;
+    fallback_attempts: number;
+    average_latency_ms: number;
+  };
+  by_provider: Array<{
+    provider: string;
+    calls: number;
+    tokens: number;
+    cost: number;
+    failed_calls: number;
+    average_latency_ms: number;
+  }>;
+  by_model: Array<{
+    provider: string;
+    model: string;
+    calls: number;
+    tokens: number;
+    cost: number;
+    failed_calls: number;
+    average_latency_ms: number;
+  }>;
+  by_agent: Array<{
+    agent_code: string;
+    calls: number;
+    tokens: number;
+    cost: number;
+    failed_calls: number;
+  }>;
+  daily: Array<{ date: string; calls: number; failed_calls: number; cost: number }>;
 }
 
 export type RiskCategory = "quality_gate" | "account_auth" | "model_failure" | "data_sync";
@@ -330,10 +551,21 @@ export type PlatformIntegrationStatus =
   | "connected"
   | "disabled";
 
-export interface Project {
+export type ClientStatus = "active" | "archived";
+
+export interface Client {
   id: number;
   name: string;
+  status: ClientStatus;
+  created_at: string;
+}
+
+export interface Project {
+  id: number;
+  client_id?: number | null;
+  name: string;
   description: string | null;
+  monthly_cost_budget_usd?: number | null;
   status: ProjectStatus;
   created_at: string;
 }
@@ -345,23 +577,40 @@ export interface AccountGroup {
   created_at: string;
 }
 
+export interface AccountCurrentTask {
+  id: number;
+  title: string;
+  status: string;
+  progress: number;
+  current_focus: string;
+}
+
 export interface Account {
   id: number;
+  client_id?: number | null;
   nickname: string;
   platform: Platform;
   group_id: number | null;
   project_id: number | null;
+  project_ids?: number[];
   status: AccountStatus;
   external_account_id: string | null;
   integration_status: IntegrationStatus;
   auth_status: AuthStatus;
   data_sync_status: DataSyncStatus;
+  avatar_url?: string | null;
+  positioning_summary?: string | null;
+  current_task?: AccountCurrentTask | null;
+  risk_count?: number;
+  last_sync_at?: string | null;
+  publish_capability?: "prepare_only" | "manual_only" | "unavailable";
   created_at: string;
 }
 
 export interface CreateAccountInput {
   nickname: string;
   platform: Platform;
+  client_id?: number | null;
   group_id?: number | null;
   project_id?: number | null;
   external_account_id?: string | null;
@@ -515,6 +764,24 @@ export interface ContentItem {
   created_at: string;
 }
 
+export interface ContentAgentTask {
+  id: number;
+  agent_code: string;
+  stage: ContentStage;
+  status: AgentTaskStatus;
+  output_deliverable_id: number | null;
+}
+
+export interface ContentGate {
+  id: number;
+  gate: GateType;
+  status: GateStatus;
+  decided_by: number | null;
+  comment: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
 export type DeliverableType =
   | "positioning_strategy"
   | "topic_plan"
@@ -557,6 +824,23 @@ export interface MaterialAsset {
   created_at: string;
 }
 
+export interface ContentWorkspace {
+  content_item: ContentItem;
+  project_name: string;
+  account: {
+    id: number;
+    nickname: string;
+    platform: Platform;
+    auth_status: string;
+  } | null;
+  tasks: ContentAgentTask[];
+  deliverables: Deliverable[];
+  gates: ContentGate[];
+  compliance: ComplianceCheck[];
+  materials: MaterialAsset[];
+  publish_tool_calls: AgentToolCall[];
+}
+
 export interface PendingGate {
   id: number;
   gate: GateType;
@@ -565,6 +849,44 @@ export interface PendingGate {
   content_title: string;
   created_at: string;
   compliance: ComplianceCheck | null;
+}
+
+export type ApprovalKind = "gate" | "tool_call" | "deliverable";
+export type ApprovalRiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface ApprovalQueueItem {
+  key: string;
+  kind: ApprovalKind;
+  source_id: number;
+  project_id: number;
+  project_name: string;
+  account_id: number | null;
+  account_name: string | null;
+  content_item_id: number | null;
+  content_title: string | null;
+  task_id: number | null;
+  category: string;
+  title: string;
+  summary: string;
+  risk_level: ApprovalRiskLevel;
+  risk_reasons: string[];
+  impact: string[];
+  agent_explanation: string;
+  preview: Record<string, unknown>;
+  can_decide: boolean;
+  created_at: string;
+}
+
+export interface ApprovalWorkspace {
+  items: ApprovalQueueItem[];
+  counts: {
+    total: number;
+    critical: number;
+    high: number;
+    medium: number;
+  };
+  can_decide: boolean;
+  generated_at: string;
 }
 
 export type ComplianceRisk = "pass" | "warn" | "block";
@@ -721,6 +1043,82 @@ export interface ModelConfig {
   fallback_model: string | null;
 }
 
+export type ModelProviderCode = "deepseek" | "litellm";
+export type ModelCallStatus = "ok" | "error";
+
+export interface ModelProvider {
+  code: ModelProviderCode;
+  name: string;
+  kind: "direct" | "router";
+  enabled: boolean;
+  credential_ref: string | null;
+  credential_configured: boolean | null;
+  runtime_ready: boolean;
+  endpoint: string | null;
+  supported_models: string[];
+  note: string;
+  updated_at: string | null;
+}
+
+export interface UpdateModelProviderInput {
+  enabled: boolean;
+  credential_ref: string | null;
+}
+
+export interface ModelRoute {
+  id: number | null;
+  agent_code: string;
+  agent_name: string;
+  primary_model: string;
+  fallback_model: string | null;
+  temperature: number;
+  max_tokens: number;
+  timeout_seconds: number;
+  updated_at: string | null;
+}
+
+export interface UpdateModelRouteInput {
+  primary_model: string;
+  fallback_model: string | null;
+  temperature: number;
+  max_tokens: number;
+  timeout_seconds: number;
+}
+
+export interface ModelInfrastructureSummary {
+  providers_total: number;
+  providers_ready: number;
+  routes_total: number;
+  routes_with_fallback: number;
+  calls_24h: number;
+  failures_24h: number;
+}
+
+export interface ModelInfrastructureOverview {
+  summary: ModelInfrastructureSummary;
+  providers: ModelProvider[];
+  routes: ModelRoute[];
+}
+
+export interface ModelCall {
+  id: number;
+  agent_code: string | null;
+  agent_name: string;
+  provider: string;
+  model: string;
+  total_tokens: number;
+  cost_usd: number;
+  latency_ms: number;
+  status: ModelCallStatus;
+  error_summary: string | null;
+  created_at: string;
+}
+
+export interface ModelCallPage {
+  total: number;
+  items: ModelCall[];
+}
+
 // —— 共享知识库 ——
 
 export type KnowledgeCategory =
@@ -731,16 +1129,64 @@ export type KnowledgeCategory =
 
 export interface KnowledgeEntry {
   id: number;
+  client_id: number;
+  project_id: number | null;
   category: KnowledgeCategory;
   title: string;
+  content: string;
   payload: Record<string, unknown>;
   tags: string[] | null;
+  source_type: "manual" | "agent" | "deliverable" | "external";
+  source_label: string;
+  source_url: string | null;
+  version: number;
+  status: "active" | "archived";
+  created_by_id: number | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface CreateKnowledgeInput {
+  client_id: number;
+  project_id?: number | null;
   category: KnowledgeCategory;
   title: string;
+  content: string;
   payload?: Record<string, unknown>;
   tags?: string[] | null;
+  source_type?: "manual" | "deliverable" | "external";
+  source_label: string;
+  source_url?: string | null;
+}
+
+export interface KnowledgeSuggestion {
+  id: number;
+  client_id: number;
+  project_id: number | null;
+  category: KnowledgeCategory;
+  title: string;
+  content: string;
+  payload: Record<string, unknown>;
+  tags: string[] | null;
+  source_agent_code: string;
+  source_label: string;
+  source_task_id: number | null;
+  source_deliverable_id: number | null;
+  status: "pending" | "approved" | "rejected";
+  reviewed_by_id: number | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  accepted_entry_id: number | null;
+  created_at: string;
+}
+
+export interface KnowledgeCitation {
+  id: number;
+  entry_id: number;
+  project_id: number | null;
+  task_id: number | null;
+  invocation_id: number | null;
+  agent_code: string;
+  context: string;
+  created_at: string;
 }

@@ -11,6 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import AdminUser, CurrentUser
+from app.core.workspace_access import accessible_client_ids, require_client_access
+from app.core.workspace_defaults import get_or_create_default_client
 from app.db import get_session
 from app.models import Project
 from app.models.enums import ProjectStatus
@@ -34,8 +36,13 @@ async def _get_owned(session: AsyncSession, project_id: int, org_id: int) -> Pro
 
 @router.get("", response_model=list[ProjectOut])
 async def list_projects(user: CurrentUser, session: SessionDep) -> list[ProjectOut]:
+    client_ids = await accessible_client_ids(session, user)
+    if not client_ids:
+        return []
     rows = await session.scalars(
-        select(Project).where(Project.org_id == user.org_id).order_by(Project.id.desc())
+        select(Project)
+        .where(Project.org_id == user.org_id, Project.client_id.in_(client_ids))
+        .order_by(Project.id.desc())
     )
     return [ProjectOut.model_validate(p) for p in rows]
 
@@ -44,7 +51,18 @@ async def list_projects(user: CurrentUser, session: SessionDep) -> list[ProjectO
 async def create_project(
     body: CreateProjectRequest, admin: AdminUser, session: SessionDep
 ) -> ProjectOut:
-    project = Project(org_id=admin.org_id, name=body.name, description=body.description)
+    client = (
+        await require_client_access(session, admin, body.client_id)
+        if body.client_id is not None
+        else await get_or_create_default_client(session, admin.org_id)
+    )
+    project = Project(
+        org_id=admin.org_id,
+        client_id=client.id,
+        name=body.name,
+        description=body.description,
+        monthly_cost_budget_usd=body.monthly_cost_budget_usd,
+    )
     session.add(project)
     await session.commit()
     await session.refresh(project)

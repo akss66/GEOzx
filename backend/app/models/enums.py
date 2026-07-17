@@ -14,6 +14,18 @@ class UserRole(enum.StrEnum):
     USER = "user"
 
 
+class WorkspaceRole(enum.StrEnum):
+    LEAD = "lead"
+    OPERATOR = "operator"
+    EDITOR = "editor"
+    REVIEWER = "reviewer"
+
+
+class ClientStatus(enum.StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
 class Platform(enum.StrEnum):
     DOUYIN = "douyin"
     XIAOHONGSHU = "xiaohongshu"

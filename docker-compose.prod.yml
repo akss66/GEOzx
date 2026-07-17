@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-dyflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dyflow_dev_pw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-dyflow}
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -33,7 +33,7 @@ services:
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dyflow}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dyflow_dev_pw}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
     volumes:
       - miniodata:/data
     restart: unless-stopped
@@ -42,7 +42,7 @@ services:
     build: ./backend
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:-dyflow_dev_pw}@postgres:5432/${POSTGRES_DB:-dyflow}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dyflow}
       REDIS_URL: redis://redis:6379/0
     expose:
       - "8000"
@@ -68,7 +68,7 @@ services:
     command: ["arq", "app.worker.WorkerSettings"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:-dyflow_dev_pw}@postgres:5432/${POSTGRES_DB:-dyflow}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dyflow}
       REDIS_URL: redis://redis:6379/0
     volumes:
       - objects:/data/objects
@@ -85,11 +85,14 @@ services:
     build: ./frontend
     ports:
       - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/dyflow/certs:/etc/nginx/ssl:ro
     depends_on:
       backend:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/nginx-health"]
       interval: 10s
       timeout: 5s
       retries: 6

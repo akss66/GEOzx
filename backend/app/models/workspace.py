@@ -1,6 +1,8 @@
 """工作区域：运营项目、账号矩阵（AccountGroup / Account 一等模型）。"""
 
-from sqlalchemy import ForeignKey, String, Text
+from decimal import Decimal
+
+from sqlalchemy import ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -17,8 +19,14 @@ class Project(Base, TimestampMixin):
     org_id: Mapped[int] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    monthly_cost_budget_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 4), nullable=True
+    )
     status: Mapped[ProjectStatus] = mapped_column(
         pg_enum(ProjectStatus, "project_status"),
         default=ProjectStatus.ACTIVE,
@@ -26,10 +34,21 @@ class Project(Base, TimestampMixin):
     )
 
     org: Mapped["Org"] = relationship()  # noqa: F821
+    client: Mapped["Client | None"] = relationship(back_populates="projects")  # noqa: F821
     content_items: Mapped[list["ContentItem"]] = relationship(  # noqa: F821
         back_populates="project", cascade="all, delete-orphan"
     )
-    accounts: Mapped[list["Account"]] = relationship(back_populates="project")  # noqa: F821
+    accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
+        secondary="project_accounts",
+        back_populates="projects",
+        overlaps="account,project",
+    )
+    memberships: Mapped[list["ProjectMembership"]] = relationship(  # noqa: F821
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    legacy_accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
+        back_populates="project", foreign_keys="Account.project_id"
+    )
 
 
 class AccountGroup(Base, TimestampMixin):
@@ -61,9 +80,13 @@ class Account(Base, TimestampMixin):
     org_id: Mapped[int] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("account_groups.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    # Transitional legacy pointer. New product behavior uses project_accounts.
     project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id", ondelete="SET NULL"), index=True, nullable=True
     )
@@ -78,7 +101,15 @@ class Account(Base, TimestampMixin):
     auth: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
     org: Mapped["Org"] = relationship()  # noqa: F821
-    project: Mapped["Project | None"] = relationship(back_populates="accounts")
+    client: Mapped["Client | None"] = relationship(back_populates="accounts")  # noqa: F821
+    project: Mapped["Project | None"] = relationship(  # noqa: F821
+        back_populates="legacy_accounts", foreign_keys=[project_id]
+    )
+    projects: Mapped[list["Project"]] = relationship(  # noqa: F821
+        secondary="project_accounts",
+        back_populates="accounts",
+        overlaps="account,project",
+    )
     group: Mapped["AccountGroup | None"] = relationship(back_populates="accounts")
 
     @property

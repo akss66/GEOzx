@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.brain import create_brain_task_draft
 from app.core.auth import CurrentUser
+from app.core.workspace_access import accessible_project_ids, require_project_access
 from app.db import get_session
 from app.models import ContentItem, OptimizationSuggestion
-from app.models.enums import OptimizationSuggestionStatus
+from app.models.enums import OptimizationSuggestionStatus, WorkspaceRole
 from app.schemas.brain import BrainTaskOut, DraftBrainTaskRequest
 from app.schemas.feedback import (
     OptimizationSuggestionOut,
@@ -21,6 +22,7 @@ from app.schemas.feedback import (
 router = APIRouter(prefix="/optimization-suggestions", tags=["feedback"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+FEEDBACK_WRITE_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR}
 
 
 def _now() -> datetime:
@@ -49,10 +51,16 @@ async def list_optimization_suggestions(
     session: SessionDep,
     status_filter: Annotated[OptimizationSuggestionStatus | None, Query(alias="status")] = None,
 ) -> list[OptimizationSuggestionOut]:
+    project_ids = await accessible_project_ids(session, user)
+    if not project_ids:
+        return []
     q = (
         select(OptimizationSuggestion, ContentItem.title)
         .join(ContentItem, OptimizationSuggestion.content_item_id == ContentItem.id)
-        .where(OptimizationSuggestion.org_id == user.org_id)
+        .where(
+            OptimizationSuggestion.org_id == user.org_id,
+            ContentItem.project_id.in_(project_ids),
+        )
         .order_by(OptimizationSuggestion.id.desc())
     )
     if status_filter is not None:
@@ -76,6 +84,15 @@ async def update_optimization_suggestion(
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="优化建议不存在")
+    content = await session.get(ContentItem, row.content_item_id)
+    if content is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
+    await require_project_access(
+        session,
+        user,
+        content.project_id,
+        roles=FEEDBACK_WRITE_ROLES,
+    )
 
     row.status = body.status
     row.note = body.note
@@ -116,6 +133,12 @@ async def send_suggestion_to_brain(
     content = await session.get(ContentItem, row.content_item_id)
     if content is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
+    await require_project_access(
+        session,
+        user,
+        content.project_id,
+        roles=FEEDBACK_WRITE_ROLES,
+    )
 
     row.status = OptimizationSuggestionStatus.ACCEPTED
     row.note = row.note or "已送入运营大脑生成下一轮 Brief"

@@ -11,12 +11,15 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agents.base import AgentContext
 from app.compliance.checker import check_script
+from app.core.approval_audit import add_approval_requested
 from app.core.events import publish_event
 from app.models import (
     AgentTask,
+    BrainTask,
     ComplianceCheck,
     ContentItem,
     Deliverable,
@@ -36,13 +39,30 @@ from app.models.enums import (
     OptimizationSuggestionStatus,
 )
 from app.orchestrator.gates import is_forced
-from app.orchestrator.pipeline import PIPELINE, AgentStep
+from app.orchestrator.pipeline import PIPELINE, AgentStep, GateStep
 
 EmitFn = Callable[..., Awaitable[None]]
 
 # 注入 Agent 上下文的知识库条目上限（避免上下文过大；后续可按 category/相关性精选）。
 _KNOWLEDGE_LIMIT = 20
 _SUGGESTION_LIMIT = 20
+
+_AGENT_STAGE = {
+    "01-positioning": ContentStage.POSITIONING,
+    "02-content-director": ContentStage.CONTENT_DIRECTION,
+    "03-art-director": ContentStage.ART_DIRECTION,
+    "04-video-creator": ContentStage.VIDEO_CREATION,
+    "05-editor": ContentStage.EDITING,
+    "06-operator": ContentStage.OPERATION,
+}
+
+_GATE_STAGE = {
+    GateType.POSITIONING_REVIEW: ContentStage.POSITIONING,
+    GateType.TOPIC_REVIEW: ContentStage.CONTENT_DIRECTION,
+    GateType.SCRIPT_COMPLIANCE: ContentStage.CONTENT_DIRECTION,
+    GateType.FINAL_VIDEO_REVIEW: ContentStage.EDITING,
+    GateType.PRE_PUBLISH_REVIEW: ContentStage.OPERATION,
+}
 
 
 def _now() -> datetime:
@@ -55,11 +75,16 @@ class OrchestrationEngine:
 
     # —— 公开入口 ——
 
-    async def start(self, session: AsyncSession, content_item_id: int) -> ContentItem:
+    async def start(
+        self,
+        session: AsyncSession,
+        content_item_id: int,
+        allowed_stages: set[ContentStage] | None = None,
+    ) -> ContentItem:
         ci = await session.get(ContentItem, content_item_id)
         if ci is None:
             raise ValueError(f"内容不存在: {content_item_id}")
-        await self.advance(session, ci)
+        await self.advance(session, ci, allowed_stages)
         return ci
 
     async def approve_gate(
@@ -97,17 +122,13 @@ class OrchestrationEngine:
         ci = await session.get(ContentItem, content_item_id)
         if ci is None:
             raise ValueError(f"内容不存在: {content_item_id}")
-        step = next(
-            (s for s in PIPELINE if isinstance(s, AgentStep) and s.stage == stage), None
-        )
+        step = next((s for s in PIPELINE if isinstance(s, AgentStep) and s.stage == stage), None)
         if step is None:
             raise ValueError(f"阶段无对应 Agent: {stage.value}")
         await self._run_agent(session, ci, step)
         return ci
 
-    async def rollback_deliverable(
-        self, session: AsyncSession, deliverable_id: int
-    ) -> Deliverable:
+    async def rollback_deliverable(self, session: AsyncSession, deliverable_id: int) -> Deliverable:
         """回滚：把指定历史版本设回生效（approved），同内容同 type 的其余版本置 superseded。"""
         target = await session.get(Deliverable, deliverable_id)
         if target is None:
@@ -134,16 +155,22 @@ class OrchestrationEngine:
 
     # —— 核心推进 ——
 
-    async def advance(self, session: AsyncSession, ci: ContentItem) -> None:
+    async def advance(
+        self,
+        session: AsyncSession,
+        ci: ContentItem,
+        allowed_stages: set[ContentStage] | None = None,
+    ) -> None:
+        pipeline = await self._pipeline_for(session, ci.id, allowed_stages)
         while True:
-            idx = await self._next_step_index(session, ci.id)
+            idx = await self._next_step_index(session, ci.id, pipeline)
             if idx is None:
                 ci.status = ContentStatus.PUBLISHED
                 await session.commit()
                 await self._emit("pipeline.done", {}, content_item_id=ci.id)
                 return
 
-            step = PIPELINE[idx]
+            step = pipeline[idx]
             if isinstance(step, AgentStep):
                 await self._run_agent(session, ci, step)
                 continue
@@ -156,8 +183,13 @@ class OrchestrationEngine:
 
     # —— 步骤完成判定 ——
 
-    async def _next_step_index(self, session: AsyncSession, ci_id: int) -> int | None:
-        for i, step in enumerate(PIPELINE):
+    async def _next_step_index(
+        self,
+        session: AsyncSession,
+        ci_id: int,
+        pipeline: list[AgentStep | GateStep] | None = None,
+    ) -> int | None:
+        for i, step in enumerate(pipeline or PIPELINE):
             if isinstance(step, AgentStep):
                 done = await session.scalar(
                     select(AgentTask).where(
@@ -180,6 +212,46 @@ class OrchestrationEngine:
                     return i
         return None
 
+    async def _pipeline_for(
+        self,
+        session: AsyncSession,
+        content_item_id: int,
+        allowed_stages: set[ContentStage] | None,
+    ) -> list[AgentStep | GateStep]:
+        selected = allowed_stages
+        if selected is None:
+            selected = await self._brain_task_stages(session, content_item_id)
+        if selected is None:
+            return PIPELINE
+        return [
+            step
+            for step in PIPELINE
+            if (
+                isinstance(step, AgentStep)
+                and step.stage in selected
+                or isinstance(step, GateStep)
+                and _GATE_STAGE.get(step.gate) in selected
+            )
+        ]
+
+    async def _brain_task_stages(
+        self, session: AsyncSession, content_item_id: int
+    ) -> set[ContentStage] | None:
+        task = await session.scalar(
+            select(BrainTask)
+            .options(selectinload(BrainTask.plan))
+            .where(BrainTask.content_item_id == content_item_id)
+        )
+        if task is None or task.plan is None:
+            return None
+        return {
+            stage
+            for step in task.plan.steps
+            if isinstance(step, dict)
+            and step.get("status") != "skipped"
+            and (stage := _AGENT_STAGE.get(str(step.get("agent_code")))) is not None
+        }
+
     # —— Agent 执行 ——
 
     async def _run_agent(self, session: AsyncSession, ci: ContentItem, step: AgentStep) -> None:
@@ -200,9 +272,7 @@ class OrchestrationEngine:
             content_item_id=ci.id,
             upstream=await self._upstream(session, ci.id),
             knowledge=await self._knowledge(session, org_id),
-            optimization_suggestions=await self._accepted_suggestions(
-                session, org_id, step.stage
-            ),
+            optimization_suggestions=await self._accepted_suggestions(session, org_id, step.stage),
         )
         try:
             result = await step.agent.run(session, org_id, ctx)
@@ -327,9 +397,7 @@ class OrchestrationEngine:
         project = await session.get(Project, ci.project_id)
         return project.org_id if project else None
 
-    async def _knowledge(
-        self, session: AsyncSession, org_id: int | None
-    ) -> dict[str, list[dict]]:
+    async def _knowledge(self, session: AsyncSession, org_id: int | None) -> dict[str, list[dict]]:
         """加载 org 的知识库切片，按 category 分组注入 Agent 上下文。
 
         每类取最近若干条（标题+payload+tags），供 Agent 参考爆款结构/画像/提示词/话术。
@@ -402,7 +470,24 @@ class OrchestrationEngine:
             )
         )
         if existing is None:
-            session.add(GateApproval(content_item_id=ci.id, gate=gate, status=GateStatus.PENDING))
+            approval = GateApproval(
+                content_item_id=ci.id,
+                gate=gate,
+                status=GateStatus.PENDING,
+            )
+            session.add(approval)
+            await session.flush()
+            project = await session.get(Project, ci.project_id)
+            if project is not None:
+                await add_approval_requested(
+                    session,
+                    org_id=project.org_id,
+                    project_id=project.id,
+                    content_item_id=ci.id,
+                    approval_kind="gate",
+                    source_id=approval.id,
+                    title=f"质量门：{gate.value}",
+                )
         ci.status = ContentStatus.BLOCKED
         await session.commit()
         if existing is None:

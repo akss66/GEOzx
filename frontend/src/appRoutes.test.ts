@@ -29,7 +29,7 @@ describe("app routes", () => {
   it("keeps privileged system routes admin-only", () => {
     const adminPaths = APP_ROUTES.filter((route) => route.adminOnly).map((route) => route.path);
 
-    expect(adminPaths).toEqual(["config", "users"]);
+    expect(adminPaths).toEqual(["config", "models", "users"]);
   });
 
   it("does not register duplicate path routes", () => {

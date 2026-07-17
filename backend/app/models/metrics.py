@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from sqlalchemy import Date, Float, ForeignKey, Integer, String
+from sqlalchemy import Date, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -44,3 +44,28 @@ class MetricSnapshot(Base, TimestampMixin):
     follower_delta: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     org: Mapped["Org"] = relationship()  # noqa: F821
+
+
+class AccountReviewGoal(Base, TimestampMixin):
+    """Rolling performance target for one account and review horizon."""
+
+    __tablename__ = "account_review_goals"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "period_days",
+            name="uq_account_review_goals_account_period",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_play: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_completion_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_follower_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)

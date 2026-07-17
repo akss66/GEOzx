@@ -6,11 +6,12 @@ import {
   WarningFilled,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
-import { Empty, Segmented, Spin, Tag } from "antd";
+import { Segmented, Tag } from "antd";
 import { useMemo, useState } from "react";
 
 import { listRiskQueue } from "../api/risks";
-import { PageHeader } from "../components/ui";
+import { presentApiError } from "../api/errors";
+import { OperationalState, PageHeader } from "../components/ui";
 import type { RiskCategory, RiskQueueItem, RiskSeverity } from "../types";
 
 type RiskFilter = "all" | RiskCategory;
@@ -40,6 +41,9 @@ export default function Risks() {
     [filter, risks],
   );
   const highCount = risks.filter((risk) => risk.severity === "high").length;
+  const riskFailure = riskQuery.isError
+    ? presentApiError(riskQuery.error, "风险队列暂时不可用，请稍后重新加载。")
+    : null;
 
   return (
     <div>
@@ -68,12 +72,28 @@ export default function Risks() {
         <Tag style={{ marginInlineEnd: 0 }}>共 {visibleRisks.length} 条</Tag>
       </div>
 
-      {riskQuery.isLoading ? (
-        <div style={{ display: "grid", placeItems: "center", marginTop: 80 }}>
-          <Spin />
-        </div>
+      {riskFailure ? (
+        <OperationalState
+          kind="error"
+          title="风险队列加载失败"
+          description={`${riskFailure.message} 当前筛选条件会保留。`}
+          diagnostic={riskFailure.diagnostic}
+          actionLabel="重新加载"
+          actionLoading={riskQuery.isFetching}
+          onAction={() => void riskQuery.refetch()}
+        />
+      ) : riskQuery.isLoading ? (
+        <OperationalState
+          kind="loading"
+          title="正在读取风险队列"
+          description="正在汇总质量门、账号授权、模型与数据回流异常。"
+        />
       ) : visibleRisks.length === 0 ? (
-        <Empty description="当前筛选下暂无风险" style={{ marginTop: 80 }} />
+        <OperationalState
+          kind="empty"
+          title="当前筛选下暂无风险"
+          description="新的质量、授权、模型或回流异常会在这里集中出现。"
+        />
       ) : (
         <div style={{ display: "grid", gap: 10, maxWidth: 960 }}>
           {visibleRisks.map((risk) => (

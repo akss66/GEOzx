@@ -67,6 +67,8 @@ class PlatformAccountAuth(Base, TimestampMixin):
     scopes: Mapped[list[str]] = mapped_column(JSONVariant, default=list, nullable=False)
     token_secret_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
     refresh_secret_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -82,4 +84,4 @@ class PlatformAccountAuth(Base, TimestampMixin):
 
     @property
     def token_configured(self) -> bool:
-        return bool(self.token_secret_ref)
+        return bool(self.access_token_encrypted or self.token_secret_ref)

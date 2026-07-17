@@ -12,16 +12,23 @@ from app.models.brain import (
     OrchestrationPlan,
     TaskBrief,
 )
+from app.models.client import (
+    Client,
+    ClientMembership,
+    Notification,
+    ProjectAccount,
+    ProjectMembership,
+)
 from app.models.compliance import ComplianceCheck
 from app.models.configuration import IntegrationConfig, ModelConfig
 from app.models.content import ContentItem, Deliverable
 from app.models.distribution import MatrixDistributionItem, MatrixDistributionPlan
 from app.models.feedback import OptimizationSuggestion
 from app.models.identity import Org, User
-from app.models.knowledge import KnowledgeEntry
+from app.models.knowledge import KnowledgeCitation, KnowledgeEntry, KnowledgeSuggestion
 from app.models.llm import LLMCall
 from app.models.material import MaterialAsset
-from app.models.metrics import MetricSnapshot
+from app.models.metrics import AccountReviewGoal, MetricSnapshot
 from app.models.orchestration import AgentTask, Event, GateApproval
 from app.models.platform import PlatformAccountAuth, PlatformIntegration
 from app.models.workspace import Account, AccountGroup, Project
@@ -29,6 +36,11 @@ from app.models.workspace import Account, AccountGroup, Project
 __all__ = [
     "Org",
     "User",
+    "Client",
+    "ClientMembership",
+    "ProjectMembership",
+    "ProjectAccount",
+    "Notification",
     "Project",
     "AccountGroup",
     "Account",
@@ -47,10 +59,13 @@ __all__ = [
     "Event",
     "GateApproval",
     "KnowledgeEntry",
+    "KnowledgeSuggestion",
+    "KnowledgeCitation",
     "ModelConfig",
     "IntegrationConfig",
     "LLMCall",
     "ComplianceCheck",
+    "AccountReviewGoal",
     "MetricSnapshot",
     "MaterialAsset",
     "OptimizationSuggestion",

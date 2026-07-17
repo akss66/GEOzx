@@ -66,6 +66,8 @@ const task = {
   progress: 0,
   current_focus: "等待确认",
   risk_count: 0,
+  runtime_mode: "legacy",
+  thread_id: null,
   context_closed_at: null,
   created_at: "2026-07-01T00:00:00Z",
   updated_at: "2026-07-01T00:00:00Z",

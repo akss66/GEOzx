@@ -11,22 +11,28 @@ from app import __version__
 from app.api import (
     accounts,
     agents,
+    approvals,
     auth,
     brain,
+    clients,
     costs,
     feedback,
     health,
     knowledge,
+    knowledge_suggestions,
     llm,
-    matrix_distribution,
     materials,
+    matrix_distribution,
     metrics,
     model_configs,
+    notifications,
     orchestrator,
     platform_integrations,
     projects,
     risks,
+    search,
     users,
+    workspace_context,
     ws,
 )
 from app.config import settings
@@ -47,7 +53,12 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(approvals.router)
 app.include_router(users.router)
+app.include_router(clients.router)
+app.include_router(workspace_context.router)
+app.include_router(notifications.router)
+app.include_router(search.router)
 app.include_router(brain.router)
 app.include_router(costs.router)
 app.include_router(agents.router)
@@ -59,7 +70,9 @@ app.include_router(projects.router)
 app.include_router(accounts.router)
 app.include_router(platform_integrations.router)
 app.include_router(model_configs.router)
+app.include_router(model_configs.infrastructure_router)
 app.include_router(knowledge.router)
+app.include_router(knowledge_suggestions.router)
 app.include_router(metrics.router)
 app.include_router(matrix_distribution.router)
 app.include_router(materials.router)

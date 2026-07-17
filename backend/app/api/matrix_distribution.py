@@ -7,15 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.approval_audit import add_approval_requested
 from app.core.auth import CurrentUser
 from app.db import get_session
 from app.models import (
     Account,
     AgentToolCall,
     BrainTask,
+    ContentItem,
+    MaterialAsset,
     MatrixDistributionItem,
     MatrixDistributionPlan,
-    MaterialAsset,
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, BrainTaskType, Platform
 from app.publishing.adapters import PublishDraft, get_publisher_adapter
@@ -45,7 +47,9 @@ async def _load_accounts(
     if any(account.status != AccountStatus.ACTIVE for account in rows):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号不可用于矩阵分发")
     if any(account.auth_status != "authorized" for account in rows):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号尚未授权，无法进入发布准备")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="账号尚未授权，无法进入发布准备"
+        )
     return sorted(rows, key=lambda account: account.id)
 
 
@@ -94,7 +98,9 @@ async def create_matrix_distribution_plan(
     materials = await _load_materials(session, user.org_id, body.material_ids, body.content_item_id)
     account_platforms = {account.platform for account in accounts}
     if not account_platforms.issubset(set(platforms)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="账号平台不在矩阵计划范围")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="账号平台不在矩阵计划范围"
+        )
 
     plan = MatrixDistributionPlan(
         org_id=user.org_id,
@@ -121,6 +127,17 @@ async def create_matrix_distribution_plan(
     )
     session.add_all([plan, task])
     await session.flush()
+
+    project_id: int | None = None
+    if plan.content_item_id is not None:
+        content_item = await session.get(ContentItem, plan.content_item_id)
+        project_id = content_item.project_id if content_item is not None else None
+    else:
+        account_project_ids = {
+            account.project_id for account in accounts if account.project_id is not None
+        }
+        if len(account_project_ids) == 1:
+            project_id = next(iter(account_project_ids))
 
     draft = PublishDraft(
         title=plan.title,
@@ -154,7 +171,10 @@ async def create_matrix_distribution_plan(
                 status="waiting_approval",
                 permission_mode="confirm",
                 requires_human_confirmation=True,
-                input_summary=f"{account.platform.value} matrix publish package for account #{account.id}",
+                input_summary=(
+                    f"{account.platform.value} matrix publish package "
+                    f"for account #{account.id}"
+                ),
                 output_summary="Matrix publish package ready for manual approval",
                 meta={
                     "matrix_plan_id": plan.id,
@@ -172,10 +192,19 @@ async def create_matrix_distribution_plan(
             await session.flush()
             item.tool_call_id = tool_call.id
 
-    await session.commit()
-    return MatrixDistributionPlanOut.model_validate(
-        await _load_plan(session, user.org_id, plan.id)
+    await add_approval_requested(
+        session,
+        org_id=user.org_id,
+        project_id=project_id,
+        content_item_id=plan.content_item_id,
+        approval_kind="matrix_plan",
+        source_id=plan.id,
+        title=plan.title,
+        body=f"矩阵分发计划包含 {len(accounts) * len(materials)} 个发布包。",
     )
+
+    await session.commit()
+    return MatrixDistributionPlanOut.model_validate(await _load_plan(session, user.org_id, plan.id))
 
 
 @router.get("", response_model=list[MatrixDistributionPlanOut])

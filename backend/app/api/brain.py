@@ -9,7 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.approval_access import require_task_approval_access, task_project_ids
+from app.core.approval_audit import add_approval_decided
 from app.core.auth import CurrentUser
+from app.core.workspace_access import accessible_project_ids
 from app.db import get_session
 from app.models import (
     Account,
@@ -31,20 +34,37 @@ from app.models.enums import (
     DeliverableAcceptanceStatus,
     Platform,
     RerunScope,
+    UserRole,
 )
-from app.orchestrator.brain_adapter import rerun_brain_acceptance, run_brain_task_pipeline
+from app.orchestrator.brain_adapter import rerun_brain_acceptance
+from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
+from app.orchestrator.brain_planner import brain_planner
+from app.orchestrator.brain_runtime import (
+    next_actions,
+    runtime_events,
+    runtime_graph,
+    runtime_status,
+)
 from app.schemas.brain import (
     AcceptDeliverableRequest,
     AgentInvocationOut,
     AgentToolCallOut,
     ApproveToolCallRequest,
+    BrainMessageRequest,
+    BrainRuntimeOut,
     BrainTaskOut,
     CloseMemoryOut,
+    DecisionRequest,
+    DecisionRevisionRequest,
+    DecisionSelectionRequest,
     DeliverableAcceptanceOut,
     DraftBrainTaskRequest,
+    IntentDecision,
     RejudgeDeliverableRequest,
     RerunDeliverableRequest,
+    RuntimeEventOut,
 )
+from app.services.agent_management import quality_gate_labels, require_agent_enabled
 
 router = APIRouter(prefix="/brain", tags=["brain"])
 
@@ -65,42 +85,98 @@ def _infer_type(goal: str) -> BrainTaskType:
     return BrainTaskType.CONTENT_CREATION
 
 
+def _is_casual_goal(goal: str) -> bool:
+    normalized = "".join(
+        ch for ch in goal.lower().strip() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff"
+    )
+    if not normalized:
+        return True
+    workflow_keywords = {
+        "诊断",
+        "分析",
+        "生成",
+        "脚本",
+        "内容",
+        "选题",
+        "发布",
+        "复盘",
+        "矩阵",
+        "分发",
+        "账号",
+        "抖音",
+        "小红书",
+        "视频号",
+        "运营",
+        "策划",
+        "计划",
+        "素材",
+        "文案",
+        "标题",
+        "增长",
+        "数据",
+        "粉丝",
+        "互动",
+        "评论",
+        "审核",
+        "合规",
+    }
+    if any(keyword in normalized for keyword in workflow_keywords):
+        return False
+    casual_exact = {
+        "你好",
+        "您好",
+        "hi",
+        "hello",
+        "哈喽",
+        "在吗",
+        "在不在",
+        "测试",
+        "ok",
+        "谢谢",
+        "好的",
+        "好",
+    }
+    return normalized in casual_exact or len(normalized) <= 8
+
+
 def _default_steps() -> list[dict]:
-    return _enrich_step_contracts([
-        {
-            "id": "step-positioning",
-            "agent_code": AgentCode.POSITIONING.value,
-            "agent_name": "账号定位专家",
-            "phase": "定位校准",
-            "intent": "判断目标、账号组、人设和平台是否匹配。",
-            "status": "planned",
-            "depends_on": [],
-            "expected_output": "定位策略",
-            "risk_level": "low",
-        },
-        {
-            "id": "step-script",
-            "agent_code": AgentCode.CONTENT_DIRECTOR.value,
-            "agent_name": "编导文案专家",
-            "phase": "脚本生产",
-            "intent": "产出可执行的视频脚本和分镜建议。",
-            "status": "planned",
-            "depends_on": ["step-positioning"],
-            "expected_output": "脚本包",
-            "risk_level": "medium",
-        },
-        {
-            "id": "step-operation",
-            "agent_code": AgentCode.OPERATOR.value,
-            "agent_name": "账号运营专家",
-            "phase": "发布与复盘",
-            "intent": "汇总交付物、发布建议和下一轮复盘口径。",
-            "status": "planned",
-            "depends_on": ["step-script"],
-            "expected_output": "发布计划与复盘建议",
-            "risk_level": "medium",
-        },
-    ])
+    return _enrich_step_contracts(
+        [
+            {
+                "id": "step-positioning",
+                "agent_code": AgentCode.POSITIONING.value,
+                "agent_name": "账号定位专家",
+                "phase": "定位校准",
+                "intent": "判断目标、账号组、人设和平台是否匹配。",
+                "status": "planned",
+                "depends_on": [],
+                "expected_output": "定位策略",
+                "risk_level": "low",
+            },
+            {
+                "id": "step-script",
+                "agent_code": AgentCode.CONTENT_DIRECTOR.value,
+                "agent_name": "编导文案专家",
+                "phase": "脚本生产",
+                "intent": "产出可执行的视频脚本和分镜建议。",
+                "status": "planned",
+                "depends_on": ["step-positioning"],
+                "expected_output": "脚本包",
+                "risk_level": "medium",
+            },
+            {
+                "id": "step-operation",
+                "agent_code": AgentCode.OPERATOR.value,
+                "agent_name": "账号运营专家",
+                "phase": "发布与复盘",
+                "intent": "汇总交付物、发布建议和下一轮复盘口径。",
+                "status": "planned",
+                "depends_on": ["step-script"],
+                "expected_output": "发布计划与复盘建议",
+                "risk_level": "medium",
+            },
+        ]
+    )
 
 
 def _enrich_step_contracts(steps: list[dict]) -> list[dict]:
@@ -335,9 +411,25 @@ async def create_brain_task_draft(
     body: DraftBrainTaskRequest,
 ) -> BrainTask:
     bindings = await _resolve_brief_bindings(session, org_id, body)
-    risk_constraints = ["发布前必须过合规门", "高风险平台动作需要人工确认"]
-    expected_outputs = ["定位策略", "脚本包", "视觉提示词", "发布计划", "复盘建议"]
+    is_casual = _is_casual_goal(body.goal)
+    if not is_casual:
+        await require_agent_enabled(session, org_id, AgentCode.DECISION)
+    risk_constraints = [] if is_casual else ["发布前必须过合规门", "高风险平台动作需要人工确认"]
     task_type = _infer_type(body.goal)
+    planning = (
+        None if is_casual else await brain_planner.plan(session, org_id, body.goal, task_type)
+    )
+    if planning is not None and not planning.steps:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前目标没有可用专家，请先在专家管理中启用对应专家",
+        )
+    plan_steps = planning.steps if planning is not None else []
+    expected_outputs = (
+        ["主 Agent 普通回复"]
+        if is_casual
+        else [str(step["expected_output"]) for step in plan_steps]
+    )
     task = BrainTask(
         org_id=org_id,
         title=_title(body.goal),
@@ -357,21 +449,172 @@ async def create_brain_task_draft(
         account_ids=bindings["account_ids"],
         cycle="待确认",
         budget=None,
-        content_goal="根据目标生成一组可执行内容或优化动作。",
+        content_goal=(
+            "普通对话，不启动专家工作流。"
+            if is_casual
+            else "根据目标生成一组可执行内容或优化动作。"
+        ),
         risk_constraints=risk_constraints,
         expected_outputs=expected_outputs,
-        confirmation_actions=["确认任务 Brief", "确认调度计划", "确认高风险动作"],
+        confirmation_actions=(
+            [] if is_casual else ["确认任务目标", "确认调度计划", "确认高风险动作"]
+        ),
     )
     task.plan = OrchestrationPlan(
-        summary="运营大脑已生成初步调度计划，等待确认后调用专家团。",
-        steps=_build_plan_steps(task_type),
-        quality_gates=["脚本合规", "发布前审核"],
-        estimated_cost=Decimal("0.68"),
-        requires_human_confirmation=True,
+        summary=(
+            "主 Agent 将直接回应这条普通消息，不调用专家团。" if is_casual else planning.summary
+        ),
+        steps=plan_steps,
+        quality_gates=[] if is_casual else quality_gate_labels(planning.quality_gates),
+        estimated_cost=Decimal("0.00") if is_casual else Decimal("0.68"),
+        requires_human_confirmation=not is_casual,
     )
     session.add(task)
     await session.commit()
     return task
+
+
+@router.post("/messages", response_model=BrainRuntimeOut, status_code=status.HTTP_201_CREATED)
+async def send_brain_message(
+    body: BrainMessageRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BrainRuntimeOut:
+    task = (
+        await _load_task(session, body.task_id, user.org_id)
+        if body.task_id is not None
+        else None
+    )
+    existing_account_ids = list(task.brief.account_ids) if task and task.brief else []
+    existing_project_id = task.brief.project_id if task and task.brief else None
+
+    if body.account_id is not None and existing_account_ids:
+        if body.account_id not in existing_account_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前对话已绑定其他账号，请开启新对话后切换账号",
+            )
+    if body.project_id is not None and existing_project_id is not None:
+        if body.project_id != existing_project_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前对话已绑定其他项目，请开启新对话后切换项目",
+            )
+
+    effective_account_id = body.account_id or (
+        existing_account_ids[0] if existing_account_ids else None
+    )
+    effective_project_id = body.project_id or existing_project_id
+
+    try:
+        intent = await brain_intelligence.classify(
+            session,
+            user.org_id,
+            body.message,
+            has_account=effective_account_id is not None,
+        )
+    except IntelligenceUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    bindings = {
+        "project_name": task.brief.project_name if task and task.brief else None,
+        "account_group_name": None,
+        "platforms": list(task.brief.platforms)
+        if task and task.brief and task.brief.platforms
+        else [body.platform.value],
+        "account_ids": existing_account_ids,
+    }
+    if intent.requires_account_context or effective_account_id is not None:
+        bindings = await _resolve_brief_bindings(
+            session,
+            user.org_id,
+            DraftBrainTaskRequest(
+                goal=body.message,
+                project_id=effective_project_id,
+                platforms=[body.platform],
+                account_ids=[effective_account_id] if effective_account_id is not None else [],
+            ),
+        )
+
+    await require_agent_enabled(session, user.org_id, AgentCode.DECISION)
+    task_type = _infer_type(body.message)
+    planning = await brain_planner.plan_selected(
+        session,
+        user.org_id,
+        [code.value for code in intent.suggested_expert_codes],
+        intent.reason,
+    )
+    risk_constraints = (
+        ["高风险外部动作必须由用户确认"] if intent.intent == "action" else []
+    )
+    confirmation_actions = ["高风险动作单独确认"] if intent.intent == "action" else []
+    expected_outputs = [str(step["expected_output"]) for step in planning.steps]
+
+    if task is None:
+        task = BrainTask(
+            org_id=user.org_id,
+            title=_title(body.message),
+            type=task_type,
+            status=BrainTaskStatus.RUNNING,
+            progress=0,
+            current_focus="主 Agent 正在理解你的消息",
+            risk_count=1 if intent.intent == "action" else 0,
+            runtime_mode="langgraph",
+        )
+        task.brief = TaskBrief(
+            goal=body.message,
+            project_id=effective_project_id,
+            project_name=bindings["project_name"],
+            account_group_id=None,
+            account_group_name=None,
+            platforms=bindings["platforms"],
+            account_ids=bindings["account_ids"],
+            cycle="当前对话",
+            budget=None,
+            content_goal="由主 Agent 根据对话动态决定下一步。",
+            risk_constraints=risk_constraints,
+            expected_outputs=expected_outputs,
+            confirmation_actions=confirmation_actions,
+        )
+        task.plan = OrchestrationPlan(
+            summary=planning.summary,
+            steps=planning.steps,
+            quality_gates=quality_gate_labels(planning.quality_gates),
+            estimated_cost=Decimal("0.00"),
+            requires_human_confirmation=intent.intent == "action",
+        )
+        session.add(task)
+    else:
+        task.type = task_type
+        task.status = BrainTaskStatus.RUNNING
+        task.progress = 0
+        task.current_focus = "主 Agent 正在理解你的新消息"
+        task.risk_count = 1 if intent.intent == "action" else 0
+        task.runtime_mode = "langgraph"
+        task.brief.goal = body.message
+        task.brief.project_id = effective_project_id
+        task.brief.project_name = bindings["project_name"]
+        task.brief.platforms = bindings["platforms"]
+        task.brief.account_ids = bindings["account_ids"]
+        task.brief.content_goal = "由主 Agent 根据本轮消息动态决定下一步。"
+        task.brief.risk_constraints = risk_constraints
+        task.brief.expected_outputs = expected_outputs
+        task.brief.confirmation_actions = confirmation_actions
+        task.plan.summary = planning.summary
+        task.plan.steps = planning.steps
+        task.plan.quality_gates = quality_gate_labels(planning.quality_gates)
+        task.plan.estimated_cost = Decimal("0.00")
+        task.plan.requires_human_confirmation = intent.intent == "action"
+
+    await session.commit()
+    task = await _load_task(session, task.id, user.org_id)
+    await runtime_graph.record_user_message(session, task, body.message)
+    await runtime_graph.start_smart(session, task, intent)
+    task = await _load_task(session, task.id, user.org_id)
+    return await _runtime_response(session, task)
 
 
 @router.get("/tasks", response_model=list[BrainTaskOut])
@@ -392,10 +635,139 @@ async def get_task(task_id: int, user: CurrentUser, session: SessionDep) -> Brai
     return BrainTaskOut.model_validate(await _load_task(session, task_id, user.org_id))
 
 
+@router.get("/tasks/{task_id}/runtime", response_model=BrainRuntimeOut)
+async def get_task_runtime(task_id: int, user: CurrentUser, session: SessionDep) -> BrainRuntimeOut:
+    task = await _load_task(session, task_id, user.org_id)
+    return await _runtime_response(session, task)
+
+
+async def _runtime_response(session: AsyncSession, task: BrainTask) -> BrainRuntimeOut:
+    tool_calls = (
+        await session.scalars(
+            select(AgentToolCall)
+            .where(AgentToolCall.task_id == task.id, AgentToolCall.org_id == task.org_id)
+            .order_by(AgentToolCall.id)
+        )
+    ).all()
+    pending_permissions = [
+        row
+        for row in tool_calls
+        if row.requires_human_confirmation and row.status == "waiting_approval"
+    ]
+    events = await runtime_events(session, task.id)
+    intent = _runtime_intent(events)
+    pending_decisions = _pending_runtime_decisions(events)
+    return BrainRuntimeOut(
+        task=BrainTaskOut.model_validate(task),
+        thread_id=task.thread_id,
+        status=await runtime_status(session, task),
+        timeline=[RuntimeEventOut.model_validate(row) for row in events],
+        invocations=[AgentInvocationOut.model_validate(row) for row in task.invocations],
+        tool_calls=[AgentToolCallOut.model_validate(row) for row in tool_calls],
+        acceptances=[DeliverableAcceptanceOut.model_validate(row) for row in task.acceptances],
+        pending_permissions=[AgentToolCallOut.model_validate(row) for row in pending_permissions],
+        intent=intent,
+        pending_decisions=pending_decisions,
+        next_actions=await next_actions(session, task),
+    )
+
+
+def _runtime_intent(events: list) -> IntentDecision | None:
+    for event in reversed(events):
+        if event.type == "brain.runtime.intent_classified":
+            payload = event.payload or {}
+            raw = payload.get("intent")
+            if isinstance(raw, dict):
+                return IntentDecision.model_validate(raw)
+    return None
+
+
+def _pending_runtime_decisions(events: list) -> list[DecisionRequest]:
+    pending: dict[str, DecisionRequest] = {}
+    for event in events:
+        payload = event.payload or {}
+        if event.type == "brain.runtime.decision_requested" and isinstance(
+            payload.get("decision"), dict
+        ):
+            decision = DecisionRequest.model_validate(payload["decision"])
+            pending[decision.id] = decision
+        elif event.type in {
+            "brain.runtime.decision_selected",
+            "brain.runtime.decision_revised",
+        }:
+            decision_id = str(payload.get("decision_id") or "")
+            pending.pop(decision_id, None)
+    return list(pending.values())
+
+
+@router.post(
+    "/tasks/{task_id}/decisions/{decision_id}/select",
+    response_model=BrainRuntimeOut,
+)
+async def select_brain_decision(
+    task_id: int,
+    decision_id: str,
+    body: DecisionSelectionRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BrainRuntimeOut:
+    task = await _load_task(session, task_id, user.org_id)
+    events = await runtime_events(session, task.id)
+    decision = next(
+        (row for row in _pending_runtime_decisions(events) if row.id == decision_id),
+        None,
+    )
+    if decision is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="待选择方案不存在")
+    choice = next((row for row in decision.choices if row.id == body.choice_id), None)
+    if choice is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选方案不存在")
+    await runtime_graph.resume_after_decision(
+        session,
+        task,
+        decision_id=decision.id,
+        choice_id=choice.id,
+        choice_title=choice.title,
+    )
+    return await _runtime_response(session, await _load_task(session, task.id, user.org_id))
+
+
+@router.post(
+    "/tasks/{task_id}/decisions/{decision_id}/revise",
+    response_model=BrainRuntimeOut,
+)
+async def revise_brain_decision(
+    task_id: int,
+    decision_id: str,
+    body: DecisionRevisionRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BrainRuntimeOut:
+    task = await _load_task(session, task_id, user.org_id)
+    events = await runtime_events(session, task.id)
+    decision = next(
+        (row for row in _pending_runtime_decisions(events) if row.id == decision_id),
+        None,
+    )
+    if decision is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="待修改方案不存在")
+    await runtime_graph.revise_decision(
+        session,
+        task,
+        decision=decision,
+        comment=body.comment,
+        request_new_options=body.request_new_options,
+    )
+    return await _runtime_response(session, await _load_task(session, task.id, user.org_id))
+
+
 @router.post("/tasks/{task_id}/confirm", response_model=BrainTaskOut)
 async def confirm_task(task_id: int, user: CurrentUser, session: SessionDep) -> BrainTaskOut:
     task = await _load_task(session, task_id, user.org_id)
-    await run_brain_task_pipeline(session, task)
+    if task.brief and _is_casual_goal(task.brief.goal):
+        await runtime_graph.start_casual_turn(session, task)
+    else:
+        await runtime_graph.start(session, task)
     return BrainTaskOut.model_validate(await _load_task(session, task_id, user.org_id))
 
 
@@ -437,7 +809,15 @@ async def list_pending_tool_call_approvals(
             .order_by(AgentToolCall.id)
         )
     ).all()
-    return [AgentToolCallOut.model_validate(row) for row in rows]
+    if user.role == UserRole.ADMIN:
+        return [AgentToolCallOut.model_validate(row) for row in rows]
+    project_ids = await accessible_project_ids(session, user)
+    visible: list[AgentToolCall] = []
+    for row in rows:
+        task = await session.get(BrainTask, row.task_id)
+        if task is not None and await task_project_ids(session, task) & project_ids:
+            visible.append(row)
+    return [AgentToolCallOut.model_validate(row) for row in visible]
 
 
 async def _sync_matrix_distribution_approval(
@@ -485,6 +865,33 @@ async def _sync_matrix_distribution_approval(
         plan.status = "pending_approval"
 
 
+async def _audit_task_approval_decision(
+    session: AsyncSession,
+    *,
+    user: CurrentUser,
+    task: BrainTask,
+    approval_kind: str,
+    source_id: int,
+    title: str,
+    approved: bool,
+    comment: str | None,
+) -> None:
+    project_ids = await task_project_ids(session, task)
+    for project_id in sorted(project_ids) or [None]:
+        await add_approval_decided(
+            session,
+            org_id=user.org_id,
+            project_id=project_id,
+            content_item_id=task.content_item_id,
+            approval_kind=approval_kind,
+            source_id=source_id,
+            title=title,
+            approved=approved,
+            actor_user_id=user.id,
+            comment=comment,
+        )
+
+
 @router.post("/tool-calls/{tool_call_id}/approve", response_model=AgentToolCallOut)
 async def approve_tool_call(
     tool_call_id: int,
@@ -501,7 +908,17 @@ async def approve_tool_call(
     if tool_call is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="工具调用不存在")
     if not tool_call.requires_human_confirmation:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该工具调用不需要人工确认")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该工具调用不需要人工确认",
+        )
+    task = await _load_task(session, tool_call.task_id, user.org_id)
+    await require_task_approval_access(session, user, task)
+    if tool_call.status != "waiting_approval":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该工具调用已经完成审批",
+        )
 
     decision = {
         "approved": body.approved,
@@ -524,7 +941,19 @@ async def approve_tool_call(
         await _sync_matrix_distribution_approval(
             session, user.org_id, next_meta, body.approved, body.comment
         )
+    await _audit_task_approval_decision(
+        session,
+        user=user,
+        task=task,
+        approval_kind="tool_call",
+        source_id=tool_call.id,
+        title=str(next_meta.get("content_title") or tool_call.tool_name),
+        approved=body.approved,
+        comment=body.comment,
+    )
     await session.commit()
+    await session.refresh(tool_call)
+    await runtime_graph.resume_after_permission(session, task, tool_call, body.approved)
     await session.refresh(tool_call)
     return AgentToolCallOut.model_validate(tool_call)
 
@@ -542,16 +971,27 @@ async def accept_deliverable(
     task_id: int, body: AcceptDeliverableRequest, user: CurrentUser, session: SessionDep
 ) -> DeliverableAcceptanceOut:
     acceptance = await _load_acceptance(session, task_id, user.org_id, body.acceptance_id)
+    task = await _load_task(session, task_id, user.org_id)
+    await require_task_approval_access(session, user, task)
     acceptance.status = DeliverableAcceptanceStatus.APPROVED
     acceptance.reviewer_note = body.reviewer_note or "用户已确认通过。"
     acceptance.rerun_scope = None
-    task = await _load_task(session, task_id, user.org_id)
     if task.acceptances and all(
         row.status == DeliverableAcceptanceStatus.APPROVED for row in task.acceptances
     ):
         task.status = BrainTaskStatus.COMPLETED
         task.progress = 100
         task.current_focus = "等待用户关闭本次任务记忆"
+    await _audit_task_approval_decision(
+        session,
+        user=user,
+        task=task,
+        approval_kind="deliverable",
+        source_id=acceptance.id,
+        title=acceptance.title,
+        approved=True,
+        comment=body.reviewer_note,
+    )
     await session.commit()
     await session.refresh(acceptance)
     return DeliverableAcceptanceOut.model_validate(acceptance)
@@ -563,14 +1003,24 @@ async def rerun_deliverable(
 ) -> DeliverableAcceptanceOut:
     acceptance = await _load_acceptance(session, task_id, user.org_id, body.acceptance_id)
     task = await _load_task(session, task_id, user.org_id)
+    await require_task_approval_access(session, user, task)
     acceptance = await rerun_brain_acceptance(
         session, task, acceptance, body.rerun_scope, body.reason
     )
     if body.ask_brain_rejudge:
         acceptance.brain_rejudge_summary = (
-            acceptance.brain_rejudge_summary
-            or "运营大脑建议保留已通过交付物，仅重跑受影响范围。"
+            acceptance.brain_rejudge_summary or "运营大脑建议保留已通过交付物，仅重跑受影响范围。"
         )
+    await _audit_task_approval_decision(
+        session,
+        user=user,
+        task=task,
+        approval_kind="deliverable",
+        source_id=acceptance.id,
+        title=acceptance.title,
+        approved=False,
+        comment=body.reason,
+    )
     await session.commit()
     await session.refresh(acceptance)
     return DeliverableAcceptanceOut.model_validate(acceptance)
@@ -581,11 +1031,21 @@ async def rejudge_deliverable(
     task_id: int, body: RejudgeDeliverableRequest, user: CurrentUser, session: SessionDep
 ) -> DeliverableAcceptanceOut:
     acceptance = await _load_acceptance(session, task_id, user.org_id, body.acceptance_id)
+    task = await _load_task(session, task_id, user.org_id)
+    await require_task_approval_access(session, user, task)
     acceptance.status = DeliverableAcceptanceStatus.RERUN_REQUESTED
     acceptance.rerun_scope = acceptance.rerun_scope or RerunScope.CURRENT_AGENT
-    acceptance.brain_rejudge_summary = (
-        "运营大脑重新判断：问题集中在当前交付物，不建议全链重跑。"
+    await _audit_task_approval_decision(
+        session,
+        user=user,
+        task=task,
+        approval_kind="deliverable",
+        source_id=acceptance.id,
+        title=acceptance.title,
+        approved=False,
+        comment="运营大脑重新判断该成果。",
     )
+    acceptance.brain_rejudge_summary = "运营大脑重新判断：问题集中在当前交付物，不建议全链重跑。"
     acceptance.brain_rejudge_basis = [
         "问题未影响已通过的上游定位。",
         "下游依赖可在当前交付物更新后再同步刷新。",

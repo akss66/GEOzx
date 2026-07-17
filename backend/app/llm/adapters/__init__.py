@@ -1,7 +1,8 @@
-"""适配器接口与统一返回结构。"""
+"""LLM adapter contracts and common return structures."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -15,10 +16,24 @@ class CompletionResult:
 
 @runtime_checkable
 class LLMAdapter(Protocol):
-    """各模型供应商适配器需实现的接口。"""
+    """Provider adapter contract used by LLMGateway."""
 
     provider: str
 
-    async def complete(self, model: str, messages: list[dict]) -> CompletionResult:
-        """执行一次对话补全；失败抛异常（由网关捕获并兜底）。"""
+    async def complete(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict[str, Any] | None = None,
+    ) -> CompletionResult:
+        """Run a non-streaming chat completion."""
+        ...
+
+    async def stream(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield text chunks from a streaming chat completion."""
         ...

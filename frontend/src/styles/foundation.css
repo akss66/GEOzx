@@ -5,25 +5,29 @@
   --tz-brand-red-active: #941016;
   --tz-brand-frame: #eee8df;
   --tz-brand-frame-strong: #e4dcd0;
-  --tz-work-canvas: #f6f6f3;
+  --tz-work-canvas: #f7f7f4;
   --tz-surface: #ffffff;
   --tz-surface-soft: #f0f0ed;
   --tz-ink: #171614;
-  --tz-ink-soft: #3c3935;
-  --tz-muted: #625e58;
-  --tz-faint: #837f78;
-  --tz-line: #d9d7d1;
-  --tz-line-subtle: #e9e8e3;
+  --tz-ink-soft: #4a4640;
+  --tz-muted: #666159;
+  --tz-faint: #827c73;
+  --tz-line: #ddd8cf;
+  --tz-line-subtle: #ebe7df;
   --tz-success: #2b8152;
   --tz-warning: #9a6300;
   --tz-error: #b92b36;
   --tz-info: #526774;
-  --tz-radius-control: 10px;
-  --tz-radius-object: 14px;
-  --tz-radius-floating: 16px;
-  --tz-shadow-floating: 0 8px 20px rgba(23, 22, 20, 0.08);
-  --tz-font-sans: "OpenAI Sans", "Söhne", "Helvetica Neue", -apple-system,
-    BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  --tz-radius-control: 8px;
+  --tz-radius-object: 10px;
+  --tz-radius-floating: 12px;
+  --tz-shadow-floating: 0 12px 34px rgba(42, 35, 27, 0.1);
+  --tz-font-sans: "Geist Variable", "Noto Sans SC Variable", "PingFang SC",
+    "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  --tz-weight-regular: 400;
+  --tz-weight-medium: 520;
+  --tz-weight-semibold: 620;
+  --tz-weight-bold: 700;
 }
 
 html,
@@ -38,6 +42,9 @@ body {
   color: var(--tz-ink);
   background: var(--tz-work-canvas);
   font-family: var(--tz-font-sans);
+  font-weight: var(--tz-weight-regular);
+  line-height: 1.5;
+  font-synthesis: none;
   font-feature-settings: "cv01", "ss01", "tnum";
   font-kerning: normal;
   font-optical-sizing: auto;

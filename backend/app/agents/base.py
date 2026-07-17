@@ -17,12 +17,14 @@ from app.agents.prompts import load_prompt
 from app.llm.gateway import LLMGateway, gateway
 from app.models.enums import DeliverableType
 from app.schemas.deliverable import DeliverablePayload, validate_payload
+from app.services.agent_management import get_business_config
 
 
 class AgentContext(BaseModel):
     """Agent 执行上下文：上游交付物、知识库切片、已采纳优化建议。"""
 
     content_item_id: int
+    request: str | None = None
     upstream: dict[str, dict] = {}
     knowledge: dict[str, list[dict]] = {}
     optimization_suggestions: list[dict] = []
@@ -78,6 +80,8 @@ class LLMAgent(BaseAgent):
     def build_user_message(self, ctx: AgentContext) -> str:
         """把上游交付物与知识库切片组织成给模型的输入。子类可覆盖定制。"""
         parts: list[str] = []
+        if ctx.request:
+            parts.append("【用户本次要求】\n" + ctx.request)
         if ctx.upstream:
             dumped = json.dumps(ctx.upstream, ensure_ascii=False, indent=2)
             parts.append("【上游交付物】\n" + dumped)
@@ -96,6 +100,13 @@ class LLMAgent(BaseAgent):
         self, session: AsyncSession, org_id: int | None, ctx: AgentContext
     ) -> DeliverablePayload:
         system_prompt = load_prompt(self.prompt_name)
+        if org_id is not None:
+            management = await get_business_config(session, org_id, self.code)
+            prompt_addition = management["system_prompt"].strip()
+            if prompt_addition:
+                system_prompt = (
+                    f"{system_prompt}\n\n【本组织专家补充指令】\n{prompt_addition}"
+                )
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": self.build_user_message(ctx)},

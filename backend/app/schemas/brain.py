@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,9 +16,57 @@ from app.models.enums import (
     DeliverableAcceptanceStatus,
     DeliverableStatus,
     DeliverableType,
+    KnowledgeCategory,
     Platform,
     RerunScope,
 )
+
+ToolPermissionMode = Literal["auto", "confirm", "manual", "disabled"]
+IntentKind = Literal["conversation", "clarification", "analysis", "workflow", "action"]
+RuntimeAction = Literal[
+    "respond",
+    "ask_user",
+    "dispatch_experts",
+    "request_decision",
+    "request_permission",
+    "finish",
+]
+
+
+class IntentDecision(BaseModel):
+    intent: IntentKind
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=500)
+    missing_field: str | None = Field(default=None, max_length=120)
+    clarifying_question: str | None = Field(default=None, max_length=500)
+    suggested_expert_codes: list[AgentCode] = Field(default_factory=list)
+    requires_account_context: bool = False
+
+
+class DecisionChoice(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=500)
+    benefit: str = Field(min_length=1, max_length=300)
+    tradeoff: str = Field(min_length=1, max_length=300)
+    recommended: bool = False
+
+
+class DecisionRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=240)
+    summary: str = Field(min_length=1, max_length=800)
+    choices: list[DecisionChoice] = Field(min_length=2, max_length=4)
+    allow_custom_input: bool = True
+    status: Literal["pending", "selected", "revised"] = "pending"
+
+
+class RuntimeNextStep(BaseModel):
+    action: RuntimeAction
+    expert_codes: list[AgentCode] = Field(default_factory=list, max_length=3)
+    rationale: str = Field(min_length=1, max_length=800)
+    handoff_message: str = Field(min_length=1, max_length=500)
+    decision_request: DecisionRequest | None = None
 
 
 class DraftBrainTaskRequest(BaseModel):
@@ -26,6 +75,23 @@ class DraftBrainTaskRequest(BaseModel):
     account_group_id: int | None = None
     platforms: list[Platform] | None = None
     account_ids: list[int] = Field(default_factory=list)
+
+
+class BrainMessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    task_id: int | None = None
+    project_id: int | None = None
+    account_id: int | None = None
+    platform: Platform = Platform.DOUYIN
+
+
+class DecisionSelectionRequest(BaseModel):
+    choice_id: str = Field(min_length=1, max_length=120)
+
+
+class DecisionRevisionRequest(BaseModel):
+    comment: str = Field(min_length=1, max_length=2000)
+    request_new_options: bool = False
 
 
 class TaskBriefOut(BaseModel):
@@ -59,6 +125,8 @@ class OrchestrationPlanStep(BaseModel):
     execution_kind: str = "analysis"
     human_gate: bool = False
     tool_codes: list[str] = []
+    tool_permissions: dict[str, ToolPermissionMode] = Field(default_factory=dict)
+    quality_gates: list[str] = Field(default_factory=list)
 
 
 class OrchestrationPlanOut(BaseModel):
@@ -85,6 +153,8 @@ class BrainTaskOut(BaseModel):
     progress: int
     current_focus: str
     risk_count: int
+    runtime_mode: str = "legacy"
+    thread_id: str | None = None
     context_closed_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -196,6 +266,29 @@ class CloseMemoryOut(BaseModel):
     context_closed_at: datetime
 
 
+class RuntimeEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    type: str
+    payload: dict | None
+    created_at: datetime
+
+
+class BrainRuntimeOut(BaseModel):
+    task: BrainTaskOut
+    thread_id: str | None
+    status: str
+    timeline: list[RuntimeEventOut]
+    invocations: list[AgentInvocationOut]
+    tool_calls: list[AgentToolCallOut]
+    acceptances: list[DeliverableAcceptanceOut]
+    pending_permissions: list[AgentToolCallOut]
+    intent: IntentDecision | None = None
+    pending_decisions: list[DecisionRequest] = Field(default_factory=list)
+    next_actions: list[str]
+
+
 class AgentCurrentTaskOut(BaseModel):
     task_id: int
     title: str
@@ -251,11 +344,84 @@ class UpdateAgentConfigRequest(BaseModel):
     automation_level: AutomationLevel | None = None
 
 
+class AgentManagementToolOut(BaseModel):
+    code: str
+    name: str
+    description: str
+
+
+class AgentManagementGateOut(BaseModel):
+    code: str
+    name: str
+    description: str
+    forced: bool
+
+
+class AgentManagementOut(BaseModel):
+    code: AgentCode
+    name: str
+    group: AgentGroup
+    enabled: bool
+    responsibility: str
+    system_prompt: str
+    automation_level: AutomationLevel
+    tool_permissions: dict[str, ToolPermissionMode]
+    quality_gates: list[str]
+    available_tools: list[AgentManagementToolOut]
+    available_quality_gates: list[AgentManagementGateOut]
+    typical_tasks: list[str]
+    standard_outputs: list[DeliverableType]
+    updated_at: datetime | None = None
+
+
+class UpdateAgentManagementRequest(BaseModel):
+    enabled: bool
+    responsibility: str = Field(min_length=1, max_length=500)
+    system_prompt: str = Field(default="", max_length=8000)
+    tool_permissions: dict[str, ToolPermissionMode]
+    quality_gates: list[str] = Field(default_factory=list, max_length=12)
+
+
 class InvokeAgentRequest(BaseModel):
-    task_id: int | None = None
+    project_id: int
+    account_id: int
+    source_task_id: int | None = None
     prompt: str = Field(min_length=1, max_length=4000)
 
 
+class AgentDeliverableOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    agent_code: str
+    type: DeliverableType
+    version: int
+    status: DeliverableStatus
+    payload: dict
+    created_at: datetime
+
+
+class AgentKnowledgeSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    category: KnowledgeCategory
+    title: str
+    source_label: str
+    version: int
+
+
 class InvokeAgentOut(BaseModel):
+    task: BrainTaskOut
     invocation: AgentInvocationOut
+    deliverable: AgentDeliverableOut
+    acceptance: DeliverableAcceptanceOut
+    knowledge_sources: list[AgentKnowledgeSourceOut]
     message: str
+
+
+class AgentHandoffOut(BaseModel):
+    task_id: int
+    project_id: int
+    account_id: int
+    prompt: str

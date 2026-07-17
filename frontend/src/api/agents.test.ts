@@ -1,78 +1,101 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
-import { getAgent, invokeAgent, listAgents } from "./agents";
+import {
+  getAgent,
+  handoffAgentRun,
+  invokeAgent,
+  listAgentManagement,
+  listAgentRuns,
+  listAgents,
+  suggestAgentRunKnowledge,
+  updateAgentManagement,
+} from "./agents";
 import { api } from "./client";
-import type { AgentProfile } from "../types";
 
 vi.mock("./client", () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),
+    put: vi.fn(),
   },
 }));
 
 const apiGet = api.get as unknown as Mock;
 const apiPost = api.post as unknown as Mock;
-
-const agent = {
-  code: "02-content-director",
-  name: "编导文案专家",
-  group: "creative",
-  one_liner: "把定位转成脚本。",
-  model: "deepseek-chat",
-  fallback_model: null,
-  automation_level: "confirm",
-  tools: ["脚本库"],
-  typical_tasks: ["脚本包"],
-  standard_outputs: ["video_script"],
-  current_task: null,
-  tool_summary: {
-    total_calls: 1,
-    pending_approvals: 1,
-    failed_calls: 0,
-    recent_calls: [
-      {
-        id: 45,
-        task_id: 12,
-        tool_code: "brief_builder",
-        tool_name: "Brief Builder",
-        status: "waiting_approval",
-        permission_mode: "confirm",
-        requires_human_confirmation: true,
-        input_summary: "目标",
-        output_summary: "Brief 已生成",
-        error: null,
-        created_at: "2026-07-01T00:00:00Z",
-      },
-    ],
-  },
-} satisfies AgentProfile;
+const apiPut = api.put as unknown as Mock;
 
 describe("agents api", () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
+  beforeEach(() => vi.resetAllMocks());
 
   it("calls list and detail endpoints", async () => {
-    apiGet.mockResolvedValueOnce({ data: [agent] });
-    apiGet.mockResolvedValueOnce({ data: agent });
+    apiGet.mockResolvedValueOnce({ data: [] });
+    apiGet.mockResolvedValueOnce({ data: { code: "01-positioning" } });
 
-    await expect(listAgents()).resolves.toEqual([agent]);
-    await expect(getAgent(agent.code)).resolves.toEqual(agent);
+    await listAgents();
+    await getAgent("01-positioning");
 
     expect(apiGet).toHaveBeenCalledWith("/agents");
-    expect(apiGet).toHaveBeenCalledWith("/agents/02-content-director");
+    expect(apiGet).toHaveBeenCalledWith("/agents/01-positioning");
   });
 
-  it("invokes an agent then refreshes the profile", async () => {
-    apiPost.mockResolvedValueOnce({ data: { message: "ok" } });
-    apiGet.mockResolvedValueOnce({ data: agent });
+  it("invokes an expert inside the explicit project and account scope", async () => {
+    const run = { task: { id: 12 } };
+    apiPost.mockResolvedValueOnce({ data: run });
 
-    await expect(invokeAgent(agent.code, "写一个脚本")).resolves.toEqual(agent);
+    const result = await invokeAgent("02-content-director", {
+      prompt: "生成脚本",
+      projectId: 7,
+      accountId: 9,
+      sourceTaskId: 11,
+    });
 
     expect(apiPost).toHaveBeenCalledWith("/agents/02-content-director/invoke", {
-      prompt: "写一个脚本",
+      prompt: "生成脚本",
+      project_id: 7,
+      account_id: 9,
+      source_task_id: 11,
     });
-    expect(apiGet).toHaveBeenCalledWith("/agents/02-content-director");
+    expect(result).toEqual(run);
+  });
+
+  it("lists scoped runs and creates an audited handoff", async () => {
+    apiGet.mockResolvedValueOnce({ data: [] });
+    apiPost.mockResolvedValueOnce({ data: { task_id: 12, prompt: "继续执行" } });
+
+    await listAgentRuns("01-positioning", 7, 9);
+    await handoffAgentRun(12);
+
+    expect(apiGet).toHaveBeenCalledWith("/agents/01-positioning/runs", {
+      params: { project_id: 7, account_id: 9 },
+    });
+    expect(apiPost).toHaveBeenCalledWith("/agents/runs/12/handoff");
+  });
+
+  it("sends an expert result to the pending knowledge suggestion queue", async () => {
+    const suggestion = { id: 21, status: "pending" };
+    apiPost.mockResolvedValueOnce({ data: suggestion });
+
+    const result = await suggestAgentRunKnowledge(12);
+
+    expect(apiPost).toHaveBeenCalledWith("/agents/runs/12/knowledge-suggestion");
+    expect(result).toEqual(suggestion);
+  });
+
+  it("loads and updates business expert management without model infrastructure fields", async () => {
+    apiGet.mockResolvedValueOnce({ data: [] });
+    apiPut.mockResolvedValueOnce({ data: { code: "02-content-director" } });
+    const input = {
+      enabled: true,
+      responsibility: "负责内容策划",
+      system_prompt: "不编造数据",
+      tool_permissions: { brief_builder: "confirm" as const },
+      quality_gates: ["script_compliance"],
+    };
+
+    await listAgentManagement();
+    await updateAgentManagement("02-content-director", input);
+
+    expect(apiGet).toHaveBeenCalledWith("/agents/management");
+    expect(apiPut).toHaveBeenCalledWith("/agents/02-content-director/management", input);
   });
 });

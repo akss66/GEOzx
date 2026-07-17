@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.models.enums import DeliverableType
 from app.schemas.deliverable import (
+    AdPlanPayload,
     PositioningStrategyPayload,
     get_schema,
     validate_payload,
@@ -51,6 +52,18 @@ def test_validate_extra_field_forbidden() -> None:
         )
 
 
-def test_unregistered_type_raises() -> None:
-    with pytest.raises(KeyError):
-        validate_payload(DeliverableType.AD_PLAN, {})
+def test_ad_plan_registered_and_validates() -> None:
+    payload = validate_payload(
+        DeliverableType.AD_PLAN,
+        {
+            "objective": "验证冷启动内容方向",
+            "target_audience": "关注数码产品的理性消费者",
+            "budget_strategy": "先小额验证，再按有效素材递增",
+            "creative_directions": ["真实体验", "同价位对比"],
+            "risk_controls": ["人工确认预算", "发布前合规复核"],
+            "measurement": {"primary": "有效互动成本"},
+        },
+    )
+
+    assert isinstance(payload, AdPlanPayload)
+    assert payload.measurement["primary"] == "有效互动成本"

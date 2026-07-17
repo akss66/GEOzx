@@ -1,9 +1,33 @@
 """工作区域接口测试：项目 / 账号 / 分组 CRUD + RBAC + org 隔离（async，SQLite override）。"""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 
-from app.models import Event
+from app.models import (
+    Account,
+    AccountGroup,
+    BrainTask,
+    Client,
+    ClientMembership,
+    ContentItem,
+    DeliverableAcceptance,
+    Event,
+    PlatformAccountAuth,
+    Project,
+    ProjectMembership,
+    TaskBrief,
+)
+from app.models.enums import (
+    AgentCode,
+    BrainTaskStatus,
+    DeliverableAcceptanceStatus,
+    DeliverableType,
+    GroupDimension,
+    Platform,
+    WorkspaceRole,
+)
 
 
 async def _token(client, email: str, password: str) -> str:
@@ -40,6 +64,118 @@ async def test_user_can_list_but_not_create_project(client, member):
     assert (await client.get("/projects", headers=_auth(token))).status_code == 200
     resp = await client.post("/projects", headers=_auth(token), json={"name": "X"})
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_member_account_matrix_is_limited_to_assigned_clients(
+    client, admin, member, session
+):
+    visible_client = Client(org_id=admin.org_id, name="可见客户")
+    hidden_client = Client(org_id=admin.org_id, name="隐藏客户")
+    visible_group = AccountGroup(
+        org_id=admin.org_id, name="可见分组", dimension=GroupDimension.TRACK
+    )
+    hidden_group = AccountGroup(
+        org_id=admin.org_id, name="隐藏分组", dimension=GroupDimension.PERSONA
+    )
+    session.add_all([visible_client, hidden_client, visible_group, hidden_group])
+    await session.flush()
+    visible_account = Account(
+        org_id=admin.org_id,
+        client_id=visible_client.id,
+        nickname="可见账号",
+        platform=Platform.DOUYIN,
+        group_id=visible_group.id,
+    )
+    hidden_account = Account(
+        org_id=admin.org_id,
+        client_id=hidden_client.id,
+        nickname="隐藏账号",
+        platform=Platform.DOUYIN,
+        group_id=hidden_group.id,
+    )
+    session.add_all(
+        [
+            visible_account,
+            hidden_account,
+            ClientMembership(
+                client_id=visible_client.id,
+                user_id=member.id,
+                role=WorkspaceRole.OPERATOR,
+            ),
+        ]
+    )
+    await session.commit()
+    token = await _token(client, "user@test.com", "user-pw-123")
+    headers = _auth(token)
+
+    accounts = await client.get("/accounts", headers=headers)
+    matrix = await client.get("/account-matrix", headers=headers)
+    groups = await client.get("/account-groups", headers=headers)
+
+    assert accounts.status_code == 200
+    assert [row["nickname"] for row in accounts.json()] == ["可见账号"]
+    assert matrix.status_code == 200
+    matrix_names = [
+        row["nickname"]
+        for group in matrix.json()["groups"]
+        for row in group["accounts"]
+    ]
+    assert matrix_names == ["可见账号"]
+    assert [row["name"] for row in groups.json()] == ["可见分组"]
+
+
+@pytest.mark.asyncio
+async def test_project_scoped_member_only_sees_accounts_in_assigned_project(
+    client, admin, member, session
+):
+    workspace = Client(org_id=admin.org_id, name="项目客户")
+    session.add(workspace)
+    await session.flush()
+    visible_project = Project(org_id=admin.org_id, client_id=workspace.id, name="可见项目")
+    hidden_project = Project(org_id=admin.org_id, client_id=workspace.id, name="隐藏项目")
+    session.add_all([visible_project, hidden_project])
+    await session.flush()
+    session.add_all(
+        [
+            Account(
+                org_id=admin.org_id,
+                client_id=workspace.id,
+                project_id=visible_project.id,
+                nickname="项目可见账号",
+                platform=Platform.DOUYIN,
+            ),
+            Account(
+                org_id=admin.org_id,
+                client_id=workspace.id,
+                project_id=hidden_project.id,
+                nickname="项目隐藏账号",
+                platform=Platform.DOUYIN,
+            ),
+            Account(
+                org_id=admin.org_id,
+                client_id=workspace.id,
+                nickname="客户未绑定账号",
+                platform=Platform.DOUYIN,
+            ),
+            ProjectMembership(
+                project_id=visible_project.id,
+                user_id=member.id,
+                role=WorkspaceRole.OPERATOR,
+            ),
+        ]
+    )
+    await session.commit()
+    token = await _token(client, "user@test.com", "user-pw-123")
+
+    response = await client.get("/accounts", headers=_auth(token))
+    hidden_filter = await client.get(
+        f"/accounts?project_id={hidden_project.id}", headers=_auth(token)
+    )
+
+    assert response.status_code == 200
+    assert [row["nickname"] for row in response.json()] == ["项目可见账号"]
+    assert hidden_filter.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -98,6 +234,57 @@ async def test_account_group_and_account_crud(client, admin):
     # 删除
     assert (await client.delete(f"/accounts/{aid}", headers=_auth(token))).status_code == 204
     assert (await client.get("/accounts", headers=_auth(token))).json() == []
+
+
+@pytest.mark.asyncio
+async def test_admin_batch_updates_account_ownership_and_status(client, admin, session):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    group_id = (
+        await client.post(
+            "/account-groups",
+            headers=headers,
+            json={"name": "批量运营组", "dimension": "track"},
+        )
+    ).json()["id"]
+    project_id = (
+        await client.post("/projects", headers=headers, json={"name": "批量项目"})
+    ).json()["id"]
+    account_ids = []
+    for nickname in ("矩阵一号", "矩阵二号"):
+        account_ids.append(
+            (
+                await client.post(
+                    "/accounts",
+                    headers=headers,
+                    json={"nickname": nickname, "platform": "douyin"},
+                )
+            ).json()["id"]
+        )
+
+    response = await client.patch(
+        "/accounts/batch",
+        headers=headers,
+        json={
+            "account_ids": account_ids,
+            "group_id": group_id,
+            "project_id": project_id,
+            "status": "inactive",
+        },
+    )
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == account_ids
+    assert all(row["group_id"] == group_id for row in response.json())
+    assert all(row["project_id"] == project_id for row in response.json())
+    assert all(project_id in row["project_ids"] for row in response.json())
+    assert all(row["status"] == "inactive" for row in response.json())
+
+    event = await session.scalar(select(Event).where(Event.type == "accounts.batch_updated"))
+    assert event is not None
+    assert event.payload["account_ids"] == account_ids
+    assert event.payload["group_id"] == group_id
+    assert event.payload["project_id"] == project_id
 
 
 @pytest.mark.asyncio
@@ -163,7 +350,7 @@ async def test_account_matrix_groups_accounts_and_platform_status(client, admin)
 
 
 @pytest.mark.asyncio
-async def test_update_account_integration_status_is_audited(client, admin, session):
+async def test_manual_account_integration_status_is_audited(client, admin, session):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     account_id = (
@@ -178,31 +365,182 @@ async def test_update_account_integration_status_is_audited(client, admin, sessi
         f"/accounts/{account_id}/integration",
         headers=headers,
         json={
-            "integration_status": "connected",
-            "auth_status": "authorized",
-            "data_sync_status": "healthy",
-            "note": "OAuth 已完成",
+            "integration_status": "manual",
+            "auth_status": "manual",
+            "data_sync_status": "manual",
+            "note": "本地开发模式",
         },
     )
 
     assert updated.status_code == 200
     body = updated.json()
-    assert body["integration_status"] == "connected"
-    assert body["auth_status"] == "authorized"
-    assert body["data_sync_status"] == "healthy"
+    assert body["integration_status"] == "manual"
+    assert body["auth_status"] == "manual"
+    assert body["data_sync_status"] == "manual"
+    assert body["publish_capability"] == "manual_only"
 
     matrix = await client.get("/account-matrix", headers=headers)
     platform = next(row for row in matrix.json()["platforms"] if row["platform"] == "douyin")
-    assert platform["integration_status"] == "connected"
-    assert platform["auth_status"] == "authorized"
-    assert platform["data_sync_status"] == "healthy"
+    assert platform["integration_status"] == "manual"
+    assert platform["auth_status"] == "manual"
+    assert platform["data_sync_status"] == "manual"
 
     event = await session.scalar(
         select(Event).where(Event.type == "account.integration.updated")
     )
     assert event is not None
     assert event.payload["account_id"] == account_id
-    assert event.payload["note"] == "OAuth 已完成"
+    assert event.payload["note"] == "本地开发模式"
+
+
+@pytest.mark.asyncio
+async def test_account_integration_rejects_forged_official_status(client, admin):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "未授权抖音号", "platform": "douyin"},
+        )
+    ).json()["id"]
+
+    updated = await client.patch(
+        f"/accounts/{account_id}/integration",
+        headers=headers,
+        json={
+            "integration_status": "connected",
+            "auth_status": "authorized",
+            "data_sync_status": "healthy",
+        },
+    )
+
+    assert updated.status_code == 409
+    assert updated.json()["detail"] == "官方授权和同步状态只能由平台回调或同步任务更新"
+
+
+@pytest.mark.asyncio
+async def test_account_integration_cannot_replace_official_status_with_manual(
+    client, admin, session
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "正式授权号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    account = await session.get(Account, account_id)
+    assert account is not None
+    account.auth = {
+        "integration_status": "connected",
+        "auth_status": "authorized",
+        "data_sync_status": "healthy",
+    }
+    await session.commit()
+
+    updated = await client.patch(
+        f"/accounts/{account_id}/integration",
+        headers=headers,
+        json={
+            "integration_status": "manual",
+            "auth_status": "manual",
+            "data_sync_status": "manual",
+        },
+    )
+
+    assert updated.status_code == 409
+    assert updated.json()["detail"] == "已存在官方接入状态，不能切换为开发模式"
+
+
+@pytest.mark.asyncio
+async def test_account_list_includes_real_operational_context(client, admin, session):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "运营账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    account = await session.get(Account, account_id)
+    assert account is not None
+    account.auth = {
+        "integration_status": "connected",
+        "auth_status": "authorized",
+        "data_sync_status": "healthy",
+    }
+    auth = PlatformAccountAuth(
+        org_id=admin.org_id,
+        account_id=account_id,
+        platform="douyin",
+        auth_status="authorized",
+        data_sync_status="healthy",
+        raw_profile={"avatar": "https://example.com/avatar.png"},
+        last_sync_at=datetime(2026, 7, 16, 8, 30, tzinfo=UTC),
+    )
+    session.add(auth)
+
+    historical_task = BrainTask(
+        org_id=admin.org_id,
+        title="历史待验收任务",
+        status=BrainTaskStatus.PENDING_ACCEPTANCE,
+        progress=38,
+        current_focus="等待历史交付物验收",
+        risk_count=7,
+    )
+    historical_task.brief = TaskBrief(
+        goal="历史任务",
+        platforms=["douyin"],
+        account_ids=[account_id],
+    )
+    session.add(historical_task)
+
+    task = BrainTask(
+        org_id=admin.org_id,
+        title="诊断账号定位",
+        status=BrainTaskStatus.RUNNING,
+        progress=45,
+        current_focus="账号定位专家正在分析",
+        risk_count=2,
+    )
+    task.brief = TaskBrief(
+        goal="诊断账号定位",
+        platforms=["douyin"],
+        account_ids=[account_id],
+    )
+    task.acceptances.append(
+        DeliverableAcceptance(
+            agent_code=AgentCode.POSITIONING,
+            agent_name="账号定位专家",
+            deliverable_type=DeliverableType.POSITIONING_STRATEGY,
+            title="账号定位诊断",
+            summary="聚焦理性数码消费与真实测评。",
+            status=DeliverableAcceptanceStatus.APPROVED,
+        )
+    )
+    session.add(task)
+    await session.commit()
+
+    listing = await client.get("/accounts", headers=headers)
+
+    assert listing.status_code == 200
+    account = next(row for row in listing.json() if row["id"] == account_id)
+    assert account["avatar_url"] == "https://example.com/avatar.png"
+    assert account["positioning_summary"] == "聚焦理性数码消费与真实测评。"
+    assert account["current_task"] == {
+        "id": task.id,
+        "title": "诊断账号定位",
+        "status": "running",
+        "progress": 45,
+        "current_focus": "账号定位专家正在分析",
+    }
+    assert account["risk_count"] == 2
+    assert account["last_sync_at"].startswith("2026-07-16T08:30:00")
+    assert account["publish_capability"] == "prepare_only"
 
 
 @pytest.mark.asyncio
@@ -216,6 +554,16 @@ async def test_distribution_action_writes_audit_event(client, member, session):
             json={"nickname": "分发账号", "platform": "douyin"},
         )
     ).json()["id"]
+    account = await session.get(Account, account_id)
+    assert account is not None and account.client_id is not None
+    session.add(
+        ClientMembership(
+            client_id=account.client_id,
+            user_id=member.id,
+            role=WorkspaceRole.OPERATOR,
+        )
+    )
+    await session.commit()
 
     member_token = await _token(client, "user@test.com", "user-pw-123")
     member_headers = _auth(member_token)
@@ -241,6 +589,113 @@ async def test_distribution_action_writes_audit_event(client, member, session):
     assert event.payload["account_ids"] == [account_id]
     assert event.payload["created_by"] == member.id
     assert event.payload["note"] == "已在抖音后台排期"
+
+
+@pytest.mark.asyncio
+async def test_distribution_action_hides_unassigned_account(client, admin, member):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=_auth(token),
+            json={"nickname": "其他客户账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    member_token = await _token(client, "user@test.com", "user-pw-123")
+
+    response = await client.post(
+        "/distribution/actions",
+        headers=_auth(member_token),
+        json={"platform": "douyin", "account_ids": [account_id]},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_distribution_action_hides_unassigned_content_item(
+    client, admin, member, session
+):
+    visible_client = Client(org_id=admin.org_id, name="可操作客户")
+    hidden_client = Client(org_id=admin.org_id, name="其他客户")
+    session.add_all([visible_client, hidden_client])
+    await session.flush()
+    hidden_project = Project(
+        org_id=admin.org_id,
+        client_id=hidden_client.id,
+        name="其他客户项目",
+    )
+    visible_account = Account(
+        org_id=admin.org_id,
+        client_id=visible_client.id,
+        nickname="可操作账号",
+        platform=Platform.DOUYIN,
+    )
+    session.add_all([hidden_project, visible_account])
+    await session.flush()
+    hidden_content = ContentItem(project_id=hidden_project.id, title="不可见内容")
+    session.add_all(
+        [
+            hidden_content,
+            ClientMembership(
+                client_id=visible_client.id,
+                user_id=member.id,
+                role=WorkspaceRole.OPERATOR,
+            ),
+        ]
+    )
+    await session.commit()
+    member_token = await _token(client, "user@test.com", "user-pw-123")
+
+    response = await client.post(
+        "/distribution/actions",
+        headers=_auth(member_token),
+        json={
+            "platform": "douyin",
+            "account_ids": [visible_account.id],
+            "content_item_id": hidden_content.id,
+        },
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_reviewer_can_view_but_cannot_record_distribution(
+    client, admin, member, session
+):
+    workspace = Client(org_id=admin.org_id, name="审核客户")
+    session.add(workspace)
+    await session.flush()
+    account = Account(
+        org_id=admin.org_id,
+        client_id=workspace.id,
+        nickname="待审核账号",
+        platform=Platform.DOUYIN,
+    )
+    session.add_all(
+        [
+            account,
+            ClientMembership(
+                client_id=workspace.id,
+                user_id=member.id,
+                role=WorkspaceRole.REVIEWER,
+            ),
+        ]
+    )
+    await session.commit()
+    member_token = await _token(client, "user@test.com", "user-pw-123")
+    headers = _auth(member_token)
+
+    listing = await client.get("/accounts", headers=headers)
+    response = await client.post(
+        "/distribution/actions",
+        headers=headers,
+        json={"platform": "douyin", "account_ids": [account.id]},
+    )
+
+    assert [row["id"] for row in listing.json()] == [account.id]
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio

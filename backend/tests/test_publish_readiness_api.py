@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
-from app.models import MaterialAsset
+from app.models import Event, MaterialAsset
 from app.models.enums import MaterialStatus
 
 
@@ -13,6 +14,31 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _manual_account(client, headers: dict[str, str], project_id: int) -> dict:
+    account = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={
+                "nickname": "Publish account",
+                "platform": "douyin",
+                "project_id": project_id,
+            },
+        )
+    ).json()
+    configured = await client.patch(
+        f"/accounts/{account['id']}/integration",
+        headers=headers,
+        json={
+            "integration_status": "manual",
+            "auth_status": "manual",
+            "data_sync_status": "manual",
+        },
+    )
+    assert configured.status_code == 200
+    return configured.json()
 
 
 @pytest.mark.asyncio
@@ -40,11 +66,16 @@ async def test_publish_readiness_creates_human_confirmation_tool_call(client, ad
     headers = _auth(token)
 
     project = (await client.post("/projects", headers=headers, json={"name": "Douyin"})).json()
+    account = await _manual_account(client, headers, project["id"])
     content = (
         await client.post(
             "/content-items",
             headers=headers,
-            json={"project_id": project["id"], "title": "New launch video"},
+            json={
+                "project_id": project["id"],
+                "account_id": account["id"],
+                "title": "New launch video",
+            },
         )
     ).json()
     material = MaterialAsset(
@@ -68,7 +99,7 @@ async def test_publish_readiness_creates_human_confirmation_tool_call(client, ad
     await session.refresh(material)
     await session.refresh(cover)
 
-    scheduled_at = datetime.now(timezone.utc) + timedelta(hours=3)
+    scheduled_at = datetime.now(UTC) + timedelta(hours=3)
     resp = await client.post(
         f"/content-items/{content['id']}/publish-readiness",
         headers=headers,
@@ -94,7 +125,7 @@ async def test_publish_readiness_creates_human_confirmation_tool_call(client, ad
     assert body["tool_call"]["tool_code"] == "publish_package_prepare"
     assert body["tool_call"]["status"] == "waiting_approval"
     assert body["tool_call"]["requires_human_confirmation"] is True
-    assert body["package"]["account_id"] is None
+    assert body["package"]["account_id"] == account["id"]
     assert body["package"]["content_type"] == "video"
     assert body["package"]["execution_mode"] == "manual_checklist"
     assert body["package"]["manual_steps"][0].startswith("打开抖音创作者")
@@ -112,6 +143,21 @@ async def test_publish_readiness_creates_human_confirmation_tool_call(client, ad
         row["id"] == body["tool_call"]["id"] and row["module"] == "content_production"
         for row in queue.json()
     )
+    notices = await client.get("/notifications", headers=headers)
+    assert notices.status_code == 200
+    assert any(
+        row["type"] == "approval.requested" and row["path"] == "/approvals"
+        for row in notices.json()
+    )
+    audit = await session.scalar(
+        select(Event).where(
+            Event.type == "approval.requested",
+            Event.content_item_id == content["id"],
+        )
+    )
+    assert audit is not None
+    assert audit.payload["approval_kind"] == "tool_call"
+    assert audit.payload["source_id"] == body["tool_call"]["id"]
 
 
 @pytest.mark.asyncio
@@ -146,6 +192,48 @@ async def test_publish_readiness_blocks_missing_material(client, admin):
     assert body["ready"] is False
     assert body["tool_call"]["status"] == "failed"
     assert any(finding["code"] == "material.required" for finding in body["findings"])
+
+
+@pytest.mark.asyncio
+async def test_publish_readiness_blocks_content_without_explicit_account(client, admin, session):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+
+    project = (await client.post("/projects", headers=headers, json={"name": "Douyin"})).json()
+    content = (
+        await client.post(
+            "/content-items",
+            headers=headers,
+            json={"project_id": project["id"], "title": "No account package"},
+        )
+    ).json()
+    material = MaterialAsset(
+        org_id=admin.org_id,
+        content_item_id=content["id"],
+        kind="video",
+        status=MaterialStatus.READY,
+        local_path="outputs/no-account.mp4",
+        size_bytes=1024,
+    )
+    session.add(material)
+    await session.commit()
+    await session.refresh(material)
+
+    resp = await client.post(
+        f"/content-items/{content['id']}/publish-readiness",
+        headers=headers,
+        json={
+            "platform": "douyin",
+            "title": "No account package",
+            "material_ids": [material.id],
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ready"] is False
+    assert body["risk"] == "block"
+    assert any(finding["code"] == "account.required" for finding in body["findings"])
 
 
 @pytest.mark.asyncio
@@ -197,11 +285,16 @@ async def test_approving_publish_package_marks_manual_publish_decision(client, a
     headers = _auth(token)
 
     project = (await client.post("/projects", headers=headers, json={"name": "Douyin"})).json()
+    account = await _manual_account(client, headers, project["id"])
     content = (
         await client.post(
             "/content-items",
             headers=headers,
-            json={"project_id": project["id"], "title": "Manual publish package"},
+            json={
+                "project_id": project["id"],
+                "account_id": account["id"],
+                "title": "Manual publish package",
+            },
         )
     ).json()
     material = MaterialAsset(
