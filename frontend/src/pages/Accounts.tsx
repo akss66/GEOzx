@@ -4,6 +4,7 @@ import {
   CheckCircleFilled,
   CheckOutlined,
   ClockCircleFilled,
+  DeleteOutlined,
   ExclamationCircleFilled,
   FolderOpenOutlined,
   LinkOutlined,
@@ -30,6 +31,7 @@ import {
   Select,
   Table,
   Tag,
+  Tooltip,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -42,6 +44,7 @@ import {
   createDouyinAuthorizeUrl,
   createDouyinScanAddUrl,
   createDouyinTrialWhitelistUrl,
+  deleteAccount,
   getAccountMatrix,
   listAccountGroups,
   listAccounts,
@@ -255,6 +258,7 @@ export default function Accounts() {
   const [batchModal, setBatchModal] = useState<"project" | "group" | null>(null);
   const [batchValue, setBatchValue] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
   const [platformBoardOpen, setPlatformBoardOpen] = useState(false);
   const [integrationPlatform, setIntegrationPlatform] = useState<Platform | null>(null);
   const [whitelistUrl, setWhitelistUrl] = useState<string | null>(null);
@@ -498,6 +502,29 @@ export default function Accounts() {
     onError: () => message.error("白名单授权二维码生成失败，请检查抖音平台配置"),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (account: Account) => deleteAccount(account.id),
+    onSuccess: (_, account) => {
+      if (currentAccountId === account.id) {
+        setCurrentAccountId(null);
+      }
+      setSelected((ids) => ids.filter((id) => id !== account.id));
+      setDeleteTarget(null);
+      message.success(`已从账号矩阵删除 ${account.nickname}`);
+      void Promise.all([
+        qc.invalidateQueries({ queryKey: ["accounts"] }),
+        qc.invalidateQueries({ queryKey: ["shell-accounts"] }),
+        qc.invalidateQueries({ queryKey: ["account-matrix"] }),
+        qc.invalidateQueries({ queryKey: ["platform-integrations"] }),
+        qc.invalidateQueries({ queryKey: ["workspace-context"] }),
+      ]);
+    },
+    onError: (error) => {
+      const failure = presentApiError(error, "账号删除失败，请稍后重试。");
+      message.error(failure.message);
+    },
+  });
+
   const columns: ColumnsType<Account> = [
     {
       title: "账号",
@@ -617,6 +644,7 @@ export default function Accounts() {
             syncLoading={douyinSyncMutation.isPending}
             onOfficialAuthorize={() => douyinAuthorizeMutation.mutate(account.id)}
             onSyncMetrics={() => douyinSyncMutation.mutate(account.id)}
+            onDelete={() => setDeleteTarget(account)}
           />
         ) : (
           <span style={{ color: "var(--dy-faint)" }}>只读</span>
@@ -850,6 +878,30 @@ export default function Accounts() {
           </Panel>
         )}
       </div>
+
+      <Modal
+        title={deleteTarget ? `删除账号“${deleteTarget.nickname}”？` : "删除账号"}
+        open={deleteTarget !== null}
+        onCancel={() => setDeleteTarget(null)}
+        onOk={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget);
+        }}
+        confirmLoading={deleteMutation.isPending}
+        okText="确认删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        closable={!deleteMutation.isPending}
+        maskClosable={!deleteMutation.isPending}
+        destroyOnHidden
+      >
+        <p style={{ marginTop: 0 }}>
+          该账号会从同舟行账号矩阵中移除，关联授权令牌与平台配置也会一并删除。此操作不可撤销。
+        </p>
+        <p style={{ marginBottom: 0, color: "var(--dy-muted)" }}>
+          <strong style={{ color: "var(--dy-text)" }}>不会删除抖音平台上的账号本身</strong>
+          ，如需撤回平台授权，请在抖音开放平台另行处理。
+        </p>
+      </Modal>
 
       <Modal
         title={batchModal === "project" ? "批量绑定项目" : "批量移动分组"}
@@ -1393,39 +1445,53 @@ function AccountActions({
   syncLoading,
   onOfficialAuthorize,
   onSyncMetrics,
+  onDelete,
 }: {
   account: Account;
   authorizeLoading: boolean;
   syncLoading: boolean;
   onOfficialAuthorize: () => void;
   onSyncMetrics: () => void;
+  onDelete: () => void;
 }) {
   const mode = getAccountActionMode(account);
-  if (mode === "official_authorize") {
-    return (
-      <Button
-        size="small"
-        type="primary"
-        loading={authorizeLoading}
-        onClick={onOfficialAuthorize}
-      >
-        官方授权
-      </Button>
-    );
-  }
-  if (mode === "sync_metrics") {
-    return (
-      <Button
-        size="small"
-        icon={<SyncOutlined />}
-        loading={syncLoading}
-        onClick={onSyncMetrics}
-      >
-        同步数据
-      </Button>
-    );
-  }
-  return <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>待接入</span>;
+  const primaryAction = mode === "official_authorize" ? (
+    <Button
+      size="small"
+      type="primary"
+      loading={authorizeLoading}
+      onClick={onOfficialAuthorize}
+    >
+      官方授权
+    </Button>
+  ) : mode === "sync_metrics" ? (
+    <Button
+      size="small"
+      icon={<SyncOutlined />}
+      loading={syncLoading}
+      onClick={onSyncMetrics}
+    >
+      同步数据
+    </Button>
+  ) : (
+    <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>待接入</span>
+  );
+
+  return (
+    <Space size={6}>
+      {primaryAction}
+      <Tooltip title="删除账号">
+        <Button
+          size="small"
+          type="text"
+          danger
+          icon={<DeleteOutlined />}
+          aria-label={`删除账号 ${account.nickname}`}
+          onClick={onDelete}
+        />
+      </Tooltip>
+    </Space>
+  );
 }
 
 function FilterField({ label, children }: { label: string; children: ReactNode }) {
