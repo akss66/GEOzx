@@ -198,7 +198,7 @@ describe("model infrastructure api", () => {
       response: {
         status: 409,
         data: {
-          affected_agents: [{ agent_code: "00-decision", agent_name: "Decision" }],
+          affected_agents: ["运营大脑", "内容策略专家"],
         },
       },
     });
@@ -206,7 +206,7 @@ describe("model infrastructure api", () => {
     await expect(deleteModelProvider(7)).rejects.toMatchObject({
       name: "ModelProviderDeleteConflictError",
       providerId: 7,
-      affectedAgents: [{ agent_code: "00-decision", agent_name: "Decision" }],
+      affectedAgents: ["运营大脑", "内容策略专家"],
     });
   });
 });

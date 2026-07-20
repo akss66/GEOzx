@@ -1327,7 +1327,7 @@ export interface ModelProviderDiscoveryResult {
 }
 
 export interface ModelProviderDeleteConflict {
-  affected_agents: ModelProviderRouteRef[];
+  affected_agents: string[];
 }
 
 // —— 共享知识库 ——
