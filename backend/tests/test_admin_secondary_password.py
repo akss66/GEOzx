@@ -227,6 +227,78 @@ async def test_concurrent_wrong_attempts_start_lockout_on_exactly_fifth_attempt(
     assert credential.locked_until is not None
 
 
+async def test_concurrent_wrong_attempts_from_expired_lock_lock_on_fifth_attempt(
+    session, admin, monkeypatch
+):
+    set_secondary_password, verify_secondary_password = _service()
+    import app.services.admin_security as admin_security
+
+    await set_secondary_password(session, admin, "admin-pw-123", "delete-pass-123")
+    credential = await session.scalar(
+        select(AdminSecurityCredential).where(AdminSecurityCredential.user_id == admin.id)
+    )
+    assert credential is not None
+    credential.delete_available_at = datetime.now(UTC) - timedelta(seconds=1)
+    credential.failed_attempts = 5
+    credential.locked_until = datetime.now(UTC) - timedelta(seconds=1)
+    await session.commit()
+
+    original_credential_for = admin_security._credential_for
+    barrier = asyncio.Barrier(5)
+
+    async def synchronized_credential_for(concurrent_session, actor):
+        result = await original_credential_for(concurrent_session, actor)
+        await barrier.wait()
+        return result
+
+    monkeypatch.setattr(admin_security, "_credential_for", synchronized_credential_for)
+    session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async def wrong_attempt() -> int:
+        async with session_factory() as concurrent_session:
+            actor = await concurrent_session.get(User, admin.id)
+            assert actor is not None
+            with pytest.raises(HTTPException) as exc:
+                await verify_secondary_password(
+                    concurrent_session, actor, "wrong-secondary-password"
+                )
+            return exc.value.status_code
+
+    status_codes = await asyncio.gather(*(wrong_attempt() for _ in range(5)))
+
+    await session.refresh(credential)
+    assert sorted(status_codes) == [401, 401, 401, 401, 429]
+    assert credential.failed_attempts == 5
+    assert credential.locked_until is not None
+
+
+async def test_concurrent_initial_secondary_password_set_creates_one_credential(session, admin):
+    set_secondary_password, _ = _service()
+    barrier = asyncio.Barrier(2)
+    session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async def set_password() -> AdminSecurityCredential:
+        async with session_factory() as concurrent_session:
+            actor = await concurrent_session.get(User, admin.id)
+            assert actor is not None
+            await barrier.wait()
+            return await set_secondary_password(
+                concurrent_session, actor, "admin-pw-123", "delete-pass-123"
+            )
+
+    credentials = await asyncio.gather(set_password(), set_password())
+    persisted = (
+        await session.scalars(
+            select(AdminSecurityCredential).where(AdminSecurityCredential.user_id == admin.id)
+        )
+    ).all()
+
+    assert len(credentials) == 2
+    assert len(persisted) == 1
+    assert persisted[0].failed_attempts == 0
+    assert persisted[0].locked_until is None
+
+
 async def test_successful_secondary_password_verification_resets_failure_state(session, admin):
     set_secondary_password, verify_secondary_password = _service()
 

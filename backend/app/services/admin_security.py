@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import case, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password, verify_password
@@ -38,23 +40,28 @@ async def set_secondary_password(
         )
 
     now = datetime.now(UTC)
-    credential = await _credential_for(session, actor)
-    if credential is None:
-        credential = AdminSecurityCredential(
-            user_id=actor.id,
-            password_hash=hash_password(secondary_password),
-            changed_at=now,
-            delete_available_at=now + timedelta(minutes=COOLDOWN_MINUTES),
+    password_hash = hash_password(secondary_password)
+    values = {
+        "user_id": actor.id,
+        "password_hash": password_hash,
+        "changed_at": now,
+        "delete_available_at": now + timedelta(minutes=COOLDOWN_MINUTES),
+        "failed_attempts": 0,
+        "locked_until": None,
+    }
+    dialect_name = session.bind.dialect.name
+    insert = postgresql_insert if dialect_name == "postgresql" else sqlite_insert
+    credential = await session.scalar(
+        insert(AdminSecurityCredential)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=[AdminSecurityCredential.user_id],
+            set_={key: value for key, value in values.items() if key != "user_id"},
         )
-        session.add(credential)
-    else:
-        credential.password_hash = hash_password(secondary_password)
-        credential.changed_at = now
-        credential.delete_available_at = now + timedelta(minutes=COOLDOWN_MINUTES)
-
-    credential.failed_attempts = 0
-    credential.locked_until = None
+        .returning(AdminSecurityCredential)
+    )
     await session.commit()
+    assert credential is not None
     await session.refresh(credential)
     return credential
 
@@ -75,11 +82,8 @@ async def verify_secondary_password(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Secondary password is temporarily locked",
             )
-        credential.failed_attempts = 0
-        credential.locked_until = None
 
     if _utc(credential.delete_available_at) > now:
-        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Secondary password cooldown is active"
         )
