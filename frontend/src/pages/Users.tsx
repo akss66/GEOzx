@@ -32,6 +32,7 @@ import {
   getAccessibleAccounts,
   hasAccessAnomaly,
   hasAvailableAccountCatalog,
+  hasAvailableUserAccessDetail,
   type AccessDraft,
 } from "../components/users/userGovernance";
 import { OperationalState } from "../components/ui";
@@ -216,6 +217,15 @@ export default function Users() {
 
   const selectedMetrics = useMemo(() => {
     if (!selectedDetail || !catalogQuery.data) return [];
+    if (!hasAvailableUserAccessDetail(selectedDetail)) {
+      return [
+        { label: "客户授权", value: "—" },
+        { label: "项目覆盖", value: "—" },
+        { label: "可见账号", value: "—" },
+        { label: "最终生效账号", value: "—" },
+        { label: "授权状态", value: "待核对" },
+      ];
+    }
     const accountCatalogAvailable = hasAvailableAccountCatalog(catalogQuery.data);
     const accessibleAccounts = getAccessibleAccounts(selectedDetail, catalogQuery.data);
     const effectiveAccounts = selectedDetail.account_scope_mode === "selected"

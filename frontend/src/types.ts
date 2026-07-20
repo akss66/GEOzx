@@ -38,13 +38,27 @@ export interface ProjectMembership {
 }
 
 export type AccountScopeMode = "all_accessible" | "selected";
+export type UserAccessDetailStatus = "available" | "unavailable";
 
 export interface UserDetail extends User {
   has_global_access: boolean;
   account_scope_mode: AccountScopeMode;
+  access_detail_status: UserAccessDetailStatus;
+  client_ids: number[];
+  project_ids: number[];
   account_ids: number[];
   client_memberships: ClientMembership[];
   project_memberships: ProjectMembership[];
+}
+
+export interface UserDetailResponse extends User {
+  has_global_access?: boolean | null;
+  account_scope_mode?: AccountScopeMode | null;
+  client_ids?: number[] | null;
+  project_ids?: number[] | null;
+  account_ids?: number[] | null;
+  client_memberships?: ClientMembership[] | null;
+  project_memberships?: ProjectMembership[] | null;
 }
 
 export interface AccountAccessCatalogItem {

@@ -114,6 +114,9 @@ function resetFixtures() {
       ...clone(adminUser),
       has_global_access: true,
       account_scope_mode: "all_accessible",
+      access_detail_status: "available",
+      client_ids: [],
+      project_ids: [],
       account_ids: [],
       client_memberships: [],
       project_memberships: [],
@@ -122,6 +125,9 @@ function resetFixtures() {
       ...clone(operatorUser),
       has_global_access: false,
       account_scope_mode: "all_accessible",
+      access_detail_status: "available",
+      client_ids: [10],
+      project_ids: [20],
       account_ids: [],
       client_memberships: [
         { client_id: 10, client_name: "数码品牌", role: "operator" },
@@ -140,6 +146,9 @@ function resetFixtures() {
       ...clone(dormantUser),
       has_global_access: false,
       account_scope_mode: "selected",
+      access_detail_status: "available",
+      client_ids: [],
+      project_ids: [],
       account_ids: [],
       client_memberships: [],
       project_memberships: [],
@@ -169,6 +178,9 @@ function configureAuthMocks() {
       ...nextUser,
       has_global_access: input.role === "admin",
       account_scope_mode: "all_accessible",
+      access_detail_status: "available",
+      client_ids: [],
+      project_ids: [],
       account_ids: [],
       client_memberships: [],
       project_memberships: [],
@@ -188,6 +200,9 @@ function configureAuthMocks() {
     const current = detailMap[userId];
     const next: UserDetail = {
       ...current,
+      access_detail_status: "available",
+      client_ids: input.clients.map((item) => item.client_id),
+      project_ids: input.projects.map((item) => item.project_id),
       client_memberships: input.clients.map((item) => ({
         client_id: item.client_id,
         client_name: accessCatalog.clients.find((client) => client.id === item.client_id)?.name ?? `客户 ${item.client_id}`,
@@ -370,6 +385,30 @@ describe("Users", () => {
       account_scope_mode: "selected",
       account_ids: [101],
     })));
+  });
+
+  it("renders legacy incomplete member access as read-only without overwriting authorization", async () => {
+    detailMap[2] = {
+      ...detailMap[2],
+      access_detail_status: "unavailable",
+      client_ids: undefined,
+      project_ids: undefined,
+      account_ids: undefined,
+      client_memberships: undefined,
+      project_memberships: undefined,
+    } as unknown as UserDetail;
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
+
+    expect(await screen.findByText("成员权限详情暂不可用")).toBeInTheDocument();
+    expect(screen.getByText(
+      "当前服务未返回完整的客户、项目和账号授权数据。为避免覆盖已有权限，资源权限暂时只读。",
+    )).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存资源权限" })).not.toBeInTheDocument();
+    expect(updateUserAccess).not.toHaveBeenCalled();
   });
 
   it("creates a scoped member with initial resource authorization in one flow", async () => {

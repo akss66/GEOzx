@@ -10,6 +10,7 @@ import {
   getAccessibleAccounts,
   getEffectiveAccounts,
   hasAvailableAccountCatalog,
+  hasAvailableUserAccessDetail,
   summarizeScopeMode,
   WORKSPACE_ROLE_OPTIONS,
   type AccessDraft,
@@ -31,6 +32,7 @@ export function MemberAccess({
   const [feedback, setFeedback] = useState<{ tone: "neutral" | "success" | "error"; text: string } | null>(null);
   const catalogClients = Array.isArray(catalog.clients) ? catalog.clients : [];
   const catalogProjects = Array.isArray(catalog.projects) ? catalog.projects : [];
+  const accessDetailAvailable = hasAvailableUserAccessDetail(detail);
   const accountCatalogAvailable = hasAvailableAccountCatalog(catalog);
   const catalogAccounts = accountCatalogAvailable ? catalog.accounts : [];
 
@@ -58,12 +60,13 @@ export function MemberAccess({
   const dirty = !areAccessDraftsEqual(baseline, draft);
 
   useEffect(() => {
+    if (!accessDetailAvailable) return;
     if (!accountCatalogAvailable) return;
     if (draft.account_scope_mode !== "selected") return;
     const nextIds = clampSelectedAccounts(draft.account_ids, accessibleAccounts);
     if (nextIds.length === draft.account_ids.length) return;
     setDraft((current) => ({ ...current, account_ids: nextIds }));
-  }, [accessibleAccounts, accountCatalogAvailable, draft.account_ids, draft.account_scope_mode]);
+  }, [accessibleAccounts, accessDetailAvailable, accountCatalogAvailable, draft.account_ids, draft.account_scope_mode]);
 
   async function handleSave() {
     setSaving(true);
@@ -132,6 +135,26 @@ export function MemberAccess({
         ? [...current.account_ids, accountId]
         : current.account_ids.filter((item) => item !== accountId),
     }));
+  }
+
+  if (!accessDetailAvailable && !detail.has_global_access) {
+    return (
+      <section className="tz-member-tab-panel tz-member-access">
+        <div className="tz-workbench-block">
+          <header className="tz-workbench-block__header">
+            <div>
+              <h3>资源权限</h3>
+              <p>当前详情来自兼容接口，不能安全重建完整授权草稿。</p>
+            </div>
+            <span className="tz-dirty-indicator" role="status">兼容只读</span>
+          </header>
+          <div className="tz-account-empty" role="status">
+            <strong>成员权限详情暂不可用</strong>
+            <p>当前服务未返回完整的客户、项目和账号授权数据。为避免覆盖已有权限，资源权限暂时只读。</p>
+          </div>
+        </div>
+      </section>
+    );
   }
 
   if (detail.has_global_access) {

@@ -50,17 +50,23 @@ const DELETION_BLOCKER_COPY: Record<UserDeletionBlocker, string> = {
 export type AccessDraft = Required<UpdateUserAccessInput>;
 
 export function detailToAccessDraft(detail: UserDetail): AccessDraft {
+  const clientMemberships = Array.isArray(detail.client_memberships)
+    ? detail.client_memberships
+    : [];
+  const projectMemberships = Array.isArray(detail.project_memberships)
+    ? detail.project_memberships
+    : [];
   return {
-    clients: detail.client_memberships.map((item) => ({
+    clients: clientMemberships.map((item) => ({
       client_id: item.client_id,
       role: item.role,
     })),
-    projects: detail.project_memberships.map((item) => ({
+    projects: projectMemberships.map((item) => ({
       project_id: item.project_id,
       role: item.role,
     })),
-    account_scope_mode: detail.account_scope_mode,
-    account_ids: [...detail.account_ids],
+    account_scope_mode: detail.account_scope_mode === "selected" ? "selected" : "all_accessible",
+    account_ids: Array.isArray(detail.account_ids) ? [...detail.account_ids] : [],
   };
 }
 
@@ -78,8 +84,16 @@ export function areAccessDraftsEqual(left: AccessDraft, right: AccessDraft) {
 }
 
 export function hasAccessAnomaly(detail: UserDetail) {
+  if (!hasAvailableUserAccessDetail(detail)) return false;
   if (detail.has_global_access) return false;
   return detail.client_memberships.length === 0 && detail.project_memberships.length === 0;
+}
+
+export function hasAvailableUserAccessDetail(detail: UserDetail) {
+  return detail.access_detail_status === "available"
+    && Array.isArray(detail.client_memberships)
+    && Array.isArray(detail.project_memberships)
+    && Array.isArray(detail.account_ids);
 }
 
 export function hasAvailableAccountCatalog(
@@ -96,8 +110,10 @@ export function getAccessibleAccounts(detail: Pick<UserDetail, "has_global_acces
   const accounts = catalog.accounts;
   if (detail.has_global_access) return [...accounts];
 
-  const clientIds = new Set(detail.client_memberships.map((item) => item.client_id));
-  const projectIds = new Set(detail.project_memberships.map((item) => item.project_id));
+  const clientMemberships = Array.isArray(detail.client_memberships) ? detail.client_memberships : [];
+  const projectMemberships = Array.isArray(detail.project_memberships) ? detail.project_memberships : [];
+  const clientIds = new Set(clientMemberships.map((item) => item.client_id));
+  const projectIds = new Set(projectMemberships.map((item) => item.project_id));
 
   return accounts.filter((account) => {
     if (account.client_id != null && clientIds.has(account.client_id)) return true;

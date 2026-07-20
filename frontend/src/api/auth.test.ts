@@ -60,6 +60,38 @@ describe("user management api", () => {
     });
   });
 
+  it("preserves present legacy access IDs and marks incomplete member detail unavailable", async () => {
+    apiGet.mockResolvedValue({
+      data: {
+        id: 7,
+        email: "legacy@test.com",
+        display_name: "Legacy member",
+        role: "user",
+        is_active: true,
+        has_global_access: false,
+        account_scope_mode: "selected",
+        client_ids: [3],
+        project_ids: [8],
+      },
+    });
+
+    await expect(getUserDetail(7)).resolves.toEqual({
+      id: 7,
+      email: "legacy@test.com",
+      display_name: "Legacy member",
+      role: "user",
+      is_active: true,
+      has_global_access: false,
+      account_scope_mode: "selected",
+      access_detail_status: "unavailable",
+      client_ids: [3],
+      project_ids: [8],
+      account_ids: [],
+      client_memberships: [],
+      project_memberships: [],
+    });
+  });
+
   it("updates user identity and replaces workspace access", async () => {
     apiPatch.mockResolvedValue({ data: {} });
     apiPut.mockResolvedValue({ data: {} });
@@ -87,6 +119,9 @@ describe("user management api", () => {
       is_active: true,
       has_global_access: false,
       account_scope_mode: "selected",
+      access_detail_status: "available",
+      client_ids: [],
+      project_ids: [],
       account_ids: [31],
       client_memberships: [],
       project_memberships: [],

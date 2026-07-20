@@ -14,6 +14,7 @@ import type {
   UserAccessCatalogResponse,
   UserDeletionPreview,
   UserDetail,
+  UserDetailResponse,
 } from "../types";
 
 export async function login(email: string, password: string): Promise<LoginResponse> {
@@ -37,8 +38,45 @@ export async function createUser(input: CreateUserInput): Promise<User> {
 }
 
 export async function getUserDetail(userId: number): Promise<UserDetail> {
-  const { data } = await api.get<UserDetail>(`/users/${userId}`);
-  return data;
+  const { data } = await api.get<UserDetailResponse>(`/users/${userId}`);
+  return normalizeUserDetail(data);
+}
+
+function normalizeUserDetail(data: UserDetailResponse): UserDetail {
+  const clientMemberships = Array.isArray(data?.client_memberships)
+    ? data.client_memberships
+    : [];
+  const projectMemberships = Array.isArray(data?.project_memberships)
+    ? data.project_memberships
+    : [];
+  const accountIds = Array.isArray(data?.account_ids) ? data.account_ids : [];
+  const hasKnownScopeMode = data?.account_scope_mode === "all_accessible"
+    || data?.account_scope_mode === "selected";
+  const accountScopeMode = data?.account_scope_mode === "selected"
+    ? "selected"
+    : "all_accessible";
+  const accessDetailAvailable = hasKnownScopeMode
+    && Array.isArray(data?.account_ids)
+    && Array.isArray(data?.client_memberships)
+    && Array.isArray(data?.project_memberships);
+
+  return {
+    ...data,
+    has_global_access: typeof data?.has_global_access === "boolean"
+      ? data.has_global_access
+      : data?.role === "admin",
+    account_scope_mode: accountScopeMode,
+    access_detail_status: accessDetailAvailable ? "available" : "unavailable",
+    client_ids: Array.isArray(data?.client_ids)
+      ? [...data.client_ids]
+      : clientMemberships.map((item) => item.client_id),
+    project_ids: Array.isArray(data?.project_ids)
+      ? [...data.project_ids]
+      : projectMemberships.map((item) => item.project_id),
+    account_ids: [...accountIds],
+    client_memberships: clientMemberships,
+    project_memberships: projectMemberships,
+  };
 }
 
 export async function getUserAccessCatalog(): Promise<UserAccessCatalog> {
@@ -69,8 +107,8 @@ export async function updateUserAccess(
   userId: number,
   input: UpdateUserAccessInput,
 ): Promise<UserDetail> {
-  const { data } = await api.put<UserDetail>(`/users/${userId}/access`, input);
-  return data;
+  const { data } = await api.put<UserDetailResponse>(`/users/${userId}/access`, input);
+  return normalizeUserDetail(data);
 }
 
 export async function setSecondaryPassword(
