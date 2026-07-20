@@ -36,7 +36,11 @@ async def set_secondary_password(
 ) -> AdminSecurityCredential:
     if not verify_password(current_password, actor.hashed_password):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid current password"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "CURRENT_PASSWORD_INVALID",
+                "message": "Invalid current password",
+            },
         )
 
     now = datetime.now(UTC)

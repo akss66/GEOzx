@@ -14,11 +14,12 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// 响应拦截：401 时清除本地令牌（路由层负责跳登录）
+// 响应拦截：会话认证 401 清除令牌，结构化业务 401 交给调用方处理
 api.interceptors.response.use(
   (resp) => resp,
   (error) => {
-    if (error?.response?.status === 401) {
+    const businessErrorCode = error?.response?.data?.detail?.code;
+    if (error?.response?.status === 401 && typeof businessErrorCode !== "string") {
       localStorage.removeItem(TOKEN_KEY);
     }
     return Promise.reject(error);

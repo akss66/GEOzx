@@ -593,6 +593,70 @@ describe("Users", () => {
     }));
   });
 
+  it("explains an invalid current password when setting the secondary password", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
+    await screen.findByText("当前登录管理员的二级密码");
+
+    vi.mocked(setSecondaryPassword).mockRejectedValueOnce({
+      response: {
+        status: 401,
+        data: {
+          detail: {
+            code: "CURRENT_PASSWORD_INVALID",
+            message: "Invalid current password",
+          },
+        },
+      },
+    });
+
+    setInputValue("当前登录密码", "wrong-admin-password");
+    setInputValue("新的二级密码", "secondary-pass-123");
+    fireEvent.click(screen.getByRole("button", { name: "设置二级密码" }));
+
+    expect(await screen.findByText("当前登录密码不正确，请重新输入。")).toBeInTheDocument();
+    expect(screen.queryByText("Invalid current password")).not.toBeInTheDocument();
+  });
+
+  it("keeps the delete preview available for retry after an invalid secondary password", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
+    fireEvent.click(await screen.findByRole("button", { name: "获取删除预览" }));
+    await screen.findByText("不可逆影响预览");
+
+    vi.mocked(permanentlyDeleteUser).mockRejectedValueOnce({
+      response: {
+        status: 401,
+        data: {
+          detail: {
+            code: "SECONDARY_PASSWORD_INVALID",
+            message: "Invalid secondary password",
+          },
+        },
+      },
+    });
+
+    setInputValue("确认目标邮箱", "ops@tzx.ai");
+    setInputValue("执行人二级密码", "wrong-delete-password");
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除" }));
+
+    expect(await screen.findByText("二级密码不正确，请重新输入。")).toBeInTheDocument();
+    expect(screen.getByText("不可逆影响预览")).toBeInTheDocument();
+    expect(previewUserDeletion).toHaveBeenCalledTimes(1);
+
+    setInputValue("确认目标邮箱", "ops@tzx.ai");
+    setInputValue("执行人二级密码", "delete-pass-123");
+    const retryDeleteButton = screen.getByRole("button", { name: /确认永久删除/ });
+    fireEvent.click(retryDeleteButton);
+
+    await waitFor(() => expect(permanentlyDeleteUser).toHaveBeenCalledTimes(2));
+    expect(previewUserDeletion).toHaveBeenCalledTimes(1);
+  });
+
   it("recovers from stale delete previews and clears sensitive destructive inputs", async () => {
     const { queryClient } = renderPage();
 

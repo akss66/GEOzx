@@ -50,7 +50,10 @@ async def test_secondary_password_requires_current_password(client, admin):
     )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid current password"
+    assert response.json()["detail"] == {
+        "code": "CURRENT_PASSWORD_INVALID",
+        "message": "Invalid current password",
+    }
 
 
 async def test_secondary_password_validation_redacts_secret_inputs(client, admin):

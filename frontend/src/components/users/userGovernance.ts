@@ -25,6 +25,7 @@ export const WORKSPACE_ROLE_OPTIONS = [
 ] satisfies Array<{ value: WorkspaceRole; label: string }>;
 
 const GOVERNANCE_ERROR_COPY: Record<UserGovernanceErrorCode, string> = {
+  CURRENT_PASSWORD_INVALID: "当前登录密码不正确，请重新输入。",
   LAST_ACTIVE_ADMIN: "至少保留一位启用中的管理员。",
   SECONDARY_PASSWORD_COOLDOWN: "二级密码刚完成设置或重置，冷却结束后才能执行危险操作。",
   SECONDARY_PASSWORD_INVALID: "二级密码不正确，请重新输入。",

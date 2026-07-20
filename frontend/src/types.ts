@@ -150,6 +150,7 @@ export interface PermanentDeleteUserResponse {
 }
 
 export type UserGovernanceErrorCode =
+  | "CURRENT_PASSWORD_INVALID"
   | "LAST_ACTIVE_ADMIN"
   | "SECONDARY_PASSWORD_COOLDOWN"
   | "SECONDARY_PASSWORD_INVALID"
