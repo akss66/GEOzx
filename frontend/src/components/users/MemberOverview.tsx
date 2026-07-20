@@ -151,4 +151,3 @@ export function MemberOverview({
     </section>
   );
 }
-
