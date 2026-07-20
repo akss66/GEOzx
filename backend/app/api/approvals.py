@@ -7,11 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.approval_access import can_decide_project, task_project_ids
+from app.core.approval_access import (
+    can_decide_project,
+    require_task_visibility,
+    task_project_ids,
+)
 from app.core.auth import CurrentUser
 from app.core.workspace_access import (
     accessible_project_ids,
     require_account_access,
+    require_content_scope,
     require_project_access,
 )
 from app.db import get_session
@@ -220,6 +225,17 @@ async def get_approval_workspace(
     for gate, content_item, project, account in gate_rows:
         if account_id is not None and content_item.account_id != account_id:
             continue
+        try:
+            await require_content_scope(
+                session,
+                user,
+                project_id=content_item.project_id,
+                account_id=content_item.account_id,
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                continue
+            raise
         check = await session.scalar(
             select(ComplianceCheck)
             .where(ComplianceCheck.content_item_id == content_item.id)
@@ -285,6 +301,12 @@ async def get_approval_workspace(
         task = await session.get(BrainTask, tool_call.task_id)
         if task is None:
             continue
+        try:
+            await require_task_visibility(session, user, task)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                continue
+            raise
         context = await _task_context(session, task, project_ids)
         if context is None:
             continue
@@ -363,6 +385,12 @@ async def get_approval_workspace(
         task = await session.get(BrainTask, acceptance.task_id)
         if task is None:
             continue
+        try:
+            await require_task_visibility(session, user, task)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                continue
+            raise
         context = await _task_context(session, task, project_ids)
         if context is None:
             continue

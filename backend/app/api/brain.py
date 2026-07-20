@@ -9,12 +9,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.approval_access import require_task_approval_access, task_project_ids
+from app.core.approval_access import (
+    require_task_approval_access,
+    require_task_visibility,
+    task_project_ids,
+)
 from app.core.approval_audit import add_approval_decided
 from app.core.auth import CurrentUser
 from app.core.workspace_access import (
     accessible_account_ids,
-    accessible_project_ids,
     require_project_access,
 )
 from app.db import get_session
@@ -393,6 +396,12 @@ async def _load_task(session: AsyncSession, task_id: int, org_id: int) -> BrainT
     return task
 
 
+async def _load_task_for_user(session: AsyncSession, task_id: int, user: CurrentUser) -> BrainTask:
+    task = await _load_task(session, task_id, user.org_id)
+    await require_task_visibility(session, user, task)
+    return task
+
+
 async def _load_acceptance(
     session: AsyncSession, task_id: int, org_id: int, acceptance_id: int
 ) -> DeliverableAcceptance:
@@ -488,7 +497,7 @@ async def send_brain_message(
     session: SessionDep,
 ) -> BrainRuntimeOut:
     task = (
-        await _load_task(session, body.task_id, user.org_id)
+        await _load_task_for_user(session, body.task_id, user)
         if body.task_id is not None
         else None
     )
@@ -634,17 +643,26 @@ async def list_tasks(user: CurrentUser, session: SessionDep) -> list[BrainTaskOu
             .order_by(BrainTask.id.desc())
         )
     ).all()
-    return [BrainTaskOut.model_validate(row) for row in rows]
+    visible: list[BrainTask] = []
+    for row in rows:
+        try:
+            await require_task_visibility(session, user, row)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                continue
+            raise
+        visible.append(row)
+    return [BrainTaskOut.model_validate(row) for row in visible]
 
 
 @router.get("/tasks/{task_id}", response_model=BrainTaskOut)
 async def get_task(task_id: int, user: CurrentUser, session: SessionDep) -> BrainTaskOut:
-    return BrainTaskOut.model_validate(await _load_task(session, task_id, user.org_id))
+    return BrainTaskOut.model_validate(await _load_task_for_user(session, task_id, user))
 
 
 @router.get("/tasks/{task_id}/runtime", response_model=BrainRuntimeOut)
 async def get_task_runtime(task_id: int, user: CurrentUser, session: SessionDep) -> BrainRuntimeOut:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     return await _runtime_response(session, task)
 
 
@@ -718,7 +736,7 @@ async def select_brain_decision(
     user: CurrentUser,
     session: SessionDep,
 ) -> BrainRuntimeOut:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     events = await runtime_events(session, task.id)
     decision = next(
         (row for row in _pending_runtime_decisions(events) if row.id == decision_id),
@@ -750,7 +768,7 @@ async def revise_brain_decision(
     user: CurrentUser,
     session: SessionDep,
 ) -> BrainRuntimeOut:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     events = await runtime_events(session, task.id)
     decision = next(
         (row for row in _pending_runtime_decisions(events) if row.id == decision_id),
@@ -770,7 +788,7 @@ async def revise_brain_decision(
 
 @router.post("/tasks/{task_id}/confirm", response_model=BrainTaskOut)
 async def confirm_task(task_id: int, user: CurrentUser, session: SessionDep) -> BrainTaskOut:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     if task.brief and _is_casual_goal(task.brief.goal):
         await runtime_graph.start_casual_turn(session, task)
     else:
@@ -782,7 +800,7 @@ async def confirm_task(task_id: int, user: CurrentUser, session: SessionDep) -> 
 async def list_invocations(
     task_id: int, user: CurrentUser, session: SessionDep
 ) -> list[AgentInvocationOut]:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     return [AgentInvocationOut.model_validate(row) for row in task.invocations]
 
 
@@ -790,7 +808,7 @@ async def list_invocations(
 async def list_tool_calls(
     task_id: int, user: CurrentUser, session: SessionDep
 ) -> list[AgentToolCallOut]:
-    await _load_task(session, task_id, user.org_id)
+    await _load_task_for_user(session, task_id, user)
     rows = (
         await session.scalars(
             select(AgentToolCall)
@@ -816,14 +834,18 @@ async def list_pending_tool_call_approvals(
             .order_by(AgentToolCall.id)
         )
     ).all()
-    if user.role == UserRole.ADMIN:
-        return [AgentToolCallOut.model_validate(row) for row in rows]
-    project_ids = await accessible_project_ids(session, user)
     visible: list[AgentToolCall] = []
     for row in rows:
         task = await session.get(BrainTask, row.task_id)
-        if task is not None and await task_project_ids(session, task) & project_ids:
-            visible.append(row)
+        if task is None:
+            continue
+        try:
+            await require_task_visibility(session, user, task)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                continue
+            raise
+        visible.append(row)
     return [AgentToolCallOut.model_validate(row) for row in visible]
 
 

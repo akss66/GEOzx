@@ -12,6 +12,7 @@ from app.models import (
     AccountMembership,
     Client,
     ClientMembership,
+    ContentItem,
     Project,
     ProjectAccount,
     ProjectMembership,
@@ -133,6 +134,39 @@ async def accessible_account_clause(
     if visible_ids is None:
         return Account.org_id == user.org_id
     return Account.id.in_(visible_ids) if visible_ids else false()
+
+
+async def accessible_content_item_clause(
+    session: AsyncSession, user: User
+) -> ColumnElement[bool]:
+    """Return content visibility while preserving project-only content access."""
+    visible_accounts = select(Account.id).where(
+        await accessible_account_clause(session, user)
+    )
+    return or_(
+        ContentItem.account_id.is_(None),
+        ContentItem.account_id.in_(visible_accounts),
+    )
+
+
+async def require_content_scope(
+    session: AsyncSession,
+    user: User,
+    *,
+    project_id: int,
+    account_id: int | None,
+    roles: Collection[WorkspaceRole] | None = None,
+) -> tuple[Project, Account | None]:
+    """Require project visibility, account visibility, then the requested role."""
+    project = await require_project_access(session, user, project_id)
+    account = (
+        await require_account_access(session, user, account_id)
+        if account_id is not None
+        else None
+    )
+    if roles is not None:
+        await require_project_access(session, user, project_id, roles=roles)
+    return project, account
 
 
 async def require_client_access(

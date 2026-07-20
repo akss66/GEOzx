@@ -127,6 +127,58 @@ async def test_content_list_and_workspace_follow_project_membership(client, admi
 
 
 @pytest.mark.asyncio
+async def test_selected_account_scope_hides_content_routes(client, admin, member, session):
+    workspace = Client(org_id=admin.org_id, name="Scoped content client")
+    project = Project(org_id=admin.org_id, client=workspace, name="Scoped content project")
+    account = Account(
+        org_id=admin.org_id,
+        client=workspace,
+        project=project,
+        platform=Platform.DOUYIN,
+        nickname="Hidden content account",
+    )
+    content = ContentItem(project=project, title="Hidden account content")
+    member.account_scope_mode = "selected"
+    session.add_all(
+        [
+            workspace,
+            project,
+            account,
+            content,
+            ProjectMembership(
+                project=project,
+                user=member,
+                role=WorkspaceRole.EDITOR,
+            ),
+        ]
+    )
+    await session.flush()
+    content.account_id = account.id
+    await session.commit()
+    token = await _token(client, "user@test.com", "user-pw-123")
+    headers = _auth(token)
+
+    created = await client.post(
+        "/content-items",
+        headers=headers,
+        json={"project_id": project.id, "account_id": account.id, "title": "Denied content"},
+    )
+    listing = await client.get("/content-items", headers=headers)
+    workspace_response = await client.get(f"/content-items/{content.id}/workspace", headers=headers)
+    readiness = await client.post(
+        f"/content-items/{content.id}/publish-readiness",
+        headers=headers,
+        json={"platform": "douyin", "title": "Denied publish"},
+    )
+
+    assert created.status_code == 404
+    assert listing.status_code == 200
+    assert listing.json() == []
+    assert workspace_response.status_code == 404
+    assert readiness.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_deliverable_revision_creates_version_and_preserves_history(client, admin, session):
     project = Project(org_id=admin.org_id, name="内容修订项目")
     content = ContentItem(project=project, title="脚本修订")

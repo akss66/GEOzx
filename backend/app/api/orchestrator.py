@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.approval_audit import add_approval_decided, add_approval_requested
 from app.core.auth import CurrentUser
-from app.core.workspace_access import accessible_project_ids, require_project_access
+from app.core.workspace_access import (
+    accessible_content_item_clause,
+    accessible_project_ids,
+    require_content_scope,
+    require_project_access,
+)
 from app.db import get_session
 from app.models import (
     Account,
@@ -144,7 +149,13 @@ async def _content_item_for_user(
     content_item = await session.get(ContentItem, ci_id)
     if content_item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
-    await require_project_access(session, user, content_item.project_id, roles=roles)
+    await require_content_scope(
+        session,
+        user,
+        project_id=content_item.project_id,
+        account_id=content_item.account_id,
+        roles=roles,
+    )
     return content_item
 
 
@@ -539,16 +550,15 @@ async def _load_publish_materials(
 async def create_content_item(
     body: CreateContentItemRequest, user: CurrentUser, session: SessionDep
 ) -> ContentItemOut:
-    project = await require_project_access(
+    project, account = await require_content_scope(
         session,
         user,
-        body.project_id,
+        project_id=body.project_id,
+        account_id=body.account_id,
         roles={WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR},
     )
     if body.account_id is not None:
-        account = await session.get(Account, body.account_id)
-        if account is None or account.org_id != user.org_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+        assert account is not None
         project_account_id = await session.scalar(
             select(ProjectAccount.id).where(
                 ProjectAccount.project_id == project.id,
@@ -584,7 +594,10 @@ async def list_content_items(
         return []
     q = (
         select(ContentItem)
-        .where(ContentItem.project_id.in_(project_ids))
+        .where(
+            ContentItem.project_id.in_(project_ids),
+            await accessible_content_item_clause(session, user),
+        )
         .order_by(ContentItem.id.desc())
     )
     if project_id is not None:
@@ -858,6 +871,7 @@ async def list_pending_gates(user: CurrentUser, session: SessionDep) -> list[Pen
             .where(
                 GateApproval.status == GateStatus.PENDING,
                 ContentItem.project_id.in_(project_ids),
+                await accessible_content_item_clause(session, user),
             )
             .order_by(GateApproval.id)
         )

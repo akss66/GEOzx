@@ -165,6 +165,34 @@ async def _approval_data(admin, member, session):
 
 
 @pytest.mark.asyncio
+async def test_selected_scope_hides_task_runtime_and_approval_entries(client, admin, member, session):
+    _, _, _, _, tool, acceptance, _ = await _approval_data(admin, member, session)
+    member.account_scope_mode = "selected"
+    await session.commit()
+    token = await _token(client, "user@test.com", "user-pw-123")
+    headers = _auth(token)
+
+    pending = await client.get("/brain/tool-calls/pending-approvals", headers=headers)
+    runtime = await client.get(f"/brain/tasks/{tool.task_id}/runtime", headers=headers)
+    approval = await client.post(
+        f"/brain/tool-calls/{tool.id}/approve",
+        headers=headers,
+        json={"approved": True, "comment": "Hidden account must not be decidable"},
+    )
+    acceptance_response = await client.post(
+        f"/brain/tasks/{tool.task_id}/accept",
+        headers=headers,
+        json={"acceptance_id": acceptance.id, "reviewer_note": "Hidden account"},
+    )
+
+    assert pending.status_code == 200
+    assert pending.json() == []
+    assert runtime.status_code == 404
+    assert approval.status_code == 404
+    assert acceptance_response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_approval_workspace_aggregates_real_scoped_items(client, admin, member, session):
     workspace_client, project, account, gate, tool, _, _ = await _approval_data(
         admin, member, session
