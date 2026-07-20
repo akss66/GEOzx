@@ -230,11 +230,15 @@ export default function Users() {
 
   async function handleSaveIdentity(draft: { display_name: string; email: string; role: Role }) {
     if (!selectedUserId) return;
-    await updateUserMutation.mutateAsync({
-      userId: selectedUserId,
-      input: draft,
-    });
-    await refreshUser(selectedUserId);
+    try {
+      await updateUserMutation.mutateAsync({
+        userId: selectedUserId,
+        input: draft,
+      });
+      await refreshUser(selectedUserId);
+    } catch (error) {
+      throw new Error(formatGovernanceError(error, "成员资料保存失败，请稍后重试。"));
+    }
   }
 
   async function handleToggleUser(nextActive: boolean) {
@@ -516,6 +520,7 @@ export default function Users() {
                       />
                     ) : (
                       <MemberAccess
+                        key={selectedDetail.id}
                         detail={selectedDetail}
                         catalog={catalogQuery.data}
                         onSave={handleSaveAccess}
@@ -531,6 +536,7 @@ export default function Users() {
                       </div>
                     ) : (
                       <MemberSecurity
+                        key={selectedDetail.id}
                         selectedUser={selectedDetail}
                         currentUser={currentUser}
                         secondaryStatus={secondaryStatusQuery.data ?? null}

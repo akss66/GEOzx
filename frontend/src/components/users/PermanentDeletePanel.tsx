@@ -166,7 +166,7 @@ export function PermanentDeletePanel({
               type="primary"
               onClick={handleDelete}
               loading={deleting}
-              disabled={!preview.allowed}
+              disabled={!preview.allowed || confirmEmail !== user.email || secondaryPassword.length === 0}
             >
               确认永久删除
             </Button>

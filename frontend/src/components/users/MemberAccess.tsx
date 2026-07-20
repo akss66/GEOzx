@@ -27,11 +27,6 @@ export function MemberAccess({
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: "neutral" | "success" | "error"; text: string } | null>(null);
 
-  useEffect(() => {
-    setDraft(detailToAccessDraft(detail));
-    setFeedback(null);
-  }, [detail]);
-
   const accessibleAccounts = useMemo(() => {
     const next = getAccessibleAccounts({
       has_global_access: detail.has_global_access,
@@ -65,13 +60,15 @@ export function MemberAccess({
   async function handleSave() {
     setSaving(true);
     setFeedback({ tone: "neutral", text: "正在保存资源权限…" });
+    const nextDraft = {
+      ...draft,
+      account_ids: draft.account_scope_mode === "selected"
+        ? clampSelectedAccounts(draft.account_ids, accessibleAccounts)
+        : [],
+    };
     try {
-      await onSave({
-        ...draft,
-        account_ids: draft.account_scope_mode === "selected"
-          ? clampSelectedAccounts(draft.account_ids, accessibleAccounts)
-          : [],
-      });
+      await onSave(nextDraft);
+      setDraft(nextDraft);
       setFeedback({ tone: "success", text: "资源权限已保存。" });
     } catch (error) {
       setFeedback({
@@ -122,6 +119,40 @@ export function MemberAccess({
         ? [...current.account_ids, accountId]
         : current.account_ids.filter((item) => item !== accountId),
     }));
+  }
+
+  if (detail.has_global_access) {
+    return (
+      <section className="tz-member-tab-panel tz-member-access">
+        <div className="tz-workbench-block">
+          <header className="tz-workbench-block__header">
+            <div>
+              <h3>资源权限</h3>
+              <p>该成员拥有全局访问权限，客户、项目和账号范围不能在此修改。</p>
+            </div>
+            <span className="tz-dirty-indicator" role="status">全局访问（只读）</span>
+          </header>
+
+          <section className="tz-effective-accounts" aria-label="最终生效账号">
+            <header>
+              <strong>最终生效账号</strong>
+              <span>{catalog.accounts.length} 个账号</span>
+            </header>
+            {catalog.accounts.length ? (
+              <div className="tz-effective-accounts__list">
+                {catalog.accounts.map((account) => (
+                  <span key={account.id} className="tz-account-pill">
+                    {account.nickname}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="tz-access-meta">当前目录中没有账号。</p>
+            )}
+          </section>
+        </div>
+      </section>
+    );
   }
 
   return (

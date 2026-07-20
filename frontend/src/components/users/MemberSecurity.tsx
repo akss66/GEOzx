@@ -201,9 +201,8 @@ export function MemberSecurity({
       </div>
 
       <div className="tz-workbench-block tz-workbench-block--danger">
-        <PermanentDeletePanel user={selectedUser} onDeleted={onDeleted} />
+        <PermanentDeletePanel key={selectedUser.id} user={selectedUser} onDeleted={onDeleted} />
       </div>
     </section>
   );
 }
-

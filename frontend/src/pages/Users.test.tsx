@@ -511,4 +511,127 @@ describe("Users", () => {
     const rosterList = screen.getByRole("list", { name: "成员名册列表" });
     expect(within(rosterList).getByRole("button", { name: /停用成员/ })).toHaveAttribute("aria-pressed", "true");
   });
+
+  it("isolates security drafts and deletion previews when the selected member changes", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
+    await screen.findByText("当前登录管理员的二级密码");
+
+    setInputValue("新的登录密码", "member-a-login-password");
+    setInputValue("当前登录密码", "actor-current-password");
+    setInputValue("新的二级密码", "actor-secondary-password");
+    fireEvent.click(screen.getByRole("button", { name: "获取删除预览" }));
+    await screen.findByText("不可逆影响预览");
+    setInputValue("确认目标邮箱", "ops@tzx.ai");
+    setInputValue("执行人二级密码", "member-a-delete-password");
+
+    fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
+
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: /停用成员/ }),
+    ).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.getByLabelText("新的登录密码")).toHaveValue("");
+    expect(screen.getByLabelText("当前登录密码")).toHaveValue("");
+    expect(screen.getByLabelText("新的二级密码")).toHaveValue("");
+    expect(screen.queryByText("不可逆影响预览")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("确认目标邮箱")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("执行人二级密码")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "获取删除预览" })).toBeInTheDocument();
+  });
+
+  it("renders global access as read-only and blocks scoped access saves", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "资源权限" }));
+
+    expect(await screen.findByText("全局访问（只读）")).toBeInTheDocument();
+    expect(screen.getByText("该成员拥有全局访问权限，客户、项目和账号范围不能在此修改。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存资源权限" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("仅指定账号")).not.toBeInTheDocument();
+    expect(updateUserAccess).not.toHaveBeenCalled();
+  });
+
+  it("preserves unsaved access drafts across overview save and status refetches", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
+    fireEvent.click(await screen.findByLabelText("仅指定账号"));
+    fireEvent.click(screen.getByLabelText("数码品牌主号"));
+    expect(screen.getByText("有未保存更改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "概览" }));
+    setInputValue("显示名称", "运营负责人");
+    fireEvent.click(screen.getByRole("button", { name: "保存成员资料" }));
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith(2, expect.objectContaining({
+      display_name: "运营负责人",
+    })));
+    fireEvent.click(screen.getByRole("button", { name: "禁用成员" }));
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith(2, { is_active: false }));
+
+    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
+    expect(screen.getByLabelText("仅指定账号")).toBeChecked();
+    expect(screen.getByLabelText("数码品牌主号")).toBeChecked();
+    expect(screen.getByText("有未保存更改")).toBeInTheDocument();
+  });
+
+  it("translates stable business errors from overview saves", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    await screen.findByDisplayValue("运营同事");
+    setInputValue("显示名称", "不允许的身份修改");
+
+    vi.mocked(updateUser).mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: "USER_SELF_ADMIN_CHANGE_FORBIDDEN",
+            message: "raw backend copy",
+          },
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存成员资料" }));
+    expect(await screen.findByText("不能移除当前登录管理员自己的管理员身份。")).toBeInTheDocument();
+    expect(screen.queryByText("raw backend copy")).not.toBeInTheDocument();
+  });
+
+  it("translates generic 422 errors from overview saves", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    await screen.findByDisplayValue("运营同事");
+    setInputValue("显示名称", "无效资料");
+
+    vi.mocked(updateUser).mockRejectedValueOnce({
+      response: {
+        status: 422,
+        data: { detail: [{ loc: ["body", "email"], msg: "invalid email" }] },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存成员资料" }));
+    expect(await screen.findByText("提交的信息未通过校验，请检查后重试。")).toBeInTheDocument();
+    expect(screen.queryByText("invalid email")).not.toBeInTheDocument();
+  });
+
+  it("enables permanent deletion only after exact email and secondary password confirmation", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
+    fireEvent.click(await screen.findByRole("button", { name: "获取删除预览" }));
+    await screen.findByText("不可逆影响预览");
+
+    const deleteButton = screen.getByRole("button", { name: "确认永久删除" });
+    expect(deleteButton).toBeDisabled();
+    setInputValue("确认目标邮箱", "OPS@tzx.ai");
+    setInputValue("执行人二级密码", "delete-pass-123");
+    expect(deleteButton).toBeDisabled();
+    setInputValue("确认目标邮箱", "ops@tzx.ai");
+    expect(deleteButton).toBeEnabled();
+  });
 });
