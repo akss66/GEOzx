@@ -3,17 +3,24 @@
 - Date: 2026-07-20 (Asia/Shanghai)
 - Workspace: `C:\Users\AKSSINA\Desktop\Workplace\GEOZX`
 - Branch: `workspace-freeze-20260706`
-- Verified HEAD: `32f6f90` (`fix: guard legacy member access details`)
-- Scope: non-browser verification only; no production services or existing real users were touched.
-- Initial status: **BLOCKED** (superseded by the final acceptance below)
+- Verified implementation HEAD: `b6a3eee` (`docs: record identity governance acceptance`)
+- Scope: full automated quality gates plus isolated desktop acceptance; production deployment was not attempted.
+- Final status: **PASS**
 
 ## Decision
 
-Task 7 is not accepted. The backend Ruff gate failed, and the planned frontend
-`npm audit` gate could not execute because the repository has only
-`pnpm-lock.yaml`. A supplemental full pnpm audit also reported one high and one
-critical development-tool vulnerability. Per the task brief, `tasks/current.md`
-was not updated and no acceptance commit was created.
+Task 7 is accepted. The initial Ruff, package-audit, and desktop-flow blockers
+were remediated and every final quality gate passed. The accepted implementation
+preserves normal authentication logout behavior, keeps sessions alive for
+structured step-up business errors, and completes the destructive flow only in
+an isolated acceptance environment.
+
+## Historical Initial Gate (Remediated)
+
+The first verification pass was blocked by four Ruff violations, an npm/pnpm
+lockfile mismatch in the planned audit command, and vulnerable development-tool
+versions. The sections below preserve that evidence for traceability; they do
+not describe the final release state.
 
 ## Planned Quality Gates
 
@@ -79,14 +86,14 @@ No live database fixture, online API, production environment, or existing real
 user was used. All destructive-flow evidence came from isolated pytest fixtures
 and test transactions.
 
-## Non-Browser Coverage And Gaps
+## Historical Non-Browser Coverage And Gaps
 
 - Frontend automated tests cover mocked member creation, profile/access flows,
   secondary-password setup, reset-password interaction, stale-preview recovery,
   destructive-input clearing, and removal of a permanently deleted member.
-- No browser or manual desktop acceptance was performed because this assignment
-  is explicitly non-browser verification. Therefore no claim is made about real
-  desktop rendering, focus behavior, or end-to-end frontend/backend wiring.
+- At this stage no browser or manual desktop acceptance had been performed.
+  The later final acceptance section supersedes this limitation with isolated
+  desktop evidence.
 - Existing backend tests explicitly exercise deactivation but do not name a
   dedicated deactivate-then-reactivate lifecycle test. Re-enable remains a
   coverage gap for this non-browser acceptance pass.
@@ -102,10 +109,11 @@ and test transactions.
   `getComputedStyle` pseudo-element limitations, and one Ant Design deprecation.
 - The build succeeded but reported `vendor-antd` and `vendor-charts` chunks over
   500 kB after minification.
-- Because required gates failed, release readiness is blocked even though all
-  backend/frontend tests and the production build passed.
+- At the initial gate, release readiness remained blocked even though all
+  backend/frontend tests and the production build passed. The final gate below
+  supersedes this historical result.
 
-## Repository Actions
+## Historical Repository Actions
 
 - `tasks/current.md`: not modified.
 - Business code and tests: not modified.
