@@ -24,7 +24,7 @@
 ### Task 1: Persist the organization provider registry and route references
 
 **Files:**
-- Create: `backend/migrations/versions/20260720_0200_model_provider_registry.py`
+- Create: `backend/migrations/versions/20260720_0400_model_provider_registry.py`
 - Modify: `backend/app/models/configuration.py`
 - Modify: `backend/app/models/__init__.py`
 - Modify: `backend/app/schemas/configuration.py`
@@ -64,7 +64,8 @@ Expected: FAIL because `ModelProvider` and provider route references do not exis
 
 - [ ] **Step 3: Add the migration and ORM model**
 
-Use `down_revision = "20260720_0100"`. The provider table must contain:
+Use `down_revision = "20260720_0300"` because the identity-governance chain now
+occupies revisions `0100` through `0300`. The provider table must contain:
 
 ```python
 class ModelProvider(Base, TimestampMixin):
@@ -87,15 +88,23 @@ class ModelProvider(Base, TimestampMixin):
     verification_error_code: Mapped[str | None]
     models: Mapped[list[str] | None]
     models_updated_at: Mapped[datetime | None]
-    created_by_id: Mapped[int]
-    updated_by_id: Mapped[int]
+    created_by_id: Mapped[int | None]
+    updated_by_id: Mapped[int | None]
 ```
 
-Apply a unique constraint on `(org_id, code)`. Add restricted foreign keys from `model_configs` to providers so provider deletion cannot orphan routes.
+Apply unique constraints on `(org_id, code)` and `(org_id, id)`. Add composite,
+restricted foreign keys from `model_configs (org_id, provider_id)` to providers
+so provider deletion cannot orphan routes and a route cannot reference another
+organization's provider. Actor attribution uses `SET NULL` so system backfills
+and later permanent member deletion preserve the organization provider.
 
 - [ ] **Step 4: Backfill compatibility providers and routes**
 
-For every existing organization, create a `deepseek` provider using `credential_source="environment"`. Create a disabled `legacy-litellm` provider only when an existing route contains a `litellm:` model. Backfill provider IDs without rewriting model names.
+For every existing organization, including historical organizations with no
+remaining users, create a `deepseek` provider using
+`credential_source="environment"`. Create a disabled `legacy-litellm` provider
+only when an existing route contains a `litellm:` model. Backfill provider IDs
+without rewriting model names.
 
 - [ ] **Step 5: Run migration and model tests**
 
@@ -110,7 +119,7 @@ Expected: schema upgrades to `20260720_0200`; existing model routes still resolv
 - [ ] **Step 6: Commit the registry persistence increment**
 
 ```bash
-git add backend/migrations/versions/20260720_0200_model_provider_registry.py backend/app/models backend/app/schemas/configuration.py backend/tests/test_model_provider_models.py
+git add backend/migrations/versions/20260720_0400_model_provider_registry.py backend/app/models backend/app/schemas/configuration.py backend/tests/test_model_provider_models.py
 git commit -m "feat: persist organization model providers"
 ```
 

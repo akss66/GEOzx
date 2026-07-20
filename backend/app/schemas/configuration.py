@@ -11,6 +11,8 @@ class ModelConfigOut(BaseModel):
 
     id: int
     agent_code: str
+    primary_provider_id: int | None
+    fallback_provider_id: int | None
     primary_model: str
     fallback_model: str | None
 
@@ -20,7 +22,7 @@ class UpdateModelConfigRequest(BaseModel):
     fallback_model: str | None = Field(default=None, max_length=128)
 
 
-ProviderCode = Literal["deepseek", "litellm"]
+ProviderCode = str
 CallStatus = Literal["ok", "error"]
 
 

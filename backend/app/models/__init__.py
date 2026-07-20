@@ -21,7 +21,7 @@ from app.models.client import (
     ProjectMembership,
 )
 from app.models.compliance import ComplianceCheck
-from app.models.configuration import IntegrationConfig, ModelConfig
+from app.models.configuration import IntegrationConfig, ModelConfig, ModelProvider
 from app.models.content import ContentItem, Deliverable
 from app.models.distribution import MatrixDistributionItem, MatrixDistributionPlan
 from app.models.feedback import OptimizationSuggestion
@@ -71,6 +71,7 @@ __all__ = [
     "KnowledgeSuggestion",
     "KnowledgeCitation",
     "ModelConfig",
+    "ModelProvider",
     "IntegrationConfig",
     "LLMCall",
     "ComplianceCheck",
