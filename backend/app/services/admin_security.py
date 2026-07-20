@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password, verify_password
@@ -90,18 +90,64 @@ async def verify_secondary_password(
         await session.commit()
         return
 
-    credential.failed_attempts += 1
-    if credential.failed_attempts == MAX_FAILED_ATTEMPTS:
-        credential.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
-        await session.commit()
+    expired_lock = (AdminSecurityCredential.locked_until.is_not(None)) & (
+        AdminSecurityCredential.locked_until <= now
+    )
+    current_failures = case(
+        (expired_lock, 0), else_=AdminSecurityCredential.failed_attempts
+    )
+    next_failures = current_failures + 1
+    failed_attempts = await session.scalar(
+        update(AdminSecurityCredential)
+        .where(
+            AdminSecurityCredential.user_id == actor.id,
+            AdminSecurityCredential.delete_available_at <= now,
+            or_(
+                AdminSecurityCredential.locked_until.is_(None),
+                AdminSecurityCredential.locked_until <= now,
+            ),
+        )
+        .values(
+            failed_attempts=next_failures,
+            locked_until=case(
+                (next_failures >= MAX_FAILED_ATTEMPTS, now + timedelta(minutes=LOCKOUT_MINUTES)),
+                else_=None,
+            ),
+        )
+        .execution_options(synchronize_session=False)
+        .returning(AdminSecurityCredential.failed_attempts)
+    )
+    await session.commit()
+    if failed_attempts is not None and failed_attempts >= MAX_FAILED_ATTEMPTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Secondary password is temporarily locked",
         )
+    if failed_attempts is not None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secondary password"
+        )
 
-    await session.commit()
+    current_credential = await _credential_for(session, actor)
+    if current_credential is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Secondary password is not configured"
+        )
+    if (
+        current_credential.locked_until is not None
+        and _utc(current_credential.locked_until) > now
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Secondary password is temporarily locked",
+        )
+    if _utc(current_credential.delete_available_at) > now:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Secondary password cooldown is active"
+        )
     raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secondary password"
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Secondary password is temporarily locked",
     )
 
 

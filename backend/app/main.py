@@ -4,8 +4,13 @@ T2：接入配置、DB/Redis、Alembic 迁移基座；健康检查拆为存活 +
 后续里程碑挂载鉴权、编排、WebSocket、各业务路由。
 """
 
-from fastapi import FastAPI
+from collections.abc import Mapping
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.api import (
@@ -42,6 +47,30 @@ app = FastAPI(
     version=__version__,
     description="同舟行 · 自媒体 AI 运营系统 后端",
 )
+
+
+def _json_safe_validation_detail(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe_validation_detail(item)
+            for key, item in value.items()
+            if key not in {"input", "body"}
+        }
+    if isinstance(value, list | tuple | set):
+        return [_json_safe_validation_detail(item) for item in value]
+    return str(value)
+
+
+@app.exception_handler(RequestValidationError)
+async def redact_request_validation_error(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _json_safe_validation_detail(exc.errors())},
+    )
 
 app.add_middleware(
     CORSMiddleware,

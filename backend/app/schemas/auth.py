@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import ClientStatus, ProjectStatus, UserRole, WorkspaceRole
 
@@ -16,6 +16,13 @@ class LoginRequest(BaseModel):
 class SetSecondaryPasswordRequest(BaseModel):
     current_password: str = Field(min_length=8, max_length=128)
     secondary_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("secondary_password")
+    @classmethod
+    def secondary_password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Secondary password must be at most 72 UTF-8 bytes")
+        return value
 
 
 class SecondaryPasswordStatusOut(BaseModel):
