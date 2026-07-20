@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.brain import create_brain_task_draft
 from app.core.auth import CurrentUser
 from app.core.workspace_access import (
-    accessible_project_ids,
     accessible_account_clause,
+    accessible_project_ids,
     require_account_access,
     require_project_access,
 )

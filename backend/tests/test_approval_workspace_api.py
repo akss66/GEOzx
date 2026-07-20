@@ -165,7 +165,9 @@ async def _approval_data(admin, member, session):
 
 
 @pytest.mark.asyncio
-async def test_selected_scope_hides_task_runtime_and_approval_entries(client, admin, member, session):
+async def test_selected_scope_hides_task_runtime_and_approval_entries(
+    client, admin, member, session
+):
     _, _, _, _, tool, acceptance, _ = await _approval_data(admin, member, session)
     member.account_scope_mode = "selected"
     await session.commit()

@@ -7,7 +7,14 @@ from app.core.workspace_access import (
     require_client_access,
     require_project_access,
 )
-from app.models import Account, AccountMembership, Client, ClientMembership, Project, ProjectMembership
+from app.models import (
+    Account,
+    AccountMembership,
+    Client,
+    ClientMembership,
+    Project,
+    ProjectMembership,
+)
 from app.models.enums import Platform, WorkspaceRole
 
 
