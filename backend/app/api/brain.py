@@ -991,7 +991,7 @@ async def approve_tool_call(
 async def list_acceptances(
     task_id: int, user: CurrentUser, session: SessionDep
 ) -> list[DeliverableAcceptanceOut]:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     return [DeliverableAcceptanceOut.model_validate(row) for row in task.acceptances]
 
 
@@ -1086,7 +1086,7 @@ async def rejudge_deliverable(
 
 @router.post("/tasks/{task_id}/close-memory", response_model=CloseMemoryOut)
 async def close_memory(task_id: int, user: CurrentUser, session: SessionDep) -> CloseMemoryOut:
-    task = await _load_task(session, task_id, user.org_id)
+    task = await _load_task_for_user(session, task_id, user)
     if task.status != BrainTaskStatus.COMPLETED:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务尚未最终验收")
     task.context_closed_at = datetime.now(UTC)

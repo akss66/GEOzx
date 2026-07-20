@@ -174,6 +174,10 @@ async def test_selected_scope_hides_task_runtime_and_approval_entries(client, ad
 
     pending = await client.get("/brain/tool-calls/pending-approvals", headers=headers)
     runtime = await client.get(f"/brain/tasks/{tool.task_id}/runtime", headers=headers)
+    acceptances = await client.get(f"/brain/tasks/{tool.task_id}/acceptances", headers=headers)
+    close_memory = await client.post(
+        f"/brain/tasks/{tool.task_id}/close-memory", headers=headers
+    )
     approval = await client.post(
         f"/brain/tool-calls/{tool.id}/approve",
         headers=headers,
@@ -188,6 +192,8 @@ async def test_selected_scope_hides_task_runtime_and_approval_entries(client, ad
     assert pending.status_code == 200
     assert pending.json() == []
     assert runtime.status_code == 404
+    assert acceptances.status_code == 404
+    assert close_memory.status_code == 404
     assert approval.status_code == 404
     assert acceptance_response.status_code == 404
 
