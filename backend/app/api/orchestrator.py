@@ -576,7 +576,12 @@ async def create_content_item(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="当前账号已停用",
             )
-    ci = ContentItem(project_id=body.project_id, account_id=body.account_id, title=body.title)
+    ci = ContentItem(
+        project_id=body.project_id,
+        created_by_id=user.id,
+        account_id=body.account_id,
+        title=body.title,
+    )
     session.add(ci)
     await session.commit()
     await session.refresh(ci)
@@ -673,6 +678,7 @@ async def check_publish_readiness(
 
     task = BrainTask(
         org_id=user.org_id,
+        created_by_id=user.id,
         content_item_id=content_item.id,
         title=f"Publish readiness: {content_item.title}",
         type=BrainTaskType.CONTENT_CREATION,

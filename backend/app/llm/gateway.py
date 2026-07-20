@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.request_context import get_acting_user_id
 from app.llm.adapters import CompletionResult, LLMAdapter
 from app.llm.adapters.deepseek import DeepSeekAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
@@ -224,6 +225,7 @@ class LLMGateway:
         session.add(
             LLMCall(
                 org_id=org_id,
+                created_by_id=get_acting_user_id(),
                 agent_code=agent_code,
                 provider=provider_for(model),
                 model=model,

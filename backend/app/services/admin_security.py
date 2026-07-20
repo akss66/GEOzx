@@ -74,7 +74,11 @@ async def set_secondary_password(
 
 
 async def verify_secondary_password(
-    session: AsyncSession, actor: User, secondary_password: str
+    session: AsyncSession,
+    actor: User,
+    secondary_password: str,
+    *,
+    commit_on_success: bool = True,
 ) -> None:
     credential = await _credential_for(session, actor)
     if credential is None:
@@ -98,7 +102,10 @@ async def verify_secondary_password(
     if verify_password(secondary_password, credential.password_hash):
         credential.failed_attempts = 0
         credential.locked_until = None
-        await session.commit()
+        if commit_on_success:
+            await session.commit()
+        else:
+            await session.flush()
         return
 
     expired_lock = (AdminSecurityCredential.locked_until.is_not(None)) & (

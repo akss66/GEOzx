@@ -65,6 +65,7 @@ async def test_knowledge_is_client_scoped_and_tracks_provenance(client, session,
     assert body["project_id"] == project.id
     assert body["version"] == 1
     assert body["source_label"] == "运营团队复盘"
+    assert body["created_by_id"] == member.id
 
     listed = await client.get(
         f"/knowledge?client_id={workspace.id}&project_id={project.id}",

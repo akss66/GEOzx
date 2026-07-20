@@ -38,7 +38,7 @@ class KnowledgeEntry(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="active", index=True, nullable=False)
     created_by_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
 
     org: Mapped["Org"] = relationship()  # noqa: F821

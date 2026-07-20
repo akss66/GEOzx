@@ -5,6 +5,7 @@
 - 便捷别名：`CurrentUser`（任意已登录用户）、`AdminUser`（仅 admin）。
 """
 
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 import jwt
@@ -12,6 +13,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_context import reset_acting_user, set_acting_user
 from app.core.security import decode_token
 from app.db import get_session
 from app.models import User
@@ -23,7 +25,7 @@ _bearer = HTTPBearer(auto_error=False)
 async def get_current_user(
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> User:
+) -> AsyncIterator[User]:
     if creds is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未提供认证凭证")
     try:
@@ -37,7 +39,11 @@ async def get_current_user(
     user = await session.get(User, int(sub)) if sub else None
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用")
-    return user
+    context_token = set_acting_user(user.id)
+    try:
+        yield user
+    finally:
+        reset_acting_user(context_token)
 
 
 def require_role(*roles: UserRole):

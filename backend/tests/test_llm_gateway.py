@@ -93,6 +93,21 @@ async def test_default_model_when_no_config(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_records_the_authenticated_request_actor(session, admin) -> None:
+    from app.core.request_context import reset_acting_user, set_acting_user
+
+    actor_token = set_acting_user(admin.id)
+    try:
+        await _gw(FakeAdapter()).chat(session, admin.org_id, "x", MSG)
+    finally:
+        reset_acting_user(actor_token)
+
+    call = await session.scalar(select(LLMCall).where(LLMCall.org_id == admin.org_id))
+    assert call is not None
+    assert call.created_by_id == admin.id
+
+
+@pytest.mark.asyncio
 async def test_routing_uses_model_config(session) -> None:
     org = Org(name="O")
     session.add(org)

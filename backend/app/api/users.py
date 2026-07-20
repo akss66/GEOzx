@@ -1,8 +1,9 @@
 """User management routes restricted to organization administrators."""
 
 from typing import Annotated
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,20 +13,30 @@ from app.db import get_session
 from app.models import Event, User
 from app.schemas.auth import (
     CreateUserRequest,
+    PermanentDeleteUserOut,
+    PermanentDeleteUserRequest,
+    ResetUserPasswordRequest,
     SecondaryPasswordStatusOut,
     SetSecondaryPasswordRequest,
     UpdateUserAccessRequest,
     UpdateUserRequest,
     UserAccessCatalogOut,
+    UserDeletionImpactOut,
     UserDetailOut,
     UserOut,
 )
 from app.services.admin_security import get_secondary_password_status, set_secondary_password
+from app.services.user_deletion import (
+    build_deletion_impact,
+    execute_permanent_deletion,
+    issue_deletion_preview_token,
+)
 from app.services.user_management import (
     build_user_detail,
     get_access_catalog,
     get_org_user,
     replace_user_access,
+    reset_org_user_password,
     update_org_user,
 )
 
@@ -138,6 +149,83 @@ async def update_user(
     user = await get_org_user(session, org_id=admin.org_id, user_id=user_id)
     updated = await update_org_user(session, actor=admin, target=user, body=body)
     return UserOut.model_validate(updated)
+
+
+@router.post("/{user_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_user_password(
+    user_id: int,
+    body: ResetUserPasswordRequest,
+    admin: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    user = await get_org_user(session, org_id=admin.org_id, user_id=user_id)
+    await reset_org_user_password(
+        session,
+        actor=admin,
+        target=user,
+        new_password=body.new_password,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{user_id}/deletion-preview", response_model=UserDeletionImpactOut)
+async def preview_user_deletion(
+    user_id: int,
+    admin: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> UserDeletionImpactOut:
+    user = await get_org_user(session, org_id=admin.org_id, user_id=user_id)
+    operation_id = uuid4().hex
+    session.add(
+        Event(
+            type="user.deletion_previewed",
+            payload={
+                "actor_user_id": admin.id,
+                "target_user_id": user.id,
+                "operation_id": operation_id,
+            },
+        )
+    )
+    await session.flush()
+    impact = await build_deletion_impact(session, actor=admin, target=user)
+    preview_token, expires_at = issue_deletion_preview_token(
+        actor=admin,
+        target=user,
+        operation_id=operation_id,
+        impact=impact,
+    )
+    await session.commit()
+    return UserDeletionImpactOut(
+        target_user_id=user.id,
+        target_email=user.email,
+        counts=impact.counts,
+        preview_token=preview_token,
+        expires_at=expires_at,
+        allowed=not impact.blockers,
+        blockers=list(impact.blockers),
+    )
+
+
+@router.delete("/{user_id}/permanent", response_model=PermanentDeleteUserOut)
+async def permanently_delete_user(
+    user_id: int,
+    body: PermanentDeleteUserRequest,
+    admin: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PermanentDeleteUserOut:
+    receipt = await execute_permanent_deletion(
+        session,
+        actor=admin,
+        target_user_id=user_id,
+        preview_token=body.preview_token,
+        target_email=str(body.target_email),
+        secondary_password=body.secondary_password,
+    )
+    return PermanentDeleteUserOut(
+        operation_id=receipt.operation_id,
+        deleted_at=receipt.deleted_at,
+        counts=receipt.counts,
+    )
 
 
 @router.put("/{user_id}/access", response_model=UserDetailOut)

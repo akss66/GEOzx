@@ -119,6 +119,7 @@ async def create_matrix_distribution_plan(
     )
     task = BrainTask(
         org_id=user.org_id,
+        created_by_id=user.id,
         content_item_id=body.content_item_id,
         title=f"Matrix distribution: {body.title.strip()}",
         type=BrainTaskType.MATRIX_DISTRIBUTION,

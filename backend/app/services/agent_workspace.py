@@ -201,6 +201,7 @@ async def create_direct_agent_run(
 
     content_item = ContentItem(
         project_id=project.id,
+        created_by_id=user.id,
         account_id=account.id,
         title=f"{spec.name}：{prompt[:180]}",
         current_stage=spec.stage,
@@ -211,6 +212,7 @@ async def create_direct_agent_run(
 
     task = BrainTask(
         org_id=user.org_id,
+        created_by_id=user.id,
         content_item_id=content_item.id,
         title=f"直接调用 · {spec.name}",
         type=spec.task_type,

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from app.models import Account, Event, MaterialAsset
+from app.models import Account, BrainTask, Event, MaterialAsset, MatrixDistributionPlan
 from app.models.enums import MaterialStatus
 
 
@@ -169,6 +169,12 @@ async def test_matrix_distribution_plan_creates_publish_packages_and_tool_calls(
         item["publish_package"]["execution_mode"] == "manual_checklist" for item in body["items"]
     )
     assert all(item["publish_package"]["manual_steps"] for item in body["items"])
+    stored_plan = await session.get(MatrixDistributionPlan, body["id"])
+    stored_task = await session.scalar(
+        select(BrainTask).where(BrainTask.title == "Matrix distribution: 矩阵内容")
+    )
+    assert stored_plan is not None and stored_plan.created_by_id == admin.id
+    assert stored_task is not None and stored_task.created_by_id == admin.id
 
     queue = await client.get("/brain/tool-calls/pending-approvals", headers=headers)
     package_calls = [row for row in queue.json() if row["tool_code"] == "publish_package_prepare"]

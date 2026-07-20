@@ -9,6 +9,7 @@ from app.models import (
     AccountMembership,
     Client,
     ClientMembership,
+    Event,
     Org,
     Project,
     ProjectMembership,
@@ -177,7 +178,9 @@ async def test_admin_atomically_replaces_user_workspace_access(client, session, 
 
 
 @pytest.mark.asyncio
-async def test_selected_accounts_must_be_in_requested_workspace_scope(client, session, admin, member):
+async def test_selected_accounts_must_be_in_requested_workspace_scope(
+    client, session, admin, member
+):
     first_client, second_client, _, _ = await _workspace(session, admin.org_id)
     out_of_scope_account = Account(
         org_id=admin.org_id,
@@ -333,6 +336,45 @@ async def test_admin_updates_and_deactivates_another_user(client, admin, member)
         "role": "user",
         "is_active": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_admin_resets_another_users_password_without_exposing_plaintext(
+    client, session, admin, member
+):
+    token = await _login(client, admin.email, "admin-pw-123")
+    replacement = "replacement-login-pw-123"
+
+    response = await client.post(
+        f"/users/{member.id}/reset-password",
+        headers=_auth(token),
+        json={"new_password": replacement},
+    )
+
+    assert response.status_code == 204
+    assert replacement not in response.text
+    assert (await client.post(
+        "/auth/login", json={"email": member.email, "password": "user-pw-123"}
+    )).status_code == 401
+    assert (await client.post(
+        "/auth/login", json={"email": member.email, "password": replacement}
+    )).status_code == 200
+    events = list(await session.scalars(select(Event)))
+    assert all(replacement not in str(event.payload) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_reset_own_login_password(client, admin):
+    token = await _login(client, admin.email, "admin-pw-123")
+
+    response = await client.post(
+        f"/users/{admin.id}/reset-password",
+        headers=_auth(token),
+        json={"new_password": "replacement-login-pw-123"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "USER_SELF_PASSWORD_RESET_FORBIDDEN"
 
 
 @pytest.mark.asyncio

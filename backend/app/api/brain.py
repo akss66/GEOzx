@@ -40,7 +40,6 @@ from app.models.enums import (
     DeliverableAcceptanceStatus,
     Platform,
     RerunScope,
-    UserRole,
 )
 from app.orchestrator.brain_adapter import rerun_brain_acceptance
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
@@ -448,6 +447,7 @@ async def create_brain_task_draft(
     )
     task = BrainTask(
         org_id=org_id,
+        created_by_id=user.id,
         title=_title(body.goal),
         type=task_type,
         status=BrainTaskStatus.PENDING_CONFIRMATION,
@@ -572,6 +572,7 @@ async def send_brain_message(
     if task is None:
         task = BrainTask(
             org_id=user.org_id,
+            created_by_id=user.id,
             title=_title(body.message),
             type=task_type,
             status=BrainTaskStatus.RUNNING,

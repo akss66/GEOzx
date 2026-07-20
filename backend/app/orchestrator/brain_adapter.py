@@ -207,7 +207,12 @@ async def ensure_content_item(session: AsyncSession, task: BrainTask) -> Content
 
     project = await _resolve_project(session, task)
     account_id = task.brief.account_ids[0] if task.brief and task.brief.account_ids else None
-    content_item = ContentItem(project_id=project.id, account_id=account_id, title=task.title)
+    content_item = ContentItem(
+        project_id=project.id,
+        created_by_id=task.created_by_id,
+        account_id=account_id,
+        title=task.title,
+    )
     session.add(content_item)
     await session.flush()
     task.content_item_id = content_item.id

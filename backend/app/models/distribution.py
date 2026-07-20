@@ -26,7 +26,7 @@ class MatrixDistributionPlan(Base, TimestampMixin):
         ForeignKey("content_items.id", ondelete="SET NULL"), index=True, nullable=True
     )
     created_by_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     title: Mapped[str] = mapped_column(String(240), nullable=False)
     body: Mapped[str] = mapped_column(Text, default="", nullable=False)

@@ -1,9 +1,10 @@
 """User lifecycle, workspace authorization, and audit helpers."""
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import hash_password
 from app.models import (
     Account,
     AccountMembership,
@@ -179,14 +180,19 @@ async def update_org_user(
             detail="不能停用自己或移除自己的管理员权限",
         )
     if removes_admin_access:
-        active_admins = await session.scalar(
-            select(func.count(User.id)).where(
-                User.org_id == actor.org_id,
-                User.role == UserRole.ADMIN,
-                User.is_active.is_(True),
+        active_admin_ids = tuple(
+            await session.scalars(
+                select(User.id)
+                .where(
+                    User.org_id == actor.org_id,
+                    User.role == UserRole.ADMIN,
+                    User.is_active.is_(True),
+                )
+                .order_by(User.id)
+                .with_for_update()
             )
         )
-        if (active_admins or 0) <= 1:
+        if len(active_admin_ids) <= 1:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="组织必须保留至少一个启用中的管理员",
@@ -227,6 +233,35 @@ async def update_org_user(
     await session.commit()
     await session.refresh(target)
     return target
+
+
+async def reset_org_user_password(
+    session: AsyncSession,
+    *,
+    actor: User,
+    target: User,
+    new_password: str,
+) -> None:
+    if actor.id == target.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "USER_SELF_PASSWORD_RESET_FORBIDDEN",
+                "message": "Administrators cannot reset their own password here",
+            },
+        )
+    target.hashed_password = hash_password(new_password)
+    session.add(
+        Event(
+            type="user.password_reset",
+            payload={
+                "org_id": actor.org_id,
+                "actor_user_id": actor.id,
+                "target_user_id": target.id,
+            },
+        )
+    )
+    await session.commit()
 
 
 async def replace_user_access(

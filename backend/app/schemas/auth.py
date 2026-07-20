@@ -63,6 +63,46 @@ class CreateUserRequest(BaseModel):
     role: UserRole = UserRole.USER
 
 
+class ResetUserPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes")
+        return value
+
+
+class UserDeletionImpactOut(BaseModel):
+    target_user_id: int
+    target_email: str
+    counts: dict[str, int]
+    preview_token: str
+    expires_at: datetime
+    allowed: bool
+    blockers: list[str]
+
+
+class PermanentDeleteUserRequest(BaseModel):
+    preview_token: str = Field(min_length=20, max_length=2048)
+    target_email: EmailStr
+    secondary_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("secondary_password")
+    @classmethod
+    def secondary_password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Secondary password must be at most 72 UTF-8 bytes")
+        return value
+
+
+class PermanentDeleteUserOut(BaseModel):
+    operation_id: str
+    deleted_at: datetime
+    counts: dict[str, int]
+
+
 class UpdateUserRequest(BaseModel):
     email: EmailStr | None = None
     display_name: str | None = Field(default=None, min_length=1, max_length=120)

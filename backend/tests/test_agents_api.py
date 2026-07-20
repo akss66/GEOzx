@@ -9,6 +9,7 @@ from app.models import (
     AgentToolCall,
     BrainTask,
     Client,
+    ContentItem,
     Event,
     KnowledgeEntry,
     Project,
@@ -388,6 +389,11 @@ async def test_direct_agent_run_creates_real_artifact_and_pending_acceptance(
             "version": 1,
         }
     ]
+    stored_task = await session.get(BrainTask, body["task"]["id"])
+    assert stored_task is not None
+    stored_content = await session.get(ContentItem, stored_task.content_item_id)
+    assert stored_task.created_by_id == admin.id
+    assert stored_content is not None and stored_content.created_by_id == admin.id
 
     runs = await client.get(
         "/agents/01-positioning/runs",

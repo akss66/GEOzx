@@ -32,6 +32,25 @@ def _auth(token: str) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
+async def test_authenticated_content_creation_records_actor(client, session, admin):
+    project = Project(org_id=admin.org_id, name="Ownership project")
+    session.add(project)
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.post(
+        "/content-items",
+        headers=_auth(token),
+        json={"project_id": project.id, "title": "Owned content"},
+    )
+
+    assert response.status_code == 201
+    stored = await session.get(ContentItem, response.json()["id"])
+    assert stored is not None
+    assert stored.created_by_id == admin.id
+
+
+@pytest.mark.asyncio
 async def test_content_list_and_workspace_follow_project_membership(client, admin, member, session):
     workspace = Client(org_id=admin.org_id, name="可见客户")
     session.add(workspace)

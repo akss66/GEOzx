@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.llm.adapters import CompletionResult
-from app.models import ContentItem, Event, GateApproval
+from app.models import BrainTask, ContentItem, Event, GateApproval
 from app.models.enums import GateStatus, GateType
 from app.schemas.brain import (
     DecisionChoice,
@@ -93,7 +93,9 @@ async def _authorized_douyin_account(
 
 
 @pytest.mark.asyncio
-async def test_brain_message_greeting_stays_in_main_agent_conversation(client, admin):
+async def test_brain_message_greeting_stays_in_main_agent_conversation(
+    client, session, admin
+):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     response = await client.post(
         "/brain/messages",
@@ -107,6 +109,9 @@ async def test_brain_message_greeting_stays_in_main_agent_conversation(client, a
     assert runtime["invocations"] == []
     assert runtime["pending_decisions"] == []
     assert any(event["type"] == "brain.runtime.message_done" for event in runtime["timeline"])
+    task = await session.get(BrainTask, runtime["task"]["id"])
+    assert task is not None
+    assert task.created_by_id == admin.id
 
 
 @pytest.mark.asyncio
