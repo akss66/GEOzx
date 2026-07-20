@@ -1150,11 +1150,13 @@ export interface OptimizationSuggestion {
 export interface ModelConfig {
   id: number;
   agent_code: string;
+  primary_provider_id: number | null;
+  fallback_provider_id: number | null;
   primary_model: string;
   fallback_model: string | null;
 }
 
-export type ModelProviderCode = "deepseek" | "litellm";
+export type ModelProviderCode = string;
 export type ModelCallStatus = "ok" | "error";
 
 export interface ModelProvider {
@@ -1176,10 +1178,19 @@ export interface UpdateModelProviderInput {
   credential_ref: string | null;
 }
 
+export interface ModelRouteTarget {
+  primary_provider_id: number;
+  primary_model: string;
+  fallback_provider_id: number | null;
+  fallback_model: string | null;
+}
+
 export interface ModelRoute {
   id: number | null;
   agent_code: string;
   agent_name: string;
+  primary_provider_id: number | null;
+  fallback_provider_id: number | null;
   primary_model: string;
   fallback_model: string | null;
   temperature: number;
@@ -1188,13 +1199,14 @@ export interface ModelRoute {
   updated_at: string | null;
 }
 
-export interface UpdateModelRouteInput {
-  primary_model: string;
-  fallback_model: string | null;
+interface ModelRoutePolicyInput {
   temperature: number;
   max_tokens: number;
   timeout_seconds: number;
 }
+
+export interface UpdateModelRouteInput
+  extends ModelRouteTarget, ModelRoutePolicyInput {}
 
 export interface ModelInfrastructureSummary {
   providers_total: number;
@@ -1228,6 +1240,94 @@ export interface ModelCall {
 export interface ModelCallPage {
   total: number;
   items: ModelCall[];
+}
+
+export interface ModelProviderTemplate {
+  code: string;
+  display_name: string;
+  base_url: string;
+  protocol: string;
+  models: string[];
+}
+
+export interface ModelProviderRouteRef {
+  agent_code: string;
+  agent_name: string;
+}
+
+export interface ModelProviderDetail {
+  id: number;
+  code: string;
+  display_name: string;
+  provider_type: string;
+  template_code: string | null;
+  protocol: string;
+  base_url: string | null;
+  enabled: boolean;
+  sort_order: number;
+  credential_source: string;
+  key_configured: boolean;
+  key_last_four: string | null;
+  key_fingerprint: string | null;
+  verification_status: string;
+  verified_at: string | null;
+  verification_error_code: string | null;
+  models: string[] | null;
+  models_updated_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  referenced_agents: ModelProviderRouteRef[];
+}
+
+interface CreatePresetModelProviderInput {
+  template_code: string;
+  provider_type?: never;
+  code?: string | null;
+  display_name?: string | null;
+  base_url?: string | null;
+  enabled?: boolean;
+}
+
+interface CreateCustomModelProviderInput {
+  template_code?: null;
+  provider_type: "custom_openai";
+  code?: string | null;
+  display_name: string;
+  base_url: string;
+  enabled?: boolean;
+}
+
+export type CreateModelProviderInput =
+  | CreatePresetModelProviderInput
+  | CreateCustomModelProviderInput;
+
+type AtLeastOne<T> = {
+  [K in keyof T]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
+}[keyof T];
+
+export type PatchModelProviderInput = AtLeastOne<{
+  display_name: string;
+  base_url: string;
+  enabled: boolean;
+}>;
+
+export interface ModelProviderVerifyResult {
+  provider_id: number;
+  verification_status: string;
+  verification_error_code: string | null;
+  verified_at: string | null;
+  latency_ms: number;
+}
+
+export interface ModelProviderDiscoveryResult {
+  provider_id: number;
+  models: string[];
+  models_updated_at: string | null;
+  error_code: string | null;
+}
+
+export interface ModelProviderDeleteConflict {
+  affected_agents: ModelProviderRouteRef[];
 }
 
 // —— 共享知识库 ——

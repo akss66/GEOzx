@@ -325,7 +325,7 @@ git commit -m "feat: route agents through model providers"
 **Interfaces:**
 - Produces typed provider template, provider detail, credential, verification, model discovery, and route target APIs.
 
-- [ ] **Step 1: Write failing API client tests**
+- [x] **Step 1: Write failing API client tests**
 
 Tests cover provider CRUD, credential body submission, model discovery, and referenced-provider deletion error parsing.
 
@@ -339,23 +339,23 @@ it("submits API keys only in a write body", async () => {
 });
 ```
 
-- [ ] **Step 2: Run focused tests and verify missing exports**
+- [x] **Step 2: Run focused tests and verify missing exports**
 
 Run: `cd frontend && npm.cmd test -- src/api/modelInfrastructure.test.ts`
 
 Expected: FAIL because provider registry methods and structured routes do not exist.
 
-- [ ] **Step 3: Implement typed contracts and client methods**
+- [x] **Step 3: Implement typed contracts and client methods**
 
 Remove the closed `"deepseek" | "litellm"` provider union. Use numeric provider IDs and server-provided codes. Do not persist API keys in component state beyond the open editor, React Query caches, LocalStorage, SessionStorage, or URL parameters.
 
-- [ ] **Step 4: Run frontend API tests**
+- [x] **Step 4: Run frontend API tests**
 
 Run: `cd frontend && npm.cmd test -- src/api/modelInfrastructure.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit frontend contracts**
+- [x] **Step 5: Commit frontend contracts**
 
 ```bash
 git add frontend/src/types.ts frontend/src/api/modelInfrastructure.ts frontend/src/api/modelInfrastructure.test.ts

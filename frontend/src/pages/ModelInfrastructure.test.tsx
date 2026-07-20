@@ -58,6 +58,8 @@ const overview: ModelInfrastructureOverview = {
       id: 1,
       agent_code: "00-decision",
       agent_name: "运营大脑",
+      primary_provider_id: 7,
+      fallback_provider_id: 7,
       primary_model: "deepseek-reasoner",
       fallback_model: "deepseek-chat",
       temperature: 0.2,
@@ -69,6 +71,8 @@ const overview: ModelInfrastructureOverview = {
       id: 2,
       agent_code: "01-positioning",
       agent_name: "账号定位专家",
+      primary_provider_id: 7,
+      fallback_provider_id: null,
       primary_model: "deepseek-chat",
       fallback_model: null,
       temperature: 0.4,
@@ -181,8 +185,28 @@ describe("ModelInfrastructure", () => {
 
     await waitFor(() => expect(updateModelRoute).toHaveBeenCalledWith(
       "01-positioning",
-      expect.objectContaining({ temperature: 0.6 }),
+      expect.objectContaining({
+        primary_provider_id: 7,
+        primary_model: "deepseek-chat",
+        fallback_provider_id: null,
+        fallback_model: null,
+        temperature: 0.6,
+      }),
     ));
+  });
+
+  it("blocks edits for a legacy route that has no provider target", async () => {
+    vi.mocked(getModelInfrastructure).mockResolvedValueOnce({
+      ...overview,
+      routes: [{ ...overview.routes[0], primary_provider_id: null }],
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("tab", { name: "路由策略" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("需要先绑定模型供应商");
+    expect(screen.queryByRole("button", { name: "保存路由策略" })).not.toBeInTheDocument();
+    expect(updateModelRoute).not.toHaveBeenCalled();
   });
 
   it("filters the immutable call ledger by failure status", async () => {

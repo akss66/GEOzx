@@ -78,7 +78,7 @@ export default function ModelInfrastructure() {
   }, [overview?.routes, selectedRouteCode]);
 
   useEffect(() => {
-    if (selectedRoute) setRouteDraft(routeToDraft(selectedRoute));
+    setRouteDraft(selectedRoute ? routeToDraft(selectedRoute) : null);
   }, [selectedRoute]);
 
   const callsQuery = useQuery({
@@ -175,17 +175,25 @@ export default function ModelInfrastructure() {
         />
       )}
 
-      {section === "routes" && selectedRoute && routeDraft && (
-        <RouteWorkspace
-          routes={overview.routes}
-          selected={selectedRoute}
-          draft={routeDraft}
-          saving={routeMutation.isPending}
-          onSelect={setSelectedRouteCode}
-          onChange={setRouteDraft}
-          onReset={() => setRouteDraft(routeToDraft(selectedRoute))}
-          onSave={() => routeMutation.mutate({ code: selectedRoute.agent_code, input: routeDraft })}
-        />
+      {section === "routes" && selectedRoute && (
+        routeDraft ? (
+          <RouteWorkspace
+            routes={overview.routes}
+            selected={selectedRoute}
+            draft={routeDraft}
+            saving={routeMutation.isPending}
+            onSelect={setSelectedRouteCode}
+            onChange={setRouteDraft}
+            onReset={() => setRouteDraft(routeToDraft(selectedRoute))}
+            onSave={() => routeMutation.mutate({ code: selectedRoute.agent_code, input: routeDraft })}
+          />
+        ) : (
+          <OperationalState
+            kind="blocked"
+            title="需要先绑定模型供应商"
+            description="这条遗留路由缺少供应商标识，暂时不能保存。请先在供应商工作台完成迁移。"
+          />
+        )
       )}
 
       {section === "calls" && (
@@ -418,9 +426,12 @@ function providerToDraft(provider: ModelProvider): UpdateModelProviderInput {
   return { enabled: provider.enabled, credential_ref: provider.credential_ref };
 }
 
-function routeToDraft(route: ModelRoute): UpdateModelRouteInput {
+function routeToDraft(route: ModelRoute): UpdateModelRouteInput | null {
+  if (route.primary_provider_id === null) return null;
   return {
+    primary_provider_id: route.primary_provider_id,
     primary_model: route.primary_model,
+    fallback_provider_id: route.fallback_provider_id,
     fallback_model: route.fallback_model,
     temperature: route.temperature,
     max_tokens: route.max_tokens,
