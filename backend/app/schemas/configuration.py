@@ -51,6 +51,8 @@ class ModelRouteOut(BaseModel):
     id: int | None
     agent_code: str
     agent_name: str
+    primary_provider_id: int | None
+    fallback_provider_id: int | None
     primary_model: str
     fallback_model: str | None
     temperature: float
@@ -60,7 +62,9 @@ class ModelRouteOut(BaseModel):
 
 
 class UpdateModelRouteRequest(BaseModel):
+    primary_provider_id: int = Field(ge=1)
     primary_model: str = Field(min_length=1, max_length=128)
+    fallback_provider_id: int | None = Field(default=None, ge=1)
     fallback_model: str | None = Field(default=None, max_length=128)
     temperature: float = Field(ge=0, le=2)
     max_tokens: int = Field(ge=256, le=32768)
@@ -68,7 +72,13 @@ class UpdateModelRouteRequest(BaseModel):
 
     @model_validator(mode="after")
     def reject_same_fallback(self):
-        if self.fallback_model and self.fallback_model == self.primary_model:
+        if (self.fallback_provider_id is None) != (self.fallback_model is None):
+            raise ValueError("fallback provider and model must be provided together")
+        if (
+            self.fallback_model
+            and self.fallback_provider_id == self.primary_provider_id
+            and self.fallback_model == self.primary_model
+        ):
             raise ValueError("fallback model must differ from primary model")
         return self
 

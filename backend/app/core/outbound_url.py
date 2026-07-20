@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -14,7 +16,7 @@ import httpx
 _MAX_URL_LENGTH = 2048
 _METADATA_ADDRESSES = frozenset(
     {
-        ipaddress.ip_address("168.63.129.16"),  # Azure platform virtual IP
+        ipaddress.ip_address("168.63.129.16"),
         ipaddress.ip_address("169.254.169.254"),
     }
 )
@@ -79,6 +81,34 @@ class OutboundRequestPolicy:
             write=self.write_timeout,
             pool=self.pool_timeout,
         )
+
+
+@dataclass
+class BoundedOutboundStream:
+    """Streaming response wrapper that enforces a cumulative byte limit."""
+
+    _response: httpx.Response
+    _max_response_bytes: int
+    _bytes_read: int = 0
+
+    @property
+    def status_code(self) -> int:
+        return self._response.status_code
+
+    @property
+    def headers(self) -> httpx.Headers:
+        return self._response.headers
+
+    @property
+    def request(self) -> httpx.Request:
+        return self._response.request
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        async for chunk in self._response.aiter_bytes():
+            self._bytes_read += len(chunk)
+            if self._bytes_read > self._max_response_bytes:
+                raise OutboundResponseTooLargeError("outbound response exceeded size limit")
+            yield chunk
 
 
 DEFAULT_OUTBOUND_REQUEST_POLICY = OutboundRequestPolicy()
@@ -168,11 +198,10 @@ async def _resolve_public_https_target(url: str) -> ValidatedOutboundTarget:
     addresses = _resolved_addresses(results)
     if not addresses:
         raise UnsafeOutboundURLError("outbound hostname did not resolve to a public address")
-    has_unsafe_address = any(
+    if any(
         address in _METADATA_ADDRESSES or not _is_public_address(address)
         for address in addresses
-    )
-    if has_unsafe_address:
+    ):
         raise UnsafeOutboundURLError("outbound hostname resolved to a non-public address")
     ordered_addresses = tuple(sorted(addresses, key=lambda item: (item.version, item.packed)))
     selected_address = ordered_addresses[0]
@@ -192,42 +221,72 @@ async def validate_public_https_url(url: str) -> str:
     return target.original_url
 
 
-async def _consume_response(
-    client: httpx.AsyncClient,
+def _validated_request_options(
+    target: ValidatedOutboundTarget,
+    request_options: dict[str, Any],
+) -> dict[str, Any]:
+    if "follow_redirects" in request_options or "timeout" in request_options:
+        raise ValueError("redirect and timeout behavior is controlled by the outbound policy")
+    if "params" in request_options:
+        raise ValueError("outbound query parameters are not allowed")
+    options = dict(request_options)
+    headers = httpx.Headers(options.pop("headers", None))
+    headers["Host"] = target.host_header
+    extensions = dict(options.pop("extensions", None) or {})
+    extensions["sni_hostname"] = target.hostname
+    options["headers"] = headers
+    options["extensions"] = extensions
+    return options
+
+
+def _validate_response_headers(response: httpx.Response, policy: OutboundRequestPolicy) -> None:
+    if 300 <= response.status_code < 400:
+        raise OutboundRedirectError("outbound redirects are not allowed")
+    content_length = response.headers.get("content-length")
+    if content_length is None:
+        return
+    try:
+        if int(content_length) > policy.max_response_bytes:
+            raise OutboundResponseTooLargeError("outbound response exceeded size limit")
+    except ValueError:
+        return
+
+
+@asynccontextmanager
+async def bounded_outbound_stream(
     method: str,
     url: str,
-    policy: OutboundRequestPolicy,
-    request_options: dict[str, Any],
-) -> httpx.Response:
-    async with client.stream(
-        method,
-        url,
-        follow_redirects=False,
-        timeout=policy.httpx_timeout(),
-        **request_options,
-    ) as response:
-        if 300 <= response.status_code < 400:
-            raise OutboundRedirectError("outbound redirects are not allowed")
-
-        content_length = response.headers.get("content-length")
-        if content_length is not None:
-            try:
-                if int(content_length) > policy.max_response_bytes:
-                    raise OutboundResponseTooLargeError("outbound response exceeded size limit")
-            except ValueError:
-                pass
-
-        content = bytearray()
-        async for chunk in response.aiter_bytes():
-            if len(content) + len(chunk) > policy.max_response_bytes:
-                raise OutboundResponseTooLargeError("outbound response exceeded size limit")
-            content.extend(chunk)
-        return httpx.Response(
-            status_code=response.status_code,
-            headers=response.headers,
-            content=bytes(content),
-            request=response.request,
-        )
+    *,
+    _transport: httpx.AsyncBaseTransport | None = None,
+    policy: OutboundRequestPolicy = DEFAULT_OUTBOUND_REQUEST_POLICY,
+    **request_options: Any,
+) -> AsyncIterator[BoundedOutboundStream]:
+    """Revalidate, pin, and stream a bounded response without redirects or proxies."""
+    try:
+        async with asyncio.timeout(policy.total_timeout):
+            target = await _resolve_public_https_target(url)
+            options = _validated_request_options(target, request_options)
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                proxy=None,
+                transport=_transport,
+                trust_env=False,
+            ) as client:
+                async with client.stream(
+                    method,
+                    target.pinned_url,
+                    follow_redirects=False,
+                    timeout=policy.httpx_timeout(),
+                    **options,
+                ) as response:
+                    _validate_response_headers(response, policy)
+                    yield BoundedOutboundStream(response, policy.max_response_bytes)
+    except TimeoutError:
+        raise OutboundRequestTimeoutError("outbound request timed out") from None
+    except httpx.TimeoutException:
+        raise OutboundRequestTimeoutError("outbound request timed out") from None
+    except httpx.RequestError:
+        raise OutboundRequestError("outbound request failed") from None
 
 
 async def bounded_outbound_request(
@@ -239,32 +298,19 @@ async def bounded_outbound_request(
     **request_options: Any,
 ) -> httpx.Response:
     """Revalidate, send without redirects, and consume a bounded response."""
-    if "follow_redirects" in request_options or "timeout" in request_options:
-        raise ValueError("redirect and timeout behavior is controlled by the outbound policy")
-    if "params" in request_options:
-        raise ValueError("outbound query parameters are not allowed")
-    try:
-        async with asyncio.timeout(policy.total_timeout):
-            target = await _resolve_public_https_target(url)
-            options = dict(request_options)
-            headers = httpx.Headers(options.pop("headers", None))
-            headers["Host"] = target.host_header
-            extensions = dict(options.pop("extensions", None) or {})
-            extensions["sni_hostname"] = target.hostname
-            options["headers"] = headers
-            options["extensions"] = extensions
-            async with httpx.AsyncClient(
-                follow_redirects=False,
-                proxy=None,
-                transport=_transport,
-                trust_env=False,
-            ) as owned_client:
-                return await _consume_response(
-                    owned_client, method, target.pinned_url, policy, options
-                )
-    except TimeoutError:
-        raise OutboundRequestTimeoutError("outbound request timed out") from None
-    except httpx.TimeoutException:
-        raise OutboundRequestTimeoutError("outbound request timed out") from None
-    except httpx.RequestError:
-        raise OutboundRequestError("outbound request failed") from None
+    async with bounded_outbound_stream(
+        method,
+        url,
+        _transport=_transport,
+        policy=policy,
+        **request_options,
+    ) as response:
+        content = bytearray()
+        async for chunk in response.aiter_bytes():
+            content.extend(chunk)
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            content=bytes(content),
+            request=response.request,
+        )

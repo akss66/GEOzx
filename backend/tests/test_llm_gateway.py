@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from app.config import settings
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.cost import compute_cost
 from app.llm.gateway import LLMError, LLMGateway, provider_for
-from app.models import IntegrationConfig, LLMCall, ModelConfig, Org
+from app.models import IntegrationConfig, LLMCall, ModelConfig, ModelProvider, Org
+from app.services.model_provider_registry import replace_provider_key
 
 
 class FakeAdapter:
@@ -40,6 +42,39 @@ def _gw(adapter: FakeAdapter) -> LLMGateway:
 
 
 MSG = [{"role": "user", "content": "hi"}]
+
+
+@pytest.fixture
+def encryption_key(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+
+
+def _provider(
+    *,
+    org_id: int,
+    code: str,
+    base_url: str,
+    models: list[str],
+    enabled: bool = True,
+    verification_status: str = "verified",
+) -> ModelProvider:
+    return ModelProvider(
+        org_id=org_id,
+        code=code,
+        display_name=code.upper(),
+        provider_type="custom_openai",
+        template_code=None,
+        protocol="openai_compatible",
+        base_url=base_url,
+        enabled=enabled,
+        credential_source="none",
+        verification_status=verification_status,
+        models=models,
+    )
 
 
 def test_compute_cost() -> None:
@@ -242,3 +277,301 @@ async def test_all_candidates_fail_raises(session) -> None:
 
     with pytest.raises(LLMError):
         await _gw(FakeAdapter(fail_models={"bad", "bad2"})).chat(session, org.id, "01", MSG)
+
+
+@pytest.mark.asyncio
+async def test_gateway_routes_provider_backed_calls_with_org_scoped_credentials(
+    session, encryption_key, monkeypatch
+) -> None:
+    org_a = Org(name="Org A")
+    org_b = Org(name="Org B")
+    session.add_all([org_a, org_b])
+    await session.flush()
+    provider_a = _provider(
+        org_id=org_a.id,
+        code="openai",
+        base_url="https://api.openai.com/v1",
+        models=["gpt-4.1-mini"],
+    )
+    provider_b = _provider(
+        org_id=org_b.id,
+        code="openai",
+        base_url="https://api.openai.com/v1",
+        models=["gpt-4.1-mini"],
+    )
+    replace_provider_key(provider_a, "sk-org-a-provider-key-1111")
+    replace_provider_key(provider_b, "sk-org-b-provider-key-2222")
+    provider_a.verification_status = "verified"
+    provider_b.verification_status = "verified"
+    session.add_all([provider_a, provider_b])
+    await session.flush()
+    session.add_all(
+        [
+            ModelConfig(
+                org_id=org_a.id,
+                agent_code="01",
+                primary_provider_id=provider_a.id,
+                primary_model="gpt-4.1-mini",
+            ),
+            ModelConfig(
+                org_id=org_b.id,
+                agent_code="01",
+                primary_provider_id=provider_b.id,
+                primary_model="gpt-4.1-mini",
+            ),
+        ]
+    )
+    await session.commit()
+
+    captured: list[tuple[str, str | None, str | None, str]] = []
+
+    class RuntimeAdapter:
+        provider = "openai"
+
+        def __init__(self, provider_code, api_key=None, base_url=None):
+            self.provider_code = provider_code
+            self.api_key = api_key
+            self.base_url = base_url
+
+        async def complete(self, model, messages, options=None):
+            captured.append((self.provider_code, self.api_key, self.base_url, model))
+            return CompletionResult(f"reply via {self.api_key}", model, 1, 2, 3)
+
+        async def stream(self, model, messages, options=None):
+            if False:
+                yield ""
+
+    monkeypatch.setattr("app.llm.gateway.OpenAICompatibleAdapter", RuntimeAdapter)
+
+    gateway = LLMGateway()
+    result_a, _ = await gateway.chat(session, org_a.id, "01", MSG)
+    result_b, _ = await gateway.chat(session, org_b.id, "01", MSG)
+
+    assert result_a.content == "reply via sk-org-a-provider-key-1111"
+    assert result_b.content == "reply via sk-org-b-provider-key-2222"
+    assert captured == [
+        ("openai", "sk-org-a-provider-key-1111", "https://api.openai.com/v1", "gpt-4.1-mini"),
+        ("openai", "sk-org-b-provider-key-2222", "https://api.openai.com/v1", "gpt-4.1-mini"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_preserves_observer_semantics_with_provider_backed_fallback(
+    session, encryption_key, monkeypatch
+) -> None:
+    org = Org(name="Streaming Org")
+    session.add(org)
+    await session.flush()
+    primary = _provider(
+        org_id=org.id,
+        code="openai",
+        base_url="https://api.openai.com/v1",
+        models=["gpt-4.1-mini"],
+    )
+    fallback = _provider(
+        org_id=org.id,
+        code="moonshot",
+        base_url="https://api.moonshot.cn/v1",
+        models=["moonshot-v1-8k"],
+    )
+    replace_provider_key(primary, "sk-primary-key-1111")
+    replace_provider_key(fallback, "sk-fallback-key-2222")
+    primary.verification_status = "verified"
+    fallback.verification_status = "verified"
+    session.add_all([primary, fallback])
+    await session.flush()
+    session.add(
+        ModelConfig(
+            org_id=org.id,
+            agent_code="02",
+            primary_provider_id=primary.id,
+            fallback_provider_id=fallback.id,
+            primary_model="gpt-4.1-mini",
+            fallback_model="moonshot-v1-8k",
+        )
+    )
+    await session.commit()
+
+    class RuntimeAdapter:
+        provider = "openai"
+
+        def __init__(self, provider_code, api_key=None, base_url=None):
+            self.provider_code = provider_code
+
+        async def complete(self, model, messages, options=None):
+            raise AssertionError("stream test should not use complete")
+
+        async def stream(self, model, messages, options=None):
+            if self.provider_code == "openai":
+                raise RuntimeError("primary stream failed")
+            for chunk in ["hello", " world"]:
+                yield chunk
+
+    monkeypatch.setattr("app.llm.gateway.OpenAICompatibleAdapter", RuntimeAdapter)
+
+    events: list[dict] = []
+
+    async def observer(event: dict) -> None:
+        events.append(event)
+
+    result, _ = await LLMGateway().chat_stream(session, org.id, "02", MSG, observer)
+
+    assert result.content == "hello world"
+    assert [event["phase"] for event in events] == [
+        "start",
+        "error",
+        "start",
+        "delta",
+        "delta",
+        "done",
+    ]
+    assert [event["model"] for event in events] == [
+        "gpt-4.1-mini",
+        "gpt-4.1-mini",
+        "moonshot-v1-8k",
+        "moonshot-v1-8k",
+        "moonshot-v1-8k",
+        "moonshot-v1-8k",
+    ]
+    rows = (await session.scalars(select(LLMCall).where(LLMCall.org_id == org.id))).all()
+    assert sorted((row.provider, row.status) for row in rows) == [
+        ("moonshot", "ok"),
+        ("openai", "error"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_unverified_provider_backed_route(
+    session, monkeypatch
+) -> None:
+    org = Org(name="Pending Provider")
+    session.add(org)
+    await session.flush()
+    provider = _provider(
+        org_id=org.id,
+        code="openai",
+        base_url="https://api.openai.com/v1",
+        models=["gpt-4.1-mini"],
+        verification_status="pending",
+    )
+    session.add(provider)
+    await session.flush()
+    session.add(
+        ModelConfig(
+            org_id=org.id,
+            agent_code="03",
+            primary_provider_id=provider.id,
+            primary_model="gpt-4.1-mini",
+        )
+    )
+    await session.commit()
+
+    class UnexpectedAdapter:
+        provider = "openai"
+
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("unverified providers should fail before adapter creation")
+
+    monkeypatch.setattr("app.llm.gateway.OpenAICompatibleAdapter", UnexpectedAdapter)
+
+    with pytest.raises(LLMError, match="all candidate models failed"):
+        await LLMGateway().chat(session, org.id, "03", MSG)
+
+    call = await session.scalar(select(LLMCall).where(LLMCall.org_id == org.id))
+    assert call is not None
+    assert call.status == "error"
+    assert "verified" in (call.error or "")
+
+
+@pytest.mark.asyncio
+async def test_custom_adapter_cannot_bypass_provider_backed_route_validation(
+    session,
+) -> None:
+    org = Org(name="Injected Adapter Org")
+    session.add(org)
+    await session.flush()
+    provider = _provider(
+        org_id=org.id,
+        code="openai",
+        base_url="https://api.openai.com/v1",
+        models=["gpt-4.1-mini"],
+        verification_status="pending",
+    )
+    session.add(provider)
+    await session.flush()
+    session.add(
+        ModelConfig(
+            org_id=org.id,
+            agent_code="03",
+            primary_provider_id=provider.id,
+            primary_model="gpt-4.1-mini",
+        )
+    )
+    await session.commit()
+
+    class InjectedAdapter:
+        provider = "openai"
+
+        async def complete(self, model, messages, options=None):
+            return CompletionResult("must not execute", model, 1, 1, 2)
+
+        async def stream(self, model, messages, options=None):
+            yield "must not execute"
+
+    gateway = LLMGateway(adapters={"openai": InjectedAdapter()})
+    with pytest.raises(LLMError, match="all candidate models failed"):
+        await gateway.chat(session, org.id, "03", MSG)
+
+    call = await session.scalar(select(LLMCall).where(LLMCall.org_id == org.id))
+    assert call is not None
+    assert call.status == "error"
+    assert "verified" in (call.error or "")
+
+
+@pytest.mark.asyncio
+async def test_gateway_redacts_secret_bearing_adapter_errors_before_storage_and_observer(
+    session,
+) -> None:
+    org = Org(name="Redaction Org")
+    session.add(org)
+    await session.flush()
+    session.add(
+        ModelConfig(
+            org_id=org.id,
+            agent_code="01",
+            primary_model="deepseek-chat",
+        )
+    )
+    await session.commit()
+
+    class SecretFailingAdapter:
+        provider = "deepseek"
+
+        async def complete(self, model, messages, options=None):
+            raise AssertionError("stream test should not use complete")
+
+        async def stream(self, model, messages, options=None):
+            if False:
+                yield ""
+            raise RuntimeError(
+                "Authorization Bearer sk-sensitive-provider-key-4321 failed"
+            )
+
+    events: list[dict] = []
+
+    async def observer(event: dict) -> None:
+        events.append(event)
+
+    gateway = LLMGateway(adapters={"deepseek": SecretFailingAdapter()})
+    with pytest.raises(LLMError) as exc_info:
+        await gateway.chat_stream(session, org.id, "01", MSG, observer)
+
+    call = await session.scalar(select(LLMCall).where(LLMCall.org_id == org.id))
+    assert call is not None
+    assert "sk-sensitive-provider-key-4321" not in (call.error or "")
+    assert "[REDACTED]" in (call.error or "")
+    serialized_events = str(events)
+    assert "sk-sensitive-provider-key-4321" not in serialized_events
+    assert "[REDACTED]" in serialized_events
+    assert "sk-sensitive-provider-key-4321" not in str(exc_info.value.__cause__)
+    assert "[REDACTED]" in str(exc_info.value.__cause__)

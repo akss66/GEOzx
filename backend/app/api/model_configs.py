@@ -53,6 +53,14 @@ async def update_model_config(
     cfg = await session.get(ModelConfig, config_id)
     if cfg is None or cfg.org_id != admin.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模型配置不存在")
+    if cfg.primary_provider_id is not None or cfg.fallback_provider_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Provider-backed routes must be updated through "
+                f"/model-infrastructure/routes/{cfg.agent_code}"
+            ),
+        )
     data = body.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(cfg, key, value)

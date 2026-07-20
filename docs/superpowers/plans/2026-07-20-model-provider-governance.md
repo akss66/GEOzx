@@ -270,21 +270,21 @@ git commit -m "feat: add model provider administration APIs"
 - Produces registry-backed runtime resolution by `(org_id, provider_id, model_name)`.
 - Preserves existing `LLMGateway.chat()` and `chat_stream()` caller signatures.
 
-- [ ] **Step 1: Write failing gateway and route tests**
+- [x] **Step 1: Write failing gateway and route tests**
 
 Prove that two organizations using the same provider code decrypt different keys, unverified providers cannot be assigned, verified custom providers work for complete and stream calls, disabled/error providers fail visibly, environment DeepSeek remains compatible, and fallback routes use their own provider.
 
-- [ ] **Step 2: Run focused tests and verify hardcoded routing fails**
+- [x] **Step 2: Run focused tests and verify hardcoded routing fails**
 
 Run: `cd backend && python -m pytest tests/test_llm_gateway.py tests/test_model_configs_api.py -q`
 
 Expected: FAIL because `provider_code_for_model()` still hardcodes DeepSeek/LiteLLM.
 
-- [ ] **Step 3: Implement the generic OpenAI-compatible adapter**
+- [x] **Step 3: Implement the generic OpenAI-compatible adapter**
 
 Extract the existing DeepSeek HTTP behavior into `OpenAICompatibleAdapter`. It receives the already validated provider runtime, never reads arbitrary environment names from database input, disables redirects, uses bounded timeouts, and supports complete plus streaming responses. Keep `DeepSeekAdapter` as a compatibility wrapper until all imports migrate.
 
-- [ ] **Step 4: Resolve routes structurally**
+- [x] **Step 4: Resolve routes structurally**
 
 Return a structured candidate from route resolution:
 
@@ -298,17 +298,17 @@ class ModelTarget:
 
 Remove model-name inference for new routes. Legacy rows are handled only by migration/backward-compatibility resolution. Record actual provider code and model in `LLMCall`.
 
-- [ ] **Step 5: Update route validation APIs**
+- [x] **Step 5: Update route validation APIs**
 
 `PUT /model-infrastructure/routes/{agent_code}` accepts primary and fallback provider IDs plus model names. Both providers must belong to the current organization, be enabled and verified, and list the selected model. Preserve existing route IDs and routing parameters.
 
-- [ ] **Step 6: Run gateway and route tests**
+- [x] **Step 6: Run gateway and route tests**
 
 Run: `cd backend && python -m pytest tests/test_llm_gateway.py tests/test_model_configs_api.py -q`
 
 Expected: PASS with DeepSeek environment compatibility and organization isolation.
 
-- [ ] **Step 7: Commit runtime integration**
+- [x] **Step 7: Commit runtime integration**
 
 ```bash
 git add backend/app/llm backend/app/services/model_infrastructure.py backend/app/api/model_configs.py backend/app/schemas/configuration.py backend/tests

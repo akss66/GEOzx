@@ -9,6 +9,7 @@ from app.core.outbound_url import (
     OutboundResponseTooLargeError,
     UnsafeOutboundURLError,
     bounded_outbound_request,
+    bounded_outbound_stream,
     validate_public_https_url,
 )
 
@@ -198,3 +199,71 @@ async def test_outbound_request_bounds_streamed_response_consumption(monkeypatch
             _transport=httpx.MockTransport(handler),
             policy=policy,
         )
+
+
+class _AsyncChunks(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_outbound_stream_pins_validated_ip_preserves_host_and_sni_and_closes_stream(
+    monkeypatch,
+):
+    requests: list[httpx.Request] = []
+    stream = _AsyncChunks([b"data: hello\n\n", b"data: [DONE]\n\n"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, stream=stream, request=request)
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: _dns_results("93.184.216.34"),
+    )
+    async with bounded_outbound_stream(
+        "POST",
+        "https://api.example.com/v1/chat/completions",
+        headers={"authorization": "Bearer sk-test"},
+        json={"stream": True},
+        _transport=httpx.MockTransport(handler),
+    ) as response:
+        body = b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    assert body == b"data: hello\n\ndata: [DONE]\n\n"
+    assert requests[0].url == httpx.URL("https://93.184.216.34/v1/chat/completions")
+    assert requests[0].headers["host"] == "api.example.com"
+    assert requests[0].extensions["sni_hostname"] == "api.example.com"
+    assert stream.closed is True
+
+
+async def test_outbound_stream_enforces_cumulative_byte_limit(monkeypatch):
+    stream = _AsyncChunks([b"1234", b"56789"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, request=request)
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: _dns_results("93.184.216.34"),
+    )
+    with pytest.raises(OutboundResponseTooLargeError):
+        async with bounded_outbound_stream(
+            "GET",
+            "https://api.example.com/v1/models",
+            _transport=httpx.MockTransport(handler),
+            policy=OutboundRequestPolicy(max_response_bytes=8),
+        ) as response:
+            async for _chunk in response.aiter_bytes():
+                pass
+
+    assert stream.closed is True

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,7 +13,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Event, IntegrationConfig, LLMCall, ModelConfig
+from app.core.credential_crypto import CredentialEncryptionError, decrypt_provider_key
+from app.models import Event, IntegrationConfig, LLMCall, ModelConfig, ModelProvider
 from app.models.enums import AgentCode
 
 AGENT_NAMES: dict[str, str] = {
@@ -64,6 +66,13 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[^\s,;]+"),
     re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s,;]+"),
 )
+
+
+@dataclass(frozen=True)
+class ModelTarget:
+    provider_id: int | None
+    provider_code: str
+    model: str
 
 
 def provider_code_for_model(model: str) -> str:
@@ -159,6 +168,138 @@ async def provider_runtime(
     }
 
 
+def _environment_provider_key(provider: ModelProvider) -> str | None:
+    if (
+        provider.credential_source != "environment"
+        or provider.code != "deepseek"
+        or provider.template_code != "deepseek"
+        or provider.base_url != "https://api.deepseek.com"
+    ):
+        return None
+    value = os.environ.get("DEEPSEEK_API_KEY") or settings.deepseek_api_key
+    return value or None
+
+
+def _provider_api_key(provider: ModelProvider) -> str | None:
+    if provider.credential_source == "encrypted" and provider.encrypted_api_key:
+        try:
+            return decrypt_provider_key(provider.encrypted_api_key)
+        except CredentialEncryptionError as exc:
+            raise RuntimeError("model provider credential could not be decrypted") from exc
+    return _environment_provider_key(provider)
+
+
+async def provider_runtime_for_target(
+    session: AsyncSession,
+    org_id: int | None,
+    provider_id: int,
+    model: str,
+) -> dict[str, str | None]:
+    if org_id is None:
+        raise RuntimeError("model provider routes require an organization")
+    provider = await session.scalar(
+        select(ModelProvider).where(
+            ModelProvider.org_id == org_id,
+            ModelProvider.id == provider_id,
+        )
+    )
+    if provider is None:
+        raise RuntimeError("model provider is not available for this organization")
+    if not provider.enabled:
+        raise RuntimeError(f"model provider {provider.code} is disabled")
+    if provider.verification_status != "verified":
+        raise RuntimeError(f"model provider {provider.code} is not verified")
+    models = list(provider.models or [])
+    if model not in models:
+        raise RuntimeError(f"model {model} is not available for provider {provider.code}")
+    if provider.protocol != "openai_compatible":
+        raise RuntimeError(f"model provider {provider.code} uses an unsupported protocol")
+    if not provider.base_url:
+        raise RuntimeError(f"model provider {provider.code} has no endpoint configured")
+    return {
+        "provider_code": provider.code,
+        "api_key": _provider_api_key(provider),
+        "base_url": provider.base_url,
+    }
+
+
+async def resolve_route_targets(
+    session: AsyncSession, org_id: int | None, agent_code: str
+) -> tuple[ModelTarget, ModelTarget | None, dict[str, Any]]:
+    if org_id is None:
+        return _legacy_target(settings.llm_default_model), None, dict(ROUTING_DEFAULTS)
+    cfg = await session.scalar(
+        select(ModelConfig).where(
+            ModelConfig.org_id == org_id,
+            ModelConfig.agent_code == agent_code,
+        )
+    )
+    if cfg is None:
+        return _legacy_target(settings.llm_default_model), None, dict(ROUTING_DEFAULTS)
+    params = dict(cfg.params or {})
+    options = {
+        **ROUTING_DEFAULTS,
+        **dict(params.get("routing_config") or {}),
+    }
+    primary = await _candidate_target(
+        session,
+        org_id=org_id,
+        provider_id=cfg.primary_provider_id,
+        model=cfg.primary_model,
+    )
+    fallback = await _optional_candidate_target(
+        session,
+        org_id=org_id,
+        provider_id=cfg.fallback_provider_id,
+        model=cfg.fallback_model,
+    )
+    return primary, fallback, options
+
+
+async def _candidate_target(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    provider_id: int | None,
+    model: str,
+) -> ModelTarget:
+    if provider_id is None:
+        return _legacy_target(model)
+    provider = await session.scalar(
+        select(ModelProvider).where(
+            ModelProvider.org_id == org_id,
+            ModelProvider.id == provider_id,
+        )
+    )
+    return ModelTarget(
+        provider_id=provider_id,
+        provider_code=provider.code if provider is not None else "unknown",
+        model=model,
+    )
+
+
+async def _optional_candidate_target(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    provider_id: int | None,
+    model: str | None,
+) -> ModelTarget | None:
+    if model is None:
+        return None
+    return await _candidate_target(session, org_id=org_id, provider_id=provider_id, model=model)
+
+
+def _legacy_target(model: str) -> ModelTarget:
+    return ModelTarget(provider_id=None, provider_code=provider_code_for_model(model), model=model)
+
+
+def _legacy_optional_target(model: str | None) -> ModelTarget | None:
+    if model is None:
+        return None
+    return _legacy_target(model)
+
+
 async def save_provider(
     session: AsyncSession,
     *,
@@ -221,6 +362,8 @@ def _route_row(code: str, stored: ModelConfig | None) -> dict[str, Any]:
         "id": stored.id if stored is not None else None,
         "agent_code": code,
         "agent_name": AGENT_NAMES[code],
+        "primary_provider_id": stored.primary_provider_id if stored is not None else None,
+        "fallback_provider_id": stored.fallback_provider_id if stored is not None else None,
         "primary_model": stored.primary_model if stored is not None else settings.llm_default_model,
         "fallback_model": stored.fallback_model if stored is not None else None,
         "temperature": float(routing["temperature"]),
@@ -249,7 +392,9 @@ async def save_route(
     org_id: int,
     user_id: int,
     agent_code: str,
+    primary_provider_id: int,
     primary_model: str,
+    fallback_provider_id: int | None,
     fallback_model: str | None,
     temperature: float,
     max_tokens: int,
@@ -257,8 +402,18 @@ async def save_route(
 ) -> dict[str, Any]:
     if agent_code not in AGENT_NAMES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="专家不存在")
-    validate_model_name(primary_model)
-    validate_model_name(fallback_model)
+    await validate_route_target(
+        session,
+        org_id=org_id,
+        provider_id=primary_provider_id,
+        model=primary_model,
+    )
+    await validate_optional_route_target(
+        session,
+        org_id=org_id,
+        provider_id=fallback_provider_id,
+        model=fallback_model,
+    )
     row = await session.scalar(
         select(ModelConfig).where(
             ModelConfig.org_id == org_id,
@@ -268,6 +423,8 @@ async def save_route(
     if row is None:
         row = ModelConfig(org_id=org_id, agent_code=agent_code, primary_model=primary_model)
         session.add(row)
+    row.primary_provider_id = primary_provider_id
+    row.fallback_provider_id = fallback_provider_id
     row.primary_model = primary_model
     row.fallback_model = fallback_model
     params = dict(row.params or {})
@@ -283,7 +440,9 @@ async def save_route(
             payload={
                 "org_id": org_id,
                 "agent_code": agent_code,
+                "primary_provider_id": primary_provider_id,
                 "primary_model": primary_model,
+                "fallback_provider_id": fallback_provider_id,
                 "fallback_model": fallback_model,
                 "routing_config": params["routing_config"],
                 "updated_by": user_id,
@@ -293,6 +452,39 @@ async def save_route(
     await session.commit()
     await session.refresh(row)
     return _route_row(agent_code, row)
+
+
+async def validate_route_target(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    provider_id: int,
+    model: str,
+) -> None:
+    try:
+        await provider_runtime_for_target(session, org_id, provider_id, model)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+
+async def validate_optional_route_target(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    provider_id: int | None,
+    model: str | None,
+) -> None:
+    if provider_id is None and model is None:
+        return
+    if provider_id is None or model is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="fallback provider and model must be provided together",
+        )
+    await validate_route_target(session, org_id=org_id, provider_id=provider_id, model=model)
 
 
 async def infrastructure_overview(session: AsyncSession, org_id: int) -> dict[str, Any]:
