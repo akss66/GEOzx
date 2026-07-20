@@ -34,7 +34,7 @@
 - Produces: `ModelProvider` and nullable `ModelConfig.primary_provider_id` / `fallback_provider_id`.
 - Preserves: existing model names and existing organization routes.
 
-- [ ] **Step 1: Write failing persistence tests**
+- [x] **Step 1: Write failing persistence tests**
 
 ```python
 async def test_model_provider_is_unique_per_org(session, org, admin):
@@ -56,13 +56,13 @@ async def test_model_provider_is_unique_per_org(session, org, admin):
 
 Also test the organization/code uniqueness constraint and the route foreign keys.
 
-- [ ] **Step 2: Run the focused test and verify it fails**
+- [x] **Step 2: Run the focused test and verify it fails**
 
 Run: `cd backend && python -m pytest tests/test_model_provider_models.py -q`
 
 Expected: FAIL because `ModelProvider` and provider route references do not exist.
 
-- [ ] **Step 3: Add the migration and ORM model**
+- [x] **Step 3: Add the migration and ORM model**
 
 Use `down_revision = "20260720_0300"` because the identity-governance chain now
 occupies revisions `0100` through `0300`. The provider table must contain:
@@ -98,7 +98,7 @@ so provider deletion cannot orphan routes and a route cannot reference another
 organization's provider. Actor attribution uses `SET NULL` so system backfills
 and later permanent member deletion preserve the organization provider.
 
-- [ ] **Step 4: Backfill compatibility providers and routes**
+- [x] **Step 4: Backfill compatibility providers and routes**
 
 For every existing organization, including historical organizations with no
 remaining users, create a `deepseek` provider using
@@ -106,7 +106,7 @@ remaining users, create a `deepseek` provider using
 only when an existing route contains a `litellm:` model. Backfill provider IDs
 without rewriting model names.
 
-- [ ] **Step 5: Run migration and model tests**
+- [x] **Step 5: Run migration and model tests**
 
 Run: `cd backend && python -m pytest tests/test_model_provider_models.py -q`
 
@@ -114,9 +114,9 @@ Expected: PASS.
 
 Run: `cd backend && python -m alembic upgrade head`
 
-Expected: schema upgrades to `20260720_0200`; existing model routes still resolve.
+Expected: schema upgrades to `20260720_0400`; existing model routes still resolve.
 
-- [ ] **Step 6: Commit the registry persistence increment**
+- [x] **Step 6: Commit the registry persistence increment**
 
 ```bash
 git add backend/migrations/versions/20260720_0400_model_provider_registry.py backend/app/models backend/app/schemas/configuration.py backend/tests/test_model_provider_models.py
@@ -137,7 +137,7 @@ git commit -m "feat: persist organization model providers"
 - Produces built-in templates: `deepseek`, `openai`, `qwen`, `doubao`, `zhipu`, and `moonshot`.
 - Produces: `validate_public_https_url`, `encrypt_provider_key`, `decrypt_provider_key`, and `provider_public_row`.
 
-- [ ] **Step 1: Write failing security and secret tests**
+- [x] **Step 1: Write failing security and secret tests**
 
 Cover HTTPS enforcement, URL credentials, IP literals, localhost, RFC1918, IPv6 local ranges, metadata IPs, DNS resolving to private addresses, redirect rejection, key encryption round-trip, key tail, keyed fingerprint, and response serialization without ciphertext.
 
@@ -153,31 +153,31 @@ async def test_rejects_unsafe_provider_urls(url):
         await validate_public_https_url(url)
 ```
 
-- [ ] **Step 2: Run focused tests and verify missing helpers fail**
+- [x] **Step 2: Run focused tests and verify missing helpers fail**
 
 Run: `cd backend && python -m pytest tests/test_model_provider_registry.py tests/test_outbound_url_security.py tests/test_credential_crypto.py -q`
 
 Expected: FAIL because registry and outbound validation do not exist.
 
-- [ ] **Step 3: Implement immutable provider templates**
+- [x] **Step 3: Implement immutable provider templates**
 
 Templates provide display name, trusted default Base URL, OpenAI-compatible protocol metadata, and common model names; they contain no credentials. Custom provider codes are normalized to lower-case slugs and are unique only within the current organization.
 
-- [ ] **Step 4: Implement write-only encrypted credentials**
+- [x] **Step 4: Implement write-only encrypted credentials**
 
 Use the existing Fernet encryption boundary. Store only ciphertext, last four characters, and a domain-separated keyed fingerprint. Updating a key resets verification to `pending`; deleting a key clears all key metadata and resets verification. Public serializers must not include `encrypted_api_key` or any field capable of reconstructing it.
 
-- [ ] **Step 5: Implement outbound URL validation**
+- [x] **Step 5: Implement outbound URL validation**
 
 Parse with a structured URL parser. Require `https`, reject user info and fragments, resolve every A/AAAA result immediately before outbound access, and reject any non-global address. Disable redirects and cap connection, read, total time, and response size. Revalidate custom endpoints before every verify, discovery, and runtime request.
 
-- [ ] **Step 6: Run service security tests**
+- [x] **Step 6: Run service security tests**
 
 Run: `cd backend && python -m pytest tests/test_model_provider_registry.py tests/test_outbound_url_security.py tests/test_credential_crypto.py -q`
 
 Expected: PASS; tests assert no plaintext key appears in serialized rows or errors.
 
-- [ ] **Step 7: Commit the provider security boundary**
+- [x] **Step 7: Commit the provider security boundary**
 
 ```bash
 git add backend/app/services/model_provider_registry.py backend/app/core/outbound_url.py backend/app/core/credential_crypto.py backend/tests
@@ -207,7 +207,7 @@ git commit -m "feat: secure model provider credentials"
   - `PUT /model-providers/{id}/models`
   - `DELETE /model-providers/{id}`
 
-- [ ] **Step 1: Write failing API and tenant-isolation tests**
+- [x] **Step 1: Write failing API and tenant-isolation tests**
 
 Test admin-only access, cross-organization `404`, write-only API key responses, duplicate code, invalid URL, verify status mapping, model discovery fallback, credential rotation, referenced-provider deletion conflict, and sanitized audit events.
 
@@ -223,31 +223,31 @@ async def test_provider_response_never_returns_api_key(client, admin_token):
     assert "encrypted_api_key" not in response.text
 ```
 
-- [ ] **Step 2: Run API tests and verify endpoints are absent**
+- [x] **Step 2: Run API tests and verify endpoints are absent**
 
 Run: `cd backend && python -m pytest tests/test_model_providers_api.py -q`
 
 Expected: FAIL with `404` responses.
 
-- [ ] **Step 3: Implement strict request and public response contracts**
+- [x] **Step 3: Implement strict request and public response contracts**
 
 Use bounded strings and lists. A provider response exposes status, endpoint, key configured flag, key tail, fingerprint prefix, model catalog, timestamps, and route references; it never exposes a secret or ciphertext. Map upstream errors to stable codes: `authentication_failed`, `endpoint_unreachable`, `protocol_incompatible`, `timeout`, and `model_unavailable`.
 
-- [ ] **Step 4: Implement verification and discovery**
+- [x] **Step 4: Implement verification and discovery**
 
 Verification performs a minimal compatible request and records latency plus sanitized status. Discovery calls `/models` with redirects disabled and a bounded response. When discovery is unsupported, return a stable `discovery_unsupported` result without erasing manually maintained models.
 
-- [ ] **Step 5: Protect destructive actions and write audits**
+- [x] **Step 5: Protect destructive actions and write audits**
 
 Deleting a provider returns `409` with affected Agent names when routes reference it. Audit create, update, enable/disable, key set/rotate/delete, verify, model update, and delete using IDs and safe metadata only.
 
-- [ ] **Step 6: Run provider API tests**
+- [x] **Step 6: Run provider API tests**
 
 Run: `cd backend && python -m pytest tests/test_model_providers_api.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit provider APIs**
+- [x] **Step 7: Commit provider APIs**
 
 ```bash
 git add backend/app/api/model_providers.py backend/app/main.py backend/app/schemas/configuration.py backend/app/services/model_provider_registry.py backend/tests/test_model_providers_api.py

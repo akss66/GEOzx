@@ -30,6 +30,7 @@ from app.api import (
     matrix_distribution,
     metrics,
     model_configs,
+    model_providers,
     notifications,
     orchestrator,
     platform_integrations,
@@ -100,6 +101,7 @@ app.include_router(accounts.router)
 app.include_router(platform_integrations.router)
 app.include_router(model_configs.router)
 app.include_router(model_configs.infrastructure_router)
+app.include_router(model_providers.router)
 app.include_router(knowledge.router)
 app.include_router(knowledge_suggestions.router)
 app.include_router(metrics.router)

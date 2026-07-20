@@ -72,6 +72,11 @@ def test_custom_provider_codes_are_normalized_to_lowercase_slugs(raw, expected):
     assert normalize_provider_code(raw) == expected
 
 
+def test_custom_provider_code_rejects_non_ascii_only_name():
+    with pytest.raises(ValueError, match="non-empty slug"):
+        normalize_provider_code("模型供应商")
+
+
 def test_replace_provider_key_resets_verification_and_public_row_is_safe(encryption_key):
     provider = _provider()
     plaintext = "sk-sensitive-provider-key-4321"
@@ -105,4 +110,28 @@ def test_remove_provider_key_clears_metadata_and_verification(encryption_key):
     assert provider.verification_status == "pending"
     assert provider.verified_at is None
     assert provider.verification_error_code is None
+    assert provider_public_row(provider)["key_configured"] is False
+
+
+def test_environment_credential_is_configured_only_when_server_key_exists(
+    monkeypatch,
+):
+    from app.config import settings
+
+    provider = _provider()
+    provider.code = "deepseek"
+    provider.template_code = "deepseek"
+    provider.base_url = PROVIDER_TEMPLATES["deepseek"].base_url
+    provider.credential_source = "environment"
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(settings, "deepseek_api_key", "")
+
+    assert provider_public_row(provider)["key_configured"] is False
+
+    monkeypatch.setattr(settings, "deepseek_api_key", "server-managed-key")
+
+    assert provider_public_row(provider)["key_configured"] is True
+
+    provider.base_url = "https://attacker.example.com/v1"
+
     assert provider_public_row(provider)["key_configured"] is False
