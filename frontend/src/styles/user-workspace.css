@@ -1,5 +1,6 @@
 .tz-user-workspace {
-  min-width: 1240px;
+  width: 100%;
+  min-width: 0;
   max-width: 1540px;
   margin: 0 auto;
   padding: 28px 32px 40px;
@@ -11,6 +12,14 @@
   justify-content: space-between;
   gap: 24px;
   margin-bottom: 18px;
+}
+
+.tz-user-page-header > div {
+  min-width: 0;
+}
+
+.tz-user-page-header > .ant-btn {
+  flex: 0 0 auto;
 }
 
 .tz-user-eyebrow,

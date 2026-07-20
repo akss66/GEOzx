@@ -45,7 +45,7 @@ describe("user management api", () => {
     expect(apiGet).toHaveBeenNthCalledWith(2, "/users/access-catalog");
   });
 
-  it("normalizes legacy access catalogs that omit optional collections", async () => {
+  it("preserves an unavailable account catalog when legacy responses omit accounts", async () => {
     apiGet.mockResolvedValue({
       data: {
         clients: [{ id: 3, name: "Legacy client", status: "active" }],
@@ -56,7 +56,7 @@ describe("user management api", () => {
     await expect(getUserAccessCatalog()).resolves.toEqual({
       clients: [{ id: 3, name: "Legacy client", status: "active" }],
       projects: [{ id: 8, client_id: 3, name: "Legacy project", status: "active" }],
-      accounts: [],
+      account_catalog_status: "unavailable",
     });
   });
 
@@ -92,6 +92,7 @@ describe("user management api", () => {
       project_memberships: [],
     };
     const catalog: UserAccessCatalog = {
+      account_catalog_status: "available",
       clients: [],
       projects: [],
       accounts: [

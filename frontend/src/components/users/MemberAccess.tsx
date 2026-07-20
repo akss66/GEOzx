@@ -9,6 +9,7 @@ import {
   formatGovernanceError,
   getAccessibleAccounts,
   getEffectiveAccounts,
+  hasAvailableAccountCatalog,
   summarizeScopeMode,
   WORKSPACE_ROLE_OPTIONS,
   type AccessDraft,
@@ -30,7 +31,8 @@ export function MemberAccess({
   const [feedback, setFeedback] = useState<{ tone: "neutral" | "success" | "error"; text: string } | null>(null);
   const catalogClients = Array.isArray(catalog.clients) ? catalog.clients : [];
   const catalogProjects = Array.isArray(catalog.projects) ? catalog.projects : [];
-  const catalogAccounts = Array.isArray(catalog.accounts) ? catalog.accounts : [];
+  const accountCatalogAvailable = hasAvailableAccountCatalog(catalog);
+  const catalogAccounts = accountCatalogAvailable ? catalog.accounts : [];
 
   const accessibleAccounts = useMemo(() => {
     const next = getAccessibleAccounts({
@@ -56,20 +58,25 @@ export function MemberAccess({
   const dirty = !areAccessDraftsEqual(baseline, draft);
 
   useEffect(() => {
+    if (!accountCatalogAvailable) return;
     if (draft.account_scope_mode !== "selected") return;
     const nextIds = clampSelectedAccounts(draft.account_ids, accessibleAccounts);
     if (nextIds.length === draft.account_ids.length) return;
     setDraft((current) => ({ ...current, account_ids: nextIds }));
-  }, [accessibleAccounts, draft.account_ids, draft.account_scope_mode]);
+  }, [accessibleAccounts, accountCatalogAvailable, draft.account_ids, draft.account_scope_mode]);
 
   async function handleSave() {
     setSaving(true);
     setFeedback({ tone: "neutral", text: "正在保存资源权限…" });
+    let accountIds = [...draft.account_ids];
+    if (accountCatalogAvailable) {
+      accountIds = draft.account_scope_mode === "selected"
+        ? clampSelectedAccounts(draft.account_ids, accessibleAccounts)
+        : [];
+    }
     const nextDraft = {
       ...draft,
-      account_ids: draft.account_scope_mode === "selected"
-        ? clampSelectedAccounts(draft.account_ids, accessibleAccounts)
-        : [],
+      account_ids: accountIds,
     };
     try {
       await onSave(nextDraft);
@@ -142,9 +149,11 @@ export function MemberAccess({
           <section className="tz-effective-accounts" aria-label="最终生效账号">
             <header>
               <strong>最终生效账号</strong>
-              <span>{catalogAccounts.length} 个账号</span>
+              <span>{accountCatalogAvailable ? `${catalogAccounts.length} 个账号` : "暂不可核对"}</span>
             </header>
-            {catalogAccounts.length ? (
+            {!accountCatalogAvailable ? (
+              <p className="tz-access-meta">账号目录暂不可用，无法核对最终生效账号。</p>
+            ) : catalogAccounts.length ? (
               <div className="tz-effective-accounts__list">
                 {catalogAccounts.map((account) => (
                   <span key={account.id} className="tz-account-pill">
@@ -263,6 +272,7 @@ export function MemberAccess({
               <label>
                 <input
                   checked={draft.account_scope_mode === "all_accessible"}
+                  disabled={!accountCatalogAvailable}
                   type="radio"
                   name={`scope-${detail.id}`}
                   aria-label="全部可见账号"
@@ -273,6 +283,7 @@ export function MemberAccess({
               <label>
                 <input
                   checked={draft.account_scope_mode === "selected"}
+                  disabled={!accountCatalogAvailable}
                   type="radio"
                   name={`scope-${detail.id}`}
                   aria-label="仅指定账号"
@@ -284,7 +295,12 @@ export function MemberAccess({
           </header>
 
           <div className="tz-account-catalog">
-            {draft.account_scope_mode === "selected" ? (
+            {!accountCatalogAvailable ? (
+              <div className="tz-account-empty" role="status">
+                <strong>账号目录暂不可用</strong>
+                <p>已保存的 {draft.account_ids.length} 个账号白名单会保持不变；目录恢复前不能修改账号范围。</p>
+              </div>
+            ) : draft.account_scope_mode === "selected" ? (
               accessibleAccounts.length ? (
                 accessibleAccounts.map((account) => (
                   <label key={account.id} className="tz-account-option">
@@ -318,9 +334,11 @@ export function MemberAccess({
         <section className="tz-effective-accounts" aria-label="最终生效账号">
           <header>
             <strong>最终生效账号</strong>
-            <span>{effectiveAccounts.length} 个账号</span>
+            <span>{accountCatalogAvailable ? `${effectiveAccounts.length} 个账号` : "暂不可核对"}</span>
           </header>
-          {effectiveAccounts.length ? (
+          {!accountCatalogAvailable ? (
+            <p className="tz-access-meta">账号目录暂不可用；已保存的账号白名单保持不变，当前无法核对最终生效账号。</p>
+          ) : effectiveAccounts.length ? (
             <div className="tz-effective-accounts__list">
               {effectiveAccounts.map((account) => (
                 <span key={account.id} className="tz-account-pill">

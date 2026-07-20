@@ -2,6 +2,7 @@ import type { UserAccessCatalog, WorkspaceRole } from "../../types";
 import {
   clampSelectedAccounts,
   getAccessibleAccounts,
+  hasAvailableAccountCatalog,
   WORKSPACE_ROLE_OPTIONS,
   type AccessDraft,
 } from "./userGovernance";
@@ -37,13 +38,16 @@ export function InitialMemberAccess({
 }) {
   const clients = Array.isArray(catalog.clients) ? catalog.clients : [];
   const projects = Array.isArray(catalog.projects) ? catalog.projects : [];
+  const accountCatalogAvailable = hasAvailableAccountCatalog(catalog);
   const accessibleAccounts = getDraftAccessibleAccounts(draft, catalog);
 
   function commitMembershipChange(nextDraft: AccessDraft) {
     const nextAccessible = getDraftAccessibleAccounts(nextDraft, catalog);
     onChange({
       ...nextDraft,
-      account_ids: clampSelectedAccounts(nextDraft.account_ids, nextAccessible),
+      account_ids: accountCatalogAvailable
+        ? clampSelectedAccounts(nextDraft.account_ids, nextAccessible)
+        : [...nextDraft.account_ids],
     });
   }
 
@@ -163,7 +167,7 @@ export function InitialMemberAccess({
             <input
               aria-label="新成员全部可见账号"
               checked={draft.account_scope_mode === "all_accessible"}
-              disabled={disabled}
+              disabled={disabled || !accountCatalogAvailable}
               name="create-account-scope"
               type="radio"
               onChange={() => onChange({ ...draft, account_scope_mode: "all_accessible", account_ids: [] })}
@@ -174,7 +178,7 @@ export function InitialMemberAccess({
             <input
               aria-label="新成员仅指定账号"
               checked={draft.account_scope_mode === "selected"}
-              disabled={disabled}
+              disabled={disabled || !accountCatalogAvailable}
               name="create-account-scope"
               type="radio"
               onChange={() => onChange({ ...draft, account_scope_mode: "selected" })}
@@ -182,7 +186,9 @@ export function InitialMemberAccess({
             <span>仅指定账号</span>
           </label>
         </div>
-        {draft.account_scope_mode === "selected" ? (
+        {!accountCatalogAvailable ? (
+          <p className="tz-access-meta">账号目录暂不可用；当前不能设置账号范围，客户与项目授权仍可配置。</p>
+        ) : draft.account_scope_mode === "selected" ? (
           accessibleAccounts.length ? (
             <div className="tz-create-access__accounts">
               {accessibleAccounts.map((account) => (

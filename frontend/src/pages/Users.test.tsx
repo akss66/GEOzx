@@ -69,6 +69,7 @@ const dormantUser: User = {
 };
 
 const accessCatalog: UserAccessCatalog = {
+  account_catalog_status: "available",
   clients: [
     { id: 10, name: "数码品牌", status: "active" },
     { id: 11, name: "生活方式品牌", status: "active" },
@@ -326,7 +327,7 @@ describe("Users", () => {
     expect(await screen.findByText("成员级操作记录暂不可用")).toBeInTheDocument();
   });
 
-  it("renders with the legacy access catalog shape when accounts are omitted", async () => {
+  it("renders an honest unavailable state when the legacy catalog omits accounts", async () => {
     vi.mocked(getUserAccessCatalog).mockResolvedValueOnce({
       clients: clone(accessCatalog.clients),
       projects: clone(accessCatalog.projects),
@@ -337,7 +338,38 @@ describe("Users", () => {
     expect(await screen.findByRole("heading", { name: "成员与权限" })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("tab", { name: "资源权限" }));
     expect(await screen.findByText("全局访问（只读）")).toBeInTheDocument();
-    expect(screen.getByText("当前目录中没有账号。")).toBeInTheDocument();
+    expect(screen.getByText("账号目录暂不可用，无法核对最终生效账号。")).toBeInTheDocument();
+    expect(screen.queryByText("当前目录中没有账号。")).not.toBeInTheDocument();
+  });
+
+  it("preserves an existing selected-account whitelist when the account catalog is unavailable", async () => {
+    detailMap[2] = {
+      ...detailMap[2],
+      account_scope_mode: "selected",
+      account_ids: [101],
+    };
+    vi.mocked(getUserAccessCatalog).mockResolvedValueOnce({
+      clients: clone(accessCatalog.clients),
+      projects: clone(accessCatalog.projects),
+    } as UserAccessCatalog);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
+
+    expect(await screen.findByText("账号目录暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("已保存的 1 个账号白名单会保持不变；目录恢复前不能修改账号范围。")).toBeInTheDocument();
+    expect(screen.getByLabelText("全部可见账号")).toBeDisabled();
+    expect(screen.getByLabelText("仅指定账号")).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("数码品牌 角色"), { target: { value: "lead" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存资源权限" }));
+
+    await waitFor(() => expect(updateUserAccess).toHaveBeenCalledWith(2, expect.objectContaining({
+      account_scope_mode: "selected",
+      account_ids: [101],
+    })));
   });
 
   it("creates a scoped member with initial resource authorization in one flow", async () => {

@@ -43,15 +43,20 @@ export async function getUserDetail(userId: number): Promise<UserDetail> {
 
 export async function getUserAccessCatalog(): Promise<UserAccessCatalog> {
   const { data } = await api.get<UserAccessCatalogResponse>("/users/access-catalog");
-  return {
+  const baseCatalog = {
     clients: Array.isArray(data?.clients) ? data.clients : [],
     projects: Array.isArray(data?.projects) ? data.projects : [],
-    accounts: Array.isArray(data?.accounts)
-      ? data.accounts.map((account) => ({
-          ...account,
-          project_ids: Array.isArray(account.project_ids) ? account.project_ids : [],
-        }))
-      : [],
+  };
+  if (!Array.isArray(data?.accounts)) {
+    return { ...baseCatalog, account_catalog_status: "unavailable" };
+  }
+  return {
+    ...baseCatalog,
+    account_catalog_status: "available",
+    accounts: data.accounts.map((account) => ({
+      ...account,
+      project_ids: Array.isArray(account.project_ids) ? account.project_ids : [],
+    })),
   };
 }
 

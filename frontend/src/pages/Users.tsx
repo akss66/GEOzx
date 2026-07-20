@@ -31,6 +31,7 @@ import {
   formatGovernanceError,
   getAccessibleAccounts,
   hasAccessAnomaly,
+  hasAvailableAccountCatalog,
   type AccessDraft,
 } from "../components/users/userGovernance";
 import { OperationalState } from "../components/ui";
@@ -215,6 +216,7 @@ export default function Users() {
 
   const selectedMetrics = useMemo(() => {
     if (!selectedDetail || !catalogQuery.data) return [];
+    const accountCatalogAvailable = hasAvailableAccountCatalog(catalogQuery.data);
     const accessibleAccounts = getAccessibleAccounts(selectedDetail, catalogQuery.data);
     const effectiveAccounts = selectedDetail.account_scope_mode === "selected"
       ? accessibleAccounts.filter((account) => selectedDetail.account_ids.includes(account.id))
@@ -222,8 +224,8 @@ export default function Users() {
     return [
       { label: "客户授权", value: selectedDetail.client_memberships.length },
       { label: "项目覆盖", value: selectedDetail.project_memberships.length },
-      { label: "可见账号", value: accessibleAccounts.length },
-      { label: "最终生效账号", value: effectiveAccounts.length },
+      { label: "可见账号", value: accountCatalogAvailable ? accessibleAccounts.length : "—" },
+      { label: "最终生效账号", value: accountCatalogAvailable ? effectiveAccounts.length : "—" },
       { label: "授权状态", value: hasAccessAnomaly(selectedDetail) ? "异常" : "正常" },
     ];
   }, [catalogQuery.data, selectedDetail]);

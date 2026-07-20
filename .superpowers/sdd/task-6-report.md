@@ -5,14 +5,15 @@
 - Rebuilt the desktop member-governance workbench in `frontend/src/pages/Users.tsx` and focused modules under `frontend/src/components/users/`.
 - Reworked `frontend/src/styles/user-workspace.css` for the approved warm-paper, dense desktop workspace.
 - Added interaction coverage in `frontend/src/pages/Users.test.tsx` for the original Task 6 acceptance paths and review findings.
-- Added a wire-response compatibility type and normalization in `frontend/src/types.ts` and `frontend/src/api/auth.ts` because an authenticated live backend returned an access catalog without `accounts`.
+- Added a discriminated wire-response compatibility type and normalization in `frontend/src/types.ts` and `frontend/src/api/auth.ts` because an authenticated live backend returned an access catalog without `accounts`.
+- Added an authenticated-shell Playwright regression for the 1440 x 900 desktop layout.
 - Did not modify backend code or model-governance flows.
 
 ## Execution Boundary
 
 - Entry point: `frontend/src/pages/Users.tsx`.
 - Server state: React Query owns the member roster, per-member detail, normalized access catalog, and current administrator secondary-password status.
-- API boundary: `getUserAccessCatalog` converts missing or non-array `clients`, `projects`, and `accounts` collections to empty arrays. Missing account `project_ids` is also normalized to an empty array. The canonical UI type still requires all collections.
+- API boundary: `getUserAccessCatalog` normalizes missing `clients` and `projects` to empty collections, but an omitted/non-array `accounts` collection becomes `account_catalog_status: "unavailable"`. A present array, including a legitimate empty array, becomes `"available"`. Missing per-account `project_ids` is normalized to an empty array only when the account catalog is available.
 - Local state: member tabs own their form drafts and feedback. `MemberAccess` and `MemberSecurity` are keyed by member ID, so member changes remount member-owned drafts. `PermanentDeletePanel` is keyed inside the security subtree.
 - Access draft baseline: unrelated detail refetches do not overwrite a draft. Only a successful access save advances the saved baseline; changing member discards the old member's draft.
 - Successful deletion updates the roster only after the API succeeds, removes the deleted detail query, and selects the adjacent member. This is not an optimistic deletion.
@@ -27,43 +28,46 @@
 
 ## TDD Evidence
 
-- Review fixes from the preceding pass were developed from five failing interaction cases, later split into 14 focused Users tests.
-- Current RED: `npm.cmd test -- src/pages/Users.test.tsx src/api/auth.test.ts` failed 6 of 28 tests before production changes. Failures covered legacy catalog normalization, the no-accounts Users crash, three missing new-member authorization/recovery paths, and access dirty-state clearing. The member-switch draft test already passed because the keyed subtree behavior was present.
-- Current GREEN: the same two-file run passed 28 of 28 after implementation.
-- Independent focused Users verification passed 19 of 19.
+- Earlier Task 6 and review work remains covered by the focused suite below.
+- This final review RED: `npm.cmd test -- src/pages/Users.test.tsx src/api/auth.test.ts` failed 3 of 29 tests before production changes. The failures proved the API fabricated `accounts: []`, global access showed a false empty state, and a scoped member's existing `[101]` whitelist was submitted as `[]` after an unrelated role edit.
+- Desktop RED: after correcting the Playwright fixture so it intercepted only `/api/*`, Chromium measured `documentScrollWidth=1524` at a 1440px viewport and failed the overflow assertion.
+- GREEN: the two-file run passed 29 of 29, focused Users passed 20 of 20, and the 1440 x 900 Chromium regression passed.
 
 Exact `Users.test.tsx` tests:
 
 1. `auto-selects the first member and exposes the four governance tabs`
-2. `renders with the legacy access catalog shape when accounts are omitted`
-3. `creates a scoped member with initial resource authorization in one flow`
-4. `recovers from a partial create result without creating the identity twice`
-5. `creates an administrator without requiring scoped grants`
-6. `filters the roster by search, role, anomaly, and status`
-7. `saves identity changes and translates enable-disable business errors`
-8. `toggles account scope, persists selected accounts, and explains when no accounts are visible`
-9. `sets the current admin secondary password and resets the selected member password`
-10. `recovers from stale delete previews and clears sensitive destructive inputs`
-11. `clears destructive inputs when the delete flow closes`
-12. `removes a permanently deleted member from the roster and selects the next member`
-13. `isolates security drafts and deletion previews when the selected member changes`
-14. `renders global access as read-only and blocks scoped access saves`
-15. `preserves unsaved access drafts across overview save and status refetches`
-16. `drops an unsaved access draft when the selected member changes`
-17. `translates stable business errors from overview saves`
-18. `translates generic 422 errors from overview saves`
-19. `enables permanent deletion only after exact email and secondary password confirmation`
+2. `renders an honest unavailable state when the legacy catalog omits accounts`
+3. `preserves an existing selected-account whitelist when the account catalog is unavailable`
+4. `creates a scoped member with initial resource authorization in one flow`
+5. `recovers from a partial create result without creating the identity twice`
+6. `creates an administrator without requiring scoped grants`
+7. `filters the roster by search, role, anomaly, and status`
+8. `saves identity changes and translates enable-disable business errors`
+9. `toggles account scope, persists selected accounts, and explains when no accounts are visible`
+10. `sets the current admin secondary password and resets the selected member password`
+11. `recovers from stale delete previews and clears sensitive destructive inputs`
+12. `clears destructive inputs when the delete flow closes`
+13. `removes a permanently deleted member from the roster and selects the next member`
+14. `isolates security drafts and deletion previews when the selected member changes`
+15. `renders global access as read-only and blocks scoped access saves`
+16. `preserves unsaved access drafts across overview save and status refetches`
+17. `drops an unsaved access draft when the selected member changes`
+18. `translates stable business errors from overview saves`
+19. `translates generic 422 errors from overview saves`
+20. `enables permanent deletion only after exact email and secondary password confirmation`
 
-The targeted API regression is `normalizes legacy access catalogs that omit optional collections` in `frontend/src/api/auth.test.ts`.
+The targeted API regression is `preserves an unavailable account catalog when legacy responses omit accounts` in `frontend/src/api/auth.test.ts`. The layout regression is `member governance fits the 1440px desktop viewport without document overflow` in `frontend/e2e/users-layout.spec.ts`.
 
 ## UX And Accessibility Review
 
 - The first visible member is selected automatically; roster search and filters remain local to the page.
-- Global-access members see explicit read-only copy and an empty catalog state when legacy responses omit accounts; scoped mutation controls are absent.
-- Missing catalog collections render as honest empty states. No placeholder clients, projects, or accounts are created.
+- Global-access members see explicit read-only copy and an unavailable state when legacy responses omit accounts; scoped mutation controls are absent.
+- Scoped members retain their saved account mode and IDs when the account catalog is unavailable. Account-scope radios are disabled, account counts are not invented, and client/project edits preserve the account fields verbatim on save.
+- A present empty account array renders a true empty state. An omitted account collection renders a compatibility-unavailable state. No placeholder clients, projects, or accounts are created.
+- The member workspace now shrinks inside the fixed desktop shell instead of forcing a 1240px content minimum; the header action and inspector remain inside a 1440px viewport.
 - Initial authorization uses labeled fieldsets, checkboxes, role selects, and named account-scope radios. The partial-result message uses an alert role and retry remains keyboard-operable.
 - Dangerous and read-only states include explicit text and do not rely on color alone.
-- A real authenticated browser accessibility-tree, focus-order, and visual pass was not rerun in this session because no authenticated browser/Chrome DevTools session is available. jsdom interaction coverage is not claimed as an end-to-end replacement.
+- A deterministic Chromium pass bootstraps the authenticated shell through `/auth/me` mocks and checks document/body width plus the header action and inspector bounds. It is a layout regression, not a substitute for a full live-backend accessibility audit.
 
 ## Security Review
 
@@ -76,16 +80,17 @@ The targeted API regression is `normalizes legacy access catalogs that omit opti
 ## Contract Notes
 
 - Current repository backend code declares `clients`, `projects`, and `accounts` as required in `UserAccessCatalogOut` and returns all three from `get_access_catalog`.
-- Browser acceptance showed a deployed or legacy backend response without `accounts`. The frontend now models that wire response as optional collections and normalizes it at the API boundary while retaining a strict canonical UI contract.
-- Treating an omitted collection as empty avoids a crash and does not fabricate data, but it cannot distinguish a legacy unsupported collection from a legitimately empty catalog.
+- Browser acceptance showed a deployed or legacy backend response without `accounts`. The frontend now preserves that distinction at the API boundary with an explicit unavailable variant.
+- An available empty array means there are genuinely no catalog accounts. An omitted/non-array collection means compatibility is unavailable; the UI does not infer emptiness and will not clamp or erase existing `account_ids`.
 - There is no member-level audit endpoint in the current frontend contract, so the activity tab shows an honest unavailable state.
 - The secondary-password contract does not expose attempts, and the member list does not expose aggregate lock state; those values remain unavailable rather than invented.
 
 ## Verification
 
-- Focused Users: `npm.cmd test -- src/pages/Users.test.tsx` - passed, 1 file / 19 tests.
-- Targeted Users + API: `npm.cmd test -- src/pages/Users.test.tsx src/api/auth.test.ts` - passed, 2 files / 28 tests.
-- Full frontend: `npm.cmd test` - passed, 52 files / 187 tests.
+- Focused Users: `npm.cmd test -- src/pages/Users.test.tsx` - passed independently, 1 file / 20 tests.
+- Targeted Users + API: `npm.cmd test -- src/pages/Users.test.tsx src/api/auth.test.ts` - passed, 2 files / 29 tests.
+- Desktop Chromium: `npx.cmd playwright test e2e/users-layout.spec.ts --project=chromium` - passed, 1 test at 1440 x 900.
+- Full frontend: `npm.cmd test` - passed, 52 files / 188 tests.
 - Build: `npm.cmd run build` - passed (`tsc --noEmit` and Vite production build); existing chunk-size warnings remain.
 - Lint: `npm.cmd run lint` - passed with 0 errors and 14 pre-existing warnings outside changed Task 6 modules.
 - Test stderr includes existing React Router future-flag, jsdom pseudo-element, and Ant Design deprecation warnings. The new modal tests also encounter the existing jsdom pseudo-element limitation.
@@ -95,4 +100,4 @@ The targeted API regression is `normalizes legacy access catalogs that omit opti
 
 - `createUser` and `updateUserAccess` are separate backend requests, so the browser cannot provide database-level atomic rollback. The UI reports partial success honestly and provides retry/recovery instead.
 - A page reload after partial creation loses the modal retry state, but the created member remains selected in the roster when the flow fails and can be repaired through the normal resource-permissions tab.
-- End-to-end confirmation against the authenticated legacy backend remains an environment-level follow-up.
+- The Chromium regression uses deterministic API mocks. Reconfirmation against the deployed legacy backend remains an environment-level follow-up.

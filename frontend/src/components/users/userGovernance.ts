@@ -82,9 +82,18 @@ export function hasAccessAnomaly(detail: UserDetail) {
   return detail.client_memberships.length === 0 && detail.project_memberships.length === 0;
 }
 
+export function hasAvailableAccountCatalog(
+  catalog: UserAccessCatalog | null,
+): catalog is UserAccessCatalog & {
+  account_catalog_status: "available";
+  accounts: AccountAccessCatalogItem[];
+} {
+  return catalog?.account_catalog_status === "available" && Array.isArray(catalog.accounts);
+}
+
 export function getAccessibleAccounts(detail: Pick<UserDetail, "has_global_access" | "client_memberships" | "project_memberships">, catalog: UserAccessCatalog | null) {
-  if (!catalog) return [] as AccountAccessCatalogItem[];
-  const accounts = Array.isArray(catalog.accounts) ? catalog.accounts : [];
+  if (!hasAvailableAccountCatalog(catalog)) return [] as AccountAccessCatalogItem[];
+  const accounts = catalog.accounts;
   if (detail.has_global_access) return [...accounts];
 
   const clientIds = new Set(detail.client_memberships.map((item) => item.client_id));

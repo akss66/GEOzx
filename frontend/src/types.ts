@@ -56,7 +56,7 @@ export interface AccountAccessCatalogItem {
   status: AccountStatus;
 }
 
-export interface UserAccessCatalog {
+interface UserAccessCatalogBase {
   clients: Array<{ id: number; name: string; status: "active" | "archived" }>;
   projects: Array<{
     id: number;
@@ -64,12 +64,16 @@ export interface UserAccessCatalog {
     name: string;
     status: "active" | "paused" | "archived";
   }>;
-  accounts: AccountAccessCatalogItem[];
 }
 
+export type UserAccessCatalog = UserAccessCatalogBase & (
+  | { account_catalog_status: "available"; accounts: AccountAccessCatalogItem[] }
+  | { account_catalog_status: "unavailable"; accounts?: never }
+);
+
 export interface UserAccessCatalogResponse {
-  clients?: UserAccessCatalog["clients"] | null;
-  projects?: UserAccessCatalog["projects"] | null;
+  clients?: UserAccessCatalogBase["clients"] | null;
+  projects?: UserAccessCatalogBase["projects"] | null;
   accounts?: Array<Omit<AccountAccessCatalogItem, "project_ids"> & {
     project_ids?: number[] | null;
   }> | null;
