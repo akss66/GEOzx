@@ -12,12 +12,15 @@ from app.db import get_session
 from app.models import Event, User
 from app.schemas.auth import (
     CreateUserRequest,
+    SecondaryPasswordStatusOut,
+    SetSecondaryPasswordRequest,
     UpdateUserAccessRequest,
     UpdateUserRequest,
     UserAccessCatalogOut,
     UserDetailOut,
     UserOut,
 )
+from app.services.admin_security import get_secondary_password_status, set_secondary_password
 from app.services.user_management import (
     build_user_detail,
     get_access_catalog,
@@ -27,6 +30,38 @@ from app.services.user_management import (
 )
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+def _secondary_password_status(
+    credential, deletion_available: bool
+) -> SecondaryPasswordStatusOut:
+    return SecondaryPasswordStatusOut(
+        configured=credential is not None,
+        deletion_available=deletion_available,
+        delete_available_at=credential.delete_available_at if credential else None,
+        locked_until=credential.locked_until if credential else None,
+    )
+
+
+@router.put("/me/secondary-password", response_model=SecondaryPasswordStatusOut)
+async def update_secondary_password(
+    body: SetSecondaryPasswordRequest,
+    admin: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> SecondaryPasswordStatusOut:
+    credential = await set_secondary_password(
+        session, admin, body.current_password, body.secondary_password
+    )
+    return _secondary_password_status(credential, deletion_available=False)
+
+
+@router.get("/me/secondary-password/status", response_model=SecondaryPasswordStatusOut)
+async def read_secondary_password_status(
+    admin: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> SecondaryPasswordStatusOut:
+    credential, deletion_available = await get_secondary_password_status(session, admin)
+    return _secondary_password_status(credential, deletion_available)
 
 
 @router.get("", response_model=list[UserOut])

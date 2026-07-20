@@ -1,5 +1,7 @@
 """Authentication and user-management schemas."""
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from app.models.enums import ClientStatus, ProjectStatus, UserRole, WorkspaceRole
@@ -9,6 +11,18 @@ class LoginRequest(BaseModel):
     # 登录按字符串查库即可，不对格式做严格校验（避免拒绝合法的已存标识，如 .local 域名）
     email: str
     password: str
+
+
+class SetSecondaryPasswordRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=128)
+    secondary_password: str = Field(min_length=8, max_length=128)
+
+
+class SecondaryPasswordStatusOut(BaseModel):
+    configured: bool
+    deletion_available: bool
+    delete_available_at: datetime | None
+    locked_until: datetime | None
 
 
 class UserOut(BaseModel):
