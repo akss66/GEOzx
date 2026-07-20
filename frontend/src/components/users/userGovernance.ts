@@ -73,9 +73,8 @@ export function normalizeAccessDraft(draft: AccessDraft): AccessDraft {
   };
 }
 
-export function isAccessDraftDirty(detail: UserDetail, draft: AccessDraft) {
-  return JSON.stringify(normalizeAccessDraft(detailToAccessDraft(detail)))
-    !== JSON.stringify(normalizeAccessDraft(draft));
+export function areAccessDraftsEqual(left: AccessDraft, right: AccessDraft) {
+  return JSON.stringify(normalizeAccessDraft(left)) === JSON.stringify(normalizeAccessDraft(right));
 }
 
 export function hasAccessAnomaly(detail: UserDetail) {
@@ -85,14 +84,15 @@ export function hasAccessAnomaly(detail: UserDetail) {
 
 export function getAccessibleAccounts(detail: Pick<UserDetail, "has_global_access" | "client_memberships" | "project_memberships">, catalog: UserAccessCatalog | null) {
   if (!catalog) return [] as AccountAccessCatalogItem[];
-  if (detail.has_global_access) return [...catalog.accounts];
+  const accounts = Array.isArray(catalog.accounts) ? catalog.accounts : [];
+  if (detail.has_global_access) return [...accounts];
 
   const clientIds = new Set(detail.client_memberships.map((item) => item.client_id));
   const projectIds = new Set(detail.project_memberships.map((item) => item.project_id));
 
-  return catalog.accounts.filter((account) => {
+  return accounts.filter((account) => {
     if (account.client_id != null && clientIds.has(account.client_id)) return true;
-    return account.project_ids.some((projectId) => projectIds.has(projectId));
+    return (account.project_ids ?? []).some((projectId) => projectIds.has(projectId));
   });
 }
 

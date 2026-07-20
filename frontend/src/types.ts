@@ -67,6 +67,14 @@ export interface UserAccessCatalog {
   accounts: AccountAccessCatalogItem[];
 }
 
+export interface UserAccessCatalogResponse {
+  clients?: UserAccessCatalog["clients"] | null;
+  projects?: UserAccessCatalog["projects"] | null;
+  accounts?: Array<Omit<AccountAccessCatalogItem, "project_ids"> & {
+    project_ids?: number[] | null;
+  }> | null;
+}
+
 export interface UpdateUserInput {
   email?: string;
   display_name?: string;

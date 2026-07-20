@@ -4,11 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import type { UserAccessCatalog, UserDetail, WorkspaceRole } from "../../types";
 import {
   clampSelectedAccounts,
+  areAccessDraftsEqual,
   detailToAccessDraft,
   formatGovernanceError,
   getAccessibleAccounts,
   getEffectiveAccounts,
-  isAccessDraftDirty,
   summarizeScopeMode,
   WORKSPACE_ROLE_OPTIONS,
   type AccessDraft,
@@ -23,9 +23,14 @@ export function MemberAccess({
   catalog: UserAccessCatalog;
   onSave: (draft: AccessDraft) => Promise<void>;
 }) {
-  const [draft, setDraft] = useState<AccessDraft>(() => detailToAccessDraft(detail));
+  const initialDraft = detailToAccessDraft(detail);
+  const [baseline, setBaseline] = useState<AccessDraft>(initialDraft);
+  const [draft, setDraft] = useState<AccessDraft>(initialDraft);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: "neutral" | "success" | "error"; text: string } | null>(null);
+  const catalogClients = Array.isArray(catalog.clients) ? catalog.clients : [];
+  const catalogProjects = Array.isArray(catalog.projects) ? catalog.projects : [];
+  const catalogAccounts = Array.isArray(catalog.accounts) ? catalog.accounts : [];
 
   const accessibleAccounts = useMemo(() => {
     const next = getAccessibleAccounts({
@@ -48,7 +53,7 @@ export function MemberAccess({
     [catalog, draft],
   );
 
-  const dirty = isAccessDraftDirty(detail, draft);
+  const dirty = !areAccessDraftsEqual(baseline, draft);
 
   useEffect(() => {
     if (draft.account_scope_mode !== "selected") return;
@@ -68,6 +73,7 @@ export function MemberAccess({
     };
     try {
       await onSave(nextDraft);
+      setBaseline(nextDraft);
       setDraft(nextDraft);
       setFeedback({ tone: "success", text: "资源权限已保存。" });
     } catch (error) {
@@ -136,11 +142,11 @@ export function MemberAccess({
           <section className="tz-effective-accounts" aria-label="最终生效账号">
             <header>
               <strong>最终生效账号</strong>
-              <span>{catalog.accounts.length} 个账号</span>
+              <span>{catalogAccounts.length} 个账号</span>
             </header>
-            {catalog.accounts.length ? (
+            {catalogAccounts.length ? (
               <div className="tz-effective-accounts__list">
-                {catalog.accounts.map((account) => (
+                {catalogAccounts.map((account) => (
                   <span key={account.id} className="tz-account-pill">
                     {account.nickname}
                   </span>
@@ -180,7 +186,7 @@ export function MemberAccess({
               <span>客户角色定义默认职责，项目角色可单独覆盖。</span>
             </header>
             <div className="tz-access-rows">
-              {catalog.clients.map((client) => {
+              {catalogClients.map((client) => {
                 const membership = draft.clients.find((item) => item.client_id === client.id);
                 return (
                   <div key={client.id} className={`tz-access-row${membership ? " is-selected" : ""}`}>
@@ -216,7 +222,7 @@ export function MemberAccess({
               <span>仅在项目职责不同于客户默认角色时配置。</span>
             </header>
             <div className="tz-access-rows">
-              {catalog.projects.map((project) => {
+              {catalogProjects.map((project) => {
                 const membership = draft.projects.find((item) => item.project_id === project.id);
                 return (
                   <div key={project.id} className={`tz-access-row${membership ? " is-selected" : ""}`}>

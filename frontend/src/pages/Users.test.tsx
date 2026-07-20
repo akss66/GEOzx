@@ -326,6 +326,96 @@ describe("Users", () => {
     expect(await screen.findByText("成员级操作记录暂不可用")).toBeInTheDocument();
   });
 
+  it("renders with the legacy access catalog shape when accounts are omitted", async () => {
+    vi.mocked(getUserAccessCatalog).mockResolvedValueOnce({
+      clients: clone(accessCatalog.clients),
+      projects: clone(accessCatalog.projects),
+    } as UserAccessCatalog);
+
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "成员与权限" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("tab", { name: "资源权限" }));
+    expect(await screen.findByText("全局访问（只读）")).toBeInTheDocument();
+    expect(screen.getByText("当前目录中没有账号。")).toBeInTheDocument();
+  });
+
+  it("creates a scoped member with initial resource authorization in one flow", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /新建成员/ }));
+    const dialog = await screen.findByRole("dialog", { name: "新建成员" });
+    fireEvent.change(within(dialog).getByLabelText("显示名称"), { target: { value: "新成员" } });
+    fireEvent.change(within(dialog).getByLabelText("登录邮箱"), { target: { value: "new@tzx.ai" } });
+    fireEvent.change(within(dialog).getByLabelText("初始密码"), { target: { value: "initial-password-123" } });
+    fireEvent.click(within(dialog).getByLabelText("授权客户 数码品牌"));
+    fireEvent.click(within(dialog).getByLabelText("授权项目 七月增长"));
+    fireEvent.change(within(dialog).getByLabelText("七月增长 初始角色"), { target: { value: "reviewer" } });
+    fireEvent.click(within(dialog).getByLabelText("新成员仅指定账号"));
+    fireEvent.click(within(dialog).getByLabelText("初始账号 数码品牌主号"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "创建成员" }));
+
+    await waitFor(() => expect(createUser).toHaveBeenCalledWith({
+      display_name: "新成员",
+      email: "new@tzx.ai",
+      password: "initial-password-123",
+      role: "user",
+    }));
+    await waitFor(() => expect(updateUserAccess).toHaveBeenCalledWith(13, {
+      clients: [{ client_id: 10, role: "operator" }],
+      projects: [{ project_id: 20, role: "reviewer" }],
+      account_scope_mode: "selected",
+      account_ids: [101],
+    }));
+    expect(vi.mocked(createUser).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(updateUserAccess).mock.invocationCallOrder[0]);
+    expect(await screen.findByRole("heading", { name: "新成员" })).toBeInTheDocument();
+  });
+
+  it("recovers from a partial create result without creating the identity twice", async () => {
+    vi.mocked(updateUserAccess).mockRejectedValueOnce(new Error("access unavailable"));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /新建成员/ }));
+    const dialog = await screen.findByRole("dialog", { name: "新建成员" });
+    fireEvent.change(within(dialog).getByLabelText("显示名称"), { target: { value: "待恢复成员" } });
+    fireEvent.change(within(dialog).getByLabelText("登录邮箱"), { target: { value: "recover@tzx.ai" } });
+    fireEvent.change(within(dialog).getByLabelText("初始密码"), { target: { value: "initial-password-123" } });
+    fireEvent.click(within(dialog).getByLabelText("授权客户 数码品牌"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "创建成员" }));
+
+    expect(await within(dialog).findByText(/成员已创建，但初始资源权限保存失败/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("显示名称")).toBeDisabled();
+    expect(within(dialog).getByLabelText("登录邮箱")).toBeDisabled();
+    expect(within(dialog).getByLabelText("初始密码")).toHaveValue("");
+    expect(within(dialog).getByLabelText("初始密码")).toBeDisabled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /重试保存权限/ }));
+
+    await waitFor(() => expect(updateUserAccess).toHaveBeenCalledTimes(2));
+    expect(createUser).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(within(dialog).queryByText(/成员已创建，但初始资源权限保存失败/)).not.toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "待恢复成员" })).toBeInTheDocument();
+  });
+
+  it("creates an administrator without requiring scoped grants", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /新建成员/ }));
+    const dialog = await screen.findByRole("dialog", { name: "新建成员" });
+    fireEvent.change(within(dialog).getByLabelText("显示名称"), { target: { value: "新管理员" } });
+    fireEvent.change(within(dialog).getByLabelText("登录邮箱"), { target: { value: "new-admin@tzx.ai" } });
+    fireEvent.change(within(dialog).getByLabelText("初始密码"), { target: { value: "initial-password-123" } });
+    fireEvent.change(within(dialog).getByLabelText("系统身份"), { target: { value: "admin" } });
+
+    expect(within(dialog).getByText("管理员拥有全局访问权限，不需要配置客户、项目或账号范围。")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "创建成员" }));
+
+    await waitFor(() => expect(createUser).toHaveBeenCalledWith(expect.objectContaining({ role: "admin" })));
+    expect(updateUserAccess).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "新管理员" })).toBeInTheDocument();
+  });
+
   it("filters the roster by search, role, anomaly, and status", async () => {
     renderPage();
     await screen.findByDisplayValue("系统管理员");
@@ -395,6 +485,9 @@ describe("Users", () => {
       account_scope_mode: "selected",
       account_ids: [101],
     })));
+    expect(await screen.findByText("资源权限已保存。")).toBeInTheDocument();
+    expect(screen.getByText("已与服务端同步")).toBeInTheDocument();
+    expect(screen.queryByText("有未保存更改")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
     await waitFor(() => expect(
@@ -575,6 +668,30 @@ describe("Users", () => {
     expect(screen.getByLabelText("仅指定账号")).toBeChecked();
     expect(screen.getByLabelText("数码品牌主号")).toBeChecked();
     expect(screen.getByText("有未保存更改")).toBeInTheDocument();
+  });
+
+  it("drops an unsaved access draft when the selected member changes", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
+    fireEvent.click(await screen.findByLabelText("仅指定账号"));
+    fireEvent.click(screen.getByLabelText("数码品牌主号"));
+    expect(screen.getByText("有未保存更改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: /停用成员/ }),
+    ).toHaveAttribute("aria-pressed", "true"));
+    fireEvent.click(screen.getByRole("button", { name: /运营同事/ }));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: /运营同事/ }),
+    ).toHaveAttribute("aria-pressed", "true"));
+    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
+
+    expect(await screen.findByLabelText("全部可见账号")).toBeChecked();
+    expect(screen.getByText("已与服务端同步")).toBeInTheDocument();
+    expect(screen.queryByLabelText("数码品牌主号")).not.toBeInTheDocument();
   });
 
   it("translates stable business errors from overview saves", async () => {

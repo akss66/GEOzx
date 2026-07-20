@@ -45,6 +45,21 @@ describe("user management api", () => {
     expect(apiGet).toHaveBeenNthCalledWith(2, "/users/access-catalog");
   });
 
+  it("normalizes legacy access catalogs that omit optional collections", async () => {
+    apiGet.mockResolvedValue({
+      data: {
+        clients: [{ id: 3, name: "Legacy client", status: "active" }],
+        projects: [{ id: 8, client_id: 3, name: "Legacy project", status: "active" }],
+      },
+    });
+
+    await expect(getUserAccessCatalog()).resolves.toEqual({
+      clients: [{ id: 3, name: "Legacy client", status: "active" }],
+      projects: [{ id: 8, client_id: 3, name: "Legacy project", status: "active" }],
+      accounts: [],
+    });
+  });
+
   it("updates user identity and replaces workspace access", async () => {
     apiPatch.mockResolvedValue({ data: {} });
     apiPut.mockResolvedValue({ data: {} });

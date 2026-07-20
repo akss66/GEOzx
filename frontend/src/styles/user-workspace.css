@@ -668,6 +668,110 @@
   gap: 12px;
 }
 
+.tz-create-member-modal .ant-modal-body {
+  max-height: calc(100vh - 210px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.tz-create-section,
+.tz-create-access {
+  display: grid;
+  gap: 12px;
+}
+
+.tz-create-section > header h3,
+.tz-create-access > header h3 {
+  margin: 0;
+  color: var(--tz-ink);
+  font-size: 15px;
+}
+
+.tz-create-section > header p,
+.tz-create-access > header p {
+  margin: 3px 0 0;
+  color: var(--tz-muted);
+  font-size: 12px;
+}
+
+.tz-modal-form--identity,
+.tz-create-access__grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tz-create-access {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--tz-line);
+}
+
+.tz-create-access__grid {
+  display: grid;
+  gap: 12px;
+}
+
+.tz-create-access__group,
+.tz-create-access__scope {
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 10px;
+}
+
+.tz-create-access__group legend,
+.tz-create-access__scope legend {
+  padding: 0 4px;
+  color: var(--tz-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.tz-create-access__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 8px;
+  align-items: center;
+  min-height: 40px;
+  border-bottom: 1px solid var(--tz-line-subtle);
+}
+
+.tz-create-access__row:last-child {
+  border-bottom: 0;
+}
+
+.tz-create-access__row label,
+.tz-create-global-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tz-create-access__scope {
+  display: grid;
+  gap: 10px;
+}
+
+.tz-create-access__accounts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tz-create-global-note {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 10px;
+  background: var(--tz-surface-soft);
+  color: var(--tz-ink-soft);
+  font-size: 13px;
+}
+
+.tz-create-global-note strong {
+  color: var(--tz-ink);
+}
+
 .tz-user-access-loading,
 .tz-member-activity .tz-operational-state,
 .tz-member-inspector > .tz-operational-state {

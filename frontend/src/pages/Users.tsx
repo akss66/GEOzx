@@ -24,9 +24,15 @@ import {
 import { presentApiError } from "../api/errors";
 import { MemberAccess } from "../components/users/MemberAccess";
 import { MemberActivity } from "../components/users/MemberActivity";
+import { InitialMemberAccess } from "../components/users/InitialMemberAccess";
 import { MemberOverview } from "../components/users/MemberOverview";
 import { MemberSecurity } from "../components/users/MemberSecurity";
-import { formatGovernanceError, getAccessibleAccounts, hasAccessAnomaly } from "../components/users/userGovernance";
+import {
+  formatGovernanceError,
+  getAccessibleAccounts,
+  hasAccessAnomaly,
+  type AccessDraft,
+} from "../components/users/userGovernance";
 import { OperationalState } from "../components/ui";
 import { useAuth } from "../stores/auth";
 import type {
@@ -55,6 +61,13 @@ const DEFAULT_CREATE_DRAFT: CreateDraft = {
   role: "user",
 };
 
+const DEFAULT_CREATE_ACCESS: AccessDraft = {
+  clients: [],
+  projects: [],
+  account_scope_mode: "all_accessible",
+  account_ids: [],
+};
+
 export default function Users() {
   const queryClient = useQueryClient();
   const currentUser = useAuth((state) => state.user);
@@ -66,6 +79,8 @@ export default function Users() {
   const [anomalyFilter, setAnomalyFilter] = useState<AnomalyFilter>("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(DEFAULT_CREATE_DRAFT);
+  const [createAccessDraft, setCreateAccessDraft] = useState<AccessDraft>(DEFAULT_CREATE_ACCESS);
+  const [createdUserId, setCreatedUserId] = useState<number | null>(null);
   const [createFeedback, setCreateFeedback] = useState<string | null>(null);
 
   const usersQuery = useQuery({
@@ -108,6 +123,10 @@ export default function Users() {
     mutationFn: (input: CreateUserInput) => createUser(input),
   });
 
+  const initialAccessMutation = useMutation({
+    mutationFn: ({ userId, input }: { userId: number; input: AccessDraft }) => updateUserAccess(userId, input),
+  });
+
   const updateUserMutation = useMutation({
     mutationFn: ({ userId, input }: { userId: number; input: Partial<User> & { role?: Role } }) => updateUser(userId, input),
   });
@@ -126,6 +145,8 @@ export default function Users() {
     mutationFn: ({ userId, input }: { userId: number; input: Parameters<typeof resetUserPassword>[1] }) =>
       resetUserPassword(userId, input),
   });
+
+  const createFlowPending = createMutation.isPending || initialAccessMutation.isPending;
 
   const filteredUsers = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -214,18 +235,63 @@ export default function Users() {
     ]);
   }
 
+  function resetCreateFlow() {
+    setCreateOpen(false);
+    setCreateDraft(DEFAULT_CREATE_DRAFT);
+    setCreateAccessDraft(DEFAULT_CREATE_ACCESS);
+    setCreatedUserId(null);
+    setCreateFeedback(null);
+  }
+
+  function openCreateFlow() {
+    setCreateDraft(DEFAULT_CREATE_DRAFT);
+    setCreateAccessDraft(DEFAULT_CREATE_ACCESS);
+    setCreatedUserId(null);
+    setCreateFeedback(null);
+    setCreateOpen(true);
+  }
+
+  async function saveInitialAccess(userId: number) {
+    try {
+      await initialAccessMutation.mutateAsync({ userId, input: createAccessDraft });
+      await queryClient.invalidateQueries({ queryKey: ["user-detail", userId] });
+      resetCreateFlow();
+    } catch (error) {
+      setCreatedUserId(userId);
+      const reason = formatGovernanceError(error, "初始资源权限保存失败，请稍后重试。");
+      setCreateFeedback(
+        `成员已创建，但初始资源权限保存失败。成员身份不会自动回滚；请调整授权后重试。原因：${reason}`,
+      );
+    }
+  }
+
   async function handleCreateUser() {
     setCreateFeedback(null);
+    if (createdUserId != null) {
+      await saveInitialAccess(createdUserId);
+      return;
+    }
+
+    let created: User;
     try {
-      const created = await createMutation.mutateAsync(createDraft);
-      setCreateOpen(false);
-      setCreateDraft(DEFAULT_CREATE_DRAFT);
-      await queryClient.invalidateQueries({ queryKey: ["users"] });
-      setSelectedUserId(created.id);
-      setActiveTab("overview");
+      created = await createMutation.mutateAsync(createDraft);
     } catch (error) {
       setCreateFeedback(formatGovernanceError(error, "新建成员失败，请检查输入后重试。"));
+      return;
     }
+
+    setCreateDraft((current) => ({ ...current, password: "" }));
+    await queryClient.invalidateQueries({ queryKey: ["users"] });
+    setSelectedUserId(created.id);
+    setActiveTab("overview");
+
+    if (created.role === "admin") {
+      resetCreateFlow();
+      return;
+    }
+
+    setCreatedUserId(created.id);
+    await saveInitialAccess(created.id);
   }
 
   async function handleSaveIdentity(draft: { display_name: string; email: string; role: Role }) {
@@ -314,7 +380,7 @@ export default function Users() {
           <h1>成员与权限</h1>
           <p>用一张紧凑桌面工作台统一处理成员身份、资源范围、登录安全和危险操作。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreateFlow}>
           新建成员
         </Button>
       </header>
@@ -504,7 +570,7 @@ export default function Users() {
                   {
                     key: "access",
                     label: "资源权限",
-                    children: inspectorLoading || !selectedDetail || catalogQuery.isLoading || !catalogQuery.data ? (
+                    children: inspectorLoading || !selectedDetail || catalogQuery.isLoading ? (
                       <div className="tz-user-access-loading">
                         <Skeleton active paragraph={{ rows: 8 }} />
                       </div>
@@ -518,14 +584,14 @@ export default function Users() {
                         actionLabel="重试"
                         onAction={() => void catalogQuery.refetch()}
                       />
-                    ) : (
+                    ) : catalogQuery.data ? (
                       <MemberAccess
                         key={selectedDetail.id}
                         detail={selectedDetail}
                         catalog={catalogQuery.data}
                         onSave={handleSaveAccess}
                       />
-                    ),
+                    ) : null,
                   },
                   {
                     key: "security",
@@ -569,52 +635,85 @@ export default function Users() {
       </section>
 
       <Modal
+        className="tz-create-member-modal"
         title="新建成员"
         open={createOpen}
-        onCancel={() => {
-          setCreateOpen(false);
-          setCreateFeedback(null);
-        }}
+        width={760}
+        onCancel={resetCreateFlow}
         onOk={() => void handleCreateUser()}
-        confirmLoading={createMutation.isPending}
-        okText="创建成员"
+        confirmLoading={createFlowPending}
+        okButtonProps={{
+          disabled: createDraft.role === "user" && (!catalogQuery.data || catalogQuery.isError),
+        }}
+        cancelButtonProps={{ disabled: createFlowPending }}
+        okText={createdUserId == null ? "创建成员" : "重试保存权限"}
         cancelText="取消"
       >
-        <div className="tz-modal-form">
-          <label className="tz-field">
-            <span>显示名称</span>
-            <Input
-              value={createDraft.display_name}
-              onChange={(event) => setCreateDraft((current) => ({ ...current, display_name: event.target.value }))}
-            />
-          </label>
-          <label className="tz-field">
-            <span>登录邮箱</span>
-            <Input
-              type="email"
-              value={createDraft.email}
-              onChange={(event) => setCreateDraft((current) => ({ ...current, email: event.target.value }))}
-            />
-          </label>
-          <label className="tz-field">
-            <span>初始密码</span>
-            <Input.Password
-              value={createDraft.password}
-              onChange={(event) => setCreateDraft((current) => ({ ...current, password: event.target.value }))}
-            />
-          </label>
-          <label className="tz-field">
-            <span>系统身份</span>
-            <select
-              className="tz-native-select"
-              value={createDraft.role}
-              onChange={(event) => setCreateDraft((current) => ({ ...current, role: event.target.value as Role }))}
-            >
-              <option value="user">成员</option>
-              <option value="admin">管理员</option>
-            </select>
-          </label>
-        </div>
+        <section className="tz-create-section" aria-labelledby="create-identity-heading">
+          <header>
+            <h3 id="create-identity-heading">身份与登录</h3>
+            <p>成员身份创建成功后，再保存下方初始资源授权。</p>
+          </header>
+          <div className="tz-modal-form tz-modal-form--identity">
+            <label className="tz-field">
+              <span>显示名称</span>
+              <Input
+                disabled={createdUserId != null || createFlowPending}
+                value={createDraft.display_name}
+                onChange={(event) => setCreateDraft((current) => ({ ...current, display_name: event.target.value }))}
+              />
+            </label>
+            <label className="tz-field">
+              <span>登录邮箱</span>
+              <Input
+                disabled={createdUserId != null || createFlowPending}
+                type="email"
+                value={createDraft.email}
+                onChange={(event) => setCreateDraft((current) => ({ ...current, email: event.target.value }))}
+              />
+            </label>
+            <label className="tz-field">
+              <span>初始密码</span>
+              <Input.Password
+                disabled={createdUserId != null || createFlowPending}
+                value={createDraft.password}
+                onChange={(event) => setCreateDraft((current) => ({ ...current, password: event.target.value }))}
+              />
+            </label>
+            <label className="tz-field">
+              <span>系统身份</span>
+              <select
+                className="tz-native-select"
+                disabled={createdUserId != null || createFlowPending}
+                value={createDraft.role}
+                onChange={(event) => setCreateDraft((current) => ({ ...current, role: event.target.value as Role }))}
+              >
+                <option value="user">成员</option>
+                <option value="admin">管理员</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        {createDraft.role === "admin" ? (
+          <div className="tz-create-global-note" role="status">
+            <strong>全局访问</strong>
+            <span>管理员拥有全局访问权限，不需要配置客户、项目或账号范围。</span>
+          </div>
+        ) : catalogQuery.data ? (
+          <InitialMemberAccess
+            catalog={catalogQuery.data}
+            disabled={createFlowPending}
+            draft={createAccessDraft}
+            onChange={setCreateAccessDraft}
+          />
+        ) : catalogError ? (
+          <div className="tz-create-global-note" role="alert">
+            <strong>初始授权目录不可用</strong>
+            <span>{catalogError.message} 请在重试加载后再创建普通成员。</span>
+            <Button size="small" onClick={() => void catalogQuery.refetch()}>重试加载</Button>
+          </div>
+        ) : <Skeleton active paragraph={{ rows: 4 }} />}
         {createFeedback ? <p className="tz-inline-feedback is-error" role="alert">{createFeedback}</p> : null}
       </Modal>
     </div>

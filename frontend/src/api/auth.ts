@@ -11,6 +11,7 @@ import type {
   UpdateUserInput,
   User,
   UserAccessCatalog,
+  UserAccessCatalogResponse,
   UserDeletionPreview,
   UserDetail,
 } from "../types";
@@ -41,8 +42,17 @@ export async function getUserDetail(userId: number): Promise<UserDetail> {
 }
 
 export async function getUserAccessCatalog(): Promise<UserAccessCatalog> {
-  const { data } = await api.get<UserAccessCatalog>("/users/access-catalog");
-  return data;
+  const { data } = await api.get<UserAccessCatalogResponse>("/users/access-catalog");
+  return {
+    clients: Array.isArray(data?.clients) ? data.clients : [],
+    projects: Array.isArray(data?.projects) ? data.projects : [],
+    accounts: Array.isArray(data?.accounts)
+      ? data.accounts.map((account) => ({
+          ...account,
+          project_ids: Array.isArray(account.project_ids) ? account.project_ids : [],
+        }))
+      : [],
+  };
 }
 
 export async function updateUser(userId: number, input: UpdateUserInput): Promise<User> {
