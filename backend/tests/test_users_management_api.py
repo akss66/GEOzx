@@ -5,6 +5,8 @@ from sqlalchemy import select
 
 from app.core.security import hash_password
 from app.models import (
+    Account,
+    AccountMembership,
     Client,
     ClientMembership,
     Org,
@@ -12,7 +14,7 @@ from app.models import (
     ProjectMembership,
     User,
 )
-from app.models.enums import UserRole, WorkspaceRole
+from app.models.enums import Platform, UserRole, WorkspaceRole
 
 
 async def _login(client, email: str, password: str) -> str:
@@ -42,8 +44,16 @@ async def test_admin_reads_user_detail_and_access_catalog(client, session, admin
     first_client, second_client, first_project, second_project = await _workspace(
         session, admin.org_id
     )
+    catalog_account = Account(
+        org_id=admin.org_id,
+        client_id=first_client.id,
+        project_id=first_project.id,
+        platform=Platform.DOUYIN,
+        nickname="Catalog account",
+    )
     session.add_all(
         [
+            catalog_account,
             ClientMembership(
                 client_id=first_client.id,
                 user_id=member.id,
@@ -64,6 +74,8 @@ async def test_admin_reads_user_detail_and_access_catalog(client, session, admin
 
     assert detail.status_code == 200
     assert detail.json()["has_global_access"] is False
+    assert detail.json()["account_scope_mode"] == "all_accessible"
+    assert detail.json()["account_ids"] == []
     assert detail.json()["client_memberships"] == [
         {"client_id": first_client.id, "client_name": "品牌甲", "role": "operator"}
     ]
@@ -85,6 +97,16 @@ async def test_admin_reads_user_detail_and_access_catalog(client, session, admin
         first_project.id,
         second_project.id,
     }
+    assert catalog.json()["accounts"] == [
+        {
+            "id": catalog_account.id,
+            "client_id": first_client.id,
+            "project_ids": [first_project.id],
+            "nickname": "Catalog account",
+            "platform": "douyin",
+            "status": "active",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -99,6 +121,13 @@ async def test_admin_atomically_replaces_user_workspace_access(client, session, 
             role=WorkspaceRole.OPERATOR,
         )
     )
+    selected_account = Account(
+        org_id=admin.org_id,
+        client_id=second_client.id,
+        platform=Platform.DOUYIN,
+        nickname="Selected account",
+    )
+    session.add(selected_account)
     await session.commit()
     token = await _login(client, admin.email, "admin-pw-123")
 
@@ -111,6 +140,8 @@ async def test_admin_atomically_replaces_user_workspace_access(client, session, 
                 {"project_id": first_project.id, "role": "editor"},
                 {"project_id": second_project.id, "role": "reviewer"},
             ],
+            "account_scope_mode": "selected",
+            "account_ids": [selected_account.id],
         },
     )
 
@@ -121,6 +152,8 @@ async def test_admin_atomically_replaces_user_workspace_access(client, session, 
         "editor",
         "reviewer",
     }
+    assert body["account_scope_mode"] == "selected"
+    assert body["account_ids"] == [selected_account.id]
     stored_clients = list(
         await session.scalars(
             select(ClientMembership).where(ClientMembership.user_id == member.id)
@@ -131,10 +164,119 @@ async def test_admin_atomically_replaces_user_workspace_access(client, session, 
             select(ProjectMembership).where(ProjectMembership.user_id == member.id)
         )
     )
+    stored_accounts = list(
+        await session.scalars(
+            select(AccountMembership).where(AccountMembership.user_id == member.id)
+        )
+    )
     assert [(item.client_id, item.role) for item in stored_clients] == [
         (second_client.id, WorkspaceRole.LEAD)
     ]
     assert len(stored_projects) == 2
+    assert [item.account_id for item in stored_accounts] == [selected_account.id]
+
+
+@pytest.mark.asyncio
+async def test_selected_accounts_must_be_in_requested_workspace_scope(client, session, admin, member):
+    first_client, second_client, _, _ = await _workspace(session, admin.org_id)
+    out_of_scope_account = Account(
+        org_id=admin.org_id,
+        client_id=second_client.id,
+        platform=Platform.DOUYIN,
+        nickname="Out of scope account",
+    )
+    session.add(out_of_scope_account)
+    await session.commit()
+    token = await _login(client, admin.email, "admin-pw-123")
+
+    response = await client.put(
+        f"/users/{member.id}/access",
+        headers=_auth(token),
+        json={
+            "clients": [{"client_id": first_client.id, "role": "operator"}],
+            "projects": [],
+            "account_scope_mode": "selected",
+            "account_ids": [out_of_scope_account.id],
+        },
+    )
+
+    assert response.status_code == 404
+    assert list(
+        await session.scalars(
+            select(ClientMembership).where(ClientMembership.user_id == member.id)
+        )
+    ) == []
+    assert list(
+        await session.scalars(
+            select(AccountMembership).where(AccountMembership.user_id == member.id)
+        )
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_cross_org_selected_account_assignment_is_rejected_without_partial_write(
+    client, session, admin, member
+):
+    first_client, _, _, _ = await _workspace(session, admin.org_id)
+    other_org = Org(name="Other organization")
+    other_account = Account(
+        org=other_org,
+        platform=Platform.DOUYIN,
+        nickname="Cross-org account",
+    )
+    session.add(other_account)
+    await session.commit()
+    token = await _login(client, admin.email, "admin-pw-123")
+
+    response = await client.put(
+        f"/users/{member.id}/access",
+        headers=_auth(token),
+        json={
+            "clients": [{"client_id": first_client.id, "role": "operator"}],
+            "projects": [],
+            "account_scope_mode": "selected",
+            "account_ids": [other_account.id],
+        },
+    )
+
+    assert response.status_code == 404
+    assert list(
+        await session.scalars(
+            select(ClientMembership).where(ClientMembership.user_id == member.id)
+        )
+    ) == []
+    assert list(
+        await session.scalars(
+            select(AccountMembership).where(AccountMembership.user_id == member.id)
+        )
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_selected_account_ids_are_rejected(client, session, admin, member):
+    workspace, _, _, _ = await _workspace(session, admin.org_id)
+    account = Account(
+        org_id=admin.org_id,
+        client_id=workspace.id,
+        platform=Platform.DOUYIN,
+        nickname="Duplicate account",
+    )
+    session.add(account)
+    await session.commit()
+    token = await _login(client, admin.email, "admin-pw-123")
+
+    response = await client.put(
+        f"/users/{member.id}/access",
+        headers=_auth(token),
+        json={
+            "clients": [{"client_id": workspace.id, "role": "operator"}],
+            "projects": [],
+            "account_scope_mode": "selected",
+            "account_ids": [account.id, account.id],
+        },
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

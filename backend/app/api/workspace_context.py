@@ -7,13 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.workspace_access import (
+    accessible_account_clause,
     accessible_client_ids,
     require_client_access,
     require_project_access,
 )
 from app.db import get_session
-from app.models import Account, Client, ClientMembership, Project, ProjectAccount
-from app.models.enums import ClientStatus, UserRole
+from app.models import Account, Client, Project, ProjectAccount
+from app.models.enums import ClientStatus
 from app.schemas.client import ClientOut
 from app.schemas.workspace import AccountOut, ProjectOut, account_out
 
@@ -85,13 +86,9 @@ async def get_workspace_context(
         if selected_project.client_id != selected_client.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 
-    account_query = select(Account).where(Account.client_id == selected_client.id)
-    allowed_project_ids = [project.id for project in projects]
-    direct_membership = await session.scalar(
-        select(ClientMembership.id).where(
-            ClientMembership.client_id == selected_client.id,
-            ClientMembership.user_id == user.id,
-        )
+    account_query = select(Account).where(
+        Account.client_id == selected_client.id,
+        await accessible_account_clause(session, user),
     )
     if selected_project is not None:
         linked = select(ProjectAccount.account_id).where(
@@ -99,13 +96,6 @@ async def get_workspace_context(
         )
         account_query = account_query.where(
             or_(Account.project_id == selected_project.id, Account.id.in_(linked))
-        )
-    elif direct_membership is None and user.role != UserRole.ADMIN:
-        linked = select(ProjectAccount.account_id).where(
-            ProjectAccount.project_id.in_(allowed_project_ids)
-        )
-        account_query = account_query.where(
-            or_(Account.project_id.in_(allowed_project_ids), Account.id.in_(linked))
         )
     accounts = (await session.scalars(account_query.order_by(Account.id))).all()
 

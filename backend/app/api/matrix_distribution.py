@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.approval_audit import add_approval_requested
 from app.core.auth import CurrentUser
+from app.core.workspace_access import accessible_account_ids
 from app.db import get_session
 from app.models import (
     Account,
@@ -33,15 +34,15 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 async def _load_accounts(
     session: AsyncSession,
-    org_id: int,
+    user: CurrentUser,
     account_ids: list[int],
 ) -> list[Account]:
     unique_ids = sorted(set(account_ids))
-    rows = (
-        await session.scalars(
-            select(Account).where(Account.org_id == org_id, Account.id.in_(unique_ids))
-        )
-    ).all()
+    query = select(Account).where(Account.org_id == user.org_id, Account.id.in_(unique_ids))
+    visible_account_ids = await accessible_account_ids(session, user)
+    if visible_account_ids is not None:
+        query = query.where(Account.id.in_(visible_account_ids))
+    rows = (await session.scalars(query)).all()
     if len(rows) != len(unique_ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
     if any(account.status != AccountStatus.ACTIVE for account in rows):
@@ -94,7 +95,7 @@ async def create_matrix_distribution_plan(
     session: SessionDep,
 ) -> MatrixDistributionPlanOut:
     platforms = sorted(set(body.platforms), key=lambda platform: platform.value)
-    accounts = await _load_accounts(session, user.org_id, body.account_ids)
+    accounts = await _load_accounts(session, user, body.account_ids)
     materials = await _load_materials(session, user.org_id, body.material_ids, body.content_item_id)
     account_platforms = {account.platform for account in accounts}
     if not account_platforms.issubset(set(platforms)):

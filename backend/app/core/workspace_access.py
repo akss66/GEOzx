@@ -9,6 +9,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     Account,
+    AccountMembership,
     Client,
     ClientMembership,
     Project,
@@ -66,29 +67,72 @@ async def accessible_project_ids(session: AsyncSession, user: User) -> set[int]:
     return direct | client_scoped
 
 
-async def accessible_account_clause(
-    session: AsyncSession, user: User
-) -> ColumnElement[bool]:
-    """Return the account visibility boundary for the current workspace member."""
+async def accessible_account_ids(
+    session: AsyncSession,
+    user: User,
+    client_id: int | None = None,
+    project_id: int | None = None,
+) -> set[int] | None:
+    """Return account IDs visible through workspace roles and account scope.
+
+    Account membership narrows existing client/project visibility. It never creates
+    a workspace role or access path on its own. ``None`` denotes an administrator's
+    unrestricted access within their organization.
+    """
     if user.role == UserRole.ADMIN:
-        return Account.org_id == user.org_id
+        return None
 
     direct_client_ids = select(ClientMembership.client_id).where(
         ClientMembership.user_id == user.id
     )
-    project_ids = await accessible_project_ids(session, user)
+    accessible_projects = await accessible_project_ids(session, user)
     clauses: list[ColumnElement[bool]] = [Account.client_id.in_(direct_client_ids)]
-    if project_ids:
+    if accessible_projects:
         linked_accounts = select(ProjectAccount.account_id).where(
-            ProjectAccount.project_id.in_(project_ids)
+            ProjectAccount.project_id.in_(accessible_projects)
         )
         clauses.extend(
             [
-                Account.project_id.in_(project_ids),
+                Account.project_id.in_(accessible_projects),
                 Account.id.in_(linked_accounts),
             ]
         )
-    return or_(*clauses) if clauses else false()
+
+    query = select(Account.id).where(Account.org_id == user.org_id, or_(*clauses))
+    if client_id is not None:
+        query = query.where(Account.client_id == client_id)
+    if project_id is not None:
+        linked_project_accounts = select(ProjectAccount.account_id).where(
+            ProjectAccount.project_id == project_id
+        )
+        query = query.where(
+            or_(
+                Account.project_id == project_id,
+                Account.id.in_(linked_project_accounts),
+            )
+        )
+    visible_ids = set(await session.scalars(query))
+
+    if user.account_scope_mode == "selected":
+        selected_ids = set(
+            await session.scalars(
+                select(AccountMembership.account_id).where(
+                    AccountMembership.user_id == user.id
+                )
+            )
+        )
+        visible_ids &= selected_ids
+    return visible_ids
+
+
+async def accessible_account_clause(
+    session: AsyncSession, user: User
+) -> ColumnElement[bool]:
+    """Return the account visibility boundary for the current workspace member."""
+    visible_ids = await accessible_account_ids(session, user)
+    if visible_ids is None:
+        return Account.org_id == user.org_id
+    return Account.id.in_(visible_ids) if visible_ids else false()
 
 
 async def require_client_access(
@@ -179,6 +223,10 @@ async def require_account_access(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
     if user.role == UserRole.ADMIN:
         return account
+
+    visible_ids = await accessible_account_ids(session, user)
+    if visible_ids is None or account.id not in visible_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
 
     memberships: list[WorkspaceRole] = []
     if account.client_id is not None:

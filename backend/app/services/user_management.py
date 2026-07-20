@@ -1,19 +1,23 @@
 """User lifecycle, workspace authorization, and audit helpers."""
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    Account,
+    AccountMembership,
     Client,
     ClientMembership,
     Event,
     Project,
+    ProjectAccount,
     ProjectMembership,
     User,
 )
 from app.models.enums import UserRole
 from app.schemas.auth import (
+    AccountAccessCatalogItem,
     ClientAccessCatalogItem,
     ClientMembershipOut,
     ProjectAccessCatalogItem,
@@ -55,6 +59,17 @@ async def build_user_detail(session: AsyncSession, user: User) -> UserDetailOut:
             .order_by(Project.name, Project.id)
         )
     ).all()
+    account_ids = list(
+        await session.scalars(
+            select(AccountMembership.account_id)
+            .join(Account, Account.id == AccountMembership.account_id)
+            .where(
+                AccountMembership.user_id == user.id,
+                Account.org_id == user.org_id,
+            )
+            .order_by(AccountMembership.account_id)
+        )
+    )
     return UserDetailOut(
         id=user.id,
         email=user.email,
@@ -62,6 +77,8 @@ async def build_user_detail(session: AsyncSession, user: User) -> UserDetailOut:
         role=user.role,
         is_active=user.is_active,
         has_global_access=user.role == UserRole.ADMIN,
+        account_scope_mode=user.account_scope_mode,
+        account_ids=account_ids,
         client_memberships=[
             ClientMembershipOut(
                 client_id=membership.client_id,
@@ -94,6 +111,23 @@ async def get_access_catalog(session: AsyncSession, org_id: int) -> UserAccessCa
             select(Project).where(Project.org_id == org_id).order_by(Project.name, Project.id)
         )
     )
+    accounts = list(
+        await session.scalars(
+            select(Account).where(Account.org_id == org_id).order_by(Account.nickname, Account.id)
+        )
+    )
+    project_rows = []
+    if accounts:
+        project_rows = (
+            await session.execute(
+                select(ProjectAccount.account_id, ProjectAccount.project_id).where(
+                    ProjectAccount.account_id.in_([account.id for account in accounts])
+                )
+            )
+        ).all()
+    project_ids_by_account: dict[int, set[int]] = {}
+    for account_id, project_id in project_rows:
+        project_ids_by_account.setdefault(account_id, set()).add(project_id)
     return UserAccessCatalogOut(
         clients=[
             ClientAccessCatalogItem(id=item.id, name=item.name, status=item.status)
@@ -107,6 +141,20 @@ async def get_access_catalog(session: AsyncSession, org_id: int) -> UserAccessCa
                 status=item.status,
             )
             for item in projects
+        ],
+        accounts=[
+            AccountAccessCatalogItem(
+                id=item.id,
+                client_id=item.client_id,
+                project_ids=sorted(
+                    project_ids_by_account.get(item.id, set())
+                    | ({item.project_id} if item.project_id is not None else set())
+                ),
+                nickname=item.nickname,
+                platform=item.platform,
+                status=item.status,
+            )
+            for item in accounts
         ],
     )
 
@@ -196,6 +244,7 @@ async def replace_user_access(
 
     requested_client_ids = {item.client_id for item in body.clients}
     requested_project_ids = {item.project_id for item in body.projects}
+    requested_account_ids = set(body.account_ids)
     if requested_client_ids:
         valid_client_ids = set(
             await session.scalars(
@@ -219,30 +268,76 @@ async def replace_user_access(
         if valid_project_ids != requested_project_ids:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 
+    if body.account_scope_mode == "selected" and requested_account_ids:
+        valid_accounts = list(
+            await session.scalars(
+                select(Account).where(
+                    Account.org_id == actor.org_id,
+                    Account.id.in_(requested_account_ids),
+                )
+            )
+        )
+        if {account.id for account in valid_accounts} != requested_account_ids:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+
+        scope_clauses = []
+        if requested_client_ids:
+            scope_clauses.append(Account.client_id.in_(requested_client_ids))
+        if requested_project_ids:
+            linked_accounts = select(ProjectAccount.account_id).where(
+                ProjectAccount.project_id.in_(requested_project_ids)
+            )
+            scope_clauses.extend(
+                [
+                    Account.project_id.in_(requested_project_ids),
+                    Account.id.in_(linked_accounts),
+                ]
+            )
+        scoped_account_ids = set()
+        if scope_clauses:
+            scoped_account_ids = set(
+                await session.scalars(
+                    select(Account.id).where(
+                        Account.org_id == actor.org_id,
+                        Account.id.in_(requested_account_ids),
+                        or_(*scope_clauses),
+                    )
+                )
+            )
+        if scoped_account_ids != requested_account_ids:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+
     await session.execute(
         delete(ClientMembership).where(ClientMembership.user_id == target.id)
     )
     await session.execute(
         delete(ProjectMembership).where(ProjectMembership.user_id == target.id)
     )
-    session.add_all(
-        [
-            ClientMembership(
-                client_id=item.client_id,
-                user_id=target.id,
-                role=item.role,
-            )
-            for item in body.clients
-        ]
-        + [
-            ProjectMembership(
-                project_id=item.project_id,
-                user_id=target.id,
-                role=item.role,
-            )
-            for item in body.projects
-        ]
+    await session.execute(
+        delete(AccountMembership).where(AccountMembership.user_id == target.id)
     )
+    target.account_scope_mode = body.account_scope_mode
+    memberships = [
+        ClientMembership(
+            client_id=item.client_id,
+            user_id=target.id,
+            role=item.role,
+        )
+        for item in body.clients
+    ] + [
+        ProjectMembership(
+            project_id=item.project_id,
+            user_id=target.id,
+            role=item.role,
+        )
+        for item in body.projects
+    ]
+    if body.account_scope_mode == "selected":
+        memberships.extend(
+            AccountMembership(user_id=target.id, account_id=account_id)
+            for account_id in sorted(requested_account_ids)
+        )
+    session.add_all(memberships)
     session.add(
         Event(
             type="user.access.updated",
@@ -250,8 +345,18 @@ async def replace_user_access(
                 "org_id": actor.org_id,
                 "actor_user_id": actor.id,
                 "target_user_id": target.id,
-                "clients": [item.model_dump(mode="json") for item in body.clients],
-                "projects": [item.model_dump(mode="json") for item in body.projects],
+                "clients": [
+                    {"client_id": item.client_id, "role": item.role.value}
+                    for item in body.clients
+                ],
+                "projects": [
+                    {"project_id": item.project_id, "role": item.role.value}
+                    for item in body.projects
+                ],
+                "account_scope_mode": body.account_scope_mode,
+                "account_ids": sorted(requested_account_ids)
+                if body.account_scope_mode == "selected"
+                else [],
             },
         )
     )

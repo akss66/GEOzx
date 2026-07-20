@@ -5,10 +5,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
-from app.core.workspace_access import accessible_client_ids, accessible_project_ids
+from app.core.workspace_access import (
+    accessible_account_clause,
+    accessible_client_ids,
+    accessible_project_ids,
+)
 from app.db import get_session
-from app.models import Account, Client, ClientMembership, Project, ProjectAccount
-from app.models.enums import UserRole
+from app.models import Account, Client, Project
 from app.schemas.shell import SearchResultOut
 
 router = APIRouter(tags=["search"])
@@ -75,21 +78,8 @@ async def search_workspace(
     account_query = select(Account).where(
         Account.client_id.in_(client_ids),
         or_(Account.nickname.ilike(term), Account.external_account_id.ilike(term)),
+        await accessible_account_clause(session, user),
     )
-    if user.role != UserRole.ADMIN:
-        direct_client_ids = select(ClientMembership.client_id).where(
-            ClientMembership.user_id == user.id
-        )
-        linked_accounts = select(ProjectAccount.account_id).where(
-            ProjectAccount.project_id.in_(project_ids)
-        )
-        account_query = account_query.where(
-            or_(
-                Account.client_id.in_(direct_client_ids),
-                Account.project_id.in_(project_ids),
-                Account.id.in_(linked_accounts),
-            )
-        )
     accounts = (await session.scalars(account_query.order_by(Account.id).limit(20))).all()
     results.extend(
         SearchResultOut(

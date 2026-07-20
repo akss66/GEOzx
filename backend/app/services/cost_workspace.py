@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workspace_access import (
+    accessible_account_ids,
     accessible_project_ids,
     require_client_access,
     require_project_access,
@@ -126,6 +127,21 @@ async def business_cost_overview(
                 )
             ).tuples()
         )
+
+    visible_account_ids = await accessible_account_ids(session, user)
+    if visible_account_ids is not None:
+        invocation_rows = [
+            row
+            for row in invocation_rows
+            if not row[2].account_ids
+            or bool(set(row[2].account_ids) & visible_account_ids)
+        ]
+        tool_rows = [
+            row
+            for row in tool_rows
+            if not row[2].account_ids
+            or bool(set(row[2].account_ids) & visible_account_ids)
+        ]
 
     task_rollups: dict[int, dict[str, Any]] = {}
     agent_rollups: dict[tuple[str, str], dict[str, Any]] = {}

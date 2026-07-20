@@ -12,7 +12,11 @@ from sqlalchemy.orm import selectinload
 from app.core.approval_access import require_task_approval_access, task_project_ids
 from app.core.approval_audit import add_approval_decided
 from app.core.auth import CurrentUser
-from app.core.workspace_access import accessible_project_ids
+from app.core.workspace_access import (
+    accessible_account_ids,
+    accessible_project_ids,
+    require_project_access,
+)
 from app.db import get_session
 from app.models import (
     Account,
@@ -23,7 +27,6 @@ from app.models import (
     MatrixDistributionItem,
     MatrixDistributionPlan,
     OrchestrationPlan,
-    Project,
     TaskBrief,
 )
 from app.models.enums import (
@@ -302,14 +305,13 @@ def _build_plan_steps(task_type: BrainTaskType) -> list[dict]:
 
 async def _resolve_brief_bindings(
     session: AsyncSession,
-    org_id: int,
+    user: CurrentUser,
     body: DraftBrainTaskRequest,
 ) -> dict:
+    org_id = user.org_id
     project_name = None
     if body.project_id is not None:
-        project = await session.get(Project, body.project_id)
-        if project is None or project.org_id != org_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
+        project = await require_project_access(session, user, body.project_id)
         project_name = project.name
 
     account_group_name = None
@@ -332,10 +334,14 @@ async def _resolve_brief_bindings(
             detail="请先选择一个抖音账号，再启动运营大脑",
         )
     if account_ids:
+        visible_account_ids = await accessible_account_ids(session, user)
+        account_query = select(Account).where(
+            Account.org_id == org_id, Account.id.in_(account_ids)
+        )
+        if visible_account_ids is not None:
+            account_query = account_query.where(Account.id.in_(visible_account_ids))
         accounts = (
-            await session.scalars(
-                select(Account).where(Account.org_id == org_id, Account.id.in_(account_ids))
-            )
+            await session.scalars(account_query)
         ).all()
         if len(accounts) != len(account_ids):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
@@ -401,16 +407,17 @@ async def _load_acceptance(
 async def draft_task(
     body: DraftBrainTaskRequest, user: CurrentUser, session: SessionDep
 ) -> BrainTaskOut:
-    task = await create_brain_task_draft(session, user.org_id, body)
+    task = await create_brain_task_draft(session, user, body)
     return BrainTaskOut.model_validate(await _load_task(session, task.id, user.org_id))
 
 
 async def create_brain_task_draft(
     session: AsyncSession,
-    org_id: int,
+    user: CurrentUser,
     body: DraftBrainTaskRequest,
 ) -> BrainTask:
-    bindings = await _resolve_brief_bindings(session, org_id, body)
+    org_id = user.org_id
+    bindings = await _resolve_brief_bindings(session, user, body)
     is_casual = _is_casual_goal(body.goal)
     if not is_casual:
         await require_agent_enabled(session, org_id, AgentCode.DECISION)
@@ -530,7 +537,7 @@ async def send_brain_message(
     if intent.requires_account_context or effective_account_id is not None:
         bindings = await _resolve_brief_bindings(
             session,
-            user.org_id,
+            user,
             DraftBrainTaskRequest(
                 goal=body.message,
                 project_id=effective_project_id,

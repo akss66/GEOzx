@@ -4,14 +4,19 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.brain import create_brain_task_draft
 from app.core.auth import CurrentUser
-from app.core.workspace_access import accessible_project_ids, require_project_access
+from app.core.workspace_access import (
+    accessible_project_ids,
+    accessible_account_clause,
+    require_account_access,
+    require_project_access,
+)
 from app.db import get_session
-from app.models import ContentItem, OptimizationSuggestion
+from app.models import Account, ContentItem, OptimizationSuggestion
 from app.models.enums import OptimizationSuggestionStatus, WorkspaceRole
 from app.schemas.brain import BrainTaskOut, DraftBrainTaskRequest
 from app.schemas.feedback import (
@@ -60,6 +65,12 @@ async def list_optimization_suggestions(
         .where(
             OptimizationSuggestion.org_id == user.org_id,
             ContentItem.project_id.in_(project_ids),
+            or_(
+                ContentItem.account_id.is_(None),
+                ContentItem.account_id.in_(
+                    select(Account.id).where(await accessible_account_clause(session, user))
+                ),
+            ),
         )
         .order_by(OptimizationSuggestion.id.desc())
     )
@@ -93,6 +104,13 @@ async def update_optimization_suggestion(
         content.project_id,
         roles=FEEDBACK_WRITE_ROLES,
     )
+    if content.account_id is not None:
+        await require_account_access(
+            session,
+            user,
+            content.account_id,
+            roles=FEEDBACK_WRITE_ROLES,
+        )
 
     row.status = body.status
     row.note = body.note
@@ -148,7 +166,7 @@ async def send_suggestion_to_brain(
     stage = f"目标阶段：{row.target_stage}" if row.target_stage is not None else "目标阶段：待判断"
     task = await create_brain_task_draft(
         session,
-        user.org_id,
+        user,
         DraftBrainTaskRequest(
             goal=(
                 f"基于《{content.title}》复盘建议生成下一轮优化任务。"

@@ -1,10 +1,18 @@
 """Authentication and user-management schemas."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-from app.models.enums import ClientStatus, ProjectStatus, UserRole, WorkspaceRole
+from app.models.enums import (
+    AccountStatus,
+    ClientStatus,
+    Platform,
+    ProjectStatus,
+    UserRole,
+    WorkspaceRole,
+)
 
 
 class LoginRequest(BaseModel):
@@ -84,6 +92,8 @@ class ProjectMembershipOut(BaseModel):
 
 class UserDetailOut(UserOut):
     has_global_access: bool
+    account_scope_mode: Literal["all_accessible", "selected"]
+    account_ids: list[int]
     client_memberships: list[ClientMembershipOut]
     project_memberships: list[ProjectMembershipOut]
 
@@ -101,9 +111,19 @@ class ProjectAccessCatalogItem(BaseModel):
     status: ProjectStatus
 
 
+class AccountAccessCatalogItem(BaseModel):
+    id: int
+    client_id: int | None
+    project_ids: list[int]
+    nickname: str
+    platform: Platform
+    status: AccountStatus
+
+
 class UserAccessCatalogOut(BaseModel):
     clients: list[ClientAccessCatalogItem]
     projects: list[ProjectAccessCatalogItem]
+    accounts: list[AccountAccessCatalogItem]
 
 
 class ClientAccessInput(BaseModel):
@@ -119,13 +139,18 @@ class ProjectAccessInput(BaseModel):
 class UpdateUserAccessRequest(BaseModel):
     clients: list[ClientAccessInput] = Field(default_factory=list, max_length=500)
     projects: list[ProjectAccessInput] = Field(default_factory=list, max_length=1000)
+    account_scope_mode: Literal["all_accessible", "selected"] = "all_accessible"
+    account_ids: list[int] = Field(default_factory=list, max_length=5000)
 
     @model_validator(mode="after")
     def reject_duplicate_resources(self):
         client_ids = [item.client_id for item in self.clients]
         project_ids = [item.project_id for item in self.projects]
+        account_ids = self.account_ids
         if len(client_ids) != len(set(client_ids)):
             raise ValueError("客户授权不能重复")
         if len(project_ids) != len(set(project_ids)):
             raise ValueError("项目授权不能重复")
+        if len(account_ids) != len(set(account_ids)):
+            raise ValueError("账号授权不能重复")
         return self
