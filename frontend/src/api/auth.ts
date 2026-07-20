@@ -2,10 +2,16 @@ import { api } from "./client";
 import type {
   CreateUserInput,
   LoginResponse,
+  PermanentDeleteUserInput,
+  PermanentDeleteUserResponse,
+  ResetUserPasswordInput,
+  SecondaryPasswordStatus,
+  SetSecondaryPasswordInput,
   UpdateUserAccessInput,
   UpdateUserInput,
   User,
   UserAccessCatalog,
+  UserDeletionPreview,
   UserDetail,
 } from "../types";
 
@@ -49,5 +55,39 @@ export async function updateUserAccess(
   input: UpdateUserAccessInput,
 ): Promise<UserDetail> {
   const { data } = await api.put<UserDetail>(`/users/${userId}/access`, input);
+  return data;
+}
+
+export async function setSecondaryPassword(
+  input: SetSecondaryPasswordInput,
+): Promise<SecondaryPasswordStatus> {
+  const { data } = await api.put<SecondaryPasswordStatus>("/users/me/secondary-password", input);
+  return data;
+}
+
+export async function getSecondaryPasswordStatus(): Promise<SecondaryPasswordStatus> {
+  const { data } = await api.get<SecondaryPasswordStatus>("/users/me/secondary-password/status");
+  return data;
+}
+
+export async function resetUserPassword(
+  userId: number,
+  input: ResetUserPasswordInput,
+): Promise<void> {
+  await api.post<void>(`/users/${userId}/reset-password`, input);
+}
+
+export async function previewUserDeletion(userId: number): Promise<UserDeletionPreview> {
+  const { data } = await api.post<UserDeletionPreview>(`/users/${userId}/deletion-preview`);
+  return data;
+}
+
+export async function permanentlyDeleteUser(
+  userId: number,
+  input: PermanentDeleteUserInput,
+): Promise<PermanentDeleteUserResponse> {
+  const { data } = await api.delete<PermanentDeleteUserResponse>(`/users/${userId}/permanent`, {
+    data: input,
+  });
   return data;
 }

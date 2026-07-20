@@ -37,10 +37,23 @@ export interface ProjectMembership {
   role: WorkspaceRole;
 }
 
+export type AccountScopeMode = "all_accessible" | "selected";
+
 export interface UserDetail extends User {
   has_global_access: boolean;
+  account_scope_mode: AccountScopeMode;
+  account_ids: number[];
   client_memberships: ClientMembership[];
   project_memberships: ProjectMembership[];
+}
+
+export interface AccountAccessCatalogItem {
+  id: number;
+  client_id: number | null;
+  project_ids: number[];
+  nickname: string;
+  platform: Platform;
+  status: AccountStatus;
 }
 
 export interface UserAccessCatalog {
@@ -51,6 +64,7 @@ export interface UserAccessCatalog {
     name: string;
     status: "active" | "paused" | "archived";
   }>;
+  accounts: AccountAccessCatalogItem[];
 }
 
 export interface UpdateUserInput {
@@ -63,6 +77,76 @@ export interface UpdateUserInput {
 export interface UpdateUserAccessInput {
   clients: Array<{ client_id: number; role: WorkspaceRole }>;
   projects: Array<{ project_id: number; role: WorkspaceRole }>;
+  account_scope_mode?: AccountScopeMode;
+  account_ids?: number[];
+}
+
+export interface SetSecondaryPasswordInput {
+  current_password: string;
+  secondary_password: string;
+}
+
+export interface SecondaryPasswordStatus {
+  configured: boolean;
+  deletion_available: boolean;
+  delete_available_at: string | null;
+  locked_until: string | null;
+}
+
+export interface ResetUserPasswordInput {
+  new_password: string;
+}
+
+export type UserDeletionBlocker =
+  | "LAST_ACTIVE_ADMIN"
+  | "USER_SELF_DELETION_FORBIDDEN";
+
+export interface UserDeletionPreview {
+  target_user_id: number;
+  target_email: string;
+  counts: Record<string, number>;
+  preview_token: string;
+  expires_at: string;
+  allowed: boolean;
+  blockers: UserDeletionBlocker[];
+}
+
+export interface PermanentDeleteUserInput {
+  preview_token: string;
+  target_email: string;
+  secondary_password: string;
+}
+
+export interface PermanentDeleteUserResponse {
+  operation_id: string;
+  deleted_at: string;
+  counts: Record<string, number>;
+}
+
+export type UserGovernanceErrorCode =
+  | "LAST_ACTIVE_ADMIN"
+  | "SECONDARY_PASSWORD_COOLDOWN"
+  | "SECONDARY_PASSWORD_INVALID"
+  | "SECONDARY_PASSWORD_LOCKED"
+  | "SECONDARY_PASSWORD_NOT_CONFIGURED"
+  | "USER_DELETION_EMAIL_MISMATCH"
+  | "USER_DELETION_PREVIEW_EXPIRED"
+  | "USER_DELETION_PREVIEW_INVALID"
+  | "USER_DELETION_PREVIEW_STALE"
+  | "USER_DELETION_PREVIEW_USED"
+  | "USER_DELETION_TRANSACTION_FAILED"
+  | "USER_LAST_ACTIVE_ADMIN_REQUIRED"
+  | "USER_SELF_ADMIN_CHANGE_FORBIDDEN"
+  | "USER_SELF_DELETION_FORBIDDEN"
+  | "USER_SELF_PASSWORD_RESET_FORBIDDEN";
+
+export interface UserGovernanceErrorDetail {
+  code: UserGovernanceErrorCode;
+  message: string;
+}
+
+export interface UserGovernanceErrorResponse {
+  detail: UserGovernanceErrorDetail;
 }
 
 // —— 运营大脑 / 专家团 ——
