@@ -5,7 +5,7 @@
 - Branch: `workspace-freeze-20260706`
 - Verified HEAD: `32f6f90` (`fix: guard legacy member access details`)
 - Scope: non-browser verification only; no production services or existing real users were touched.
-- Status: **BLOCKED**
+- Initial status: **BLOCKED** (superseded by the final acceptance below)
 
 ## Decision
 
@@ -110,7 +110,45 @@ and test transactions.
 - `tasks/current.md`: not modified.
 - Business code and tests: not modified.
 - Production deployment: not attempted.
-- Acceptance commit: not created.
+
+---
+
+## Final Task 7 Acceptance
+
+- Date: 2026-07-20 (Asia/Shanghai)
+- Status: **PASS**
+- Production deployment: not attempted.
+
+### Final Quality Gates
+
+| Gate | Result |
+| --- | --- |
+| Backend full suite | 263 passed, 323 existing warnings |
+| Backend Ruff | All checks passed |
+| Frontend full suite | 53 files, 194 tests passed |
+| Frontend production build | Passed with existing large-chunk warnings |
+| Frontend ESLint | 0 errors, 14 pre-existing warnings |
+| Full dependency audit | 0 known vulnerabilities |
+| Production dependency audit | 0 known vulnerabilities |
+| Sensitive logging/storage grep | No matches |
+
+### Desktop Acceptance
+
+- The real local environment verified create, profile edit, disable/enable,
+  customer/project/account authorization, login-password reset, and audit-aware
+  cleanup. The disposable real-local member was disabled through the application
+  service after acceptance.
+- A separate SQLite database and separate backend/frontend ports were used for
+  destructive acceptance. The administrator secondary password was configured,
+  its cooldown was overridden only inside that disposable database, and the
+  permanent-deletion impact preview was inspected.
+- A wrong secondary password produced the localized business error while the
+  session and deletion preview remained available. Retrying with the correct
+  secondary password permanently deleted the target member and reduced the
+  roster from two members to one.
+- The isolated browser session, frontend/backend processes, and temporary
+  database were all closed and removed after acceptance.
+- Acceptance documentation is included in the final Task 7 commit.
 
 ---
 
