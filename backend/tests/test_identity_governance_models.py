@@ -1,8 +1,9 @@
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import UniqueConstraint, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app import models as app_models
 from app.core.security import hash_password
 from app.db import Base
 from app.models import (
@@ -63,6 +64,23 @@ def test_creator_foreign_keys_restrict_direct_user_deletion():
         assert column.nullable is True
         assert foreign_key.target_fullname == "users.id"
         assert foreign_key.ondelete == "RESTRICT"
+
+
+def test_deletion_preview_reservation_has_atomic_non_sensitive_identity() -> None:
+    model = getattr(app_models, "UserDeletionPreviewReservation", None)
+
+    assert model is not None
+    table = model.__table__
+    assert set(table.c.keys()) == {"id", "organization_id", "operation_id", "reserved_at"}
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(column.name for column in constraint.columns)
+        == ("organization_id", "operation_id")
+        for constraint in table.constraints
+    )
+    organization_fk = next(iter(table.c.organization_id.foreign_keys))
+    assert organization_fk.target_fullname == "orgs.id"
+    assert organization_fk.ondelete == "CASCADE"
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,8 @@ from typing import Never
 import jwt
 from fastapi import HTTPException, status
 from sqlalchemy import delete, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -42,6 +44,7 @@ from app.models import (
     ProjectMembership,
     TaskBrief,
     User,
+    UserDeletionPreviewReservation,
 )
 from app.models.enums import UserRole
 from app.services.admin_security import verify_secondary_password
@@ -49,6 +52,9 @@ from app.services.admin_security import verify_secondary_password
 PREVIEW_TTL_MINUTES = 5
 PREVIEW_PURPOSE = "user_deletion_preview"
 RECEIPT_EVENT_TYPE = "user.permanently_deleted"
+RESERVATION_UNIQUE_CONSTRAINT = (
+    "uq_user_deletion_preview_reservations_org_operation"
+)
 
 SELF_DELETION_CODE = "USER_SELF_DELETION_FORBIDDEN"
 LAST_ADMIN_CODE = "LAST_ACTIVE_ADMIN"
@@ -174,6 +180,7 @@ def _payload_references_owned_root(
     brain_task_ids: set[int],
     matrix_plan_ids: set[int],
     knowledge_entry_ids: set[int],
+    knowledge_suggestion_ids: set[int],
 ) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -190,6 +197,10 @@ def _payload_references_owned_root(
             _same_identifier(value, item_id) for item_id in knowledge_entry_ids
         ):
             return True
+        if key == "suggestion_id" and any(
+            _same_identifier(value, item_id) for item_id in knowledge_suggestion_ids
+        ):
+            return True
         if (
             key == "source_id"
             and payload.get("approval_kind") == "matrix_plan"
@@ -201,6 +212,7 @@ def _payload_references_owned_root(
             brain_task_ids=brain_task_ids,
             matrix_plan_ids=matrix_plan_ids,
             knowledge_entry_ids=knowledge_entry_ids,
+            knowledge_suggestion_ids=knowledge_suggestion_ids,
         ):
             return True
         if isinstance(value, list):
@@ -210,6 +222,7 @@ def _payload_references_owned_root(
                     brain_task_ids=brain_task_ids,
                     matrix_plan_ids=matrix_plan_ids,
                     knowledge_entry_ids=knowledge_entry_ids,
+                    knowledge_suggestion_ids=knowledge_suggestion_ids,
                 ):
                     return True
     return False
@@ -387,6 +400,7 @@ async def build_deletion_impact(
     owned_task_ids = set(task_ids)
     owned_plan_ids = set(plan_ids)
     owned_entry_ids = set(entry_ids)
+    owned_suggestion_ids = suggestion_ids
     matching_events = []
     event_rows = await session.stream_scalars(
         select(Event).order_by(Event.id).execution_options(yield_per=500)
@@ -400,6 +414,7 @@ async def build_deletion_impact(
                 brain_task_ids=owned_task_ids,
                 matrix_plan_ids=owned_plan_ids,
                 knowledge_entry_ids=owned_entry_ids,
+                knowledge_suggestion_ids=owned_suggestion_ids,
             )
         ):
             matching_events.append(
@@ -513,8 +528,20 @@ def _decode_preview_token(token: str) -> DeletionPreviewClaims:
 
 
 async def _preview_was_used(
-    session: AsyncSession, *, operation_id: str, actor_id: int
+    session: AsyncSession,
+    *,
+    organization_id: int,
+    operation_id: str,
+    actor_id: int,
 ) -> bool:
+    reservation_id = await session.scalar(
+        select(UserDeletionPreviewReservation.id).where(
+            UserDeletionPreviewReservation.organization_id == organization_id,
+            UserDeletionPreviewReservation.operation_id == operation_id,
+        )
+    )
+    if reservation_id is not None:
+        return True
     receipts = list(
         await session.scalars(
             select(Event).where(Event.type == RECEIPT_EVENT_TYPE).order_by(Event.id)
@@ -526,6 +553,51 @@ async def _preview_was_used(
         and receipt.payload.get("actor_id") == actor_id
         for receipt in receipts
     )
+
+
+async def _reserve_preview(
+    session: AsyncSession,
+    *,
+    organization_id: int,
+    operation_id: str,
+) -> None:
+    values = {
+        "organization_id": organization_id,
+        "operation_id": operation_id,
+    }
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        statement = (
+            postgresql_insert(UserDeletionPreviewReservation)
+            .values(**values)
+            .on_conflict_do_nothing(constraint=RESERVATION_UNIQUE_CONSTRAINT)
+            .returning(UserDeletionPreviewReservation.id)
+        )
+    elif dialect_name == "sqlite":
+        statement = (
+            sqlite_insert(UserDeletionPreviewReservation)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    UserDeletionPreviewReservation.organization_id,
+                    UserDeletionPreviewReservation.operation_id,
+                ]
+            )
+            .returning(UserDeletionPreviewReservation.id)
+        )
+    else:
+        raise RuntimeError(
+            f"Unsupported deletion reservation dialect: {dialect_name}"
+        )
+
+    with session.no_autoflush:
+        reservation_id = await session.scalar(statement)
+    if reservation_id is None:
+        _business_error(
+            status.HTTP_409_CONFLICT,
+            "USER_DELETION_PREVIEW_USED",
+            "Deletion preview has already been used",
+        )
 
 
 def _raise_blocker(blockers: tuple[str, ...]) -> None:
@@ -632,7 +704,10 @@ async def execute_permanent_deletion(
             "Deletion preview does not match this operation",
         )
     if await _preview_was_used(
-        session, operation_id=claims.operation_id, actor_id=actor.id
+        session,
+        organization_id=actor.org_id,
+        operation_id=claims.operation_id,
+        actor_id=actor.id,
     ):
         _business_error(
             status.HTTP_409_CONFLICT,
@@ -665,17 +740,21 @@ async def execute_permanent_deletion(
         )
 
     try:
-        await verify_secondary_password(
-            session,
-            actor,
-            secondary_password,
-            commit_on_success=False,
-        )
-    except HTTPException as exc:
-        await session.rollback()
-        _map_secondary_password_error(exc)
+        try:
+            await verify_secondary_password(
+                session,
+                actor,
+                secondary_password,
+                commit_on_success=False,
+            )
+        except HTTPException as exc:
+            _map_secondary_password_error(exc)
 
-    try:
+        await _reserve_preview(
+            session,
+            organization_id=actor.org_id,
+            operation_id=claims.operation_id,
+        )
         await session.execute(
             select(User.id)
             .where(

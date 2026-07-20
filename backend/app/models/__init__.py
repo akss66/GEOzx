@@ -25,7 +25,12 @@ from app.models.configuration import IntegrationConfig, ModelConfig
 from app.models.content import ContentItem, Deliverable
 from app.models.distribution import MatrixDistributionItem, MatrixDistributionPlan
 from app.models.feedback import OptimizationSuggestion
-from app.models.identity import AdminSecurityCredential, Org, User
+from app.models.identity import (
+    AdminSecurityCredential,
+    Org,
+    User,
+    UserDeletionPreviewReservation,
+)
 from app.models.knowledge import KnowledgeCitation, KnowledgeEntry, KnowledgeSuggestion
 from app.models.llm import LLMCall
 from app.models.material import MaterialAsset
@@ -38,6 +43,7 @@ __all__ = [
     "Org",
     "User",
     "AdminSecurityCredential",
+    "UserDeletionPreviewReservation",
     "Client",
     "ClientMembership",
     "ProjectMembership",

@@ -1,13 +1,19 @@
 """Protected two-phase user deletion lifecycle tests."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
-from sqlalchemy import delete, select
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete, func, select
+from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.core.security import hash_password
+from app.db import Base, get_session
+from app.main import app
 from app.models import (
     Account,
     AdminSecurityCredential,
@@ -22,6 +28,7 @@ from app.models import (
     GateApproval,
     KnowledgeCitation,
     KnowledgeEntry,
+    KnowledgeSuggestion,
     LLMCall,
     MaterialAsset,
     MatrixDistributionItem,
@@ -31,6 +38,7 @@ from app.models import (
     Project,
     TaskBrief,
     User,
+    UserDeletionPreviewReservation,
 )
 from app.models.enums import (
     AgentCode,
@@ -228,6 +236,9 @@ async def test_permanent_delete_rejects_wrong_secondary_password_and_keeps_asset
     assert credential.failed_attempts == 1
     assert await session.get(User, target.id) is not None
     assert await session.get(BrainTask, owned.id) is not None
+    assert await session.scalar(
+        select(func.count(UserDeletionPreviewReservation.id))
+    ) == 0
     assert "wrong-secondary-password" not in str(
         [event.payload for event in await session.scalars(select(Event))]
     )
@@ -328,6 +339,8 @@ async def test_permanent_delete_rolls_back_every_change_on_transaction_failure(
     await session.commit()
     credential_id = credential.id
     preview = await _preview(client, token, target)
+    target_email = target.email
+    real_delete_owned_records = user_deletion._delete_owned_records
 
     async def fail_after_first_write(deletion_session, impact):
         await deletion_session.execute(
@@ -347,6 +360,32 @@ async def test_permanent_delete_rolls_back_every_change_on_transaction_failure(
     stored_credential = await session.get(AdminSecurityCredential, credential_id)
     assert stored_credential is not None
     assert stored_credential.failed_attempts == 4
+    assert await session.scalar(
+        select(func.count(UserDeletionPreviewReservation.id))
+    ) == 0
+
+    monkeypatch.setattr(
+        user_deletion,
+        "_delete_owned_records",
+        real_delete_owned_records,
+    )
+    retry = await client.request(
+        "DELETE",
+        f"/users/{target_id}/permanent",
+        headers=_auth(token),
+        json={
+            "preview_token": preview["preview_token"],
+            "target_email": target_email,
+            "secondary_password": "delete-pass-123",
+        },
+    )
+
+    assert retry.status_code == 200
+    session.expire_all()
+    assert await session.get(User, target_id) is None
+    assert await session.scalar(
+        select(func.count(UserDeletionPreviewReservation.id))
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -542,6 +581,139 @@ async def test_permanent_delete_removes_owned_roots_and_keeps_sanitized_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["reject", "approve"])
+async def test_permanent_delete_removes_linked_suggestion_events_only(
+    client, session, admin, decision
+):
+    target = await _target(session, admin, "suggestion-events")
+    workspace = Client(org_id=admin.org_id, name="Suggestion event client")
+    project = Project(org_id=admin.org_id, client=workspace, name="Suggestion event project")
+    session.add_all([workspace, project])
+    await session.flush()
+    content = ContentItem(
+        project_id=project.id,
+        created_by_id=target.id,
+        title="Suggestion source content",
+    )
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=target.id,
+        title="Suggestion source task",
+    )
+    unrelated_task = BrainTask(org_id=admin.org_id, title="Shared unrelated task")
+    session.add_all([content, task, unrelated_task])
+    await session.flush()
+    deliverable = Deliverable(
+        content_item_id=content.id,
+        agent_code="02-content",
+        type=DeliverableType.VIDEO_SCRIPT,
+        payload={"title": "Suggestion source"},
+    )
+    session.add(deliverable)
+    await session.flush()
+    linked_suggestion = KnowledgeSuggestion(
+        org_id=admin.org_id,
+        client_id=workspace.id,
+        project_id=project.id,
+        category=KnowledgeCategory.USER_PERSONA,
+        title="Linked suggestion",
+        content="Delete with the owned roots",
+        source_agent_code="02-content",
+        source_label="Owned task result",
+        source_task_id=task.id,
+        source_deliverable_id=deliverable.id,
+    )
+    unrelated_suggestion = KnowledgeSuggestion(
+        org_id=admin.org_id,
+        client_id=workspace.id,
+        project_id=project.id,
+        category=KnowledgeCategory.USER_PERSONA,
+        title="Unrelated suggestion",
+        content="Keep this shared suggestion",
+        source_agent_code="01-positioning",
+        source_label="Shared task result",
+        source_task_id=unrelated_task.id,
+    )
+    session.add_all([linked_suggestion, unrelated_suggestion])
+    await session.flush()
+    session.add_all(
+        [
+            Event(
+                type="knowledge.suggested.from_agent",
+                project_id=project.id,
+                payload={
+                    "suggestion_id": linked_suggestion.id,
+                    "actor_user_id": admin.id,
+                },
+            ),
+            Event(
+                type="knowledge.suggested.from_agent",
+                project_id=project.id,
+                payload={
+                    "suggestion_id": unrelated_suggestion.id,
+                    "actor_user_id": admin.id,
+                },
+            ),
+        ]
+    )
+    await session.commit()
+
+    token = await _login(client, admin.email, "admin-pw-123")
+    review = await client.post(
+        f"/knowledge-suggestions/{linked_suggestion.id}/{decision}",
+        headers=_auth(token),
+        json={"review_note": "Reviewed by a different user"},
+    )
+    assert review.status_code == 200
+    accepted_entry_id = (
+        review.json()["entry"]["id"] if decision == "approve" else None
+    )
+    linked_suggestion_id = linked_suggestion.id
+    unrelated_suggestion_id = unrelated_suggestion.id
+    linked_event_ids = [
+        event.id
+        for event in await session.scalars(select(Event).order_by(Event.id))
+        if isinstance(event.payload, dict)
+        and event.payload.get("suggestion_id") == linked_suggestion_id
+    ]
+    unrelated_event_ids = [
+        event.id
+        for event in await session.scalars(select(Event).order_by(Event.id))
+        if isinstance(event.payload, dict)
+        and event.payload.get("suggestion_id") == unrelated_suggestion_id
+    ]
+    assert len(linked_event_ids) == 2
+    assert len(unrelated_event_ids) == 1
+
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 200
+    session.expire_all()
+    assert await session.get(KnowledgeSuggestion, linked_suggestion_id) is None
+    assert await session.get(KnowledgeSuggestion, unrelated_suggestion_id) is not None
+    if accepted_entry_id is not None:
+        assert await session.get(KnowledgeEntry, accepted_entry_id) is not None
+    stored_events = list(await session.scalars(select(Event).order_by(Event.id)))
+    assert not any(
+        isinstance(event.payload, dict)
+        and event.payload.get("suggestion_id") == linked_suggestion_id
+        for event in stored_events
+    )
+    assert any(
+        isinstance(event.payload, dict)
+        and event.payload.get("suggestion_id") == unrelated_suggestion_id
+        for event in stored_events
+    )
+    receipts = [
+        event for event in stored_events if event.type == "user.permanently_deleted"
+    ]
+    assert len(receipts) == 1
+    assert set(receipts[0].payload) == {"actor_id", "operation_id", "timestamp", "counts"}
+
+
+@pytest.mark.asyncio
 async def test_permanent_delete_rejects_self_deletion(client, session, admin):
     second_admin = await _target(session, admin, "second-admin", role=UserRole.ADMIN)
     assert second_admin.is_active is True
@@ -613,3 +785,137 @@ async def test_permanent_delete_preview_is_single_use(client, session, admin):
     assert first.status_code == 200
     assert replay.status_code == 409
     assert _code(replay) == "USER_DELETION_PREVIEW_USED"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deletes_atomically_reserve_one_preview(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "concurrent-preview.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path.as_posix()}",
+        connect_args={"timeout": 30},
+    )
+
+    @sqlalchemy_event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as setup_session:
+        organization = Org(name="Concurrent deletion org")
+        acting_admin = User(
+            org=organization,
+            email="concurrent-admin@test.com",
+            hashed_password=hash_password("admin-pw-123"),
+            display_name="Concurrent admin",
+            role=UserRole.ADMIN,
+        )
+        target = User(
+            org=organization,
+            email="concurrent-target@test.com",
+            hashed_password=hash_password("target-pw-123"),
+            display_name="Concurrent target",
+            role=UserRole.USER,
+        )
+        setup_session.add_all([acting_admin, target])
+        await setup_session.flush()
+        setup_session.add(
+            AdminSecurityCredential(
+                user_id=acting_admin.id,
+                password_hash=hash_password("delete-pass-123"),
+                changed_at=datetime.now(UTC) - timedelta(minutes=20),
+                delete_available_at=datetime.now(UTC) - timedelta(minutes=10),
+            )
+        )
+        await setup_session.commit()
+        organization_id = organization.id
+        target_id = target.id
+
+    async def _request_session():
+        async with maker() as request_session:
+            yield request_session
+
+    app.dependency_overrides[get_session] = _request_session
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as api_client:
+            token = await _login(api_client, "concurrent-admin@test.com", "admin-pw-123")
+            preview_response = await api_client.post(
+                f"/users/{target_id}/deletion-preview",
+                headers=_auth(token),
+            )
+            assert preview_response.status_code == 200
+            preview_token = preview_response.json()["preview_token"]
+
+            from app.services import user_deletion
+
+            real_verify = user_deletion.verify_secondary_password
+            real_delete_owned_records = user_deletion._delete_owned_records
+            verification_barrier = asyncio.Barrier(2)
+            deletion_entries = 0
+
+            async def _verify_then_synchronize(*args, **kwargs):
+                await real_verify(*args, **kwargs)
+                await verification_barrier.wait()
+
+            async def _count_deletion_entry(*args, **kwargs):
+                nonlocal deletion_entries
+                deletion_entries += 1
+                await real_delete_owned_records(*args, **kwargs)
+
+            monkeypatch.setattr(
+                user_deletion,
+                "verify_secondary_password",
+                _verify_then_synchronize,
+            )
+            monkeypatch.setattr(
+                user_deletion,
+                "_delete_owned_records",
+                _count_deletion_entry,
+            )
+            body = {
+                "preview_token": preview_token,
+                "target_email": "concurrent-target@test.com",
+                "secondary_password": "delete-pass-123",
+            }
+
+            first, second = await asyncio.wait_for(
+                asyncio.gather(
+                    api_client.request(
+                        "DELETE",
+                        f"/users/{target_id}/permanent",
+                        headers=_auth(token),
+                        json=body,
+                    ),
+                    api_client.request(
+                        "DELETE",
+                        f"/users/{target_id}/permanent",
+                        headers=_auth(token),
+                        json=body,
+                    ),
+                ),
+                timeout=30,
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    responses = [first, second]
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    rejected = next(response for response in responses if response.status_code == 409)
+    assert _code(rejected) == "USER_DELETION_PREVIEW_USED"
+    assert deletion_entries == 1
+
+    async with maker() as verification_session:
+        assert await verification_session.get(User, target_id) is None
+        assert await verification_session.scalar(
+            select(func.count(UserDeletionPreviewReservation.id)).where(
+                UserDeletionPreviewReservation.organization_id == organization_id
+            )
+        ) == 1
+        assert await verification_session.scalar(
+            select(func.count(Event.id)).where(Event.type == "user.permanently_deleted")
+        ) == 1
+    await engine.dispose()

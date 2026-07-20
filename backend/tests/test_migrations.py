@@ -50,3 +50,21 @@ def test_user_deletion_migration_preserves_sqlite_constraint_name_on_downgrade()
         'new_sqlite_name="fk_matrix_distribution_plans_created_by_id_users"'
         in source
     )
+
+
+def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensitive() -> None:
+    module = importlib.import_module(
+        "migrations.versions.20260720_0300_user_deletion_preview_reservations"
+    )
+
+    assert module.down_revision == "20260720_0200"
+    upgrade_source = inspect.getsource(module.upgrade)
+    downgrade_source = inspect.getsource(module.downgrade)
+    assert "op.create_table" in upgrade_source
+    assert '"user_deletion_preview_reservations"' in upgrade_source
+    assert "sa.UniqueConstraint" in upgrade_source
+    assert '"organization_id"' in upgrade_source
+    assert '"operation_id"' in upgrade_source
+    assert 'drop_table("user_deletion_preview_reservations")' in downgrade_source
+    for forbidden in ("preview_token", "target_email", "secondary_password"):
+        assert forbidden not in upgrade_source

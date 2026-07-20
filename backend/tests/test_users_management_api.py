@@ -385,7 +385,19 @@ async def test_admin_cannot_reset_own_login_password(client, admin):
         {"role": "user"},
     ],
 )
-async def test_admin_cannot_remove_own_admin_access(client, admin, payload):
+async def test_admin_cannot_remove_own_admin_access_with_stable_code(
+    client, session, admin, payload
+):
+    backup_admin = User(
+        org_id=admin.org_id,
+        email="backup-admin@test.com",
+        hashed_password=hash_password("backup-admin-pw"),
+        display_name="Backup admin",
+        role=UserRole.ADMIN,
+    )
+    session.add(backup_admin)
+    await session.commit()
+    admin_id = admin.id
     token = await _login(client, admin.email, "admin-pw-123")
 
     response = await client.patch(
@@ -393,6 +405,39 @@ async def test_admin_cannot_remove_own_admin_access(client, admin, payload):
     )
 
     assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "USER_SELF_ADMIN_CHANGE_FORBIDDEN"
+    session.expire_all()
+    stored = await session.get(User, admin_id)
+    assert stored is not None
+    assert stored.role == UserRole.ADMIN
+    assert stored.is_active is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"is_active": False},
+        {"role": "user"},
+    ],
+)
+async def test_last_active_admin_cannot_lose_access_with_stable_code(
+    client, session, admin, payload
+):
+    admin_id = admin.id
+    token = await _login(client, admin.email, "admin-pw-123")
+
+    response = await client.patch(
+        f"/users/{admin.id}", headers=_auth(token), json=payload
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "USER_LAST_ACTIVE_ADMIN_REQUIRED"
+    session.expire_all()
+    stored = await session.get(User, admin_id)
+    assert stored is not None
+    assert stored.role == UserRole.ADMIN
+    assert stored.is_active is True
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -81,3 +81,25 @@ class AdminSecurityCredential(Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="admin_security_credential")
+
+
+class UserDeletionPreviewReservation(Base):
+    """Atomic, non-sensitive single-use marker for a deletion preview nonce."""
+
+    __tablename__ = "user_deletion_preview_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "operation_id",
+            name="uq_user_deletion_preview_reservations_org_operation",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    operation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

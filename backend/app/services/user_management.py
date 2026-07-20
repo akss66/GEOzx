@@ -174,11 +174,6 @@ async def update_org_user(
         requested_role != UserRole.ADMIN or requested_active is False
     )
 
-    if target.id == actor.id and removes_admin_access:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="不能停用自己或移除自己的管理员权限",
-        )
     if removes_admin_access:
         active_admin_ids = tuple(
             await session.scalars(
@@ -195,7 +190,18 @@ async def update_org_user(
         if len(active_admin_ids) <= 1:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="组织必须保留至少一个启用中的管理员",
+                detail={
+                    "code": "USER_LAST_ACTIVE_ADMIN_REQUIRED",
+                    "message": "The organization must retain an active administrator",
+                },
+            )
+        if target.id == actor.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "USER_SELF_ADMIN_CHANGE_FORBIDDEN",
+                    "message": "Administrators cannot remove their own active admin access",
+                },
             )
 
     if "email" in changes:
