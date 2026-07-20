@@ -378,25 +378,25 @@ git commit -m "feat: expose model provider registry client"
 - Consumes Task 5 contracts.
 - Produces a desktop provider registry with write-only credential handling and route-aware deletion.
 
-- [ ] **Step 1: Write failing interaction tests**
+- [x] **Step 1: Write failing interaction tests**
 
 Test adding from each built-in template, creating a custom OpenAI-compatible provider, editing endpoint/name, saving/replacing/removing a key, clearing the key input after mutation, verification states, discovery/manual models, route assignment grouped by provider, failed-provider impact, and referenced-provider deletion guidance.
 
-- [ ] **Step 2: Run UI tests and verify failure**
+- [x] **Step 2: Run UI tests and verify failure**
 
 Run: `cd frontend && npm.cmd test -- src/pages/ModelInfrastructure.test.tsx`
 
 Expected: FAIL because the current page exposes only DeepSeek/LiteLLM reference selection.
 
-- [ ] **Step 3: Implement provider registry and editor**
+- [x] **Step 3: Implement provider registry and editor**
 
 Use the approved high-fidelity desktop system: compact list/detail workbench, restrained red accent, strong typography, and no nested decorative cards. Provider status is one of 未配置、待验证、可用、异常、停用. Use a dedicated key replacement action; never render a fake filled password field.
 
-- [ ] **Step 4: Implement verification, models, and route impact**
+- [x] **Step 4: Implement verification, models, and route impact**
 
 Show safe error summaries, latency, model count, and last verification time. Preserve manual model entries when discovery is unsupported. Route selectors group models by provider and disable unverified choices with a reason. Provider deletion shows affected experts inline rather than in a raw browser dialog.
 
-- [ ] **Step 5: Run UI tests and production build**
+- [x] **Step 5: Run UI tests and production build**
 
 Run: `cd frontend && npm.cmd test -- src/pages/ModelInfrastructure.test.tsx`
 
@@ -406,7 +406,7 @@ Run: `cd frontend && npm.cmd run build`
 
 Expected: TypeScript and Vite build succeed.
 
-- [ ] **Step 6: Commit the workbench**
+- [x] **Step 6: Commit the workbench**
 
 ```bash
 git add frontend/src/pages/ModelInfrastructure.tsx frontend/src/components/models frontend/src/styles/model-infrastructure.css frontend/src/pages/ModelInfrastructure.test.tsx
@@ -421,7 +421,7 @@ git commit -m "feat: rebuild model infrastructure workbench"
 **Interfaces:**
 - Validates all previous tasks as one releasable increment.
 
-- [ ] **Step 1: Run backend quality gates**
+- [x] **Step 1: Run backend quality gates**
 
 Run: `cd backend && python -m pytest -q`
 
@@ -431,7 +431,7 @@ Run: `cd backend && python -m ruff check app tests`
 
 Expected: no violations.
 
-- [ ] **Step 2: Run frontend quality gates**
+- [x] **Step 2: Run frontend quality gates**
 
 Run: `cd frontend && npm.cmd test`
 
@@ -441,7 +441,7 @@ Run: `cd frontend && npm.cmd run build`
 
 Expected: build succeeds.
 
-- [ ] **Step 3: Run secret and endpoint safety checks**
+- [x] **Step 3: Run secret and endpoint safety checks**
 
 Run: `git grep -n -E "(api_key|encrypted_api_key).*(console|logger|localStorage|sessionStorage)" -- backend frontend`
 
