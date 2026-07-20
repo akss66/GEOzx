@@ -1,6 +1,8 @@
 """身份域：组织、用户（RBAC 两级角色）。"""
 
-from sqlalchemy import Boolean, ForeignKey, String
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -38,6 +40,9 @@ class User(Base, TimestampMixin):
         pg_enum(UserRole, "user_role"), default=UserRole.USER, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    account_scope_mode: Mapped[str] = mapped_column(
+        String(32), default="all_accessible", server_default="all_accessible", nullable=False
+    )
 
     org: Mapped["Org"] = relationship(back_populates="users")
     client_memberships: Mapped[list["ClientMembership"]] = relationship(  # noqa: F821
@@ -46,3 +51,33 @@ class User(Base, TimestampMixin):
     project_memberships: Mapped[list["ProjectMembership"]] = relationship(  # noqa: F821
         back_populates="user", cascade="all, delete-orphan"
     )
+    account_memberships: Mapped[list["AccountMembership"]] = relationship(  # noqa: F821
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    admin_security_credential: Mapped["AdminSecurityCredential | None"] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class AdminSecurityCredential(Base):
+    __tablename__ = "admin_security_credentials"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    delete_available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC) + timedelta(minutes=10),
+        nullable=False,
+    )
+    failed_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="admin_security_credential")

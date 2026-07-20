@@ -86,6 +86,22 @@ class ProjectAccount(Base, TimestampMixin):
     account: Mapped["Account"] = relationship(overlaps="accounts,projects")  # noqa: F821
 
 
+class AccountMembership(Base):
+    __tablename__ = "account_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "account_id"),)
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="account_memberships")  # noqa: F821
+    account: Mapped["Account"] = relationship()  # noqa: F821
+
+
 class Notification(Base, TimestampMixin):
     __tablename__ = "notifications"
 

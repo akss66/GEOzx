@@ -33,6 +33,9 @@ class BrainTask(Base, TimestampMixin):
     org_id: Mapped[int] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     content_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("content_items.id", ondelete="SET NULL"), index=True, nullable=True
     )

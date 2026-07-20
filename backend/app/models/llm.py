@@ -18,6 +18,9 @@ class LLMCall(Base):
     org_id: Mapped[int | None] = mapped_column(
         ForeignKey("orgs.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     agent_code: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     model: Mapped[str] = mapped_column(String(128), index=True, nullable=False)

@@ -22,6 +22,9 @@ class ContentItem(Base, TimestampMixin):
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id", ondelete="SET NULL"), index=True, nullable=True
     )
