@@ -184,6 +184,31 @@ async def test_fifth_wrong_secondary_password_starts_lockout(session, admin):
     assert credential.locked_until is not None
 
 
+async def test_same_session_correct_secondary_password_cannot_bypass_active_lock(session, admin):
+    set_secondary_password, verify_secondary_password = _service()
+
+    await set_secondary_password(session, admin, "admin-pw-123", "delete-pass-123")
+    credential = await session.scalar(
+        select(AdminSecurityCredential).where(AdminSecurityCredential.user_id == admin.id)
+    )
+    assert credential is not None
+    credential.delete_available_at = datetime.now(UTC) - timedelta(seconds=1)
+    await session.commit()
+
+    for _ in range(5):
+        with pytest.raises(HTTPException):
+            await verify_secondary_password(session, admin, "wrong-secondary-password")
+
+    with pytest.raises(HTTPException) as exc:
+        await verify_secondary_password(session, admin, "delete-pass-123")
+
+    assert exc.value.status_code == 429
+    assert exc.value.detail == "Secondary password is temporarily locked"
+    await session.refresh(credential)
+    assert credential.failed_attempts == 5
+    assert credential.locked_until is not None
+
+
 async def test_concurrent_wrong_attempts_start_lockout_on_exactly_fifth_attempt(
     session, admin, monkeypatch
 ):

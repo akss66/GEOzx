@@ -50,7 +50,14 @@ async def set_secondary_password(
         "locked_until": None,
     }
     dialect_name = session.bind.dialect.name
-    insert = postgresql_insert if dialect_name == "postgresql" else sqlite_insert
+    if dialect_name == "postgresql":
+        insert = postgresql_insert
+    elif dialect_name == "sqlite":
+        insert = sqlite_insert
+    else:
+        raise RuntimeError(
+            f"Unsupported database dialect for admin security credentials: {dialect_name}"
+        )
     credential = await session.scalar(
         insert(AdminSecurityCredential)
         .values(**values)
@@ -122,6 +129,7 @@ async def verify_secondary_password(
         .returning(AdminSecurityCredential.failed_attempts)
     )
     await session.commit()
+    session.expire(credential)
     if failed_attempts is not None and failed_attempts >= MAX_FAILED_ATTEMPTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
