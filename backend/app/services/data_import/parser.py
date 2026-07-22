@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -71,7 +71,7 @@ class ParsedDataset:
     template_name: str
     headers: list[str]
     rows: list[ValidatedRow]
-    preview: ImportPreview | None = None
+    preview: ImportPreview
 
 
 def parse_source_file(filename: str, data: bytes) -> ParsedDataset:
@@ -79,22 +79,28 @@ def parse_source_file(filename: str, data: bytes) -> ParsedDataset:
     headers, raw_rows = _parse_xlsx(data) if extension == ".xlsx" else _parse_csv(data)
     template = _detect_template_or_fail(headers)
     rows = _normalize_rows(template, raw_rows)
-    parsed = ParsedDataset(
+    preview = build_preview(rows, template_code=template.code)
+    return ParsedDataset(
         template_code=template.code,
         template_name=template.display_name,
         headers=headers,
         rows=rows,
+        preview=preview,
     )
-    return replace(parsed, preview=build_preview(parsed))
 
 
-def build_preview(parsed: ParsedDataset) -> ImportPreview:
-    invalid_rows = sum(1 for row in parsed.rows if row.errors)
-    warning_rows = sum(1 for row in parsed.rows if row.warnings)
+def build_preview(
+    rows: list[ValidatedRow],
+    *,
+    template_code: str | None = None,
+) -> ImportPreview:
+    resolved_template_code = template_code or (rows[0].template_code if rows else "")
+    invalid_rows = sum(1 for row in rows if row.errors)
+    warning_rows = sum(1 for row in rows if row.warnings)
     return ImportPreview(
-        template_code=parsed.template_code,
-        total_rows=len(parsed.rows),
-        valid_rows=len(parsed.rows) - invalid_rows,
+        template_code=resolved_template_code,
+        total_rows=len(rows),
+        valid_rows=len(rows) - invalid_rows,
         invalid_rows=invalid_rows,
         warning_rows=warning_rows,
     )
@@ -441,9 +447,16 @@ def _validate_archive_metadata(infos: list[Any]) -> None:
         )
 
     total_uncompressed_bytes = 0
+    seen_filenames: set[str] = set()
     for info in infos:
         if info.is_dir():
             continue
+        if info.filename in seen_filenames:
+            raise ParseFailure(
+                "archive_duplicate_entries",
+                f"XLSX archive contains duplicate archive entries for {info.filename}",
+            )
+        seen_filenames.add(info.filename)
         if info.file_size > MAX_ARCHIVE_ENTRY_UNCOMPRESSED_BYTES:
             raise ParseFailure(
                 "archive_entry_too_large",

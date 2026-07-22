@@ -35,7 +35,12 @@ class DataSourceAdapter(Protocol):
 
     def validate(self, rows: list[ValidatedRow]) -> list[ValidatedRow]: ...
 
-    def preview(self, parsed: ParsedDataset): ...
+    def preview(
+        self,
+        rows: list[ValidatedRow],
+        *,
+        template_code: str | None = None,
+    ): ...
 
 
 @dataclass(slots=True)
@@ -61,8 +66,13 @@ class FileDataSourceAdapter:
     def validate(self, rows: list[ValidatedRow]) -> list[ValidatedRow]:
         return rows
 
-    def preview(self, parsed: ParsedDataset):
-        return parsed.preview or build_preview(parsed)
+    def preview(
+        self,
+        rows: list[ValidatedRow],
+        *,
+        template_code: str | None = None,
+    ):
+        return build_preview(rows, template_code=template_code)
 
 
 REGISTERED_ADAPTERS: tuple[DataSourceAdapter, ...] = (FileDataSourceAdapter(),)

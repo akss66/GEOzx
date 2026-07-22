@@ -530,6 +530,86 @@ def test_archive_compression_ratio_limit_rejects_before_decompression(
         parse_source_file("bomb.xlsx", payload)
 
 
+def test_archive_entry_with_zero_compressed_size_is_rejected_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeZipInfo:
+        filename = "xl/worksheets/sheet1.xml"
+        file_size = 128
+        compress_size = 0
+
+        @staticmethod
+        def is_dir() -> bool:
+            return False
+
+    class FakeZipFile:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def infolist():
+            return [FakeZipInfo()]
+
+        @staticmethod
+        def open(*_args, **_kwargs):
+            raise AssertionError("archive entry should not be decompressed")
+
+    monkeypatch.setattr(parser_module, "ZipFile", FakeZipFile)
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="compression ratio"):
+        parse_source_file("bomb.xlsx", b"placeholder")
+
+
+def test_duplicate_zip_entry_names_are_rejected_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeZipInfo:
+        file_size = 32
+        compress_size = 16
+
+        def __init__(self, filename: str):
+            self.filename = filename
+
+        @staticmethod
+        def is_dir() -> bool:
+            return False
+
+    class FakeZipFile:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def infolist():
+            return [
+                FakeZipInfo("[Content_Types].xml"),
+                FakeZipInfo("xl/workbook.xml"),
+                FakeZipInfo("xl/workbook.xml"),
+            ]
+
+        @staticmethod
+        def open(*_args, **_kwargs):
+            raise AssertionError("archive entry should not be decompressed")
+
+    monkeypatch.setattr(parser_module, "ZipFile", FakeZipFile)
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="duplicate archive entries"):
+        parse_source_file("duplicate.xlsx", b"placeholder")
+
+
 def test_malformed_csv_and_non_utf8_input_are_rejected():
     malformed = '"日期","播放量"\n"2026-07-18","81'.encode()
     with pytest.raises(ParseFailure, match="Malformed CSV"):
@@ -595,7 +675,7 @@ def test_file_adapter_builds_preview_contract():
         }
     )
 
-    preview = adapter.preview(parsed)
+    preview = adapter.preview(parsed.rows)
 
     assert adapter.detect({"filename": source.name, "data": b"test"}).matched is True
     assert preview.template_code == "douyin_work_list_v1"
@@ -608,7 +688,7 @@ def test_file_adapter_preserves_template_code_for_header_only_preview():
     adapter = FileDataSourceAdapter()
     parsed = adapter.parse({"filename": "works.csv", "data": csv_bytes(WORK_LIST_HEADERS, [])})
 
-    preview = adapter.preview(parsed)
+    preview = adapter.preview(parsed.rows, template_code=parsed.template_code)
 
     assert preview.template_code == "douyin_work_list_v1"
     assert preview.total_rows == 0
