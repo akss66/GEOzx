@@ -62,7 +62,20 @@ def _change(
     *,
     percentage_value: bool = False,
 ) -> ReviewChangeOut:
-    current_value = current or 0
+    if current is None:
+        display_previous = (
+            round(previous * 100, 2) if percentage_value and previous is not None else previous
+        )
+        return ReviewChangeOut(
+            metric=metric,
+            label=label,
+            current=None,
+            previous=round(display_previous, 2) if display_previous is not None else None,
+            delta_percent=None,
+            direction="unavailable",
+            summary=f"{label}缂轰箯鐪熷疄鏁版嵁锛屾殏涓嶅仛鍛ㄦ湡瀵规瘮",
+        )
+    current_value = current
     direction = _direction(current_value, previous)
     delta = None
     if previous not in (None, 0):
@@ -121,9 +134,13 @@ def _goal_progress(
             {
                 "metric": "play",
                 "label": "播放量",
-                "current": totals.play or 0,
+                "current": totals.play,
                 "target": goal.target_play,
-                "achievement_percent": round((totals.play or 0) / goal.target_play * 100, 1),
+                "achievement_percent": (
+                    round(totals.play / goal.target_play * 100, 1)
+                    if totals.play is not None
+                    else None
+                ),
             }
         )
     if goal.target_completion_rate:
@@ -131,11 +148,12 @@ def _goal_progress(
             {
                 "metric": "completion_rate",
                 "label": "平均完播率",
-                "current": totals.avg_completion_rate or 0,
+                "current": totals.avg_completion_rate,
                 "target": goal.target_completion_rate,
-                "achievement_percent": round(
-                    (totals.avg_completion_rate or 0) / goal.target_completion_rate * 100,
-                    1,
+                "achievement_percent": (
+                    round(totals.avg_completion_rate / goal.target_completion_rate * 100, 1)
+                    if totals.avg_completion_rate is not None
+                    else None
                 ),
             }
         )
@@ -144,13 +162,29 @@ def _goal_progress(
             {
                 "metric": "follower_delta",
                 "label": "净增粉丝",
-                "current": totals.follower_delta or 0,
+                "current": totals.follower_delta,
                 "target": goal.target_follower_delta,
-                "achievement_percent": round(
-                    (totals.follower_delta or 0) / goal.target_follower_delta * 100,
-                    1,
+                "achievement_percent": (
+                    round(totals.follower_delta / goal.target_follower_delta * 100, 1)
+                    if totals.follower_delta is not None
+                    else None
                 ),
             }
+        )
+    for component in components:
+        if component["achievement_percent"] is None:
+            component["status"] = "unavailable"
+    if any(component["achievement_percent"] is None for component in components):
+        return AccountReviewGoalOut(
+            id=goal.id,
+            period_days=goal.period_days,
+            target_play=goal.target_play,
+            target_completion_rate=goal.target_completion_rate,
+            target_follower_delta=goal.target_follower_delta,
+            status="insufficient_data",
+            achievement_percent=None,
+            components=components,
+            summary="鐩爣宸茶缃紝閮ㄥ垎鎸囨爣灏氭湭鍥炴祦锛屾殏涓嶈绠楀畬鎴愬害",
         )
     achievement = round(
         sum(component["achievement_percent"] for component in components) / len(components),

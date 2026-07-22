@@ -161,10 +161,10 @@ class ReviewTotalsOut(BaseModel):
 class ReviewChangeOut(BaseModel):
     metric: Literal["play", "completion_rate", "follower_delta"]
     label: str
-    current: float
+    current: float | None
     previous: float | None = None
     delta_percent: float | None = None
-    direction: Literal["up", "down", "flat", "baseline"]
+    direction: Literal["up", "down", "flat", "baseline", "unavailable"]
     summary: str
 
 

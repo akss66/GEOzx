@@ -391,3 +391,85 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
     assert body["engagement"][-1]["like_rate"] is None
     assert body["attributions"] == []
     assert body["evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_review_workspace_marks_unavailable_changes_and_goal_metrics_for_account_only_data(
+    client, admin, session
+):
+    _project, account = await _review_account(session, admin, nickname="Goal gap account")
+    batch = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_daily_play_v1",
+        content_sha256="7" * 64,
+        period_start=date.today() - timedelta(days=6),
+        period_end=date.today(),
+        committed_at=datetime.now(UTC),
+    )
+    session.add(batch)
+    await session.flush()
+    session.add(
+        AccountMetricSnapshot(
+            org_id=admin.org_id,
+            account_id=account.id,
+            import_batch_id=batch.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            stat_date=date.today(),
+            total_play=81,
+        )
+    )
+    await session.commit()
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    goal_response = await client.put(
+        f"/metrics/review-goals/{account.id}",
+        headers=_auth(token),
+        json={
+            "period_days": 7,
+            "target_play": 100,
+            "target_completion_rate": 0.4,
+            "target_follower_delta": 10,
+        },
+    )
+    assert goal_response.status_code == 200
+
+    response = await client.get(
+        "/metrics/review-workspace",
+        headers=_auth(token),
+        params={"account_id": account.id, "days": 7},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    completion_change = next(row for row in body["changes"] if row["metric"] == "completion_rate")
+    follower_change = next(row for row in body["changes"] if row["metric"] == "follower_delta")
+    play_component = next(item for item in body["goal"]["components"] if item["metric"] == "play")
+    completion_component = next(
+        item for item in body["goal"]["components"] if item["metric"] == "completion_rate"
+    )
+    follower_component = next(
+        item for item in body["goal"]["components"] if item["metric"] == "follower_delta"
+    )
+
+    assert completion_change["current"] is None
+    assert completion_change["previous"] is None
+    assert completion_change["delta_percent"] is None
+    assert completion_change["direction"] == "unavailable"
+    assert follower_change["current"] is None
+    assert follower_change["previous"] is None
+    assert follower_change["delta_percent"] is None
+    assert follower_change["direction"] == "unavailable"
+    assert body["goal"]["status"] == "insufficient_data"
+    assert body["goal"]["achievement_percent"] is None
+    assert play_component["current"] == 81
+    assert play_component["achievement_percent"] == 81.0
+    assert completion_component["current"] is None
+    assert completion_component["achievement_percent"] is None
+    assert completion_component["status"] == "unavailable"
+    assert follower_component["current"] is None
+    assert follower_component["achievement_percent"] is None
+    assert follower_component["status"] == "unavailable"

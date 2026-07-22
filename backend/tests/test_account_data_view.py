@@ -526,3 +526,80 @@ async def test_load_prefilters_relevant_batches_and_ignores_out_of_window_batch_
         "FROM data_import_batches" in statement and "data_import_batches.id IN" in statement
         for statement in statements
     )
+
+
+@pytest.mark.asyncio
+async def test_load_scopes_conflicts_to_in_window_rows_within_overlapping_batch(
+    session, admin, account
+):
+    start = date(2026, 7, 18)
+    end = date(2026, 7, 22)
+    batch = DataImportBatch(
+        org_id=account.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_daily_play_v1",
+        content_sha256="a1" * 32,
+        period_start=date(2026, 7, 10),
+        period_end=date(2026, 7, 21),
+        committed_at=datetime(2026, 7, 22, 8, 0, tzinfo=UTC),
+    )
+    session.add(batch)
+    await session.flush()
+    session.add_all(
+        [
+            AccountMetricSnapshot(
+                org_id=account.org_id,
+                account_id=account.id,
+                import_batch_id=batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=date(2026, 7, 21),
+                total_play=81,
+            ),
+            DataImportRow(
+                org_id=account.org_id,
+                account_id=account.id,
+                batch_id=batch.id,
+                row_number=2,
+                status=ImportRowStatus.COMMITTED,
+                normalized_values={"play": 81, "stat_date": "2026-07-21"},
+                projected_target_ids=[],
+            ),
+            DataImportRow(
+                org_id=account.org_id,
+                account_id=account.id,
+                batch_id=batch.id,
+                row_number=3,
+                status=ImportRowStatus.COMMITTED,
+                normalized_values={"play": 999, "stat_date": "2026-07-10"},
+                projected_target_ids=[],
+            ),
+            DataConflict(
+                org_id=account.org_id,
+                account_id=account.id,
+                batch_id=batch.id,
+                row_number=2,
+                status=ConflictStatus.OPEN,
+                field_name="play",
+                conflict_code="in_window_conflict",
+                message="The in-window row still needs review",
+            ),
+            DataConflict(
+                org_id=account.org_id,
+                account_id=account.id,
+                batch_id=batch.id,
+                row_number=3,
+                status=ConflictStatus.OPEN,
+                field_name="play",
+                conflict_code="out_of_window_conflict",
+                message="The older row should not count in this request window",
+            ),
+        ]
+    )
+    await session.commit()
+
+    view = await AccountDataViewService(session).load(account, start, end)
+
+    assert [item.conflict_code for item in view.conflicts] == ["in_window_conflict"]

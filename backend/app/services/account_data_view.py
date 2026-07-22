@@ -259,7 +259,13 @@ class AccountDataViewService:
         batches = await self._load_batches(account, relevant_batch_ids)
         batch_by_id = {item.id: item for item in batches}
         import_rows = _build_import_projection_index(batches)
-        conflicts = await self._load_conflicts(account, relevant_batch_ids)
+        conflicts = await self._load_conflicts(
+            account,
+            relevant_batch_ids,
+            period_start,
+            period_end,
+            batches,
+        )
         content_snapshots = _build_content_snapshots(content_rows, batch_by_id, import_rows)
         account_snapshots = _build_account_snapshots(account_rows, batch_by_id, import_rows)
         audience = _build_audience_views(audience_rows, batch_by_id)
@@ -337,9 +343,22 @@ class AccountDataViewService:
             )
         )
 
-    async def _load_conflicts(self, account: Account, batch_ids: set[int]) -> list[ConflictView]:
+    async def _load_conflicts(
+        self,
+        account: Account,
+        batch_ids: set[int],
+        period_start: date,
+        period_end: date,
+        batches: list[DataImportBatch],
+    ) -> list[ConflictView]:
         if not batch_ids:
             return []
+        batch_by_id = {item.id: item for item in batches}
+        row_index = {
+            (batch.id, row.row_number): row
+            for batch in batches
+            for row in batch.rows
+        }
         rows = list(
             await self.session.scalars(
                 select(DataConflict)
@@ -367,6 +386,13 @@ class AccountDataViewService:
                 created_at=row.created_at,
             )
             for row in rows
+            if _conflict_overlaps_period(
+                conflict=row,
+                batch_by_id=batch_by_id,
+                row_index=row_index,
+                period_start=period_start,
+                period_end=period_end,
+            )
         ]
 
 
@@ -881,6 +907,51 @@ def _collect_relevant_batch_ids(
         row.import_batch_id for row in benchmark_rows if row.import_batch_id is not None
     )
     return batch_ids
+
+
+def _conflict_overlaps_period(
+    *,
+    conflict: DataConflict,
+    batch_by_id: dict[int, DataImportBatch],
+    row_index: dict[tuple[int, int], DataImportRow],
+    period_start: date,
+    period_end: date,
+) -> bool:
+    row = row_index.get((conflict.batch_id, conflict.row_number))
+    observed_at = _import_row_observed_at(row) if row is not None else None
+    if observed_at is not None:
+        return period_start <= observed_at <= period_end
+    batch = batch_by_id.get(conflict.batch_id)
+    if batch is None:
+        return False
+    return _periods_overlap(batch.period_start, batch.period_end, period_start, period_end)
+
+
+def _import_row_observed_at(row: DataImportRow) -> date | None:
+    raw_value = row.normalized_values.get("stat_date")
+    if isinstance(raw_value, date):
+        return raw_value
+    if isinstance(raw_value, str):
+        try:
+            return date.fromisoformat(raw_value)
+        except ValueError:
+            return None
+    return None
+
+
+def _periods_overlap(
+    left_start: date | None,
+    left_end: date | None,
+    right_start: date,
+    right_end: date,
+) -> bool:
+    if left_start is None and left_end is None:
+        return True
+    start = left_start or left_end
+    end = left_end or left_start
+    if start is None or end is None:
+        return True
+    return start <= right_end and right_start <= end
 
 
 def _datetime_sort_key(value: datetime | None) -> float:
