@@ -909,9 +909,10 @@ async def test_postgresql_mutation_queries_request_row_locks(monkeypatch):
 
         async def scalar(self, statement):
             captured.append(statement)
-            if "platform_content_records" in str(
-                statement.compile(dialect=postgresql.dialect())
-            ):
+            compiled = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM data_import_batches" in compiled:
+                return batch
+            if "platform_content_records" in compiled:
                 return PlatformContentRecord(
                     id=9,
                     org_id=1,
@@ -949,3 +950,174 @@ async def test_postgresql_mutation_queries_request_row_locks(monkeypatch):
     assert any("data_import_rows" in item and "FOR UPDATE" in item for item in compiled)
     assert any("data_conflicts" in item and "FOR UPDATE" in item for item in compiled)
     assert any("platform_content_records" in item and "FOR UPDATE" in item for item in compiled)
+
+
+@pytest.mark.asyncio
+async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_batch(monkeypatch):
+    captured: list[object] = []
+    stale_batch = DataImportBatch(
+        org_id=1,
+        account_id=2,
+        id=3,
+        status=ImportBatchStatus.PREVIEW_READY,
+    )
+    authoritative_batch = DataImportBatch(
+        org_id=1,
+        account_id=2,
+        id=3,
+        status=ImportBatchStatus.COMMITTED,
+        committed_at=datetime(2026, 7, 22, 9, 30),
+    )
+
+    class _FakeBind:
+        dialect = postgresql.dialect()
+
+    class _FakeSession:
+        def get_bind(self):
+            return _FakeBind()
+
+        async def scalar(self, statement):
+            captured.append(statement)
+            compiled = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM data_import_batches" in compiled:
+                return authoritative_batch
+            return None
+
+        async def scalars(self, statement):
+            captured.append(statement)
+            return []
+
+    async def _fake_load_scoped_batch(*args, **kwargs):
+        return stale_batch
+
+    monkeypatch.setattr(data_import_service, "load_scoped_batch", _fake_load_scoped_batch)
+    loaded = await data_import_service._load_mutation_batch(
+        _FakeSession(),
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+    )
+
+    assert loaded is authoritative_batch
+    assert loaded.status is ImportBatchStatus.COMMITTED
+    assert loaded.committed_at == datetime(2026, 7, 22, 9, 30)
+    batch_query = next(
+        str(statement.compile(dialect=postgresql.dialect()))
+        for statement in captured
+        if "FROM data_import_batches" in str(statement.compile(dialect=postgresql.dialect()))
+    )
+    assert "data_import_batches.status" in batch_query
+    assert "FOR UPDATE" in batch_query
+
+
+@pytest.mark.asyncio
+async def test_commit_retry_no_ops_when_locked_batch_is_already_committed(monkeypatch):
+    original_timestamp = datetime(2026, 7, 22, 10, 0)
+    original_targets = [{"kind": "metric_snapshot", "id": 11, "action": "created"}]
+    row = DataImportRow(
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        row_number=2,
+        status=ImportRowStatus.COMMITTED,
+        projected_target_ids=list(original_targets),
+    )
+    batch = DataImportBatch(
+        org_id=1,
+        account_id=2,
+        id=3,
+        status=ImportBatchStatus.COMMITTED,
+        committed_at=original_timestamp,
+    )
+    batch.rows = [row]
+    actor = User(org_id=1, id=9)
+    project_calls = 0
+
+    async def _fake_load_mutation_batch(*args, **kwargs):
+        return batch
+
+    async def _fake_load_scoped_batch(*args, **kwargs):
+        return batch
+
+    async def _unexpected_project(*args, **kwargs):
+        nonlocal project_calls
+        project_calls += 1
+        raise AssertionError("commit retry should not project rows again")
+
+    monkeypatch.setattr(data_import_service, "_load_mutation_batch", _fake_load_mutation_batch)
+    monkeypatch.setattr(data_import_service, "load_scoped_batch", _fake_load_scoped_batch)
+    monkeypatch.setattr(data_import_service, "_project_row_targets", _unexpected_project)
+
+    replayed = await commit_batch(
+        None,
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        actor=actor,
+    )
+
+    assert replayed is batch
+    assert batch.committed_at == original_timestamp
+    assert row.projected_target_ids == original_targets
+    assert project_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_revoke_retry_no_ops_when_locked_batch_is_already_revoked(monkeypatch):
+    original_timestamp = datetime(2026, 7, 22, 11, 0)
+    original_targets = [{"kind": "metric_snapshot", "id": 12, "action": "created"}]
+    row = DataImportRow(
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        row_number=2,
+        status=ImportRowStatus.REVOKED,
+        projected_target_ids=list(original_targets),
+    )
+    batch = DataImportBatch(
+        org_id=1,
+        account_id=2,
+        id=3,
+        status=ImportBatchStatus.REVOKED,
+        committed_at=datetime(2026, 7, 22, 10, 0),
+        revoked_at=original_timestamp,
+    )
+    batch.rows = [row]
+    actor = User(org_id=1, id=9)
+    revoke_conflict_checks = 0
+    delete_calls = 0
+
+    async def _fake_load_mutation_batch(*args, **kwargs):
+        return batch
+
+    async def _fake_load_scoped_batch(*args, **kwargs):
+        return batch
+
+    async def _unexpected_conflicts(*args, **kwargs):
+        nonlocal revoke_conflict_checks
+        revoke_conflict_checks += 1
+        raise AssertionError("revoke retry should not re-check conflicts")
+
+    async def _unexpected_delete(*args, **kwargs):
+        nonlocal delete_calls
+        delete_calls += 1
+        raise AssertionError("revoke retry should not delete projections again")
+
+    monkeypatch.setattr(data_import_service, "_load_mutation_batch", _fake_load_mutation_batch)
+    monkeypatch.setattr(data_import_service, "load_scoped_batch", _fake_load_scoped_batch)
+    monkeypatch.setattr(data_import_service, "_find_revoke_conflicts", _unexpected_conflicts)
+    monkeypatch.setattr(data_import_service, "_delete_row_targets", _unexpected_delete)
+
+    replayed = await data_import_service.revoke_batch(
+        None,
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        actor=actor,
+    )
+
+    assert replayed is batch
+    assert batch.revoked_at == original_timestamp
+    assert row.projected_target_ids == original_targets
+    assert revoke_conflict_checks == 0
+    assert delete_calls == 0

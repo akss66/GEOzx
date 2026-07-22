@@ -831,23 +831,20 @@ async def _load_mutation_batch(
     account_id: int,
     batch_id: int,
 ) -> DataImportBatch:
-    batch = await load_scoped_batch(
-        session,
-        org_id=org_id,
-        account_id=account_id,
-        batch_id=batch_id,
-    )
     dialect_name = _dialect_name(session)
     if dialect_name == "postgresql":
-        await session.scalar(
-            select(DataImportBatch.id)
+        batch = await session.scalar(
+            select(DataImportBatch)
             .where(
                 DataImportBatch.org_id == org_id,
                 DataImportBatch.account_id == account_id,
                 DataImportBatch.id == batch_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
+        if batch is None:
+            raise DataImportBatchNotFoundError("import batch does not exist")
         batch.rows = list(
             await session.scalars(
                 select(DataImportRow)
@@ -872,7 +869,14 @@ async def _load_mutation_batch(
                 .with_for_update()
             )
         )
-    return batch
+        return batch
+
+    return await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
 
 
 async def _project_row_targets(
