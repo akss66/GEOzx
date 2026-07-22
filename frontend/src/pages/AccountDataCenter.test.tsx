@@ -5,7 +5,14 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp } from "antd";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import {
+  MemoryRouter,
+  Route,
+  RouterProvider,
+  Routes,
+  createMemoryRouter,
+  useNavigate,
+} from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -207,6 +214,35 @@ function renderPage(route = "/accounts/42/data", queryClient = createTestQueryCl
       </QueryClientProvider>
     ),
   };
+}
+
+function RouteSwitchHarness() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" onClick={() => navigate("/accounts/99/data")}>
+        切换到账号 99
+      </button>
+      <Routes>
+        <Route path="/accounts/:accountId/data" element={<AccountDataCenter />} />
+      </Routes>
+    </>
+  );
+}
+
+function renderMountedRouteSwitcher(
+  route = "/accounts/2/data",
+  queryClient = createTestQueryClient(),
+) {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <QueryClientProvider client={queryClient}>
+        <AntApp>
+          <RouteSwitchHarness />
+        </AntApp>
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
 }
 
 describe("AccountDataCenter", () => {
@@ -636,42 +672,91 @@ describe("AccountDataCenter", () => {
     expect(await screen.findByText("只有负责人可以撤销已确认批次。")).toBeInTheDocument();
   });
 
-  it("resets stale batch state when the route account changes", async () => {
+  it("does not render or mutate a stale batch after same-mounted route navigation", async () => {
+    const account2Batch = buildPreviewBatch({
+      id: 201,
+      artifacts: [
+        buildArtifact({
+          id: 601,
+          filename: "account-2.xlsx",
+          download_url: "/account-data/2/imports/201/artifacts/601",
+        }),
+      ],
+      rows: buildPreviewBatch().rows.map((row) => ({
+        ...row,
+        status: "ready" as const,
+        candidate_content_ids: [],
+      })),
+      conflicts: [],
+    });
+    const account99Batch = buildPreviewBatch({
+      id: 990,
+      artifacts: [
+        buildArtifact({
+          id: 602,
+          filename: "account-99.xlsx",
+          download_url: "/account-data/99/imports/990/artifacts/602",
+        }),
+      ],
+      rows: buildPreviewBatch().rows.map((row) => ({
+        ...row,
+        status: "ready" as const,
+        title: undefined,
+        candidate_content_ids: [],
+      })),
+      conflicts: [],
+    });
     vi.mocked(getWorkspaceContext).mockResolvedValue({
       clients: [],
       selected_client: null,
       projects: [],
       selected_project: null,
-      accounts: [buildAccount(42), buildAccount(99)],
+      accounts: [buildAccount(2), buildAccount(99)],
     });
     vi.mocked(getAccountDataStatus).mockImplementation(async (accountId) =>
-      buildStatus({ account_id: accountId, latest_confirmed_at: accountId === 42 ? null : "2026-07-22T08:10:00Z" }),
-    );
-    vi.mocked(listAccountDataImports).mockImplementation(async (accountId) =>
-      accountId === 42
-        ? { items: [buildBatchSummary()] }
-        : { items: [] },
-    );
-    vi.mocked(getAccountDataImportBatch).mockImplementation(async () =>
-      buildPreviewBatch({
-        rows: buildPreviewBatch().rows.map((row) => ({ ...row, status: "ready" as const })),
-        conflicts: [],
+      buildStatus({
+        account_id: accountId,
+        latest_confirmed_at: accountId === 2 ? null : "2026-07-22T08:10:00Z",
       }),
     );
+    vi.mocked(listAccountDataImports).mockImplementation(async (accountId) =>
+      accountId === 2
+        ? { items: [buildBatchSummary({ id: 201 })] }
+        : { items: [buildBatchSummary({ id: 990, row_count: 1 })] },
+    );
+    vi.mocked(getAccountDataImportBatch).mockImplementation(async (accountId, batchId) =>
+      accountId === 2 && batchId === 201 ? account2Batch : account99Batch,
+    );
+    vi.mocked(commitAccountDataImportBatch).mockImplementation(async (accountId, batchId) => ({
+      ...(accountId === 99 && batchId === 990 ? account99Batch : account2Batch),
+      status: "committed",
+      committed_at: "2026-07-22T08:25:00Z",
+      rows: (accountId === 99 && batchId === 990 ? account99Batch : account2Batch).rows.map((row) => ({
+        ...row,
+        status: "committed" as const,
+        platform_content_record_id: 91,
+      })),
+    }));
 
-    const initialView = renderPage();
+    renderMountedRouteSwitcher();
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认导入" })).toBeEnabled(),
+      expect(screen.getByText("account-2.xlsx")).toBeInTheDocument(),
     );
+    expect(screen.getByRole("button", { name: "确认导入" })).toBeEnabled();
 
-    initialView.unmount();
-    renderPage("/accounts/99/data", initialView.queryClient);
+    fireEvent.click(screen.getByRole("button", { name: "切换到账号 99" }));
 
     await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "确认导入" })).not.toBeInTheDocument(),
+      expect(screen.getByText("account-99.xlsx")).toBeInTheDocument(),
     );
-    expect(screen.getByText("暂无导入历史")).toBeInTheDocument();
-    expect(commitAccountDataImportBatch).not.toHaveBeenCalled();
+    expect(screen.queryByText("account-2.xlsx")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
+
+    await waitFor(() =>
+      expect(commitAccountDataImportBatch).toHaveBeenCalledWith(99, 990),
+    );
+    expect(commitAccountDataImportBatch).not.toHaveBeenCalledWith(2, 201);
   });
 });
