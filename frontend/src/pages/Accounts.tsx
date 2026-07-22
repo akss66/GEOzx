@@ -11,6 +11,7 @@ import {
   PauseOutlined,
   PlusOutlined,
   QrcodeOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
   SyncOutlined,
   TableOutlined,
@@ -42,10 +43,12 @@ import {
   createAccount,
   createAccountGroup,
   createDouyinAuthorizeUrl,
+  createDouyinIncrementalAuthorizeUrl,
   createDouyinScanAddUrl,
   createDouyinTrialWhitelistUrl,
   deleteAccount,
   getAccountMatrix,
+  getDouyinAccountCapabilities,
   listAccountGroups,
   listAccounts,
   listPlatformIntegrations,
@@ -77,6 +80,8 @@ import type {
   AccountStatus,
   AuthStatus,
   DataSyncStatus,
+  DouyinCapability,
+  DouyinCapabilityKey,
   GroupDimension,
   IntegrationStatus,
   Platform,
@@ -259,6 +264,7 @@ export default function Accounts() {
   const [batchValue, setBatchValue] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
+  const [capabilityAccount, setCapabilityAccount] = useState<Account | null>(null);
   const [platformBoardOpen, setPlatformBoardOpen] = useState(false);
   const [integrationPlatform, setIntegrationPlatform] = useState<Platform | null>(null);
   const [whitelistUrl, setWhitelistUrl] = useState<string | null>(null);
@@ -283,6 +289,12 @@ export default function Accounts() {
     queryKey: ["platform-integrations"],
     queryFn: listPlatformIntegrations,
     enabled: isAdmin,
+  });
+  const douyinCapabilitiesQuery = useQuery({
+    queryKey: ["douyin-account-capabilities", capabilityAccount?.id],
+    queryFn: () => getDouyinAccountCapabilities(capabilityAccount!.id),
+    enabled: isAdmin && capabilityAccount?.platform === "douyin",
+    retry: false,
   });
 
   const groupName = useMemo(() => {
@@ -477,6 +489,24 @@ export default function Accounts() {
     onError: () => message.error("授权链接生成失败，请先检查平台接入配置"),
   });
 
+  const douyinIncrementalAuthorizeMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      capabilityKey,
+    }: {
+      accountId: number;
+      capabilityKey: DouyinCapabilityKey;
+    }) => createDouyinIncrementalAuthorizeUrl(accountId, capabilityKey),
+    onSuccess: (result) => {
+      window.open(result.authorization_url, "_blank", "noopener,noreferrer");
+      message.success("已打开抖音补充授权页面");
+    },
+    onError: (error) => {
+      const failure = presentApiError(error, "补充授权链接生成失败");
+      message.error(failure.message);
+    },
+  });
+
   const douyinSyncMutation = useMutation({
     mutationFn: syncDouyinAccountMetrics,
     onSuccess: (result) => {
@@ -644,6 +674,7 @@ export default function Accounts() {
             syncLoading={douyinSyncMutation.isPending}
             onOfficialAuthorize={() => douyinAuthorizeMutation.mutate(account.id)}
             onSyncMetrics={() => douyinSyncMutation.mutate(account.id)}
+            onInspectCapabilities={() => setCapabilityAccount(account)}
             onDelete={() => setDeleteTarget(account)}
           />
         ) : (
@@ -1132,16 +1163,24 @@ export default function Accounts() {
           <Form.Item name="js_sdk_domain" label="JS SDK / H5 安全域名">
             <Input placeholder="https://example.com" maxLength={500} />
           </Form.Item>
-          <Form.Item name="scopes" label="已申请权限">
+          <Form.Item
+            name="scopes"
+            label="开放平台已开通权限"
+            extra="这里只登记已在抖音开放平台审核通过的权限；账号授权会按实际任务增量申请。"
+          >
             <Select
               mode="tags"
               tokenSeparators={[",", "，", " "]}
-              placeholder="例如 user_info、video.list"
+              placeholder="例如 user_info、h5.share"
               options={[
                 { label: "user_info", value: "user_info" },
-                { label: "video.list", value: "video.list" },
-                { label: "fans.data", value: "fans.data" },
                 { label: "h5.share", value: "h5.share" },
+                { label: "open.get.ticket", value: "open.get.ticket" },
+                { label: "task.posting.create", value: "task.posting.create" },
+                { label: "posting.behavior", value: "posting.behavior" },
+                { label: "task.posting.user_verification", value: "task.posting.user_verification" },
+                { label: "js.ticket", value: "js.ticket" },
+                { label: "jump.basic", value: "jump.basic" },
               ]}
             />
           </Form.Item>
@@ -1149,6 +1188,49 @@ export default function Accounts() {
             <Input.TextArea rows={3} maxLength={1000} placeholder="平台审核、权限申请、回调域配置说明" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={capabilityAccount ? `抖音能力 · ${capabilityAccount.nickname}` : "抖音能力"}
+        open={capabilityAccount != null}
+        onCancel={() => setCapabilityAccount(null)}
+        footer={null}
+        width={680}
+        destroyOnHidden
+      >
+        {douyinCapabilitiesQuery.isLoading ? (
+          <div style={{ padding: "32px 0", textAlign: "center", color: "var(--dy-muted)" }}>
+            正在核对开放平台与账号授权状态...
+          </div>
+        ) : douyinCapabilitiesQuery.isError ? (
+          <OperationalState
+            kind="error"
+            title="能力状态暂时不可用"
+            description={presentApiError(
+              douyinCapabilitiesQuery.error,
+              "请确认账号已完成抖音官方授权后重试。",
+            ).message}
+            actionLabel="重新检查"
+            onAction={() => void douyinCapabilitiesQuery.refetch()}
+          />
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {(douyinCapabilitiesQuery.data?.capabilities ?? []).map((capability) => (
+              <DouyinCapabilityRow
+                key={capability.key}
+                capability={capability}
+                authorizing={douyinIncrementalAuthorizeMutation.isPending}
+                onAuthorize={() => {
+                  if (!capabilityAccount) return;
+                  douyinIncrementalAuthorizeMutation.mutate({
+                    accountId: capabilityAccount.id,
+                    capabilityKey: capability.key,
+                  });
+                }}
+              />
+            ))}
+          </div>
+        )}
       </Modal>
 
       <Modal
@@ -1445,6 +1527,7 @@ function AccountActions({
   syncLoading,
   onOfficialAuthorize,
   onSyncMetrics,
+  onInspectCapabilities,
   onDelete,
 }: {
   account: Account;
@@ -1452,6 +1535,7 @@ function AccountActions({
   syncLoading: boolean;
   onOfficialAuthorize: () => void;
   onSyncMetrics: () => void;
+  onInspectCapabilities: () => void;
   onDelete: () => void;
 }) {
   const mode = getAccountActionMode(account);
@@ -1480,6 +1564,17 @@ function AccountActions({
   return (
     <Space size={6}>
       {primaryAction}
+      {account.platform === "douyin" && account.auth_status === "authorized" ? (
+        <Tooltip title="查看官方能力状态">
+          <Button
+            size="small"
+            type="text"
+            icon={<SafetyCertificateOutlined />}
+            aria-label={`查看抖音能力 ${account.nickname}`}
+            onClick={onInspectCapabilities}
+          />
+        </Tooltip>
+      ) : null}
       <Tooltip title="删除账号">
         <Button
           size="small"
@@ -1491,6 +1586,63 @@ function AccountActions({
         />
       </Tooltip>
     </Space>
+  );
+}
+
+function DouyinCapabilityRow({
+  capability,
+  authorizing,
+  onAuthorize,
+}: {
+  capability: DouyinCapability;
+  authorizing: boolean;
+  onAuthorize: () => void;
+}) {
+  const status = {
+    ready: { label: "已可用", color: "success" },
+    needs_app_permission: { label: "开放平台待开通", color: "warning" },
+    needs_account_authorization: { label: "账号待补充授权", color: "processing" },
+  }[capability.status];
+  const missingScopes = capability.status === "needs_app_permission"
+    ? capability.missing_app_scopes
+    : capability.missing_user_scopes;
+
+  return (
+    <section
+      style={{
+        border: "1px solid var(--dy-border)",
+        borderRadius: 10,
+        padding: "14px 16px",
+        display: "grid",
+        gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <strong>{capability.label}</strong>
+          <div style={{ marginTop: 4, color: "var(--dy-muted)", fontSize: 13 }}>
+            {capability.description}
+          </div>
+        </div>
+        <Tag color={status.color}>{status.label}</Tag>
+      </div>
+      {missingScopes.length > 0 ? (
+        <div style={{ color: "var(--dy-muted)", fontSize: 12 }}>
+          缺少权限：<code>{missingScopes.join(", ")}</code>
+        </div>
+      ) : null}
+      {capability.status === "needs_app_permission" ? (
+        <div style={{ fontSize: 12 }}>
+          请先在抖音开放平台申请并审核通过，再到“平台接入”登记权限。
+        </div>
+      ) : capability.status === "needs_account_authorization" ? (
+        <div>
+          <Button size="small" loading={authorizing} onClick={onAuthorize}>
+            补充授权
+          </Button>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

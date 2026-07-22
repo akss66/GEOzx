@@ -73,6 +73,11 @@ class DouyinAuthorizeRequest(BaseModel):
     account_id: int
 
 
+class DouyinIncrementalAuthorizeRequest(BaseModel):
+    account_id: int
+    capability_key: Literal["profile", "h5_publish", "posting_feedback"]
+
+
 class DouyinScanAddRequest(BaseModel):
     nickname: str | None = Field(default=None, min_length=1, max_length=200)
     group_id: int | None = None
@@ -134,3 +139,25 @@ class DouyinDataSyncOut(BaseModel):
     video_count: int
     snapshot_count: int
     last_sync_at: datetime
+
+
+class DouyinCapabilityStatusOut(BaseModel):
+    key: str
+    label: str
+    description: str
+    app_scopes: list[str]
+    user_scopes: list[str]
+    missing_app_scopes: list[str]
+    missing_user_scopes: list[str]
+    status: Literal[
+        "ready", "needs_app_permission", "needs_account_authorization"
+    ]
+
+
+class DouyinAccountCapabilitiesOut(BaseModel):
+    account_id: int
+    platform: Literal["douyin"] = "douyin"
+    configured_app_scopes: list[str]
+    granted_account_scopes: list[str]
+    capabilities: list[DouyinCapabilityStatusOut]
+    next_recommended: str | None

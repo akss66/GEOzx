@@ -177,9 +177,241 @@ async def test_douyin_authorize_url_uses_configured_app_and_signed_state(client,
     assert body["platform"] == "douyin"
     assert body["client_key"] == "douyin-client-key"
     assert body["redirect_uri"] == "https://console.example.com/douyin/callback"
-    assert body["scopes"] == ["user_info", "video.list"]
+    assert body["scopes"] == ["user_info"]
     assert "state=" in body["authorization_url"]
     assert "client_secret" not in body["authorization_url"]
+
+
+@pytest.mark.asyncio
+async def test_douyin_capability_status_separates_app_permission_and_account_authorization(
+    client, admin, session
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://console.example.com/douyin/callback",
+            "scopes": [
+                "user_info",
+                "h5.share",
+                "open.get.ticket",
+            ],
+        },
+    )
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "能力诊断账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    session.add(
+        PlatformAccountAuth(
+            org_id=admin.org_id,
+            account_id=account_id,
+            platform="douyin",
+            external_open_id="open-capabilities",
+            auth_status="authorized",
+            data_sync_status="pending",
+            scopes=["user_info"],
+        )
+    )
+    await session.commit()
+
+    response = await client.get(
+        f"/platform-integrations/douyin/accounts/{account_id}/capabilities",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    by_key = {item["key"]: item for item in body["capabilities"]}
+    assert by_key["profile"]["status"] == "ready"
+    assert "audience_insights" not in by_key
+    assert by_key["h5_publish"]["status"] == "ready"
+    assert by_key["posting_feedback"]["status"] == "needs_app_permission"
+    assert body["next_recommended"] == "posting_feedback"
+
+
+@pytest.mark.asyncio
+async def test_douyin_incremental_authorization_requests_only_missing_supported_scopes(
+    client, admin, session
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://console.example.com/douyin/callback",
+            "scopes": [
+                "user_info",
+                "task.posting.create",
+                "posting.behavior",
+                "task.posting.user_verification",
+            ],
+        },
+    )
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "增量授权账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    session.add(
+        PlatformAccountAuth(
+            org_id=admin.org_id,
+            account_id=account_id,
+            platform="douyin",
+            external_open_id="open-incremental",
+            auth_status="authorized",
+            data_sync_status="pending",
+            scopes=["user_info"],
+        )
+    )
+    await session.commit()
+
+    response = await client.post(
+        "/platform-integrations/douyin/oauth/incremental-authorize",
+        headers=headers,
+        json={"account_id": account_id, "capability_key": "posting_feedback"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scopes"] == ["posting.behavior"]
+    assert parse_qs(urlparse(body["authorization_url"]).query)["scope"] == ["posting.behavior"]
+
+
+@pytest.mark.asyncio
+async def test_douyin_incremental_authorization_blocks_unapproved_app_capability(
+    client, admin, session
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://console.example.com/douyin/callback",
+            "scopes": ["user_info"],
+        },
+    )
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "权限缺失账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    session.add(
+        PlatformAccountAuth(
+            org_id=admin.org_id,
+            account_id=account_id,
+            platform="douyin",
+            external_open_id="open-missing-app-permission",
+            auth_status="authorized",
+            data_sync_status="pending",
+            scopes=["user_info"],
+        )
+    )
+    await session.commit()
+
+    response = await client.post(
+        "/platform-integrations/douyin/oauth/incremental-authorize",
+        headers=headers,
+        json={"account_id": account_id, "capability_key": "posting_feedback"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["missing_app_scopes"] == [
+        "task.posting.create",
+        "posting.behavior",
+        "task.posting.user_verification",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_douyin_incremental_callback_preserves_previously_granted_scopes(
+    client, admin, session, monkeypatch
+):
+    from app.api import platform_integrations as api_module
+
+    async def fake_exchange(*, client_key, client_secret, code):
+        return {
+            "open_id": "open-preserve-scopes",
+            "scope": "posting.behavior",
+            "expires_in": 7200,
+            "refresh_expires_in": 86400,
+            "access_token": "incremental-access-token",
+            "refresh_token": "incremental-refresh-token",
+        }
+
+    monkeypatch.setenv("DOUYIN_CLIENT_SECRET", "secret-from-env")
+    monkeypatch.setattr(
+        api_module.settings,
+        "credential_encryption_key",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    monkeypatch.setattr(api_module, "exchange_douyin_access_token", fake_exchange)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.patch(
+        "/platform-integrations/douyin",
+        headers=headers,
+        json={
+            "status": "configured",
+            "client_key": "douyin-client-key",
+            "redirect_uri": "https://console.example.com/douyin/callback",
+            "scopes": [
+                "user_info",
+                "task.posting.create",
+                "posting.behavior",
+                "task.posting.user_verification",
+            ],
+        },
+    )
+    account_id = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={"nickname": "保留权限账号", "platform": "douyin"},
+        )
+    ).json()["id"]
+    auth = PlatformAccountAuth(
+        org_id=admin.org_id,
+        account_id=account_id,
+        platform="douyin",
+        external_open_id="open-preserve-scopes",
+        auth_status="authorized",
+        data_sync_status="pending",
+        scopes=["fans.data.bind", "user_info"],
+    )
+    session.add(auth)
+    await session.commit()
+    authorize = await client.post(
+        "/platform-integrations/douyin/oauth/incremental-authorize",
+        headers=headers,
+        json={"account_id": account_id, "capability_key": "posting_feedback"},
+    )
+
+    callback = await client.get(
+        "/platform-integrations/douyin/oauth/callback",
+        params={"code": "incremental-code", "state": authorize.json()["state"]},
+    )
+
+    assert callback.status_code == 200
+    await session.refresh(auth)
+    assert auth.scopes == ["fans.data.bind", "posting.behavior", "user_info"]
 
 
 @pytest.mark.asyncio

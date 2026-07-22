@@ -795,6 +795,36 @@ export interface DouyinAuthorizeUrl {
   authorization_url: string;
 }
 
+export type DouyinCapabilityKey =
+  | "profile"
+  | "h5_publish"
+  | "posting_feedback";
+
+export type DouyinCapabilityStatus =
+  | "ready"
+  | "needs_app_permission"
+  | "needs_account_authorization";
+
+export interface DouyinCapability {
+  key: DouyinCapabilityKey;
+  label: string;
+  description: string;
+  app_scopes: string[];
+  user_scopes: string[];
+  missing_app_scopes: string[];
+  missing_user_scopes: string[];
+  status: DouyinCapabilityStatus;
+}
+
+export interface DouyinAccountCapabilities {
+  account_id: number;
+  platform: "douyin";
+  configured_app_scopes: string[];
+  granted_account_scopes: string[];
+  capabilities: DouyinCapability[];
+  next_recommended: DouyinCapabilityKey | null;
+}
+
 export interface DouyinTrialWhitelistUrl {
   platform: "douyin";
   client_key: string;
