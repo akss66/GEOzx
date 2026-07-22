@@ -6,7 +6,13 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Account, AccountReviewGoal, ContentItem, OptimizationSuggestion
+from app.models import (
+    Account,
+    AccountReviewGoal,
+    ContentItem,
+    OptimizationSuggestion,
+    PlatformAccountAuth,
+)
 from app.schemas.feedback import OptimizationSuggestionOut
 from app.schemas.metrics import (
     AccountReviewGoalOut,
@@ -51,15 +57,16 @@ def _direction(current: float, previous: float | None) -> str:
 def _change(
     metric: str,
     label: str,
-    current: float,
+    current: float | None,
     previous: float | None,
     *,
     percentage_value: bool = False,
 ) -> ReviewChangeOut:
-    direction = _direction(current, previous)
+    current_value = current or 0
+    direction = _direction(current_value, previous)
     delta = None
     if previous not in (None, 0):
-        delta = round((current - previous) / abs(previous) * 100, 1)
+        delta = round((current_value - previous) / abs(previous) * 100, 1)
     if direction == "baseline":
         summary = f"{label}已形成首个可比较基线"
     elif direction == "flat":
@@ -67,7 +74,9 @@ def _change(
     else:
         verb = "提升" if direction == "up" else "下降"
         summary = f"{label}较上一周期{verb}{abs(delta or 0):.1f}%"
-    display_current = round(current * 100, 2) if percentage_value else round(current, 2)
+    display_current = (
+        round(current_value * 100, 2) if percentage_value else round(current_value, 2)
+    )
     display_previous = (
         round(previous * 100, 2) if percentage_value and previous is not None else previous
     )
@@ -112,9 +121,9 @@ def _goal_progress(
             {
                 "metric": "play",
                 "label": "播放量",
-                "current": totals.play,
+                "current": totals.play or 0,
                 "target": goal.target_play,
-                "achievement_percent": round(totals.play / goal.target_play * 100, 1),
+                "achievement_percent": round((totals.play or 0) / goal.target_play * 100, 1),
             }
         )
     if goal.target_completion_rate:
@@ -122,10 +131,10 @@ def _goal_progress(
             {
                 "metric": "completion_rate",
                 "label": "平均完播率",
-                "current": totals.avg_completion_rate,
+                "current": totals.avg_completion_rate or 0,
                 "target": goal.target_completion_rate,
                 "achievement_percent": round(
-                    totals.avg_completion_rate / goal.target_completion_rate * 100,
+                    (totals.avg_completion_rate or 0) / goal.target_completion_rate * 100,
                     1,
                 ),
             }
@@ -135,10 +144,10 @@ def _goal_progress(
             {
                 "metric": "follower_delta",
                 "label": "净增粉丝",
-                "current": totals.follower_delta,
+                "current": totals.follower_delta or 0,
                 "target": goal.target_follower_delta,
                 "achievement_percent": round(
-                    totals.follower_delta / goal.target_follower_delta * 100,
+                    (totals.follower_delta or 0) / goal.target_follower_delta * 100,
                     1,
                 ),
             }
@@ -233,25 +242,34 @@ def _collect_metric(content_snapshots: list, metric_name: str) -> list[float]:
 
 def _totals_from_view(view: AccountDataView) -> ReviewTotalsOut:
     rollups = _daily_rollups(view)
-    engagement_values = []
+    engagement_values: list[float] = []
     for snapshot in view.content_snapshots:
-        like_rate = _metric_value(snapshot.metrics, "like_rate") or 0
-        comment_rate = _metric_value(snapshot.metrics, "comment_rate") or 0
-        share_rate = _metric_value(snapshot.metrics, "share_rate") or 0
-        engagement_values.append(float(like_rate) + float(comment_rate) + float(share_rate))
+        parts = [
+            _metric_value(snapshot.metrics, "like_rate"),
+            _metric_value(snapshot.metrics, "comment_rate"),
+            _metric_value(snapshot.metrics, "share_rate"),
+        ]
+        present_parts = [float(part) for part in parts if part is not None]
+        if present_parts:
+            engagement_values.append(sum(present_parts))
     completion_values = [
         float(item["completion_rate"]) for item in rollups if item["completion_rate"] is not None
     ]
+    play_values = [int(item["play"]) for item in rollups if item["play"] is not None]
+    exposure_values = [int(item["exposure"]) for item in rollups if item["exposure"] is not None]
+    follower_values = [
+        int(item["follower_delta"]) for item in rollups if item["follower_delta"] is not None
+    ]
     return ReviewTotalsOut(
-        play=sum(int(item["play"] or 0) for item in rollups),
-        exposure=sum(int(item["exposure"] or 0) for item in rollups),
+        play=sum(play_values) if play_values else None,
+        exposure=sum(exposure_values) if exposure_values else None,
         avg_completion_rate=(
-            round(sum(completion_values) / len(completion_values), 4) if completion_values else 0
+            round(sum(completion_values) / len(completion_values), 4) if completion_values else None
         ),
         avg_engagement_rate=(
-            round(sum(engagement_values) / len(engagement_values), 4) if engagement_values else 0
+            round(sum(engagement_values) / len(engagement_values), 4) if engagement_values else None
         ),
-        follower_delta=sum(int(item["follower_delta"] or 0) for item in rollups),
+        follower_delta=sum(follower_values) if follower_values else None,
     )
 
 
@@ -260,16 +278,20 @@ def _trend(view: AccountDataView) -> tuple[list[TrendPoint], list[EngagementPoin
     trends = [
         TrendPoint(
             date=item["date"].strftime("%m/%d"),
-            play=int(item["play"] or 0),
-            exposure=int(item["exposure"] or 0),
+            play=int(item["play"]) if item["play"] is not None else None,
+            exposure=int(item["exposure"]) if item["exposure"] is not None else None,
         )
         for item in rollups
     ]
     engagement = [
         EngagementPoint(
             date=item["date"].strftime("%m/%d"),
-            completion_rate=round(float(item["completion_rate"] or 0), 4),
-            like_rate=round(float(item["like_rate"] or 0), 4),
+            completion_rate=(
+                round(float(item["completion_rate"]), 4)
+                if item["completion_rate"] is not None
+                else None
+            ),
+            like_rate=round(float(item["like_rate"]), 4) if item["like_rate"] is not None else None,
         )
         for item in rollups
     ]
@@ -279,6 +301,8 @@ def _trend(view: AccountDataView) -> tuple[list[TrendPoint], list[EngagementPoin
 def _attributions(view: AccountDataView) -> list[ReviewAttributionOut]:
     grouped: dict[tuple[int | None, int | None, str], list] = defaultdict(list)
     for snapshot in view.content_snapshots:
+        if not snapshot.has_stable_identity:
+            continue
         grouped[
             (
                 snapshot.platform_content_record_id,
@@ -309,20 +333,23 @@ def _attributions(view: AccountDataView) -> list[ReviewAttributionOut]:
                 title,
                 ReviewTotalsOut(
                     play=play,
-                    exposure=0,
+                    exposure=None,
                     avg_completion_rate=(
-                        round(sum(completion) / len(completion), 4) if completion else 0
+                        round(sum(completion) / len(completion), 4) if completion else None
                     ),
                     avg_engagement_rate=(
                         round(sum(engagement_values) / len(engagement_values), 4)
                         if engagement_values
-                        else 0
+                        else None
                     ),
-                    follower_delta=0,
+                    follower_delta=None,
                 ),
             )
         )
-    ranked.sort(key=lambda item: (item[2].play, item[2].avg_completion_rate), reverse=True)
+    ranked.sort(
+        key=lambda item: (item[2].play or 0, item[2].avg_completion_rate or 0),
+        reverse=True,
+    )
     results: list[ReviewAttributionOut] = []
     for index, (content_item_id, title, totals) in enumerate(ranked[:4]):
         is_driver = index == 0
@@ -330,9 +357,9 @@ def _attributions(view: AccountDataView) -> list[ReviewAttributionOut]:
             ReviewAttributionOut(
                 content_item_id=content_item_id,
                 title=title,
-                play=totals.play,
-                completion_rate=totals.avg_completion_rate,
-                engagement_rate=totals.avg_engagement_rate,
+                play=totals.play or 0,
+                completion_rate=totals.avg_completion_rate or 0,
+                engagement_rate=totals.avg_engagement_rate or 0,
                 role="driver" if is_driver else "opportunity",
                 reason=(
                     "本周期播放贡献最高，是当前增长驱动内容"
@@ -393,6 +420,12 @@ async def build_review_workspace(
     service = AccountDataViewService(session)
     current_view = await service.load(account, current_start, current_end)
     previous_view = await service.load(account, previous_start, previous_end)
+    platform_auth = await session.scalar(
+        select(PlatformAccountAuth).where(
+            PlatformAccountAuth.org_id == account.org_id,
+            PlatformAccountAuth.account_id == account.id,
+        )
+    )
     goal = await session.scalar(
         select(AccountReviewGoal).where(
             AccountReviewGoal.account_id == account.id,
@@ -464,12 +497,13 @@ async def build_review_workspace(
         ),
         data_status=ReviewDataStatusOut(
             has_data=_has_data(current_view),
-            sources=sorted(
-                {row.source for row in current_view.evidence_rows},
-                key=lambda source: source.value,
-            ),
+            sources=_review_sources(current_view),
             latest_stat_date=current_view.freshness.latest_observed_at,
-            latest_synced_at=current_view.freshness.latest_confirmed_at,
+            latest_synced_at=(
+                platform_auth.last_sync_at
+                if platform_auth is not None and platform_auth.last_sync_at is not None
+                else current_view.latest_synced_at
+            ),
             latest_confirmed_at=current_view.latest_confirmed_at,
             coverage=current_view.coverage,
             conflict_count=len(current_view.conflicts),
@@ -506,3 +540,10 @@ async def build_review_workspace(
 
 def _has_data(view: AccountDataView) -> bool:
     return bool(view.account_snapshots or view.content_snapshots)
+
+
+def _review_sources(view: AccountDataView) -> list[str]:
+    content_sources = sorted({row.source.value for row in view.evidence_rows})
+    if content_sources:
+        return content_sources
+    return sorted({item.source_kind for item in view.source_summary})

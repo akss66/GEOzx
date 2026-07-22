@@ -101,6 +101,7 @@ class ContentMetricSnapshotView:
     title: str | None
     content_item_id: int | None
     platform_content_record_id: int | None
+    has_stable_identity: bool
     metrics: dict[str, AccountDataMetric]
 
 
@@ -179,6 +180,7 @@ class AccountDataView:
     audience: list[AudienceProfileSnapshotView]
     benchmarks: list[BenchmarkSnapshotView]
     evidence_rows: list[MetricSnapshot]
+    latest_synced_at: datetime | None
     latest_confirmed_at: datetime | None
     source_summary: list[AccountDataSourceSummary]
 
@@ -199,25 +201,6 @@ class AccountDataViewService:
         period_start: date,
         period_end: date,
     ) -> AccountDataView:
-        batches = list(
-            await self.session.scalars(
-                select(DataImportBatch)
-                .options(
-                    selectinload(DataImportBatch.rows),
-                    selectinload(DataImportBatch.conflicts),
-                )
-                .where(
-                    DataImportBatch.org_id == account.org_id,
-                    DataImportBatch.account_id == account.id,
-                    DataImportBatch.status == ImportBatchStatus.COMMITTED,
-                    DataImportBatch.committed_at.is_not(None),
-                    DataImportBatch.revoked_at.is_(None),
-                )
-                .order_by(DataImportBatch.committed_at.desc(), DataImportBatch.id.desc())
-            )
-        )
-        batch_by_id = {item.id: item for item in batches}
-        import_rows = _build_import_projection_index(batches)
         content_rows = list(
             await self.session.scalars(
                 select(MetricSnapshot)
@@ -267,7 +250,16 @@ class AccountDataViewService:
                 .order_by(BenchmarkSnapshot.stat_date.desc(), BenchmarkSnapshot.id.desc())
             )
         )
-        conflicts = await self._load_conflicts(account)
+        relevant_batch_ids = _collect_relevant_batch_ids(
+            content_rows=content_rows,
+            account_rows=account_rows,
+            audience_rows=audience_rows,
+            benchmark_rows=benchmark_rows,
+        )
+        batches = await self._load_batches(account, relevant_batch_ids)
+        batch_by_id = {item.id: item for item in batches}
+        import_rows = _build_import_projection_index(batches)
+        conflicts = await self._load_conflicts(account, relevant_batch_ids)
         content_snapshots = _build_content_snapshots(content_rows, batch_by_id, import_rows)
         account_snapshots = _build_account_snapshots(account_rows, batch_by_id, import_rows)
         audience = _build_audience_views(audience_rows, batch_by_id)
@@ -275,9 +267,16 @@ class AccountDataViewService:
         coverage = {
             "account_metrics": "available" if account_snapshots else "missing",
             "content_metrics": "available" if content_snapshots else "missing",
+            "content_identity": _content_identity_coverage(content_snapshots),
             "audience": "available" if audience else "missing",
             "benchmarks": "available" if benchmarks else "missing",
         }
+        latest_synced_at = _latest_synced_at(
+            content_rows=content_rows,
+            account_rows=account_rows,
+            audience_rows=audience_rows,
+            benchmark_rows=benchmark_rows,
+        )
         latest_confirmed_at = _latest_confirmed_at(
             content_rows=content_rows,
             account_rows=account_rows,
@@ -304,10 +303,9 @@ class AccountDataViewService:
             audience=audience,
             benchmarks=benchmarks,
             evidence_rows=content_rows,
+            latest_synced_at=latest_synced_at,
             latest_confirmed_at=latest_confirmed_at,
             source_summary=_build_source_summary(
-                period_start=period_start,
-                period_end=period_end,
                 content_rows=content_rows,
                 account_rows=account_rows,
                 audience_rows=audience_rows,
@@ -316,7 +314,32 @@ class AccountDataViewService:
             ),
         )
 
-    async def _load_conflicts(self, account: Account) -> list[ConflictView]:
+    async def _load_batches(
+        self,
+        account: Account,
+        batch_ids: set[int],
+    ) -> list[DataImportBatch]:
+        if not batch_ids:
+            return []
+        return list(
+            await self.session.scalars(
+                select(DataImportBatch)
+                .options(selectinload(DataImportBatch.rows))
+                .where(
+                    DataImportBatch.org_id == account.org_id,
+                    DataImportBatch.account_id == account.id,
+                    DataImportBatch.id.in_(batch_ids),
+                    DataImportBatch.status == ImportBatchStatus.COMMITTED,
+                    DataImportBatch.committed_at.is_not(None),
+                    DataImportBatch.revoked_at.is_(None),
+                )
+                .order_by(DataImportBatch.committed_at.desc(), DataImportBatch.id.desc())
+            )
+        )
+
+    async def _load_conflicts(self, account: Account, batch_ids: set[int]) -> list[ConflictView]:
+        if not batch_ids:
+            return []
         rows = list(
             await self.session.scalars(
                 select(DataConflict)
@@ -324,6 +347,7 @@ class AccountDataViewService:
                 .where(
                     DataConflict.org_id == account.org_id,
                     DataConflict.account_id == account.id,
+                    DataConflict.batch_id.in_(batch_ids),
                     DataConflict.status == ConflictStatus.OPEN,
                     DataImportBatch.org_id == account.org_id,
                     DataImportBatch.account_id == account.id,
@@ -368,13 +392,8 @@ def _build_content_snapshots(
 ) -> list[ContentMetricSnapshotView]:
     grouped: dict[tuple[object, date], ContentMetricSnapshotView] = {}
     for row in rows:
-        snapshot_key = (
-            row.platform_content_record_id
-            or row.content_item_id
-            or row.title
-            or f"metric:{row.id}",
-            row.stat_date,
-        )
+        imported_context = import_rows.get("metric_snapshot", {}).get(row.id)
+        snapshot_key = _content_snapshot_key(row=row, imported_context=imported_context)
         snapshot = grouped.get(snapshot_key)
         if snapshot is None:
             snapshot = ContentMetricSnapshotView(
@@ -382,10 +401,12 @@ def _build_content_snapshots(
                 title=row.title,
                 content_item_id=row.content_item_id,
                 platform_content_record_id=row.platform_content_record_id,
+                has_stable_identity=(
+                    row.platform_content_record_id is not None or row.content_item_id is not None
+                ),
                 metrics={metric: AccountDataMetric(metric=metric) for metric in CONTENT_METRICS},
             )
             grouped[snapshot_key] = snapshot
-        imported_context = import_rows.get("metric_snapshot", {}).get(row.id)
         for metric_name in CONTENT_METRICS:
             observation = _content_observation(
                 metric_name=metric_name,
@@ -409,6 +430,28 @@ def _build_content_snapshots(
         reverse=True,
     )
     return results
+
+
+def _content_snapshot_key(
+    *,
+    row: MetricSnapshot,
+    imported_context: _ImportProjectionContext | None,
+) -> tuple[object, date]:
+    if row.platform_content_record_id is not None:
+        return (("platform_content_record", row.platform_content_record_id), row.stat_date)
+    if row.content_item_id is not None:
+        return (("content_item", row.content_item_id), row.stat_date)
+    if imported_context is not None:
+        return (("import_row", imported_context.row.id), row.stat_date)
+    return (("metric_snapshot", row.id), row.stat_date)
+
+
+def _content_identity_coverage(content_snapshots: list[ContentMetricSnapshotView]) -> str:
+    if not content_snapshots:
+        return "missing"
+    if any(not item.has_stable_identity for item in content_snapshots):
+        return "ambiguous"
+    return "available"
 
 
 def _build_account_snapshots(
@@ -447,7 +490,7 @@ def _build_audience_views(
                 stat_date=row.stat_date,
                 dimension=row.dimension,
                 total_audience=row.total_audience,
-                source=batch.source_kind if batch is not None else DataSourceKind.MANUAL_ENTRY,
+                source=batch.source_kind if batch is not None else row.source_kind,
                 confirmed_at=batch.committed_at if batch is not None else row.updated_at,
                 items=[
                     AudienceProfileItemView(
@@ -477,7 +520,7 @@ def _build_benchmark_views(
                 metric_code=row.metric_code,
                 metric_value=row.metric_value,
                 sample_size=row.sample_size,
-                source=batch.source_kind if batch is not None else DataSourceKind.MANUAL_ENTRY,
+                source=batch.source_kind if batch is not None else row.source_kind,
                 confirmed_at=batch.committed_at if batch is not None else row.updated_at,
                 meta=row.meta or {},
             )
@@ -556,7 +599,7 @@ def _account_observation(
         value = getattr(row, field_name)
         batch = batch_by_id.get(row.import_batch_id)
         confirmed_at = batch.committed_at if batch is not None else row.updated_at
-        source = batch.source_kind if batch is not None else DataSourceKind.MANUAL_ENTRY
+        source = batch.source_kind if batch is not None else row.source_kind
     return AccountDataObservation(
         metric=metric_name,
         value=value,
@@ -666,6 +709,23 @@ def _latest_confirmed_at(
     return max(dated, key=_datetime_sort_key)
 
 
+def _latest_synced_at(
+    *,
+    content_rows: list[MetricSnapshot],
+    account_rows: list[AccountMetricSnapshot],
+    audience_rows: list[AudienceProfileSnapshot],
+    benchmark_rows: list[BenchmarkSnapshot],
+) -> datetime | None:
+    candidates = [row.updated_at for row in content_rows]
+    candidates.extend(row.updated_at for row in account_rows)
+    candidates.extend(row.updated_at for row in audience_rows)
+    candidates.extend(row.updated_at for row in benchmark_rows)
+    dated = [item for item in candidates if item is not None]
+    if not dated:
+        return None
+    return max(dated, key=_datetime_sort_key)
+
+
 def _latest_observed_at(
     *,
     content_rows: list[MetricSnapshot],
@@ -702,8 +762,6 @@ def _build_freshness(
 
 def _build_source_summary(
     *,
-    period_start: date,
-    period_end: date,
     content_rows: list[MetricSnapshot],
     account_rows: list[AccountMetricSnapshot],
     audience_rows: list[AudienceProfileSnapshot],
@@ -717,41 +775,37 @@ def _build_source_summary(
             source=_metric_snapshot_source(row=row, batch_by_id=batch_by_id),
             batch=batch_by_id.get(row.import_batch_id) if row.import_batch_id is not None else None,
             data_domain="content_metrics",
-            period_start=period_start,
-            period_end=period_end,
+            observed_at=row.stat_date,
             fallback_confirmed_at=row.updated_at,
         )
     for row in account_rows:
         batch = batch_by_id.get(row.import_batch_id)
         _accumulate_source_summary(
             grouped=grouped,
-            source=batch.source_kind if batch is not None else DataSourceKind.MANUAL_ENTRY,
+            source=batch.source_kind if batch is not None else row.source_kind,
             batch=batch,
             data_domain="account_metrics",
-            period_start=period_start,
-            period_end=period_end,
+            observed_at=row.stat_date,
             fallback_confirmed_at=row.updated_at,
         )
     for row in audience_rows:
         batch = batch_by_id.get(row.import_batch_id)
         _accumulate_source_summary(
             grouped=grouped,
-            source=batch.source_kind if batch is not None else DataSourceKind.MANUAL_ENTRY,
+            source=batch.source_kind if batch is not None else row.source_kind,
             batch=batch,
             data_domain="audience",
-            period_start=period_start,
-            period_end=period_end,
+            observed_at=row.stat_date,
             fallback_confirmed_at=row.updated_at,
         )
     for row in benchmark_rows:
         batch = batch_by_id.get(row.import_batch_id)
         _accumulate_source_summary(
             grouped=grouped,
-            source=batch.source_kind if batch is not None else DataSourceKind.MANUAL_ENTRY,
+            source=batch.source_kind if batch is not None else row.source_kind,
             batch=batch,
             data_domain="benchmarks",
-            period_start=period_start,
-            period_end=period_end,
+            observed_at=row.stat_date,
             fallback_confirmed_at=row.updated_at,
         )
     results = [
@@ -782,8 +836,7 @@ def _accumulate_source_summary(
     source: ObservationSource,
     batch: DataImportBatch | None,
     data_domain: str,
-    period_start: date,
-    period_end: date,
+    observed_at: date,
     fallback_confirmed_at: datetime,
 ) -> None:
     if source == "derived":
@@ -796,17 +849,38 @@ def _accumulate_source_summary(
         {
             "data_domains": set(),
             "confirmed_at": batch.committed_at if batch is not None else fallback_confirmed_at,
-            "period_start": batch.period_start if batch is not None else period_start,
-            "period_end": batch.period_end if batch is not None else period_end,
+            "period_start": batch.period_start if batch is not None else observed_at,
+            "period_end": batch.period_end if batch is not None else observed_at,
         },
     )
     payload["data_domains"].add(data_domain)
+    if batch is None:
+        payload["period_start"] = min(payload["period_start"], observed_at)
+        payload["period_end"] = max(payload["period_end"], observed_at)
     confirmed_at = batch.committed_at if batch is not None else fallback_confirmed_at
     if confirmed_at is not None and (
         payload["confirmed_at"] is None
         or _datetime_sort_key(confirmed_at) > _datetime_sort_key(payload["confirmed_at"])
     ):
         payload["confirmed_at"] = confirmed_at
+
+
+def _collect_relevant_batch_ids(
+    *,
+    content_rows: list[MetricSnapshot],
+    account_rows: list[AccountMetricSnapshot],
+    audience_rows: list[AudienceProfileSnapshot],
+    benchmark_rows: list[BenchmarkSnapshot],
+) -> set[int]:
+    batch_ids = {row.import_batch_id for row in content_rows if row.import_batch_id is not None}
+    batch_ids.update(row.import_batch_id for row in account_rows if row.import_batch_id is not None)
+    batch_ids.update(
+        row.import_batch_id for row in audience_rows if row.import_batch_id is not None
+    )
+    batch_ids.update(
+        row.import_batch_id for row in benchmark_rows if row.import_batch_id is not None
+    )
+    return batch_ids
 
 
 def _datetime_sort_key(value: datetime | None) -> float:

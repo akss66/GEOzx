@@ -28,14 +28,14 @@ class IngestMetricRequest(BaseModel):
 
 class TrendPoint(BaseModel):
     date: str
-    play: int
-    exposure: int
+    play: int | None
+    exposure: int | None
 
 
 class EngagementPoint(BaseModel):
     date: str
-    completion_rate: float
-    like_rate: float
+    completion_rate: float | None
+    like_rate: float | None
 
 
 class RankItem(BaseModel):
@@ -131,7 +131,7 @@ class ReviewPeriodOut(BaseModel):
 
 class ReviewDataStatusOut(BaseModel):
     has_data: bool
-    sources: list[MetricSource]
+    sources: list[str]
     latest_stat_date: date | None = None
     latest_synced_at: datetime | None = None
     latest_confirmed_at: datetime | None = None
@@ -151,11 +151,11 @@ class ReviewSourceSummaryOut(BaseModel):
 
 
 class ReviewTotalsOut(BaseModel):
-    play: int = 0
-    exposure: int = 0
-    avg_completion_rate: float = 0
-    avg_engagement_rate: float = 0
-    follower_delta: int = 0
+    play: int | None = None
+    exposure: int | None = None
+    avg_completion_rate: float | None = None
+    avg_engagement_rate: float | None = None
+    follower_delta: int | None = None
 
 
 class ReviewChangeOut(BaseModel):

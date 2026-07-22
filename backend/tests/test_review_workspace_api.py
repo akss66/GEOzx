@@ -9,6 +9,7 @@ from app.models import (
     DataImportBatch,
     MetricSnapshot,
     OptimizationSuggestion,
+    PlatformAccountAuth,
     Project,
     ProjectMembership,
 )
@@ -324,6 +325,17 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
     client, admin, session
 ):
     _project, account = await _review_account(session, admin, nickname="Only daily play")
+    last_sync_at = datetime(2026, 7, 21, 7, 45, tzinfo=UTC)
+    session.add(
+        PlatformAccountAuth(
+            org_id=admin.org_id,
+            account_id=account.id,
+            platform=account.platform.value,
+            auth_status="authorized",
+            data_sync_status="healthy",
+            last_sync_at=last_sync_at,
+        )
+    )
     batch = DataImportBatch(
         org_id=admin.org_id,
         account_id=account.id,
@@ -360,11 +372,22 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
     assert response.status_code == 200
     body = response.json()
     assert body["data_status"]["has_data"] is True
+    assert body["data_status"]["sources"] == ["platform_export"]
     assert body["data_status"]["coverage"]["account_metrics"] == "available"
     assert body["data_status"]["coverage"]["content_metrics"] == "missing"
+    assert "当前周期仅有账号级趋势数据，作品归因尚未补齐" in body["data_status"]["missing_reasons"]
+    assert body["data_status"]["latest_synced_at"].startswith("2026-07-21T07:45:00")
     assert body["data_status"]["latest_confirmed_at"] is not None
     assert body["data_status"]["source_summary"][0]["source_kind"] == "platform_export"
+    assert body["data_status"]["source_summary"][0]["data_domains"] == ["account_metrics"]
     assert body["totals"]["play"] == 81
+    assert body["totals"]["exposure"] is None
+    assert body["totals"]["avg_completion_rate"] is None
+    assert body["totals"]["avg_engagement_rate"] is None
+    assert body["totals"]["follower_delta"] is None
     assert body["trend"][-1]["play"] == 81
+    assert body["trend"][-1]["exposure"] is None
+    assert body["engagement"][-1]["completion_rate"] is None
+    assert body["engagement"][-1]["like_rate"] is None
     assert body["attributions"] == []
     assert body["evidence"] == []
