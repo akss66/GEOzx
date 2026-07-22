@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,10 @@ SUPPORTED_EXTENSIONS = {".xlsx", ".csv"}
 MISSING_MARKERS = {"", "-", "--", "N/A", "n/a", "null", "None"}
 TOO_MANY_COLUMNS_MESSAGE = "Files with more than 100 columns are not supported"
 TOO_MANY_ROWS_MESSAGE = "Files with more than 10,000 rows are not supported"
+MAX_ARCHIVE_ENTRY_COUNT = 2_048
+MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_ENTRY_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
+MAX_ARCHIVE_COMPRESSION_RATIO = 100
 
 
 class ParseFailure(ValueError):
@@ -67,7 +71,7 @@ class ParsedDataset:
     template_name: str
     headers: list[str]
     rows: list[ValidatedRow]
-    preview: ImportPreview
+    preview: ImportPreview | None = None
 
 
 def parse_source_file(filename: str, data: bytes) -> ParsedDataset:
@@ -75,24 +79,22 @@ def parse_source_file(filename: str, data: bytes) -> ParsedDataset:
     headers, raw_rows = _parse_xlsx(data) if extension == ".xlsx" else _parse_csv(data)
     template = _detect_template_or_fail(headers)
     rows = _normalize_rows(template, raw_rows)
-    preview = build_preview(rows)
-    return ParsedDataset(
+    parsed = ParsedDataset(
         template_code=template.code,
         template_name=template.display_name,
         headers=headers,
         rows=rows,
-        preview=preview,
     )
+    return replace(parsed, preview=build_preview(parsed))
 
 
-def build_preview(rows: list[ValidatedRow]) -> ImportPreview:
-    template_code = rows[0].template_code if rows else ""
-    invalid_rows = sum(1 for row in rows if row.errors)
-    warning_rows = sum(1 for row in rows if row.warnings)
+def build_preview(parsed: ParsedDataset) -> ImportPreview:
+    invalid_rows = sum(1 for row in parsed.rows if row.errors)
+    warning_rows = sum(1 for row in parsed.rows if row.warnings)
     return ImportPreview(
-        template_code=template_code,
-        total_rows=len(rows),
-        valid_rows=len(rows) - invalid_rows,
+        template_code=parsed.template_code,
+        total_rows=len(parsed.rows),
+        valid_rows=len(parsed.rows) - invalid_rows,
         invalid_rows=invalid_rows,
         warning_rows=warning_rows,
     )
@@ -120,7 +122,7 @@ def _parse_csv(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
         rows = list(reader)
     except csv.Error as exc:
         raise ParseFailure("malformed_csv", f"Malformed CSV: {exc}") from exc
-    return _rows_to_table(rows)
+    return _rows_to_table(rows, strict_row_width=True)
 
 
 def _decode_csv(data: bytes) -> str:
@@ -180,7 +182,9 @@ def _parse_xlsx(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
 def _scan_xlsx_archive(data: bytes) -> None:
     try:
         with ZipFile(io.BytesIO(data)) as archive:
-            names = archive.namelist()
+            infos = archive.infolist()
+            _validate_archive_metadata(infos)
+            names = [info.filename for info in infos]
             if any(name.startswith("xl/externalLinks/") for name in names):
                 raise ParseFailure(
                     "external_links_unsupported",
@@ -191,10 +195,12 @@ def _scan_xlsx_archive(data: bytes) -> None:
                     "macros_unsupported",
                     "Macro-enabled workbooks are not supported",
                 )
-            for name in names:
-                if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+            for info in infos:
+                if not info.filename.startswith("xl/worksheets/") or not info.filename.endswith(
+                    ".xml"
+                ):
                     continue
-                if b"<f" in archive.read(name):
+                if _entry_contains_formula(archive, info):
                     raise ParseFailure(
                         "formula_cells_unsupported",
                         "Formula cells are not supported",
@@ -203,15 +209,24 @@ def _scan_xlsx_archive(data: bytes) -> None:
         raise ParseFailure("invalid_xlsx", "The workbook is not a valid XLSX file") from exc
 
 
-def _rows_to_table(rows: list[list[Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+def _rows_to_table(
+    rows: list[list[Any]],
+    *,
+    strict_row_width: bool = False,
+) -> tuple[list[str], list[dict[str, Any]]]:
     if not rows:
         raise ParseFailure("empty_file", "The file does not contain any rows")
     headers = [_stringify_header(value) for value in rows[0]]
     _validate_headers(headers)
     data_rows: list[dict[str, Any]] = []
     for row_number, values in enumerate(rows[1:], start=2):
-        trimmed = list(values[: len(headers)])
-        if len(trimmed) < len(headers):
+        if strict_row_width and len(values) != len(headers):
+            raise ParseFailure(
+                "csv_row_width_mismatch",
+                f"CSV row {row_number} has {len(values)} fields; expected {len(headers)} fields",
+            )
+        trimmed = list(values if strict_row_width else values[: len(headers)])
+        if not strict_row_width and len(trimmed) < len(headers):
             trimmed.extend([None] * (len(headers) - len(trimmed)))
         if _row_is_blank(trimmed):
             continue
@@ -416,3 +431,54 @@ def _issue(code: str, field_name: str) -> RowIssue:
         "invalid_datetime": f"Invalid datetime for {field_name}",
     }
     return RowIssue(code=code, message=messages[code], field=field_name)
+
+
+def _validate_archive_metadata(infos: list[Any]) -> None:
+    if len(infos) > MAX_ARCHIVE_ENTRY_COUNT:
+        raise ParseFailure(
+            "archive_too_many_entries",
+            f"XLSX archive has too many archive entries ({len(infos)} > {MAX_ARCHIVE_ENTRY_COUNT})",
+        )
+
+    total_uncompressed_bytes = 0
+    for info in infos:
+        if info.is_dir():
+            continue
+        if info.file_size > MAX_ARCHIVE_ENTRY_UNCOMPRESSED_BYTES:
+            raise ParseFailure(
+                "archive_entry_too_large",
+                "XLSX archive entry is too large before decompression",
+            )
+        total_uncompressed_bytes += info.file_size
+        if total_uncompressed_bytes > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES:
+            raise ParseFailure(
+                "archive_total_uncompressed_too_large",
+                "XLSX archive total uncompressed size exceeds the allowed limit",
+            )
+        if _compression_ratio(info) > MAX_ARCHIVE_COMPRESSION_RATIO:
+            raise ParseFailure(
+                "archive_compression_ratio_too_large",
+                "XLSX archive entry exceeds the allowed compression ratio",
+            )
+
+
+def _compression_ratio(info: Any) -> float:
+    if info.file_size == 0:
+        return 0.0
+    if info.compress_size == 0:
+        return float("inf")
+    return info.file_size / info.compress_size
+
+
+def _entry_contains_formula(archive: ZipFile, info: Any) -> bool:
+    needle = b"<f"
+    tail = b""
+    with archive.open(info, "r") as entry:
+        while True:
+            chunk = entry.read(8_192)
+            if not chunk:
+                return False
+            haystack = tail + chunk
+            if needle in haystack:
+                return True
+            tail = haystack[-1:]

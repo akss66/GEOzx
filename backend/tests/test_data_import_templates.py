@@ -5,10 +5,11 @@ import io
 from collections.abc import Iterable
 from datetime import date, datetime
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
 
+import app.services.data_import.parser as parser_module
 from app.services.data_import.adapters import FileDataSourceAdapter
 from app.services.data_import.parser import ParseFailure, parse_source_file
 
@@ -98,7 +99,7 @@ def workbook_bytes(
     rows: Iterable[Iterable[object | None]],
     *,
     formulas: set[tuple[int, int]] | None = None,
-    extras: dict[str, bytes] | None = None,
+    extras: dict[str, bytes | tuple[bytes, int]] | None = None,
 ) -> bytes:
     formulas = formulas or set()
     buffer = io.BytesIO()
@@ -121,7 +122,11 @@ def workbook_bytes(
         archive.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS_XML)
         archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
         for filename, content in (extras or {}).items():
-            archive.writestr(filename, content)
+            if isinstance(content, tuple):
+                body, compress_type = content
+                archive.writestr(filename, body, compress_type=compress_type)
+            else:
+                archive.writestr(filename, content)
 
     return buffer.getvalue()
 
@@ -182,6 +187,14 @@ def _column_label(index: int) -> str:
         current, remainder = divmod(current - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+def _fail_if_opened(*_args, **_kwargs):
+    raise AssertionError("archive entry should not be decompressed")
+
+
+def _fail_if_loaded(*_args, **_kwargs):
+    raise AssertionError("openpyxl should not run for this rejection path")
 
 
 @pytest.mark.parametrize(
@@ -245,44 +258,40 @@ def test_single_content_template_normalizes_metrics(filename: str, payload):
             "aggregate.xlsx",
             lambda: workbook_bytes(
                 PERIOD_AGGREGATE_HEADERS,
-                [
-                    [
-                        "2026-04-23 ~ 2026-07-22",
-                        "1min-视频,图文",
-                        "随拍",
-                        "1",
-                        "0.0000",
-                        "0.1471",
-                        "0.6353",
-                        "2.8314",
-                        "444.0000",
-                        "10.0000",
-                        "0.0000",
-                        "1.0000",
-                    ]
-                ],
+                [[
+                    "2026-04-23 ~ 2026-07-22",
+                    "1min-视频,图文",
+                    "随拍",
+                    "1",
+                    "0.0000",
+                    "0.1471",
+                    "0.6353",
+                    "2.8314",
+                    "444.0000",
+                    "10.0000",
+                    "0.0000",
+                    "1.0000",
+                ]],
             ),
         ),
         (
             "aggregate.csv",
             lambda: csv_bytes(
                 PERIOD_AGGREGATE_HEADERS,
-                [
-                    [
-                        "2026-04-23 ~ 2026-07-22",
-                        "1min-视频,图文",
-                        "随拍",
-                        "1",
-                        "0.0000",
-                        "0.1471",
-                        "0.6353",
-                        "2.8314",
-                        "444.0000",
-                        "10.0000",
-                        "0.0000",
-                        "1.0000",
-                    ]
-                ],
+                [[
+                    "2026-04-23 ~ 2026-07-22",
+                    "1min-视频,图文",
+                    "随拍",
+                    "1",
+                    "0.0000",
+                    "0.1471",
+                    "0.6353",
+                    "2.8314",
+                    "444.0000",
+                    "10.0000",
+                    "0.0000",
+                    "1.0000",
+                ]],
             ),
         ),
     ],
@@ -308,52 +317,48 @@ def test_period_aggregate_template_parses_date_range_and_numeric_fields(
             "works.xlsx",
             lambda: workbook_bytes(
                 WORK_LIST_HEADERS,
-                [
-                    [
-                        "作品 A",
-                        "2026-07-18 14:11:20",
-                        "1min-视频",
-                        "公开",
-                        "81",
-                        "0.087500",
-                        "0.375000",
-                        "-",
-                        "0.375000",
-                        "9.53",
-                        "6",
-                        "0",
-                        "3",
-                        "0",
-                        "3",
-                        "0",
-                    ]
-                ],
+                [[
+                    "作品 A",
+                    "2026-07-18 14:11:20",
+                    "1min-视频",
+                    "公开",
+                    "81",
+                    "0.087500",
+                    "0.375000",
+                    "-",
+                    "0.375000",
+                    "9.53",
+                    "6",
+                    "0",
+                    "3",
+                    "0",
+                    "3",
+                    "0",
+                ]],
             ),
         ),
         (
             "works.csv",
             lambda: csv_bytes(
                 WORK_LIST_HEADERS,
-                [
-                    [
-                        "作品 A",
-                        "2026-07-18 14:11:20",
-                        "1min-视频",
-                        "公开",
-                        "81",
-                        "0.087500",
-                        "0.375000",
-                        "-",
-                        "0.375000",
-                        "9.53",
-                        "6",
-                        "0",
-                        "3",
-                        "0",
-                        "3",
-                        "0",
-                    ]
-                ],
+                [[
+                    "作品 A",
+                    "2026-07-18 14:11:20",
+                    "1min-视频",
+                    "公开",
+                    "81",
+                    "0.087500",
+                    "0.375000",
+                    "-",
+                    "0.375000",
+                    "9.53",
+                    "6",
+                    "0",
+                    "3",
+                    "0",
+                    "3",
+                    "0",
+                ]],
             ),
         ),
     ],
@@ -380,26 +385,24 @@ def test_invalid_dates_and_percentages_are_reported_in_preview():
         "works.csv",
         csv_bytes(
             WORK_LIST_HEADERS,
-            [
-                [
-                    "作品 A",
-                    "not-a-date",
-                    "1min-视频",
-                    "公开",
-                    "81",
-                    "1.25",
-                    "0.375000",
-                    "-",
-                    "0.375000",
-                    "9.53",
-                    "6",
-                    "0",
-                    "3",
-                    "0",
-                    "3",
-                    "0",
-                ]
-            ],
+            [[
+                "作品 A",
+                "not-a-date",
+                "1min-视频",
+                "公开",
+                "81",
+                "1.25",
+                "0.375000",
+                "-",
+                "0.375000",
+                "9.53",
+                "6",
+                "0",
+                "3",
+                "0",
+                "3",
+                "0",
+            ]],
         ),
     )
 
@@ -422,41 +425,109 @@ def test_duplicate_headers_fail_clearly():
         parse_source_file("dup.csv", csv_bytes(["日期", "日期"], [["2026-07-18", "81"]]))
 
 
-def test_formula_cells_are_rejected_even_when_cached_values_exist():
+def test_csv_short_row_is_rejected():
+    payload = csv_bytes(["日期", "播放量"], [["2026-07-18"]])
+
+    with pytest.raises(ParseFailure, match="expected 2 fields"):
+        parse_source_file("daily.csv", payload)
+
+
+def test_csv_long_row_is_rejected():
+    payload = csv_bytes(["日期", "播放量"], [["2026-07-18", "81", "extra"]])
+
+    with pytest.raises(ParseFailure, match="expected 2 fields"):
+        parse_source_file("daily.csv", payload)
+
+
+def test_header_only_file_preserves_template_code_in_preview():
+    parsed = parse_source_file("works.csv", csv_bytes(WORK_LIST_HEADERS, []))
+
+    assert parsed.template_code == "douyin_work_list_v1"
+    assert parsed.preview.template_code == "douyin_work_list_v1"
+    assert parsed.preview.total_rows == 0
+    assert parsed.preview.valid_rows == 0
+    assert parsed.preview.invalid_rows == 0
+
+
+def test_formula_cells_are_rejected_before_openpyxl_load(monkeypatch: pytest.MonkeyPatch):
     payload = workbook_bytes(
         DAILY_HEADERS,
         [["2026-07-18", "81"]],
         formulas={(2, 2)},
     )
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
 
     with pytest.raises(ParseFailure, match="Formula cells are not supported"):
         parse_source_file("daily.xlsx", payload)
 
 
-@pytest.mark.parametrize(
-    ("filename", "payload"),
-    [
-        (
-            "macro.xlsx",
-            lambda: workbook_bytes(
-                DAILY_HEADERS,
-                [["2026-07-18", "81"]],
-                extras={"xl/vbaProject.bin": b"vba"},
-            ),
-        ),
-        (
-            "external.xlsx",
-            lambda: workbook_bytes(
-                DAILY_HEADERS,
-                [["2026-07-18", "81"]],
-                extras={"xl/externalLinks/externalLink1.xml": b"<externalLink/>"},
-            ),
-        ),
-    ],
-)
-def test_macros_and_external_links_are_rejected(filename: str, payload):
-    with pytest.raises(ParseFailure):
-        parse_source_file(filename, payload())
+def test_external_links_are_rejected_before_openpyxl_load(monkeypatch: pytest.MonkeyPatch):
+    payload = workbook_bytes(
+        DAILY_HEADERS,
+        [["2026-07-18", "81"]],
+        extras={"xl/externalLinks/externalLink1.xml": b"<externalLink/>"},
+    )
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="external links"):
+        parse_source_file("external.xlsx", payload)
+
+
+def test_archive_entry_count_limit_rejects_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(parser_module, "MAX_ARCHIVE_ENTRY_COUNT", 8)
+    extras = {f"xl/junk/{index}.bin": b"x" for index in range(12)}
+    payload = workbook_bytes(DAILY_HEADERS, [["2026-07-18", "81"]], extras=extras)
+    monkeypatch.setattr(parser_module.ZipFile, "open", _fail_if_opened)
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="too many archive entries"):
+        parse_source_file("bomb.xlsx", payload)
+
+
+def test_archive_total_uncompressed_limit_rejects_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(parser_module, "MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES", 1_024)
+    chunk = bytes(range(256)) * 3
+    extras = {
+        "xl/junk/a.bin": (chunk, ZIP_STORED),
+        "xl/junk/b.bin": (chunk, ZIP_STORED),
+        "xl/junk/c.bin": (chunk[:64], ZIP_STORED),
+    }
+    payload = workbook_bytes(DAILY_HEADERS, [["2026-07-18", "81"]], extras=extras)
+    monkeypatch.setattr(parser_module.ZipFile, "open", _fail_if_opened)
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="total uncompressed size"):
+        parse_source_file("bomb.xlsx", payload)
+
+
+def test_archive_entry_size_limit_rejects_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(parser_module, "MAX_ARCHIVE_ENTRY_UNCOMPRESSED_BYTES", 512)
+    extras = {"xl/junk/huge.bin": b"A" * 768}
+    payload = workbook_bytes(DAILY_HEADERS, [["2026-07-18", "81"]], extras=extras)
+    monkeypatch.setattr(parser_module.ZipFile, "open", _fail_if_opened)
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="archive entry is too large"):
+        parse_source_file("bomb.xlsx", payload)
+
+
+def test_archive_compression_ratio_limit_rejects_before_decompression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(parser_module, "MAX_ARCHIVE_COMPRESSION_RATIO", 5)
+    extras = {"xl/junk/high-ratio.bin": b"A" * 16_384}
+    payload = workbook_bytes(DAILY_HEADERS, [["2026-07-18", "81"]], extras=extras)
+    monkeypatch.setattr(parser_module.ZipFile, "open", _fail_if_opened)
+    monkeypatch.setattr(parser_module, "load_workbook", _fail_if_loaded)
+
+    with pytest.raises(ParseFailure, match="compression ratio"):
+        parse_source_file("bomb.xlsx", payload)
 
 
 def test_malformed_csv_and_non_utf8_input_are_rejected():
@@ -502,34 +573,42 @@ def test_file_adapter_builds_preview_contract():
             "filename": source.name,
             "data": csv_bytes(
                 WORK_LIST_HEADERS,
-                [
-                    [
-                        "作品 A",
-                        "2026-07-18 14:11:20",
-                        "1min-视频",
-                        "公开",
-                        "81",
-                        "0.0875",
-                        "0.375",
-                        "",
-                        "0.375",
-                        "9.53",
-                        "6",
-                        "0",
-                        "3",
-                        "0",
-                        "3",
-                        "0",
-                    ]
-                ],
+                [[
+                    "作品 A",
+                    "2026-07-18 14:11:20",
+                    "1min-视频",
+                    "公开",
+                    "81",
+                    "0.0875",
+                    "0.375",
+                    "",
+                    "0.375",
+                    "9.53",
+                    "6",
+                    "0",
+                    "3",
+                    "0",
+                    "3",
+                    "0",
+                ]],
             ),
         }
     )
 
-    preview = adapter.preview(parsed.rows)
+    preview = adapter.preview(parsed)
 
     assert adapter.detect({"filename": source.name, "data": b"test"}).matched is True
     assert preview.template_code == "douyin_work_list_v1"
     assert preview.total_rows == 1
     assert preview.valid_rows == 1
     assert preview.invalid_rows == 0
+
+
+def test_file_adapter_preserves_template_code_for_header_only_preview():
+    adapter = FileDataSourceAdapter()
+    parsed = adapter.parse({"filename": "works.csv", "data": csv_bytes(WORK_LIST_HEADERS, [])})
+
+    preview = adapter.preview(parsed)
+
+    assert preview.template_code == "douyin_work_list_v1"
+    assert preview.total_rows == 0
