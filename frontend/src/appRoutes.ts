@@ -9,6 +9,7 @@ export type AppPage =
   | "cost"
   | "risks"
   | "accounts"
+  | "account-data"
   | "knowledge"
   | "config"
   | "models"
@@ -34,6 +35,7 @@ export const APP_ROUTES: readonly AppRouteItem[] = [
   { path: "cost", page: "cost" },
   { path: "risks", page: "risks" },
   { path: "accounts", page: "accounts" },
+  { path: "accounts/:accountId/data", page: "account-data" },
   { path: "knowledge", page: "knowledge" },
   { path: "config", page: "config", adminOnly: true },
   { path: "models", page: "models", adminOnly: true },

@@ -21,6 +21,7 @@ describe("app routes", () => {
         "cost",
         "risks",
         "accounts",
+        "accounts/:accountId/data",
         "knowledge",
       ]),
     );

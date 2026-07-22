@@ -8,6 +8,7 @@ import { AppShell } from "./components/AppShell";
 import { AdminRoute, ProtectedRoute } from "./components/RouteGuards";
 import { OperationalState } from "./components/ui";
 import Accounts from "./pages/Accounts";
+import AccountDataCenter from "./pages/AccountDataCenter";
 import Advertising from "./pages/Advertising";
 import Approvals from "./pages/Approvals";
 import BrainHome from "./pages/BrainHome";
@@ -35,6 +36,7 @@ const pageElements: Record<AppPage, JSX.Element> = {
   cost: <Cost />,
   risks: <Risks />,
   accounts: <Accounts />,
+  "account-data": <AccountDataCenter />,
   knowledge: <Knowledge />,
   config: <Config />,
   models: <ModelInfrastructure />,

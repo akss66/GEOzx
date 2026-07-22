@@ -17,7 +17,16 @@ import Accounts from "./Accounts";
 const workspaceMocks = vi.hoisted(() => ({
   setPlatform: vi.fn(),
   setAccountId: vi.fn(),
+  navigate: vi.fn(),
 }));
+
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return {
+    ...actual,
+    useNavigate: () => workspaceMocks.navigate,
+  };
+});
 
 vi.mock("../api/workspace", () => ({
   batchUpdateAccounts: vi.fn(),
@@ -177,6 +186,33 @@ describe("Accounts", () => {
     expect(await screen.findByText("投流回收")).toBeInTheDocument();
     expect(screen.getByText("开放平台待开通")).toBeInTheDocument();
     expect(screen.getByText(/task.posting.user_verification/)).toBeInTheDocument();
+  });
+
+  it("opens the data center for the selected account and preserves workspace context", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([
+      {
+        id: 3,
+        nickname: "数码菌",
+        platform: "douyin",
+        group_id: null,
+        project_id: null,
+        status: "active",
+        external_account_id: "douyin-3",
+        integration_status: "connected",
+        auth_status: "authorized",
+        data_sync_status: "healthy",
+        publish_capability: "prepare_only",
+        created_at: "2026-07-22T00:00:00Z",
+      },
+    ]);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开数据中心 数码菌" }));
+
+    expect(workspaceMocks.setPlatform).toHaveBeenCalledWith("douyin");
+    expect(workspaceMocks.setAccountId).toHaveBeenCalledWith(3);
+    expect(workspaceMocks.navigate).toHaveBeenCalledWith("/accounts/3/data");
   });
 });
 

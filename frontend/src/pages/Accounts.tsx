@@ -4,6 +4,7 @@ import {
   CheckCircleFilled,
   CheckOutlined,
   ClockCircleFilled,
+  DatabaseOutlined,
   DeleteOutlined,
   ExclamationCircleFilled,
   FolderOpenOutlined,
@@ -37,6 +38,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   batchUpdateAccounts,
@@ -246,6 +248,7 @@ export function platformIntegrationByKey(rows: PlatformIntegration[]) {
 export default function Accounts() {
   const { message } = AntApp.useApp();
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const isAdmin = useAuth((s) => s.user?.role === "admin");
   const currentAccountId = useCurrentWorkspace((s) => s.accountId);
   const setCurrentPlatform = useCurrentWorkspace((s) => s.setPlatform);
@@ -388,6 +391,12 @@ export default function Accounts() {
       note: integration?.note ?? undefined,
     });
     setIntegrationPlatform(target);
+  };
+
+  const openAccountDataCenter = (account: Account) => {
+    setCurrentPlatform(account.platform);
+    setCurrentAccountId(account.id);
+    navigate(`/accounts/${account.id}/data`);
   };
 
   const createMutation = useMutation({
@@ -665,21 +674,20 @@ export default function Accounts() {
     },
     {
       title: "动作",
-      width: 168,
-      render: (_, account) =>
-        isAdmin ? (
-          <AccountActions
-            account={account}
-            authorizeLoading={douyinAuthorizeMutation.isPending}
-            syncLoading={douyinSyncMutation.isPending}
-            onOfficialAuthorize={() => douyinAuthorizeMutation.mutate(account.id)}
-            onSyncMetrics={() => douyinSyncMutation.mutate(account.id)}
-            onInspectCapabilities={() => setCapabilityAccount(account)}
-            onDelete={() => setDeleteTarget(account)}
-          />
-        ) : (
-          <span style={{ color: "var(--dy-faint)" }}>只读</span>
-        ),
+      width: 240,
+      render: (_, account) => (
+        <AccountActions
+          account={account}
+          canManage={isAdmin}
+          authorizeLoading={douyinAuthorizeMutation.isPending}
+          syncLoading={douyinSyncMutation.isPending}
+          onOpenDataCenter={() => openAccountDataCenter(account)}
+          onOfficialAuthorize={() => douyinAuthorizeMutation.mutate(account.id)}
+          onSyncMetrics={() => douyinSyncMutation.mutate(account.id)}
+          onInspectCapabilities={() => setCapabilityAccount(account)}
+          onDelete={() => setDeleteTarget(account)}
+        />
+      ),
     },
   ];
 
@@ -1523,48 +1531,64 @@ function MatrixProject({
 
 function AccountActions({
   account,
+  canManage,
   authorizeLoading,
   syncLoading,
+  onOpenDataCenter,
   onOfficialAuthorize,
   onSyncMetrics,
   onInspectCapabilities,
   onDelete,
 }: {
   account: Account;
+  canManage: boolean;
   authorizeLoading: boolean;
   syncLoading: boolean;
+  onOpenDataCenter: () => void;
   onOfficialAuthorize: () => void;
   onSyncMetrics: () => void;
   onInspectCapabilities: () => void;
   onDelete: () => void;
 }) {
   const mode = getAccountActionMode(account);
-  const primaryAction = mode === "official_authorize" ? (
-    <Button
-      size="small"
-      type="primary"
-      loading={authorizeLoading}
-      onClick={onOfficialAuthorize}
-    >
-      官方授权
-    </Button>
-  ) : mode === "sync_metrics" ? (
-    <Button
-      size="small"
-      icon={<SyncOutlined />}
-      loading={syncLoading}
-      onClick={onSyncMetrics}
-    >
-      同步数据
-    </Button>
-  ) : (
-    <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>待接入</span>
-  );
+  const primaryAction = canManage
+    ? mode === "official_authorize" ? (
+      <Button
+        size="small"
+        type="primary"
+        loading={authorizeLoading}
+        onClick={onOfficialAuthorize}
+      >
+        官方授权
+      </Button>
+    ) : mode === "sync_metrics" ? (
+      <Button
+        size="small"
+        icon={<SyncOutlined />}
+        loading={syncLoading}
+        onClick={onSyncMetrics}
+      >
+        同步数据
+      </Button>
+    ) : (
+      <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>待接入</span>
+    )
+    : null;
 
   return (
     <Space size={6}>
+      <Tooltip title="数据中心 / 导入数据">
+        <Button
+          size="small"
+          icon={<DatabaseOutlined />}
+          aria-label={`打开数据中心 ${account.nickname}`}
+          onClick={onOpenDataCenter}
+        >
+          数据中心
+        </Button>
+      </Tooltip>
       {primaryAction}
-      {account.platform === "douyin" && account.auth_status === "authorized" ? (
+      {canManage && account.platform === "douyin" && account.auth_status === "authorized" ? (
         <Tooltip title="查看官方能力状态">
           <Button
             size="small"
@@ -1575,16 +1599,18 @@ function AccountActions({
           />
         </Tooltip>
       ) : null}
-      <Tooltip title="删除账号">
-        <Button
-          size="small"
-          type="text"
-          danger
-          icon={<DeleteOutlined />}
-          aria-label={`删除账号 ${account.nickname}`}
-          onClick={onDelete}
-        />
-      </Tooltip>
+      {canManage ? (
+        <Tooltip title="删除账号">
+          <Button
+            size="small"
+            type="text"
+            danger
+            icon={<DeleteOutlined />}
+            aria-label={`删除账号 ${account.nickname}`}
+            onClick={onDelete}
+          />
+        </Tooltip>
+      ) : null}
     </Space>
   );
 }
