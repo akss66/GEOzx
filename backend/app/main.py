@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.api import (
+    account_data,
     accounts,
     agents,
     approvals,
@@ -98,6 +99,7 @@ app.include_router(feedback.router)
 app.include_router(orchestrator.router)
 app.include_router(projects.router)
 app.include_router(accounts.router)
+app.include_router(account_data.router)
 app.include_router(platform_integrations.router)
 app.include_router(model_configs.router)
 app.include_router(model_configs.infrastructure_router)

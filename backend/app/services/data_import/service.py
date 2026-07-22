@@ -19,6 +19,7 @@ from app.models import (
     DataConflict,
     DataImportBatch,
     DataImportRow,
+    MetricSnapshot,
     PlatformContentRecord,
     User,
 )
@@ -27,10 +28,29 @@ from app.models.enums import (
     ContentIdentityConfidence,
     ImportBatchStatus,
     ImportRowStatus,
+    MetricSource,
+    Platform,
 )
 from app.services.data_import import REGISTERED_ADAPTERS
 from app.services.data_import.identity import build_weak_fingerprint, match_content
 from app.services.data_import.parser import SUPPORTED_EXTENSIONS, RowIssue
+from app.services.data_import.templates import KNOWN_TEMPLATES
+
+
+class DataImportBatchNotFoundError(LookupError):
+    pass
+
+
+class DataImportCommitConflictError(RuntimeError):
+    pass
+
+
+class DataImportStateError(RuntimeError):
+    pass
+
+
+class DataImportRevokeConflictError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +268,217 @@ async def resolve_row_match(
     conflict.resolved_at = row.resolved_at
     await session.commit()
     return await _load_row(session, row_id=row.id)
+
+
+async def load_scoped_batch(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+) -> DataImportBatch:
+    batch = await session.scalar(
+        select(DataImportBatch)
+        .options(
+            selectinload(DataImportBatch.artifacts),
+            selectinload(DataImportBatch.rows),
+            selectinload(DataImportBatch.conflicts),
+        )
+        .where(
+            DataImportBatch.org_id == org_id,
+            DataImportBatch.account_id == account_id,
+            DataImportBatch.id == batch_id,
+        )
+    )
+    if batch is None:
+        raise DataImportBatchNotFoundError("import batch does not exist")
+    return batch
+
+
+async def load_scoped_artifact(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+    artifact_id: int,
+) -> DataArtifact:
+    batch = await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
+    for artifact in batch.artifacts:
+        if artifact.id == artifact_id:
+            return artifact
+    raise DataImportBatchNotFoundError("artifact does not exist")
+
+
+async def list_scoped_batches(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+) -> list[DataImportBatch]:
+    rows = await session.scalars(
+        select(DataImportBatch)
+        .options(selectinload(DataImportBatch.artifacts))
+        .where(
+            DataImportBatch.org_id == org_id,
+            DataImportBatch.account_id == account_id,
+        )
+        .order_by(DataImportBatch.id.desc())
+    )
+    return list(rows)
+
+
+async def account_status_summary(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+) -> dict[str, object]:
+    batches = await session.scalars(
+        select(DataImportBatch)
+        .where(
+            DataImportBatch.org_id == org_id,
+            DataImportBatch.account_id == account_id,
+            DataImportBatch.committed_at.is_not(None),
+            DataImportBatch.revoked_at.is_(None),
+        )
+        .order_by(DataImportBatch.committed_at.desc(), DataImportBatch.id.desc())
+    )
+    latest_confirmed_at = None
+    coverage = {
+        "account_metrics": "missing",
+        "content_metrics": "missing",
+        "benchmarks": "missing",
+    }
+    sources: list[dict[str, object]] = []
+    seen_domains: set[str] = set()
+    template_domains = {item.code: item.data_domain for item in KNOWN_TEMPLATES}
+    for batch in batches:
+        if latest_confirmed_at is None:
+            latest_confirmed_at = batch.committed_at
+        data_domain = template_domains.get(batch.template_code, "unknown")
+        if data_domain not in seen_domains and data_domain in coverage:
+            coverage[data_domain] = "available"
+            seen_domains.add(data_domain)
+        sources.append(
+            {
+                "batch_id": batch.id,
+                "source_kind": batch.source_kind,
+                "template_code": batch.template_code,
+                "data_domain": data_domain,
+                "committed_at": batch.committed_at,
+                "period_start": batch.period_start,
+                "period_end": batch.period_end,
+            }
+        )
+    return {
+        "account_id": account_id,
+        "latest_confirmed_at": latest_confirmed_at,
+        "coverage": coverage,
+        "sources": sources,
+    }
+
+
+async def commit_batch(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+    actor: User,
+) -> DataImportBatch:
+    batch = await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
+    _assert_batch_scope(batch=batch, user=actor)
+    if batch.revoked_at is not None or batch.status is ImportBatchStatus.REVOKED:
+        raise DataImportStateError("revoked batches cannot be committed")
+    if batch.committed_at is not None or batch.status is ImportBatchStatus.COMMITTED:
+        return batch
+
+    blocking_rows = [
+        row.row_number
+        for row in batch.rows
+        if row.status in {ImportRowStatus.INVALID, ImportRowStatus.NEEDS_RESOLUTION}
+    ]
+    if blocking_rows:
+        raise DataImportCommitConflictError(
+            f"batch contains unresolved or invalid rows: {blocking_rows}"
+        )
+
+    try:
+        for row in batch.rows:
+            row.projected_target_ids = await _project_row_targets(
+                session=session,
+                batch=batch,
+                row=row,
+            )
+            row.status = ImportRowStatus.COMMITTED
+        batch.status = ImportBatchStatus.COMMITTED
+        batch.committed_at = datetime.now(UTC)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    return await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
+
+
+async def revoke_batch(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+    actor: User,
+) -> DataImportBatch:
+    batch = await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
+    _assert_batch_scope(batch=batch, user=actor)
+    if batch.revoked_at is not None or batch.status is ImportBatchStatus.REVOKED:
+        return batch
+    if batch.committed_at is None or batch.status is not ImportBatchStatus.COMMITTED:
+        raise DataImportStateError("only committed batches can be revoked")
+
+    conflicts = await _find_revoke_conflicts(session=session, batch=batch)
+    if conflicts:
+        await _record_revoke_conflicts(session=session, batch=batch, conflicts=conflicts)
+        raise DataImportRevokeConflictError("batch contains superseded projections")
+
+    try:
+        for row in batch.rows:
+            await _delete_row_targets(session=session, batch=batch, row=row)
+            row.status = ImportRowStatus.REVOKED
+        batch.status = ImportBatchStatus.REVOKED
+        batch.revoked_at = datetime.now(UTC)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    return await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
 
 
 async def _insert_preview_graph(
@@ -577,6 +808,208 @@ async def _load_resolution_targets(
     row = await session.scalar(row_query)
     conflict = await session.scalar(conflict_query)
     return row, conflict
+
+
+async def _project_row_targets(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    content_record, content_action = await _ensure_platform_content_record(
+        session=session,
+        batch=batch,
+        row=row,
+    )
+    metric = MetricSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=batch.id,
+        platform_content_record_id=content_record.id,
+        source=MetricSource(_batch_platform(batch).value),
+        stat_date=_row_stat_date(batch=batch, row=row),
+        title=row.normalized_values.get("title"),
+        play=int(row.normalized_values.get("play") or 0),
+        exposure=int(row.normalized_values.get("exposure") or 0),
+        completion_rate=float(row.normalized_values.get("completion_rate") or 0.0),
+        like_rate=float(row.normalized_values.get("like_rate") or 0.0),
+        comment_rate=float(row.normalized_values.get("comment_rate") or 0.0),
+        share_rate=float(row.normalized_values.get("share_rate") or 0.0),
+        follower_delta=int(row.normalized_values.get("follower_delta") or 0),
+        like_count=_int_or_none(row.normalized_values.get("like_count")),
+        comment_count=_int_or_none(row.normalized_values.get("comment_count")),
+        share_count=_int_or_none(row.normalized_values.get("share_count")),
+        favorite_count=_int_or_none(row.normalized_values.get("favorite_count")),
+        cover_click_rate=_float_or_none(row.normalized_values.get("cover_click_rate")),
+        avg_watch_time_seconds=_float_or_none(
+            row.normalized_values.get("avg_watch_time_seconds")
+        ),
+    )
+    session.add(metric)
+    await session.flush()
+    row.platform_content_record_id = content_record.id
+    return [
+        {
+            "kind": "platform_content_record",
+            "id": content_record.id,
+            "action": content_action,
+        },
+        {
+            "kind": "metric_snapshot",
+            "id": metric.id,
+            "action": "created",
+        },
+    ]
+
+
+async def _ensure_platform_content_record(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> tuple[PlatformContentRecord, str]:
+    if row.platform_content_record_id is not None:
+        record = await session.get(PlatformContentRecord, row.platform_content_record_id)
+        if (
+            record is not None
+            and record.org_id == batch.org_id
+            and record.account_id == batch.account_id
+        ):
+            return record, "linked"
+
+    published_at = row.normalized_values.get("published_at")
+    if isinstance(published_at, str):
+        published_at = datetime.fromisoformat(published_at)
+    weak_fingerprint = row.weak_fingerprint or build_weak_fingerprint(
+        title=row.normalized_values.get("title"),
+        published_at=published_at,
+    )
+    record = PlatformContentRecord(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        platform=_batch_platform(batch),
+        canonical_import_batch_id=batch.id,
+        title=row.normalized_values.get("title"),
+        published_at=published_at,
+        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+        weak_fingerprint=weak_fingerprint,
+    )
+    session.add(record)
+    await session.flush()
+    return record, "created"
+
+
+async def _find_revoke_conflicts(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+) -> list[dict[str, object]]:
+    conflicts: list[dict[str, object]] = []
+    for row in batch.rows:
+        for target in row.projected_target_ids:
+            if target.get("kind") != "platform_content_record":
+                continue
+            if target.get("action") != "created":
+                continue
+            content = await session.get(PlatformContentRecord, int(target["id"]))
+            if content is None:
+                continue
+            if content.canonical_import_batch_id != batch.id:
+                conflicts.append(
+                    {
+                        "row_number": row.row_number,
+                        "message": (
+                            "A later import now owns this projected content record; "
+                            "manual resolution is required before revoke."
+                        ),
+                    }
+                )
+    return conflicts
+
+
+async def _record_revoke_conflicts(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    conflicts: list[dict[str, object]],
+) -> None:
+    timestamp = datetime.now(UTC)
+    for item in conflicts:
+        existing = await session.scalar(
+            select(DataConflict).where(
+                DataConflict.org_id == batch.org_id,
+                DataConflict.account_id == batch.account_id,
+                DataConflict.batch_id == batch.id,
+                DataConflict.row_number == int(item["row_number"]),
+                DataConflict.field_name == "projected_target_ids",
+            )
+        )
+        if existing is not None:
+            existing.status = ConflictStatus.OPEN
+            existing.conflict_code = "superseded_projection"
+            existing.message = str(item["message"])
+            continue
+        session.add(
+            DataConflict(
+                org_id=batch.org_id,
+                account_id=batch.account_id,
+                batch_id=batch.id,
+                row_number=int(item["row_number"]),
+                status=ConflictStatus.OPEN,
+                field_name="projected_target_ids",
+                conflict_code="superseded_projection",
+                message=str(item["message"]),
+                incoming_value={"batch_id": batch.id, "detected_at": timestamp.isoformat()},
+            )
+        )
+    await session.commit()
+
+
+async def _delete_row_targets(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> None:
+    for target in row.projected_target_ids:
+        if target.get("kind") == "metric_snapshot":
+            metric = await session.get(MetricSnapshot, int(target["id"]))
+            if metric is not None and metric.import_batch_id == batch.id:
+                await session.delete(metric)
+        elif target.get("kind") == "platform_content_record" and target.get("action") == "created":
+            content = await session.get(PlatformContentRecord, int(target["id"]))
+            if content is not None and content.canonical_import_batch_id == batch.id:
+                await session.delete(content)
+
+
+def _batch_platform(batch: DataImportBatch):
+    return {
+        "douyin_work_list_v1": Platform.DOUYIN,
+        "douyin_single_content_v1": Platform.DOUYIN,
+        "douyin_daily_play_v1": Platform.DOUYIN,
+        "douyin_period_aggregate_v1": Platform.DOUYIN,
+    }.get(batch.template_code, Platform.DOUYIN)
+
+
+def _row_stat_date(*, batch: DataImportBatch, row: DataImportRow):
+    published_at = row.normalized_values.get("published_at")
+    if isinstance(published_at, str):
+        published_at = datetime.fromisoformat(published_at)
+    if isinstance(published_at, datetime):
+        return published_at.date()
+    if batch.period_end is not None:
+        return batch.period_end
+    if batch.period_start is not None:
+        return batch.period_start
+    return datetime.now(UTC).date()
+
+
+def _int_or_none(value) -> int | None:
+    return None if value is None else int(value)
+
+
+def _float_or_none(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def _resolved_replay_or_error(
