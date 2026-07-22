@@ -75,3 +75,32 @@ Observed results:
 - `37 passed, 1 warning in 7.91s`
 - Warning: Alembic emitted a deprecation warning about missing `path_separator` in `alembic.ini`; no test failures.
 - `All checks passed!`
+
+## Final Review Follow-up (2026-07-22)
+
+Addressed the two final correctness findings from the last review:
+
+- `create_preview()` now preserves caller transaction ownership by using a nested savepoint when the `AsyncSession` is already inside a transaction. Successful preview creation no longer commits unrelated caller work, and failing preview creation no longer rolls back unrelated caller work.
+- Active preview dedupe now repairs a missing artifact file for an otherwise-valid active preview instead of falling into a unique-index dead end. If an active preview is stale with no artifact row, the stale batch is revoked inside the current transaction so a new identical preview can supersede it safely.
+
+### Exact Evidence
+
+Ran on **Wednesday, July 22, 2026**:
+
+```bash
+cd backend
+python -m pytest tests/test_data_import_preview.py tests/test_content_identity_matching.py tests/test_account_data_models.py tests/test_migrations.py -q
+python -m ruff check app/services/data_import/service.py tests/test_data_import_preview.py
+```
+
+Observed results:
+
+- `40 passed, 1 warning in 9.55s`
+- Warning: Alembic emitted the existing deprecation warning about missing `path_separator` in `alembic.ini`; no test failures.
+- `All checks passed!`
+
+### Added Regression Coverage
+
+- Stale active preview row with a missing artifact file is repaired on identical re-import and reuses the existing preview row.
+- Caller-managed transaction success path keeps the preview and unrelated caller inserts invisible to a separate session until the caller commits.
+- Caller-managed transaction failure path keeps the outer transaction usable and commits unrelated caller work without persisting preview rows or artifact files.

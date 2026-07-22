@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -39,6 +39,13 @@ class RowMatchResolution:
     resolved_by: User
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewRecoveryResult:
+    batch: DataImportBatch | None = None
+    wrote_storage_key: str | None = None
+    retired_stale_batch: bool = False
+
+
 async def create_preview(
     session: AsyncSession,
     *,
@@ -47,11 +54,6 @@ async def create_preview(
     filename: str,
     content: bytes,
 ) -> DataImportBatch:
-    owns_transaction = False
-    if not session.in_transaction():
-        await session.begin()
-        owns_transaction = True
-
     _assert_org_account_scope(user=user, account=account)
     source = {"filename": filename, "data": content}
     adapter = _resolve_adapter(source)
@@ -59,36 +61,12 @@ async def create_preview(
     rows = adapter.validate(adapter.normalize(parsed))
     preview = adapter.preview(rows, template_code=parsed.template_code)
     content_sha256 = hashlib.sha256(content).hexdigest()
+    owns_transaction = not session.in_transaction()
+    preview_scope = None if owns_transaction else await session.begin_nested()
+    cleanup_storage_key: str | None = None
 
-    existing = await _find_existing_preview(
-        session,
-        org_id=account.org_id,
-        account_id=account.id,
-        source_kind=adapter.source_kind,
-        template_code=parsed.template_code,
-        content_sha256=content_sha256,
-    )
-    if existing is not None:
-        if owns_transaction:
-            await session.commit()
-        return existing
-
-    extension = _validated_extension(filename)
-    inserted = await _insert_preview_graph(
-        session=session,
-        user=user,
-        account=account,
-        parsed_template_code=parsed.template_code,
-        preview_row_count=preview.total_rows,
-        rows=rows,
-        content_sha256=content_sha256,
-        filename=filename,
-        extension=extension,
-        content=content,
-        source_kind=adapter.source_kind,
-    )
-    if inserted is None:
-        winner = await _find_existing_preview(
+    try:
+        existing = await _find_existing_preview(
             session,
             org_id=account.org_id,
             account_id=account.id,
@@ -96,30 +74,131 @@ async def create_preview(
             template_code=parsed.template_code,
             content_sha256=content_sha256,
         )
-        if winner is not None:
-            if owns_transaction:
-                await session.commit()
-            return winner
-        raise RuntimeError("Preview dedupe conflict occurred but no winning preview was found")
+        if existing is not None:
+            await _commit_preview_scope(
+                session=session,
+                owns_transaction=owns_transaction,
+                preview_scope=preview_scope,
+            )
+            return existing
 
-    batch_id, storage_key = inserted
-    wrote_file = False
-    try:
+        recovery = await _recover_stale_preview(
+            session,
+            org_id=account.org_id,
+            account_id=account.id,
+            source_kind=adapter.source_kind,
+            template_code=parsed.template_code,
+            content_sha256=content_sha256,
+            content=content,
+        )
+        if recovery.batch is not None:
+            cleanup_storage_key = recovery.wrote_storage_key
+            await _commit_preview_scope(
+                session=session,
+                owns_transaction=owns_transaction,
+                preview_scope=preview_scope,
+            )
+            return recovery.batch
+
+        extension = _validated_extension(filename)
+        inserted = await _insert_preview_graph(
+            session=session,
+            user=user,
+            account=account,
+            parsed_template_code=parsed.template_code,
+            preview_row_count=preview.total_rows,
+            rows=rows,
+            content_sha256=content_sha256,
+            filename=filename,
+            extension=extension,
+            content=content,
+            source_kind=adapter.source_kind,
+        )
+        if inserted is None:
+            winner = await _find_existing_preview(
+                session,
+                org_id=account.org_id,
+                account_id=account.id,
+                source_kind=adapter.source_kind,
+                template_code=parsed.template_code,
+                content_sha256=content_sha256,
+            )
+            if winner is not None:
+                await _commit_preview_scope(
+                    session=session,
+                    owns_transaction=owns_transaction,
+                    preview_scope=preview_scope,
+                )
+                return winner
+
+            recovery = await _recover_stale_preview(
+                session,
+                org_id=account.org_id,
+                account_id=account.id,
+                source_kind=adapter.source_kind,
+                template_code=parsed.template_code,
+                content_sha256=content_sha256,
+                content=content,
+            )
+            if recovery.batch is not None:
+                cleanup_storage_key = recovery.wrote_storage_key
+                await _commit_preview_scope(
+                    session=session,
+                    owns_transaction=owns_transaction,
+                    preview_scope=preview_scope,
+                )
+                return recovery.batch
+            if recovery.retired_stale_batch:
+                inserted = await _insert_preview_graph(
+                    session=session,
+                    user=user,
+                    account=account,
+                    parsed_template_code=parsed.template_code,
+                    preview_row_count=preview.total_rows,
+                    rows=rows,
+                    content_sha256=content_sha256,
+                    filename=filename,
+                    extension=extension,
+                    content=content,
+                    source_kind=adapter.source_kind,
+                )
+                if inserted is None:
+                    winner = await _find_existing_preview(
+                        session,
+                        org_id=account.org_id,
+                        account_id=account.id,
+                        source_kind=adapter.source_kind,
+                        template_code=parsed.template_code,
+                        content_sha256=content_sha256,
+                    )
+                    if winner is not None:
+                        await _commit_preview_scope(
+                            session=session,
+                            owns_transaction=owns_transaction,
+                            preview_scope=preview_scope,
+                        )
+                        return winner
+            if inserted is None:
+                raise RuntimeError(
+                    "Preview dedupe conflict occurred but no winning preview was found"
+                )
+
+        batch_id, storage_key = inserted
+        cleanup_storage_key = storage_key
         _write_artifact_atomic(storage_key, content)
-        wrote_file = True
-        await session.commit()
+        await _commit_preview_scope(
+            session=session,
+            owns_transaction=owns_transaction,
+            preview_scope=preview_scope,
+        )
     except Exception:
-        if session.in_transaction():
-            await session.rollback()
-        if wrote_file:
-            _delete_artifact(storage_key)
-        if batch_id is not None:
-            try:
-                await _discard_preview_batch(session, batch_id=batch_id)
-            except Exception:
-                session.sync_session.expunge_all()
-                raise
-        session.sync_session.expunge_all()
+        await _rollback_preview_scope(
+            session=session,
+            owns_transaction=owns_transaction,
+            preview_scope=preview_scope,
+        )
+        if cleanup_storage_key is not None:
+            _delete_artifact(cleanup_storage_key)
         raise
 
     return await _load_batch(session, batch_id=batch_id)
@@ -363,6 +442,94 @@ async def _find_existing_preview(
     return existing
 
 
+async def _recover_stale_preview(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    source_kind,
+    template_code: str,
+    content_sha256: str,
+    content: bytes,
+) -> PreviewRecoveryResult:
+    existing = await _find_active_preview(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        source_kind=source_kind,
+        template_code=template_code,
+        content_sha256=content_sha256,
+    )
+    if existing is None:
+        return PreviewRecoveryResult()
+
+    artifact = existing.artifacts[0] if existing.artifacts else None
+    if artifact is None:
+        existing.status = ImportBatchStatus.REVOKED
+        existing.revoked_at = datetime.now(UTC)
+        await session.flush()
+        return PreviewRecoveryResult(retired_stale_batch=True)
+    if storage.exists(artifact.storage_key):
+        return PreviewRecoveryResult()
+
+    _write_artifact_atomic(artifact.storage_key, content)
+    return PreviewRecoveryResult(batch=existing, wrote_storage_key=artifact.storage_key)
+
+
+async def _find_active_preview(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    source_kind,
+    template_code: str,
+    content_sha256: str,
+) -> DataImportBatch | None:
+    return await session.scalar(
+        select(DataImportBatch)
+        .options(
+            selectinload(DataImportBatch.artifacts),
+            selectinload(DataImportBatch.rows),
+            selectinload(DataImportBatch.conflicts),
+        )
+        .where(
+            DataImportBatch.org_id == org_id,
+            DataImportBatch.account_id == account_id,
+            DataImportBatch.source_kind == source_kind,
+            DataImportBatch.template_code == template_code,
+            DataImportBatch.content_sha256 == content_sha256,
+            DataImportBatch.committed_at.is_(None),
+            DataImportBatch.revoked_at.is_(None),
+        )
+        .order_by(DataImportBatch.id.desc())
+    )
+
+
+async def _commit_preview_scope(
+    session: AsyncSession,
+    *,
+    owns_transaction: bool,
+    preview_scope,
+) -> None:
+    if owns_transaction:
+        await session.commit()
+    elif preview_scope is not None:
+        await preview_scope.commit()
+
+
+async def _rollback_preview_scope(
+    session: AsyncSession,
+    *,
+    owns_transaction: bool,
+    preview_scope,
+) -> None:
+    if owns_transaction:
+        if session.in_transaction():
+            await session.rollback()
+    elif preview_scope is not None and preview_scope.is_active:
+        await preview_scope.rollback()
+
+
 async def _load_batch(session: AsyncSession, *, batch_id: int) -> DataImportBatch:
     batch = await session.scalar(
         select(DataImportBatch)
@@ -383,14 +550,6 @@ async def _load_row(session: AsyncSession, *, row_id: int) -> DataImportRow:
     if row is None:
         raise ValueError(f"Import row {row_id} no longer exists")
     return row
-
-
-async def _discard_preview_batch(session: AsyncSession, *, batch_id: int) -> None:
-    await session.execute(delete(DataConflict).where(DataConflict.batch_id == batch_id))
-    await session.execute(delete(DataImportRow).where(DataImportRow.batch_id == batch_id))
-    await session.execute(delete(DataArtifact).where(DataArtifact.batch_id == batch_id))
-    await session.execute(delete(DataImportBatch).where(DataImportBatch.id == batch_id))
-    await session.commit()
 
 
 async def _load_resolution_targets(

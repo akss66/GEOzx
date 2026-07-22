@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.security import hash_password
+from app.db import Base
 from app.models import (
     Account,
     DataArtifact,
     DataConflict,
     DataImportBatch,
     DataImportRow,
+    Org,
     PlatformContentRecord,
+    User,
 )
 from app.models.enums import (
     ConflictStatus,
@@ -76,6 +82,36 @@ def _workbook_payload(*, title: str = "作品 A") -> bytes:
             "0",
         ]],
     )
+
+
+async def _make_filebacked_sessionmaker(tmp_path: Path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'preview-transaction.db').as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _seed_transaction_scope(session) -> tuple[int, int]:
+    org = Org(name="Preview transaction org")
+    admin = User(
+        org=org,
+        email="preview-transaction-admin@test.com",
+        hashed_password=hash_password("preview-transaction-password"),
+        display_name="Preview transaction admin",
+    )
+    session.add(admin)
+    await session.flush()
+    account = Account(
+        org_id=org.id,
+        platform=Platform.DOUYIN,
+        nickname="Preview transaction account",
+    )
+    session.add(account)
+    await session.commit()
+    return admin.id, account.id
 
 
 @pytest.mark.asyncio
@@ -154,6 +190,38 @@ async def test_create_preview_reuses_identical_hash_for_same_scope(
     assert batch_count == 1
     assert artifact_count == 1
     assert row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_create_preview_repairs_missing_artifact_for_identical_active_preview(
+    session, admin, account, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    payload = _workbook_payload()
+
+    first = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+    artifact = first.artifacts[0]
+    artifact_path = tmp_path / artifact.storage_key
+    artifact_path.unlink()
+
+    repaired = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+
+    assert repaired.id == first.id
+    assert artifact_path.read_bytes() == payload
+    assert await session.scalar(select(func.count()).select_from(DataImportBatch)) == 1
+    assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
 
 
 @pytest.mark.asyncio
@@ -269,12 +337,11 @@ async def test_create_preview_cleans_up_orphaned_file_when_commit_fails(
 ):
     monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
     payload = _workbook_payload()
-    original_commit = session.commit
 
-    async def _boom():
+    async def _boom(**_kwargs):
         raise RuntimeError("commit failed")
 
-    monkeypatch.setattr(session, "commit", _boom)
+    monkeypatch.setattr("app.services.data_import.service._commit_preview_scope", _boom)
 
     with pytest.raises(RuntimeError, match="commit failed"):
         await create_preview(
@@ -286,7 +353,6 @@ async def test_create_preview_cleans_up_orphaned_file_when_commit_fails(
         )
 
     assert list(tmp_path.rglob("*.xlsx")) == []
-    monkeypatch.setattr(session, "commit", original_commit)
 
 
 @pytest.mark.asyncio
@@ -313,6 +379,164 @@ async def test_create_preview_rolls_back_rows_and_artifacts_when_storage_write_f
     assert await session.scalar(select(func.count()).select_from(DataImportBatch)) == 0
     assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 0
     assert await session.scalar(select(func.count()).select_from(DataImportRow)) == 0
+
+
+@pytest.mark.asyncio
+async def test_create_preview_does_not_commit_caller_transaction_on_success(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path / "storage"))
+    engine, maker = await _make_filebacked_sessionmaker(tmp_path)
+
+    try:
+        async with maker() as caller:
+            admin_id, account_id = await _seed_transaction_scope(caller)
+            await caller.rollback()
+            async with caller.begin():
+                admin = await caller.get(User, admin_id)
+                account = await caller.get(Account, account_id)
+                assert admin is not None
+                assert account is not None
+                caller.add(
+                    PlatformContentRecord(
+                        org_id=admin.org_id,
+                        account_id=account.id,
+                        platform=Platform.DOUYIN,
+                        external_content_id="caller-success-content",
+                        canonical_share_url=(
+                            "https://www.douyin.com/video/caller-success-content"
+                        ),
+                        title="Caller Success Content",
+                        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+                    )
+                )
+
+                batch = await create_preview(
+                    caller,
+                    user=admin,
+                    account=account,
+                    filename="works.xlsx",
+                    content=_workbook_payload(),
+                )
+
+                async with maker() as observer:
+                    assert (
+                        await observer.scalar(select(func.count()).select_from(DataImportBatch))
+                    ) == 0
+                    assert (
+                        await observer.scalar(
+                            select(func.count())
+                            .select_from(PlatformContentRecord)
+                            .where(
+                                PlatformContentRecord.external_content_id
+                                == "caller-success-content"
+                            )
+                        )
+                    ) == 0
+
+                assert batch.id is not None
+
+            async with maker() as observer:
+                assert (
+                    await observer.scalar(select(func.count()).select_from(DataImportBatch))
+                ) == 1
+                assert (
+                    await observer.scalar(
+                        select(func.count())
+                        .select_from(PlatformContentRecord)
+                        .where(
+                            PlatformContentRecord.external_content_id
+                            == "caller-success-content"
+                        )
+                    )
+                ) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_preview_failure_does_not_rollback_caller_transaction(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path / "storage"))
+    engine, maker = await _make_filebacked_sessionmaker(tmp_path)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.services.data_import.service._write_artifact_atomic", _boom)
+
+    try:
+        async with maker() as caller:
+            admin_id, account_id = await _seed_transaction_scope(caller)
+            await caller.rollback()
+            async with caller.begin():
+                admin = await caller.get(User, admin_id)
+                account = await caller.get(Account, account_id)
+                assert admin is not None
+                assert account is not None
+                caller.add(
+                    PlatformContentRecord(
+                        org_id=admin.org_id,
+                        account_id=account.id,
+                        platform=Platform.DOUYIN,
+                        external_content_id="caller-failure-content",
+                        canonical_share_url=(
+                            "https://www.douyin.com/video/caller-failure-content"
+                        ),
+                        title="Caller Failure Content",
+                        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+                    )
+                )
+
+                with pytest.raises(OSError, match="disk full"):
+                    await create_preview(
+                        caller,
+                        user=admin,
+                        account=account,
+                        filename="works.xlsx",
+                        content=_workbook_payload(),
+                    )
+
+                await caller.flush()
+
+                async with maker() as observer:
+                    assert (
+                        await observer.scalar(select(func.count()).select_from(DataImportBatch))
+                    ) == 0
+                    assert (
+                        await observer.scalar(
+                            select(func.count())
+                            .select_from(PlatformContentRecord)
+                            .where(
+                                PlatformContentRecord.external_content_id
+                                == "caller-failure-content"
+                            )
+                        )
+                    ) == 0
+
+            async with maker() as observer:
+                assert (
+                    await observer.scalar(select(func.count()).select_from(DataImportBatch))
+                ) == 0
+                assert (
+                    await observer.scalar(select(func.count()).select_from(DataArtifact))
+                ) == 0
+                assert (
+                    await observer.scalar(select(func.count()).select_from(DataImportRow))
+                ) == 0
+                assert (
+                    await observer.scalar(
+                        select(func.count())
+                        .select_from(PlatformContentRecord)
+                        .where(
+                            PlatformContentRecord.external_content_id
+                            == "caller-failure-content"
+                        )
+                    )
+                ) == 1
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
