@@ -23,6 +23,7 @@ from app.models import (
     Client,
     ClientMembership,
     ContentItem,
+    DataImportBatch,
     Deliverable,
     Event,
     GateApproval,
@@ -42,8 +43,10 @@ from app.models import (
 )
 from app.models.enums import (
     AgentCode,
+    DataSourceKind,
     DeliverableType,
     GateType,
+    ImportBatchStatus,
     KnowledgeCategory,
     Platform,
     UserRole,
@@ -711,6 +714,44 @@ async def test_permanent_delete_removes_linked_suggestion_events_only(
     ]
     assert len(receipts) == 1
     assert set(receipts[0].payload) == {"actor_id", "operation_id", "timestamp", "counts"}
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_keeps_account_owned_import_data_and_counts_redacted_batches(
+    client, session, admin
+):
+    target = await _target(session, admin, "account-data")
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Deletion import account",
+    )
+    session.add(account)
+    await session.flush()
+    batch = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=target.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.PREVIEW_READY,
+        template_code="douyin_work_list_v1",
+    )
+    session.add(batch)
+    await session.commit()
+    batch_id = batch.id
+
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+    assert preview["counts"]["data_import_batches_created_by_redacted"] == 1
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 200
+    session.expire_all()
+    stored_batch = await session.get(DataImportBatch, batch_id)
+    assert stored_batch is not None
+    assert stored_batch.created_by_id is None
 
 
 @pytest.mark.asyncio

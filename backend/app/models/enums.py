@@ -149,6 +149,42 @@ class MetricSource(enum.StrEnum):
     DEMO = "demo"
 
 
+class DataSourceKind(enum.StrEnum):
+    OFFICIAL_API = "official_api"
+    PLATFORM_EXPORT = "platform_export"
+    SCREENSHOT_VERIFIED = "screenshot_verified"
+    MANUAL_ENTRY = "manual_entry"
+
+
+class ImportBatchStatus(enum.StrEnum):
+    UPLOADED = "uploaded"
+    PREVIEW_READY = "preview_ready"
+    COMMITTED = "committed"
+    REVOKED = "revoked"
+    FAILED = "failed"
+
+
+class ImportRowStatus(enum.StrEnum):
+    READY = "ready"
+    INVALID = "invalid"
+    NEEDS_RESOLUTION = "needs_resolution"
+    COMMITTED = "committed"
+    REVOKED = "revoked"
+
+
+class ContentIdentityConfidence(enum.StrEnum):
+    CONFIRMED = "confirmed"
+    PROVISIONAL = "provisional"
+    AMBIGUOUS = "ambiguous"
+    UNRESOLVED = "unresolved"
+
+
+class ConflictStatus(enum.StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    IGNORED = "ignored"
+
+
 class OptimizationSuggestionStatus(enum.StrEnum):
     """闭环优化建议状态。suggested=新建议；accepted=已采纳；verified=已验证。"""
 

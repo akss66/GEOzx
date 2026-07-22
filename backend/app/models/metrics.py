@@ -29,6 +29,14 @@ class MetricSnapshot(Base, TimestampMixin):
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    import_batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("data_import_batches.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    platform_content_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("platform_content_records.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     source: Mapped[MetricSource] = mapped_column(
         pg_enum(MetricSource, "metric_source"), nullable=False
     )
@@ -42,8 +50,16 @@ class MetricSnapshot(Base, TimestampMixin):
     comment_rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     share_rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     follower_delta: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    like_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    share_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    favorite_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cover_click_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_watch_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     org: Mapped["Org"] = relationship()  # noqa: F821
+    import_batch: Mapped["DataImportBatch | None"] = relationship()  # noqa: F821
+    platform_content_record: Mapped["PlatformContentRecord | None"] = relationship()  # noqa: F821
 
 
 class AccountReviewGoal(Base, TimestampMixin):

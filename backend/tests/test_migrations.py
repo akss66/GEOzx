@@ -1,6 +1,15 @@
 import importlib
 import inspect
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
+
+def get_head_revision() -> str | None:
+    config = Config("alembic.ini")
+    script = ScriptDirectory.from_config(config)
+    return script.get_current_head()
+
 
 def test_client_workspace_migration_is_additive() -> None:
     module = importlib.import_module(
@@ -68,3 +77,33 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
     assert 'drop_table("user_deletion_preview_reservations")' in downgrade_source
     for forbidden in ("preview_token", "target_email", "secondary_password"):
         assert forbidden not in upgrade_source
+
+
+def test_migration_head_is_account_data_center() -> None:
+    assert get_head_revision() == "20260722_0100"
+
+
+def test_account_data_center_migration_is_linear_and_additive() -> None:
+    module = importlib.import_module(
+        "migrations.versions.20260722_0100_account_data_center"
+    )
+
+    assert module.down_revision == "20260721_0400"
+    upgrade_source = inspect.getsource(module.upgrade)
+    downgrade_source = inspect.getsource(module.downgrade)
+    for table_name in (
+        '"data_import_batches"',
+        '"data_artifacts"',
+        '"data_import_rows"',
+        '"platform_content_records"',
+        '"account_metric_snapshots"',
+        '"audience_profile_snapshots"',
+        '"audience_profile_items"',
+        '"benchmark_snapshots"',
+        '"data_conflicts"',
+    ):
+        assert table_name in upgrade_source
+    assert '"metric_snapshots"' in upgrade_source
+    assert '"import_batch_id"' in upgrade_source
+    assert '"platform_content_record_id"' in upgrade_source
+    assert 'drop_table("data_conflicts")' in downgrade_source

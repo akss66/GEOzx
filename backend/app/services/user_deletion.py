@@ -26,6 +26,7 @@ from app.models import (
     ClientMembership,
     ComplianceCheck,
     ContentItem,
+    DataImportBatch,
     Deliverable,
     DeliverableAcceptance,
     Event,
@@ -395,6 +396,11 @@ async def build_deletion_impact(
         AdminSecurityCredential,
         AdminSecurityCredential.user_id == target.id,
     )
+    manifest["data_import_batches_created_by_redacted"] = await _snapshot(
+        session,
+        DataImportBatch,
+        DataImportBatch.created_by_id == target.id,
+    )
 
     owned_content_ids = set(content_ids)
     owned_task_ids = set(task_ids)
@@ -678,6 +684,14 @@ async def _delete_owned_records(session: AsyncSession, impact: DeletionImpact) -
             update(KnowledgeSuggestion)
             .where(KnowledgeSuggestion.id.in_(review_ids))
             .values(reviewed_by_id=None, reviewed_at=None, review_note=None)
+            .execution_options(synchronize_session=False)
+        )
+    redacted_batch_ids = ids["data_import_batches_created_by_redacted"]
+    if redacted_batch_ids:
+        await session.execute(
+            update(DataImportBatch)
+            .where(DataImportBatch.id.in_(redacted_batch_ids))
+            .values(created_by_id=None)
             .execution_options(synchronize_session=False)
         )
     await _delete_ids(session, User, ids["users"])

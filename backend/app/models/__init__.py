@@ -3,6 +3,18 @@
 导入全部模型，使 `app.db.Base.metadata` 完整（Alembic autogenerate 依赖于此）。
 """
 
+from app.models.account_data import (
+    AccountMetricSnapshot,
+    AudienceProfileItem,
+    AudienceProfileSnapshot,
+    BenchmarkSnapshot,
+    DataArtifact,
+    DataConflict,
+    DataImportBatch,
+    DataImportRow,
+    PlatformContentRecord,
+)
+from app.models.agent_runtime import AgentRun
 from app.models.brain import (
     AgentInvocation,
     AgentToolCall,
@@ -34,12 +46,22 @@ from app.models.identity import (
 from app.models.knowledge import KnowledgeCitation, KnowledgeEntry, KnowledgeSuggestion
 from app.models.llm import LLMCall
 from app.models.material import MaterialAsset
+from app.models.memory import RuntimeMemory
 from app.models.metrics import AccountReviewGoal, MetricSnapshot
 from app.models.orchestration import AgentTask, Event, GateApproval
 from app.models.platform import PlatformAccountAuth, PlatformIntegration
 from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
+    "DataImportBatch",
+    "DataArtifact",
+    "DataImportRow",
+    "PlatformContentRecord",
+    "AccountMetricSnapshot",
+    "AudienceProfileSnapshot",
+    "AudienceProfileItem",
+    "BenchmarkSnapshot",
+    "DataConflict",
     "Org",
     "User",
     "AdminSecurityCredential",
@@ -58,6 +80,7 @@ __all__ = [
     "MatrixDistributionPlan",
     "MatrixDistributionItem",
     "BrainTask",
+    "AgentRun",
     "TaskBrief",
     "OrchestrationPlan",
     "AgentInvocation",
@@ -78,6 +101,7 @@ __all__ = [
     "AccountReviewGoal",
     "MetricSnapshot",
     "MaterialAsset",
+    "RuntimeMemory",
     "OptimizationSuggestion",
     "PlatformIntegration",
     "PlatformAccountAuth",
