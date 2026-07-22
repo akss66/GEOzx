@@ -7,7 +7,11 @@ import { App as AntApp } from "antd";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { deleteAccount, listAccounts } from "../api/workspace";
+import {
+  deleteAccount,
+  getDouyinAccountCapabilities,
+  listAccounts,
+} from "../api/workspace";
 import Accounts from "./Accounts";
 
 const workspaceMocks = vi.hoisted(() => ({
@@ -20,10 +24,12 @@ vi.mock("../api/workspace", () => ({
   createAccount: vi.fn(),
   createAccountGroup: vi.fn(),
   createDouyinAuthorizeUrl: vi.fn(),
+  createDouyinIncrementalAuthorizeUrl: vi.fn(),
   createDouyinScanAddUrl: vi.fn(),
   createDouyinTrialWhitelistUrl: vi.fn(),
   deleteAccount: vi.fn(),
   getAccountMatrix: vi.fn(async () => ({ platforms: [] })),
+  getDouyinAccountCapabilities: vi.fn(),
   listAccountGroups: vi.fn(async () => []),
   listAccounts: vi.fn(async () => []),
   listPlatformIntegrations: vi.fn(async () => []),
@@ -76,6 +82,7 @@ describe("Accounts", () => {
       })),
     });
   });
+
   afterEach(cleanup);
 
   it("does not present a failed account query as an empty matrix", async () => {
@@ -122,6 +129,55 @@ describe("Accounts", () => {
     await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith(1));
     expect(workspaceMocks.setAccountId).toHaveBeenCalledWith(null);
   });
+
+  it("shows official app permission gaps for a supported Douyin capability", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([
+      {
+        id: 9,
+        nickname: "数码菌",
+        platform: "douyin",
+        group_id: null,
+        project_id: null,
+        status: "active",
+        external_account_id: "douyin-9",
+        integration_status: "connected",
+        auth_status: "authorized",
+        data_sync_status: "pending",
+        publish_capability: "prepare_only",
+        created_at: "2026-07-22T00:00:00Z",
+      },
+    ]);
+    vi.mocked(getDouyinAccountCapabilities).mockResolvedValueOnce({
+      account_id: 9,
+      platform: "douyin",
+      configured_app_scopes: ["user_info", "task.posting.create"],
+      granted_account_scopes: ["user_info"],
+      next_recommended: "posting_feedback",
+      capabilities: [
+        {
+          key: "posting_feedback",
+          label: "投流回收",
+          description: "创建投流任务、绑定作品并查询基础信息，形成发布复盘闭环。",
+          app_scopes: [
+            "task.posting.create",
+            "posting.behavior",
+            "task.posting.user_verification",
+          ],
+          user_scopes: ["posting.behavior"],
+          missing_app_scopes: ["posting.behavior", "task.posting.user_verification"],
+          missing_user_scopes: ["posting.behavior"],
+          status: "needs_app_permission",
+        },
+      ],
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "查看抖音能力 数码菌" }));
+    expect(await screen.findByText("投流回收")).toBeInTheDocument();
+    expect(screen.getByText("开放平台待开通")).toBeInTheDocument();
+    expect(screen.getByText(/task.posting.user_verification/)).toBeInTheDocument();
+  });
 });
 
 function renderPage() {
@@ -130,7 +186,9 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <AntApp><Accounts /></AntApp>
+      <AntApp>
+        <Accounts />
+      </AntApp>
     </QueryClientProvider>,
   );
 }
