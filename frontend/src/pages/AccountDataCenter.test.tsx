@@ -5,6 +5,7 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp } from "antd";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import {
   MemoryRouter,
   Route,
@@ -312,6 +313,52 @@ describe("AccountDataCenter", () => {
 
     expect(await screen.findByText("无法识别导入模板")).toBeInTheDocument();
     expect(screen.getByText("请改用已支持的抖音导出模板后重新上传。")).toBeInTheDocument();
+  });
+
+  it("keeps the uploaded preview in React StrictMode", async () => {
+    const preview = buildPreviewBatch({
+      id: 81,
+      template_code: "douyin_daily_play_v1",
+    });
+    vi.mocked(getWorkspaceContext).mockResolvedValue({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValue(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValue({ items: [] });
+    vi.mocked(uploadAccountDataImport).mockResolvedValueOnce(preview);
+
+    const queryClient = createTestQueryClient();
+    const router = createMemoryRouter(
+      [{ path: "/accounts/:accountId/data", element: <AccountDataCenter /> }],
+      { initialEntries: ["/accounts/42/data"] },
+    );
+    render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <AntApp>
+            <RouterProvider router={router} />
+          </AntApp>
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+
+    const fileInput = await screen.findByLabelText("选择导入文件");
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(["valid"], "daily.xlsx", {
+            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+        ],
+      },
+    });
+
+    expect(await screen.findByText("导入预览已生成")).toBeInTheDocument();
+    expect(screen.getByText("douyin_daily_play_v1")).toBeInTheDocument();
   });
 
   it("blocks commit while one row is invalid", async () => {

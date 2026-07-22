@@ -140,8 +140,11 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
   const [historyError, setHistoryError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
 
-  useEffect(() => () => {
-    isMountedRef.current = false;
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
   const contextQuery = useQuery({
