@@ -76,8 +76,8 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_account_data_center() -> None:
-    assert get_head_revision() == "20260722_0100"
+def test_migration_head_is_account_data_projection_guards() -> None:
+    assert get_head_revision() == "20260722_0200"
 
 
 def test_account_data_center_migration_is_linear_and_additive() -> None:
@@ -298,3 +298,126 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         assert "canonical_share_url" in reupgraded_content_columns
         assert "resolution_outcome" in reupgraded_row_columns
         assert "ck_metric_snapshots_account_required_for_source_links" in reupgraded_metric_checks
+
+
+def test_account_data_projection_guards_migration_is_linear_and_additive() -> None:
+    module = importlib.import_module(
+        "migrations.versions.20260722_0200_account_data_projection_guards"
+    )
+
+    assert module.down_revision == "20260722_0100"
+    upgrade_source = inspect.getsource(module.upgrade)
+    downgrade_source = inspect.getsource(module.downgrade)
+    assert '"platform_content_records"' in upgrade_source
+    assert '"metric_snapshots"' in upgrade_source
+    assert '"canonical_import_row_number"' in upgrade_source
+    assert "uq_platform_content_records_import_row_identity" in upgrade_source
+    assert "uq_metric_snapshots_import_projection" in upgrade_source
+    assert 'drop_constraint("uq_metric_snapshots_import_projection"' in downgrade_source
+
+
+def test_account_data_projection_guards_migration_smoke(monkeypatch) -> None:
+    base_migration = importlib.import_module(
+        "migrations.versions.20260722_0100_account_data_center"
+    )
+    guard_migration = importlib.import_module(
+        "migrations.versions.20260722_0200_account_data_projection_guards"
+    )
+    engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    metadata = sa.MetaData()
+    sa.Table(
+        "orgs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(length=200), nullable=False),
+    )
+    sa.Table(
+        "users",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column(
+            "org_id", sa.Integer, sa.ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column("email", sa.String(length=255), nullable=True),
+    )
+    sa.Table(
+        "accounts",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column(
+            "org_id", sa.Integer, sa.ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column("platform", sa.String(length=32), nullable=False),
+    )
+    sa.Table(
+        "content_items",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("project_id", sa.Integer, nullable=True),
+    )
+    sa.Table(
+        "metric_snapshots",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column(
+            "org_id", sa.Integer, sa.ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column(
+            "content_item_id",
+            sa.Integer,
+            sa.ForeignKey("content_items.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
+        sa.Column(
+            "account_id",
+            sa.Integer,
+            sa.ForeignKey("accounts.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+        sa.Column("source", sa.String(length=32), nullable=False),
+        sa.Column("stat_date", sa.Date(), nullable=False),
+        sa.Column("title", sa.String(length=300), nullable=True),
+        sa.Column("play", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("exposure", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("completion_rate", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("like_rate", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("comment_rate", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("share_rate", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("follower_delta", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(base_migration, "op", operations)
+        monkeypatch.setattr(guard_migration, "op", operations)
+
+        base_migration.upgrade()
+        guard_migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        content_columns = {
+            column["name"] for column in inspector.get_columns("platform_content_records")
+        }
+        metric_uniques = {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("metric_snapshots")
+        }
+        content_uniques = {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("platform_content_records")
+        }
+        assert "canonical_import_row_number" in content_columns
+        assert "uq_metric_snapshots_import_projection" in metric_uniques
+        assert "uq_platform_content_records_import_row_identity" in content_uniques

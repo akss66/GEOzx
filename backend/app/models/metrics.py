@@ -30,6 +30,13 @@ class MetricSnapshot(Base, TimestampMixin):
 
     __tablename__ = "metric_snapshots"
     __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "import_batch_id",
+            "platform_content_record_id",
+            "stat_date",
+            name="uq_metric_snapshots_import_projection",
+        ),
         CheckConstraint(
             "(import_batch_id IS NULL AND platform_content_record_id IS NULL) "
             "OR account_id IS NOT NULL",

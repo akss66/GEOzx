@@ -15,6 +15,8 @@ from sqlalchemy.orm import selectinload
 from app.core import storage
 from app.models import (
     Account,
+    AccountMetricSnapshot,
+    BenchmarkSnapshot,
     DataArtifact,
     DataConflict,
     DataImportBatch,
@@ -26,6 +28,7 @@ from app.models import (
 from app.models.enums import (
     ConflictStatus,
     ContentIdentityConfidence,
+    DataSourceKind,
     ImportBatchStatus,
     ImportRowStatus,
     MetricSource,
@@ -359,9 +362,14 @@ async def account_status_summary(
     seen_domains: set[str] = set()
     template_domains = {item.code: item.data_domain for item in KNOWN_TEMPLATES}
     for batch in batches:
+        projected_domains = await _projected_domains_for_batch(session=session, batch=batch)
+        if not projected_domains:
+            continue
         if latest_confirmed_at is None:
             latest_confirmed_at = batch.committed_at
         data_domain = template_domains.get(batch.template_code, "unknown")
+        if data_domain not in projected_domains:
+            data_domain = next(iter(projected_domains))
         if data_domain not in seen_domains and data_domain in coverage:
             coverage[data_domain] = "available"
             seen_domains.add(data_domain)
@@ -392,7 +400,7 @@ async def commit_batch(
     batch_id: int,
     actor: User,
 ) -> DataImportBatch:
-    batch = await load_scoped_batch(
+    batch = await _load_mutation_batch(
         session,
         org_id=org_id,
         account_id=account_id,
@@ -402,7 +410,12 @@ async def commit_batch(
     if batch.revoked_at is not None or batch.status is ImportBatchStatus.REVOKED:
         raise DataImportStateError("revoked batches cannot be committed")
     if batch.committed_at is not None or batch.status is ImportBatchStatus.COMMITTED:
-        return batch
+        return await load_scoped_batch(
+            session,
+            org_id=org_id,
+            account_id=account_id,
+            batch_id=batch_id,
+        )
 
     blocking_rows = [
         row.row_number
@@ -445,7 +458,7 @@ async def revoke_batch(
     batch_id: int,
     actor: User,
 ) -> DataImportBatch:
-    batch = await load_scoped_batch(
+    batch = await _load_mutation_batch(
         session,
         org_id=org_id,
         account_id=account_id,
@@ -460,6 +473,7 @@ async def revoke_batch(
     conflicts = await _find_revoke_conflicts(session=session, batch=batch)
     if conflicts:
         await _record_revoke_conflicts(session=session, batch=batch, conflicts=conflicts)
+        await session.commit()
         raise DataImportRevokeConflictError("batch contains superseded projections")
 
     try:
@@ -810,56 +824,189 @@ async def _load_resolution_targets(
     return row, conflict
 
 
+async def _load_mutation_batch(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+) -> DataImportBatch:
+    batch = await load_scoped_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
+    dialect_name = _dialect_name(session)
+    if dialect_name == "postgresql":
+        await session.scalar(
+            select(DataImportBatch.id)
+            .where(
+                DataImportBatch.org_id == org_id,
+                DataImportBatch.account_id == account_id,
+                DataImportBatch.id == batch_id,
+            )
+            .with_for_update()
+        )
+        batch.rows = list(
+            await session.scalars(
+                select(DataImportRow)
+                .where(
+                    DataImportRow.org_id == org_id,
+                    DataImportRow.account_id == account_id,
+                    DataImportRow.batch_id == batch_id,
+                )
+                .order_by(DataImportRow.row_number)
+                .with_for_update()
+            )
+        )
+        batch.conflicts = list(
+            await session.scalars(
+                select(DataConflict)
+                .where(
+                    DataConflict.org_id == org_id,
+                    DataConflict.account_id == account_id,
+                    DataConflict.batch_id == batch_id,
+                )
+                .order_by(DataConflict.id)
+                .with_for_update()
+            )
+        )
+    return batch
+
+
 async def _project_row_targets(
     session: AsyncSession,
     *,
     batch: DataImportBatch,
     row: DataImportRow,
 ) -> list[dict[str, object]]:
-    content_record, content_action = await _ensure_platform_content_record(
+    if batch.template_code == "douyin_work_list_v1":
+        return await _project_work_list_row(session=session, batch=batch, row=row)
+    if batch.template_code == "douyin_single_content_v1":
+        return await _project_single_content_row(session=session, batch=batch, row=row)
+    if batch.template_code == "douyin_daily_play_v1":
+        return await _project_daily_play_row(session=session, batch=batch, row=row)
+    if batch.template_code == "douyin_period_aggregate_v1":
+        return await _project_period_aggregate_row(session=session, batch=batch, row=row)
+    raise DataImportStateError(f"unsupported template_code: {batch.template_code}")
+
+
+async def _project_work_list_row(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    content_record, targets = await _project_content_record(session=session, batch=batch, row=row)
+    metric, action = await _upsert_metric_snapshot(
+        session=session,
+        batch=batch,
+        row=row,
+        content_record=content_record,
+    )
+    row.platform_content_record_id = content_record.id
+    targets.append(
+        {
+            "kind": "metric_snapshot",
+            "id": metric.id,
+            "action": action,
+        }
+    )
+    gap = _projection_gap(
+        row=row,
+        missing_fields=[
+            "content_format",
+            "review_status",
+            "completion_rate_5s",
+            "bounce_rate_2s",
+            "profile_visit_count",
+            "exposure",
+        ],
+    )
+    if gap is not None:
+        targets.append(gap)
+    return targets
+
+
+async def _project_single_content_row(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    content_record, targets = await _project_content_record(session=session, batch=batch, row=row)
+    row.platform_content_record_id = content_record.id
+    gap = _projection_gap(
+        row=row,
+        missing_fields=[
+            "play",
+            "completion_rate_5s",
+            "bounce_rate_2s",
+            "avg_watch_time_seconds",
+        ],
+    )
+    if gap is not None:
+        targets.append(gap)
+    return targets
+
+
+async def _project_daily_play_row(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    snapshot, action = await _upsert_account_metric_snapshot(
         session=session,
         batch=batch,
         row=row,
     )
-    metric = MetricSnapshot(
-        org_id=batch.org_id,
-        account_id=batch.account_id,
-        import_batch_id=batch.id,
-        platform_content_record_id=content_record.id,
-        source=MetricSource(_batch_platform(batch).value),
-        stat_date=_row_stat_date(batch=batch, row=row),
-        title=row.normalized_values.get("title"),
-        play=int(row.normalized_values.get("play") or 0),
-        exposure=int(row.normalized_values.get("exposure") or 0),
-        completion_rate=float(row.normalized_values.get("completion_rate") or 0.0),
-        like_rate=float(row.normalized_values.get("like_rate") or 0.0),
-        comment_rate=float(row.normalized_values.get("comment_rate") or 0.0),
-        share_rate=float(row.normalized_values.get("share_rate") or 0.0),
-        follower_delta=int(row.normalized_values.get("follower_delta") or 0),
-        like_count=_int_or_none(row.normalized_values.get("like_count")),
-        comment_count=_int_or_none(row.normalized_values.get("comment_count")),
-        share_count=_int_or_none(row.normalized_values.get("share_count")),
-        favorite_count=_int_or_none(row.normalized_values.get("favorite_count")),
-        cover_click_rate=_float_or_none(row.normalized_values.get("cover_click_rate")),
-        avg_watch_time_seconds=_float_or_none(
-            row.normalized_values.get("avg_watch_time_seconds")
-        ),
-    )
-    session.add(metric)
-    await session.flush()
-    row.platform_content_record_id = content_record.id
     return [
         {
-            "kind": "platform_content_record",
-            "id": content_record.id,
-            "action": content_action,
-        },
-        {
-            "kind": "metric_snapshot",
-            "id": metric.id,
-            "action": "created",
-        },
+            "kind": "account_metric_snapshot",
+            "id": snapshot.id,
+            "action": action,
+        }
     ]
+
+
+async def _project_period_aggregate_row(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = []
+    for metric_code, metric_value in (
+        ("click_rate", _float_or_none(row.normalized_values.get("click_rate"))),
+        ("completion_rate_5s", _float_or_none(row.normalized_values.get("completion_rate_5s"))),
+        ("bounce_rate_2s", _float_or_none(row.normalized_values.get("bounce_rate_2s"))),
+        (
+            "avg_watch_time_seconds",
+            _float_or_none(row.normalized_values.get("avg_watch_time_seconds")),
+        ),
+        ("median_play", _float_or_none(row.normalized_values.get("median_play"))),
+        ("avg_like_count", _float_or_none(row.normalized_values.get("avg_like_count"))),
+        ("avg_comment_count", _float_or_none(row.normalized_values.get("avg_comment_count"))),
+        ("avg_share_count", _float_or_none(row.normalized_values.get("avg_share_count"))),
+    ):
+        snapshot, action = await _upsert_benchmark_snapshot(
+            session=session,
+            batch=batch,
+            row=row,
+            metric_code=metric_code,
+            metric_value=metric_value,
+        )
+        targets.append(
+            {
+                "kind": "benchmark_snapshot",
+                "id": snapshot.id,
+                "metric_code": metric_code,
+                "action": action,
+            }
+        )
+    return targets
 
 
 async def _ensure_platform_content_record(
@@ -877,6 +1024,16 @@ async def _ensure_platform_content_record(
         ):
             return record, "linked"
 
+    existing = await session.scalar(
+        select(PlatformContentRecord).where(
+            PlatformContentRecord.account_id == batch.account_id,
+            PlatformContentRecord.canonical_import_batch_id == batch.id,
+            PlatformContentRecord.canonical_import_row_number == row.row_number,
+        )
+    )
+    if existing is not None:
+        return existing, "linked"
+
     published_at = row.normalized_values.get("published_at")
     if isinstance(published_at, str):
         published_at = datetime.fromisoformat(published_at)
@@ -889,13 +1046,29 @@ async def _ensure_platform_content_record(
         account_id=batch.account_id,
         platform=_batch_platform(batch),
         canonical_import_batch_id=batch.id,
+        canonical_import_row_number=row.row_number,
         title=row.normalized_values.get("title"),
         published_at=published_at,
         identity_confidence=ContentIdentityConfidence.CONFIRMED,
         weak_fingerprint=weak_fingerprint,
     )
-    session.add(record)
-    await session.flush()
+    savepoint = await session.begin_nested()
+    try:
+        session.add(record)
+        await session.flush()
+    except IntegrityError:
+        await savepoint.rollback()
+        existing = await session.scalar(
+            select(PlatformContentRecord).where(
+                PlatformContentRecord.account_id == batch.account_id,
+                PlatformContentRecord.canonical_import_batch_id == batch.id,
+                PlatformContentRecord.canonical_import_row_number == row.row_number,
+            )
+        )
+        if existing is None:
+            raise
+        return existing, "linked"
+    await savepoint.commit()
     return record, "created"
 
 
@@ -911,7 +1084,14 @@ async def _find_revoke_conflicts(
                 continue
             if target.get("action") != "created":
                 continue
-            content = await session.get(PlatformContentRecord, int(target["id"]))
+            content_query = select(PlatformContentRecord).where(
+                PlatformContentRecord.id == int(target["id"]),
+                PlatformContentRecord.org_id == batch.org_id,
+                PlatformContentRecord.account_id == batch.account_id,
+            )
+            if _dialect_name(session) == "postgresql":
+                content_query = content_query.with_for_update()
+            content = await session.scalar(content_query)
             if content is None:
                 continue
             if content.canonical_import_batch_id != batch.id:
@@ -962,7 +1142,6 @@ async def _record_revoke_conflicts(
                 incoming_value={"batch_id": batch.id, "detected_at": timestamp.isoformat()},
             )
         )
-    await session.commit()
 
 
 async def _delete_row_targets(
@@ -976,10 +1155,252 @@ async def _delete_row_targets(
             metric = await session.get(MetricSnapshot, int(target["id"]))
             if metric is not None and metric.import_batch_id == batch.id:
                 await session.delete(metric)
+        elif target.get("kind") == "account_metric_snapshot":
+            snapshot = await session.get(AccountMetricSnapshot, int(target["id"]))
+            if snapshot is not None and snapshot.import_batch_id == batch.id:
+                await session.delete(snapshot)
+        elif target.get("kind") == "benchmark_snapshot":
+            snapshot = await session.get(BenchmarkSnapshot, int(target["id"]))
+            if snapshot is not None and snapshot.import_batch_id == batch.id:
+                await session.delete(snapshot)
         elif target.get("kind") == "platform_content_record" and target.get("action") == "created":
             content = await session.get(PlatformContentRecord, int(target["id"]))
             if content is not None and content.canonical_import_batch_id == batch.id:
                 await session.delete(content)
+
+
+async def _project_content_record(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> tuple[PlatformContentRecord, list[dict[str, object]]]:
+    content_record, action = await _ensure_platform_content_record(
+        session=session,
+        batch=batch,
+        row=row,
+    )
+    return content_record, [
+        {
+            "kind": "platform_content_record",
+            "id": content_record.id,
+            "action": action,
+        }
+    ]
+
+
+async def _upsert_metric_snapshot(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+    content_record: PlatformContentRecord,
+) -> tuple[MetricSnapshot, str]:
+    stat_date = _row_stat_date(batch=batch, row=row)
+    existing = await session.scalar(
+        select(MetricSnapshot).where(
+            MetricSnapshot.account_id == batch.account_id,
+            MetricSnapshot.import_batch_id == batch.id,
+            MetricSnapshot.platform_content_record_id == content_record.id,
+            MetricSnapshot.stat_date == stat_date,
+        )
+    )
+    action = "updated" if existing is not None else "created"
+    metric = existing or MetricSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=batch.id,
+        platform_content_record_id=content_record.id,
+        source=MetricSource(_batch_platform(batch).value),
+        stat_date=stat_date,
+    )
+    metric.title = row.normalized_values.get("title")
+    metric.play = int(row.normalized_values.get("play") or 0)
+    metric.exposure = int(row.normalized_values.get("exposure") or 0)
+    metric.completion_rate = _float_or_zero(row.normalized_values.get("completion_rate"))
+    metric.like_rate = _derived_rate(
+        numerator=row.normalized_values.get("like_count"),
+        denominator=row.normalized_values.get("play"),
+    )
+    metric.comment_rate = _derived_rate(
+        numerator=row.normalized_values.get("comment_count"),
+        denominator=row.normalized_values.get("play"),
+    )
+    metric.share_rate = _derived_rate(
+        numerator=row.normalized_values.get("share_count"),
+        denominator=row.normalized_values.get("play"),
+    )
+    metric.follower_delta = int(row.normalized_values.get("follower_delta") or 0)
+    metric.like_count = _int_or_none(row.normalized_values.get("like_count"))
+    metric.comment_count = _int_or_none(row.normalized_values.get("comment_count"))
+    metric.share_count = _int_or_none(row.normalized_values.get("share_count"))
+    metric.favorite_count = _int_or_none(row.normalized_values.get("favorite_count"))
+    metric.cover_click_rate = _float_or_none(row.normalized_values.get("cover_click_rate"))
+    metric.avg_watch_time_seconds = _float_or_none(
+        row.normalized_values.get("avg_watch_time_seconds")
+    )
+    if existing is None:
+        savepoint = await session.begin_nested()
+        try:
+            session.add(metric)
+            await session.flush()
+        except IntegrityError:
+            await savepoint.rollback()
+            metric = await session.scalar(
+                select(MetricSnapshot).where(
+                    MetricSnapshot.account_id == batch.account_id,
+                    MetricSnapshot.import_batch_id == batch.id,
+                    MetricSnapshot.platform_content_record_id == content_record.id,
+                    MetricSnapshot.stat_date == stat_date,
+                )
+            )
+            if metric is None:
+                raise
+            action = "updated"
+        else:
+            await savepoint.commit()
+    else:
+        await session.flush()
+    return metric, action
+
+
+async def _upsert_account_metric_snapshot(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> tuple[AccountMetricSnapshot, str]:
+    stat_date = _row_stat_date(batch=batch, row=row)
+    existing = await session.scalar(
+        select(AccountMetricSnapshot).where(
+            AccountMetricSnapshot.account_id == batch.account_id,
+            AccountMetricSnapshot.import_batch_id == batch.id,
+            AccountMetricSnapshot.stat_date == stat_date,
+        )
+    )
+    action = "updated" if existing is not None else "created"
+    snapshot = existing or AccountMetricSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=batch.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        stat_date=stat_date,
+    )
+    snapshot.total_play = _int_or_none(row.normalized_values.get("play"))
+    snapshot.follower_count = _int_or_none(row.normalized_values.get("follower_count"))
+    snapshot.follower_delta = _int_or_none(row.normalized_values.get("follower_delta"))
+    snapshot.total_exposure = _int_or_none(row.normalized_values.get("exposure"))
+    snapshot.engagement_rate = _float_or_none(row.normalized_values.get("engagement_rate"))
+    if existing is None:
+        savepoint = await session.begin_nested()
+        try:
+            session.add(snapshot)
+            await session.flush()
+        except IntegrityError:
+            await savepoint.rollback()
+            snapshot = await session.scalar(
+                select(AccountMetricSnapshot).where(
+                    AccountMetricSnapshot.account_id == batch.account_id,
+                    AccountMetricSnapshot.import_batch_id == batch.id,
+                    AccountMetricSnapshot.stat_date == stat_date,
+                )
+            )
+            if snapshot is None:
+                raise
+            action = "updated"
+        else:
+            await savepoint.commit()
+    else:
+        await session.flush()
+    return snapshot, action
+
+
+async def _upsert_benchmark_snapshot(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+    metric_code: str,
+    metric_value: float | None,
+) -> tuple[BenchmarkSnapshot, str]:
+    stat_date = _row_stat_date(batch=batch, row=row)
+    benchmark_code = _benchmark_code(row=row)
+    existing = await session.scalar(
+        select(BenchmarkSnapshot).where(
+            BenchmarkSnapshot.account_id == batch.account_id,
+            BenchmarkSnapshot.import_batch_id == batch.id,
+            BenchmarkSnapshot.stat_date == stat_date,
+            BenchmarkSnapshot.benchmark_code == benchmark_code,
+            BenchmarkSnapshot.metric_code == metric_code,
+        )
+    )
+    action = "updated" if existing is not None else "created"
+    snapshot = existing or BenchmarkSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=batch.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        stat_date=stat_date,
+        benchmark_code=benchmark_code,
+        metric_code=metric_code,
+    )
+    snapshot.metric_value = metric_value
+    snapshot.sample_size = _int_or_none(row.normalized_values.get("publish_count"))
+    snapshot.meta = {
+        "content_format": row.normalized_values.get("content_format"),
+        "vertical": row.normalized_values.get("vertical"),
+        "period_start": _date_or_none(row.normalized_values.get("period_start")),
+        "period_end": _date_or_none(row.normalized_values.get("period_end")),
+    }
+    if existing is None:
+        savepoint = await session.begin_nested()
+        try:
+            session.add(snapshot)
+            await session.flush()
+        except IntegrityError:
+            await savepoint.rollback()
+            snapshot = await session.scalar(
+                select(BenchmarkSnapshot).where(
+                    BenchmarkSnapshot.account_id == batch.account_id,
+                    BenchmarkSnapshot.import_batch_id == batch.id,
+                    BenchmarkSnapshot.stat_date == stat_date,
+                    BenchmarkSnapshot.benchmark_code == benchmark_code,
+                    BenchmarkSnapshot.metric_code == metric_code,
+                )
+            )
+            if snapshot is None:
+                raise
+            action = "updated"
+        else:
+            await savepoint.commit()
+    else:
+        await session.flush()
+    return snapshot, action
+
+
+async def _projected_domains_for_batch(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+) -> set[str]:
+    projected_domains: set[str] = set()
+    if await session.scalar(
+        select(AccountMetricSnapshot.id).where(AccountMetricSnapshot.import_batch_id == batch.id)
+    ):
+        projected_domains.add("account_metrics")
+    if await session.scalar(
+        select(BenchmarkSnapshot.id).where(BenchmarkSnapshot.import_batch_id == batch.id)
+    ):
+        projected_domains.add("benchmarks")
+    if await session.scalar(
+        select(PlatformContentRecord.id).where(
+            PlatformContentRecord.canonical_import_batch_id == batch.id
+        )
+    ) or await session.scalar(
+        select(MetricSnapshot.id).where(MetricSnapshot.import_batch_id == batch.id)
+    ):
+        projected_domains.add("content_metrics")
+    return projected_domains
 
 
 def _batch_platform(batch: DataImportBatch):
@@ -992,6 +1413,11 @@ def _batch_platform(batch: DataImportBatch):
 
 
 def _row_stat_date(*, batch: DataImportBatch, row: DataImportRow):
+    stat_date = row.normalized_values.get("stat_date")
+    if isinstance(stat_date, str):
+        return date.fromisoformat(stat_date)
+    if isinstance(stat_date, date):
+        return stat_date
     published_at = row.normalized_values.get("published_at")
     if isinstance(published_at, str):
         published_at = datetime.fromisoformat(published_at)
@@ -1002,6 +1428,50 @@ def _row_stat_date(*, batch: DataImportBatch, row: DataImportRow):
     if batch.period_start is not None:
         return batch.period_start
     return datetime.now(UTC).date()
+
+
+def _projection_gap(*, row: DataImportRow, missing_fields: list[str]) -> dict[str, object] | None:
+    missing = [field for field in missing_fields if field in row.normalized_values]
+    if not missing:
+        return None
+    return {
+        "kind": "projection_gap",
+        "missing_fields": missing,
+        "report": "staging_only",
+    }
+
+
+def _derived_rate(*, numerator, denominator) -> float:
+    numerator_value = _int_or_none(numerator)
+    denominator_value = _int_or_none(denominator)
+    if numerator_value is None or denominator_value in (None, 0):
+        return 0.0
+    return numerator_value / denominator_value
+
+
+def _float_or_zero(value) -> float:
+    return 0.0 if value is None else float(value)
+
+
+def _benchmark_code(*, row: DataImportRow) -> str:
+    content_format = str(row.normalized_values.get("content_format") or "unknown")
+    vertical = str(row.normalized_values.get("vertical") or "unknown")
+    return f"period_aggregate:{content_format}:{vertical}"
+
+
+def _date_or_none(value) -> str | None:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _dialect_name(session: AsyncSession) -> str:
+    bind = session.get_bind()
+    return bind.dialect.name if bind is not None else ""
 
 
 def _int_or_none(value) -> int | None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import select
@@ -10,6 +10,8 @@ from app.core.security import hash_password
 from app.models import (
     Account,
     AccountMembership,
+    AccountMetricSnapshot,
+    BenchmarkSnapshot,
     Client,
     ClientMembership,
     DataConflict,
@@ -30,7 +32,13 @@ from app.models.enums import (
     UserRole,
     WorkspaceRole,
 )
-from tests.test_data_import_templates import WORK_LIST_HEADERS, workbook_bytes
+from tests.test_data_import_templates import (
+    DAILY_HEADERS,
+    PERIOD_AGGREGATE_HEADERS,
+    SINGLE_CONTENT_HEADERS,
+    WORK_LIST_HEADERS,
+    workbook_bytes,
+)
 
 
 async def _login(client, email: str, password: str) -> str:
@@ -63,6 +71,52 @@ def _workbook_payload(*, title: str = "作品 A") -> bytes:
             "0",
             "3",
             "0",
+        ]],
+    )
+
+
+def _daily_play_workbook_payload(*, stat_date: str = "2026-07-18", play: str = "81") -> bytes:
+    return workbook_bytes(DAILY_HEADERS, [[stat_date, play]])
+
+
+def _single_content_workbook_payload(
+    *,
+    title: str = "燃尽。#codex",
+    published_at: str = "2026-07-07 13:36",
+    play: str = "444",
+    completion_rate_5s: str = "0.1471",
+    bounce_rate_2s: str = "0.6353",
+    avg_watch_time_seconds: str = "2.8314",
+) -> bytes:
+    return workbook_bytes(
+        SINGLE_CONTENT_HEADERS,
+        [[
+            title,
+            published_at,
+            play,
+            completion_rate_5s,
+            bounce_rate_2s,
+            avg_watch_time_seconds,
+        ]],
+    )
+
+
+def _period_aggregate_workbook_payload() -> bytes:
+    return workbook_bytes(
+        PERIOD_AGGREGATE_HEADERS,
+        [[
+            "2026-04-23 ~ 2026-07-22",
+            "1min-视频,图文",
+            "数码",
+            "1",
+            "0.2000",
+            "0.1471",
+            "0.6353",
+            "2.8314",
+            "444",
+            "6",
+            "3",
+            "1",
         ]],
     )
 
@@ -161,6 +215,7 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
 ):
     monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
     account = account_access_setup["account"]
+    payload = _workbook_payload()
     candidate = PlatformContentRecord(
         org_id=admin.org_id,
         account_id=account.id,
@@ -179,7 +234,7 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
         files={
             "file": (
                 "works.xlsx",
-                _workbook_payload(),
+                payload,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         },
@@ -223,7 +278,7 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
         headers=_auth(operator_token),
     )
     assert download.status_code == 200
-    assert download.content == _workbook_payload()
+    assert download.content == payload
 
     history = await client.get(
         f"/account-data/{account.id}/imports",
@@ -314,6 +369,252 @@ async def test_commit_rejects_unresolved_rows_without_partial_projection(
     batch = await session.get(DataImportBatch, batch_id)
     assert batch is not None
     assert batch.status is ImportBatchStatus.PREVIEW_READY
+
+
+@pytest.mark.asyncio
+async def test_commit_projects_daily_play_into_account_metric_snapshots_and_status(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "daily.xlsx",
+                _daily_play_workbook_payload(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+
+    committed = await client.post(
+        f"/account-data/{account.id}/imports/{batch_id}/commit",
+        headers=_auth(operator_token),
+    )
+    assert committed.status_code == 200
+
+    account_snapshot = await session.scalar(
+        select(AccountMetricSnapshot).where(AccountMetricSnapshot.import_batch_id == batch_id)
+    )
+    assert account_snapshot is not None
+    assert account_snapshot.account_id == account.id
+    assert account_snapshot.stat_date == date(2026, 7, 18)
+    assert account_snapshot.total_play == 81
+    assert account_snapshot.follower_count is None
+    assert account_snapshot.total_exposure is None
+
+    metric_snapshot = await session.scalar(
+        select(MetricSnapshot).where(MetricSnapshot.import_batch_id == batch_id)
+    )
+    content_record = await session.scalar(
+        select(PlatformContentRecord).where(
+            PlatformContentRecord.canonical_import_batch_id == batch_id
+        )
+    )
+    assert metric_snapshot is None
+    assert content_record is None
+
+    coverage = await client.get(
+        f"/account-data/{account.id}/status",
+        headers=_auth(operator_token),
+    )
+    assert coverage.status_code == 200
+    assert coverage.json()["coverage"] == {
+        "account_metrics": "available",
+        "content_metrics": "missing",
+        "benchmarks": "missing",
+    }
+
+
+@pytest.mark.asyncio
+async def test_commit_projects_single_content_without_inventing_unmodeled_metrics(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "single.xlsx",
+                _single_content_workbook_payload(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+
+    committed = await client.post(
+        f"/account-data/{account.id}/imports/{batch_id}/commit",
+        headers=_auth(operator_token),
+    )
+    assert committed.status_code == 200
+
+    content_record = await session.scalar(
+        select(PlatformContentRecord).where(
+            PlatformContentRecord.canonical_import_batch_id == batch_id
+        )
+    )
+    assert content_record is not None
+    assert content_record.title == "燃尽。#codex"
+    assert content_record.published_at == datetime(2026, 7, 7, 13, 36)
+
+    metric_snapshot = await session.scalar(
+        select(MetricSnapshot).where(MetricSnapshot.import_batch_id == batch_id)
+    )
+    account_snapshot = await session.scalar(
+        select(AccountMetricSnapshot).where(AccountMetricSnapshot.import_batch_id == batch_id)
+    )
+    benchmark_snapshot = await session.scalar(
+        select(BenchmarkSnapshot).where(BenchmarkSnapshot.import_batch_id == batch_id)
+    )
+    assert metric_snapshot is None
+    assert account_snapshot is None
+    assert benchmark_snapshot is None
+
+    row = await session.scalar(
+        select(DataImportRow).where(
+            DataImportRow.batch_id == batch_id,
+            DataImportRow.row_number == 2,
+        )
+    )
+    assert row is not None
+    gap = next(item for item in row.projected_target_ids if item["kind"] == "projection_gap")
+    assert gap["missing_fields"] == [
+        "play",
+        "completion_rate_5s",
+        "bounce_rate_2s",
+        "avg_watch_time_seconds",
+    ]
+
+    coverage = await client.get(
+        f"/account-data/{account.id}/status",
+        headers=_auth(operator_token),
+    )
+    assert coverage.status_code == 200
+    assert coverage.json()["coverage"]["content_metrics"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_commit_projects_period_aggregate_into_benchmark_snapshots_and_status(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "aggregate.xlsx",
+                _period_aggregate_workbook_payload(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+
+    committed = await client.post(
+        f"/account-data/{account.id}/imports/{batch_id}/commit",
+        headers=_auth(operator_token),
+    )
+    assert committed.status_code == 200
+
+    snapshots = list(
+        await session.scalars(
+            select(BenchmarkSnapshot)
+            .where(BenchmarkSnapshot.import_batch_id == batch_id)
+            .order_by(BenchmarkSnapshot.metric_code)
+        )
+    )
+    assert [item.metric_code for item in snapshots] == [
+        "avg_comment_count",
+        "avg_like_count",
+        "avg_share_count",
+        "avg_watch_time_seconds",
+        "bounce_rate_2s",
+        "click_rate",
+        "completion_rate_5s",
+        "median_play",
+    ]
+    assert all(item.benchmark_code == "period_aggregate:1min-视频,图文:数码" for item in snapshots)
+    assert all(item.sample_size == 1 for item in snapshots)
+    assert all(item.stat_date == date(2026, 7, 22) for item in snapshots)
+    assert snapshots[0].meta["content_format"] == "1min-视频,图文"
+    assert snapshots[0].meta["vertical"] == "数码"
+    assert snapshots[0].meta["period_start"] == "2026-04-23"
+    assert snapshots[0].meta["period_end"] == "2026-07-22"
+
+    coverage = await client.get(
+        f"/account-data/{account.id}/status",
+        headers=_auth(operator_token),
+    )
+    assert coverage.status_code == 200
+    assert coverage.json()["coverage"] == {
+        "account_metrics": "missing",
+        "content_metrics": "missing",
+        "benchmarks": "available",
+    }
+
+
+@pytest.mark.asyncio
+async def test_status_does_not_claim_coverage_from_template_code_without_committed_projections(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+):
+    account = account_access_setup["account"]
+    batch = DataImportBatch(
+        org_id=account.org_id,
+        account_id=account.id,
+        created_by_id=account_access_setup["operator"].id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_daily_play_v1",
+        content_sha256="7" * 64,
+        committed_at=datetime(2026, 7, 22, 8, 0, tzinfo=UTC),
+    )
+    session.add(batch)
+    await session.commit()
+
+    coverage = await client.get(
+        f"/account-data/{account.id}/status",
+        headers=_auth(operator_token),
+    )
+
+    assert coverage.status_code == 200
+    assert coverage.json()["coverage"] == {
+        "account_metrics": "missing",
+        "content_metrics": "missing",
+        "benchmarks": "missing",
+    }
+    assert coverage.json()["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -447,3 +748,21 @@ async def test_revoke_creates_conflict_when_projection_was_superseded(
     )
     assert conflict is not None
     assert conflict.status is ConflictStatus.OPEN
+    replay = await client.post(
+        f"/account-data/{account.id}/imports/{batch_id}/revoke",
+        headers=_auth(lead_token),
+    )
+    assert replay.status_code == 409
+    conflicts = list(
+        await session.scalars(
+            select(DataConflict).where(
+                DataConflict.batch_id == batch_id,
+                DataConflict.row_number == 2,
+                DataConflict.conflict_code == "superseded_projection",
+            )
+        )
+    )
+    assert len(conflicts) == 1
+    content = await session.get(PlatformContentRecord, content_target["id"])
+    assert content is not None
+    assert content.canonical_import_batch_id == later_batch.id

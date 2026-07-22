@@ -203,6 +203,12 @@ class PlatformContentRecord(Base, TimestampMixin):
             ],
             name="fk_platform_content_records_canonical_batch_scope",
         ),
+        UniqueConstraint(
+            "account_id",
+            "canonical_import_batch_id",
+            "canonical_import_row_number",
+            name="uq_platform_content_records_import_row_identity",
+        ),
         Index(
             "ix_platform_content_records_weak_fingerprint",
             "weak_fingerprint",
@@ -222,6 +228,7 @@ class PlatformContentRecord(Base, TimestampMixin):
     canonical_import_batch_id: Mapped[int | None] = mapped_column(
         BigIntPK, index=True, nullable=True
     )
+    canonical_import_row_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     external_content_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     share_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     canonical_share_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)

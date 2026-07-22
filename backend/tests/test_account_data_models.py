@@ -1,7 +1,9 @@
+import asyncio
 from datetime import date, datetime
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import UniqueConstraint, event, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
@@ -32,6 +34,8 @@ from app.models.enums import (
     MetricSource,
     Platform,
 )
+from app.services.data_import import service as data_import_service
+from app.services.data_import.service import commit_batch
 
 
 @pytest.fixture
@@ -728,3 +732,220 @@ async def test_active_preview_identity_is_unique_until_commit_or_revoke(session,
     await session.commit()
     await session.refresh(duplicate)
     assert duplicate.id is not None
+
+
+def test_platform_content_record_has_import_row_identity_guard_for_retry_safe_projection():
+    columns = PlatformContentRecord.__table__.c
+    constraints = {
+        constraint.name: constraint
+        for constraint in PlatformContentRecord.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+    assert "canonical_import_row_number" in columns
+    constraint = constraints["uq_platform_content_records_import_row_identity"]
+    assert [column.name for column in constraint.columns] == [
+        "account_id",
+        "canonical_import_batch_id",
+        "canonical_import_row_number",
+    ]
+
+
+def test_metric_snapshot_has_unique_import_projection_identity():
+    constraints = {
+        constraint.name: constraint
+        for constraint in MetricSnapshot.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+    constraint = constraints["uq_metric_snapshots_import_projection"]
+    assert [column.name for column in constraint.columns] == [
+        "account_id",
+        "import_batch_id",
+        "platform_content_record_id",
+        "stat_date",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_commit_is_retry_idempotent_for_same_batch(tmp_path, monkeypatch):
+    database_path = tmp_path / "account-data-concurrent-commit.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path.as_posix()}",
+        connect_args={"timeout": 30},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as setup_session:
+        org = Org(name="Concurrent import org")
+        actor = User(
+            org=org,
+            email="concurrent-import@test.com",
+            hashed_password=hash_password("import-pw-123"),
+            display_name="Concurrent import actor",
+        )
+        setup_session.add(actor)
+        await setup_session.flush()
+        account = Account(
+            org_id=org.id,
+            platform=Platform.DOUYIN,
+            nickname="Concurrent import account",
+        )
+        setup_session.add(account)
+        await setup_session.flush()
+        batch = DataImportBatch(
+            org_id=org.id,
+            account_id=account.id,
+            created_by_id=actor.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            status=ImportBatchStatus.PREVIEW_READY,
+            template_code="douyin_work_list_v1",
+            content_sha256="8" * 64,
+        )
+        setup_session.add(batch)
+        await setup_session.flush()
+        setup_session.add(
+            DataImportRow(
+                org_id=org.id,
+                account_id=account.id,
+                batch_id=batch.id,
+                row_number=2,
+                status=ImportRowStatus.READY,
+                    raw_values={"title": "Concurrent work"},
+                    normalized_values={
+                        "title": "Concurrent work",
+                        "published_at": "2026-07-18T14:11:20",
+                        "play": 81,
+                    "completion_rate": 0.0875,
+                    "like_count": 6,
+                    "comment_count": 3,
+                    "share_count": 0,
+                    "favorite_count": 0,
+                    "cover_click_rate": None,
+                    "avg_watch_time_seconds": 9.53,
+                    "follower_delta": 0,
+                },
+                projected_target_ids=[],
+                weak_fingerprint="concurrent-work|2026-07-18t14:11:20",
+            )
+        )
+        await setup_session.commit()
+        org_id = org.id
+        account_id = account.id
+        actor_id = actor.id
+        batch_id = batch.id
+
+    barrier = asyncio.Barrier(2)
+    real_project = data_import_service._project_row_targets
+
+    async def _synchronized_project(*args, **kwargs):
+        await barrier.wait()
+        return await real_project(*args, **kwargs)
+
+    monkeypatch.setattr(data_import_service, "_project_row_targets", _synchronized_project)
+
+    async def _run_commit():
+        async with maker() as db_session:
+            actor = await db_session.get(User, actor_id)
+            assert actor is not None
+            return await commit_batch(
+                db_session,
+                org_id=org_id,
+                account_id=account_id,
+                batch_id=batch_id,
+                actor=actor,
+            )
+
+    await asyncio.wait_for(asyncio.gather(_run_commit(), _run_commit()), timeout=30)
+
+    async with maker() as assert_session:
+        content_rows = list(
+            await assert_session.scalars(
+                select(PlatformContentRecord).where(
+                    PlatformContentRecord.canonical_import_batch_id == batch_id
+                )
+            )
+        )
+        metric_rows = list(
+            await assert_session.scalars(
+                select(MetricSnapshot).where(MetricSnapshot.import_batch_id == batch_id)
+            )
+        )
+        stored_batch = await assert_session.get(DataImportBatch, batch_id)
+        assert stored_batch is not None
+        assert stored_batch.status is ImportBatchStatus.COMMITTED
+        assert len(content_rows) == 1
+        assert len(metric_rows) == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgresql_mutation_queries_request_row_locks(monkeypatch):
+    captured: list[object] = []
+    batch = DataImportBatch(org_id=1, account_id=2, id=3)
+    row = DataImportRow(
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        row_number=2,
+        status=ImportRowStatus.COMMITTED,
+        projected_target_ids=[{"kind": "platform_content_record", "id": 9, "action": "created"}],
+    )
+    batch.rows = [row]
+
+    class _FakeBind:
+        dialect = postgresql.dialect()
+
+    class _FakeSession:
+        def get_bind(self):
+            return _FakeBind()
+
+        async def scalar(self, statement):
+            captured.append(statement)
+            if "platform_content_records" in str(
+                statement.compile(dialect=postgresql.dialect())
+            ):
+                return PlatformContentRecord(
+                    id=9,
+                    org_id=1,
+                    account_id=2,
+                    platform=Platform.DOUYIN,
+                    canonical_import_batch_id=99,
+                    identity_confidence=ContentIdentityConfidence.CONFIRMED,
+                )
+            return 3
+
+        async def scalars(self, statement):
+            captured.append(statement)
+            if "data_import_rows" in str(statement.compile(dialect=postgresql.dialect())):
+                return [row]
+            if "data_conflicts" in str(statement.compile(dialect=postgresql.dialect())):
+                return []
+            return []
+
+    async def _fake_load_scoped_batch(*args, **kwargs):
+        return batch
+
+    monkeypatch.setattr(data_import_service, "load_scoped_batch", _fake_load_scoped_batch)
+    session = _FakeSession()
+
+    await data_import_service._load_mutation_batch(
+        session,
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+    )
+    await data_import_service._find_revoke_conflicts(session=session, batch=batch)
+
+    compiled = [str(statement.compile(dialect=postgresql.dialect())) for statement in captured]
+    assert any("data_import_batches" in item and "FOR UPDATE" in item for item in compiled)
+    assert any("data_import_rows" in item and "FOR UPDATE" in item for item in compiled)
+    assert any("data_conflicts" in item and "FOR UPDATE" in item for item in compiled)
+    assert any("platform_content_records" in item and "FOR UPDATE" in item for item in compiled)
