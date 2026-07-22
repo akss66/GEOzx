@@ -5,10 +5,12 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp } from "antd";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  downloadAccountDataArtifact,
+  type AccountDataImportArtifact,
   type AccountDataImportBatch,
   type AccountDataImportBatchSummary,
   type AccountDataStatus,
@@ -40,6 +42,7 @@ vi.mock("../api/accountData", () => ({
   resolveAccountDataImportRow: vi.fn(),
   commitAccountDataImportBatch: vi.fn(),
   revokeAccountDataImportBatch: vi.fn(),
+  downloadAccountDataArtifact: vi.fn(),
 }));
 
 vi.mock("../api/shell", () => ({
@@ -70,7 +73,7 @@ function buildAccount(id = 42) {
   };
 }
 
-function buildStatus(): AccountDataStatus {
+function buildStatus(overrides: Partial<AccountDataStatus> = {}): AccountDataStatus {
   return {
     account_id: 42,
     latest_confirmed_at: "2026-07-22T08:10:00Z",
@@ -90,10 +93,27 @@ function buildStatus(): AccountDataStatus {
         period_end: "2026-07-22",
       },
     ],
+    ...overrides,
   };
 }
 
-function buildPreviewBatch(): AccountDataImportBatch {
+function buildArtifact(
+  overrides: Partial<AccountDataImportArtifact> = {},
+): AccountDataImportArtifact {
+  return {
+    id: 501,
+    filename: "works.xlsx",
+    content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    byte_size: 2048,
+    sha256: "a".repeat(64),
+    download_url: "/account-data/42/imports/81/artifacts/501",
+    ...overrides,
+  };
+}
+
+function buildBatchSummary(
+  overrides: Partial<AccountDataImportBatchSummary> = {},
+): AccountDataImportBatchSummary {
   return {
     id: 81,
     status: "preview_ready",
@@ -105,16 +125,23 @@ function buildPreviewBatch(): AccountDataImportBatch {
     committed_at: null,
     revoked_at: null,
     created_at: "2026-07-22T08:00:00Z",
-    artifacts: [
-      {
-        id: 501,
-        filename: "works.xlsx",
-        content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        byte_size: 2048,
-        sha256: "a".repeat(64),
-        download_url: "/account-data/42/imports/81/artifacts/501",
-      },
-    ],
+    ...overrides,
+  };
+}
+
+function buildPreviewBatch(overrides: Partial<AccountDataImportBatch> = {}): AccountDataImportBatch {
+  const base: AccountDataImportBatch = {
+    id: 81,
+    status: "preview_ready",
+    source_kind: "platform_export",
+    template_code: "douyin_work_list_v1",
+    row_count: 1,
+    period_start: "2026-07-01",
+    period_end: "2026-07-22",
+    committed_at: null,
+    revoked_at: null,
+    created_at: "2026-07-22T08:00:00Z",
+    artifacts: [buildArtifact()],
     conflicts: [
       {
         id: 701,
@@ -146,31 +173,45 @@ function buildPreviewBatch(): AccountDataImportBatch {
       },
     ],
   };
+  return {
+    ...base,
+    ...overrides,
+    artifacts: overrides.artifacts ?? base.artifacts,
+    conflicts: overrides.conflicts ?? base.conflicts,
+    rows: overrides.rows ?? base.rows,
+  };
 }
 
-function renderPage(route = "/accounts/42/data") {
-  const queryClient = new QueryClient({
+function createTestQueryClient() {
+  return new QueryClient({
     defaultOptions: {
       queries: { retry: false },
       mutations: { retry: false },
     },
   });
-  return render(
-    <MemoryRouter initialEntries={[route]}>
+}
+
+function renderPage(route = "/accounts/42/data", queryClient = createTestQueryClient()) {
+  const router = createMemoryRouter(
+    [{ path: "/accounts/:accountId/data", element: <AccountDataCenter /> }],
+    { initialEntries: [route] },
+  );
+  return {
+    queryClient,
+    router,
+    ...render(
       <QueryClientProvider client={queryClient}>
         <AntApp>
-          <Routes>
-            <Route path="/accounts/:accountId/data" element={<AccountDataCenter />} />
-          </Routes>
+          <RouterProvider router={router} />
         </AntApp>
       </QueryClientProvider>
-    </MemoryRouter>,
-  );
+    ),
+  };
 }
 
 describe("AccountDataCenter", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     Object.defineProperty(window, "matchMedia", {
       writable: true,
       value: vi.fn(() => ({
@@ -237,8 +278,18 @@ describe("AccountDataCenter", () => {
     expect(screen.getByText("请改用已支持的抖音导出模板后重新上传。")).toBeInTheDocument();
   });
 
-  it("blocks commit until one ambiguous row is resolved", async () => {
-    const preview = buildPreviewBatch();
+  it("blocks commit while one row is invalid", async () => {
+    const preview = buildPreviewBatch({
+      rows: [
+        {
+          ...buildPreviewBatch().rows[0],
+          status: "invalid",
+          candidate_content_ids: [],
+          field_errors: [{ message: "播放量不能为空" }],
+        },
+      ],
+      conflicts: [],
+    });
     vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
       clients: [],
       selected_client: null,
@@ -248,29 +299,51 @@ describe("AccountDataCenter", () => {
     });
     vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
     vi.mocked(listAccountDataImports).mockResolvedValueOnce({
-      items: [
-        {
-          id: 81,
-          status: "preview_ready",
-          source_kind: "platform_export",
-          template_code: "douyin_work_list_v1",
-          row_count: 1,
-          period_start: "2026-07-01",
-          period_end: "2026-07-22",
-          committed_at: null,
-          revoked_at: null,
-          created_at: "2026-07-22T08:00:00Z",
-        },
-      ],
+      items: [buildBatchSummary()],
     });
     vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
-    vi.mocked(resolveAccountDataImportRow).mockResolvedValueOnce({
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "确认导入" })).toBeDisabled();
+    expect(screen.getByText("播放量不能为空")).toBeInTheDocument();
+    expect(commitAccountDataImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("blocks commit until one ambiguous row is resolved", async () => {
+    const preview = buildPreviewBatch();
+    const resolvedRow = {
       ...preview.rows[0],
-      status: "ready",
+      status: "ready" as const,
       platform_content_record_id: 91,
       resolution_outcome: "selected_existing_content",
       candidate_content_ids: [91, 92],
+    };
+    const refreshedBatch = buildPreviewBatch({
+      rows: [resolvedRow],
+      conflicts: [],
     });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus)
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports)
+      .mockResolvedValueOnce({
+        items: [buildBatchSummary()],
+      })
+      .mockResolvedValueOnce({
+        items: [buildBatchSummary()],
+      });
+    vi.mocked(getAccountDataImportBatch)
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValueOnce(refreshedBatch);
+    vi.mocked(resolveAccountDataImportRow).mockResolvedValueOnce(resolvedRow);
 
     renderPage();
 
@@ -280,7 +353,51 @@ describe("AccountDataCenter", () => {
     await waitFor(() =>
       expect(resolveAccountDataImportRow).toHaveBeenCalledWith(42, 81, 2, 91),
     );
+    await waitFor(() => expect(getAccountDataImportBatch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(listAccountDataImports).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getAccountDataStatus).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("button", { name: "确认导入" })).toBeEnabled();
+  });
+
+  it("renders uploaded and failed batch statuses truthfully", async () => {
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus({ latest_confirmed_at: null }));
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [
+        buildBatchSummary({ id: 82, status: "uploaded", committed_at: null }),
+        buildBatchSummary({ id: 83, status: "failed", committed_at: null }),
+      ],
+    });
+    vi.mocked(getAccountDataImportBatch)
+      .mockResolvedValueOnce(
+        buildPreviewBatch({
+          id: 82,
+          status: "uploaded",
+          rows: [],
+          conflicts: [],
+          artifacts: [buildArtifact({ download_url: "/account-data/42/imports/82/artifacts/501" })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        buildPreviewBatch({
+          id: 83,
+          status: "failed",
+          rows: [],
+          conflicts: [],
+          artifacts: [buildArtifact({ id: 502, download_url: "/account-data/42/imports/83/artifacts/502" })],
+        }),
+      );
+
+    renderPage();
+
+    expect((await screen.findAllByText("已上传")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("导入失败")).toBeInTheDocument();
   });
 
   it("commits successfully and refreshes status plus history", async () => {
@@ -365,18 +482,10 @@ describe("AccountDataCenter", () => {
   });
 
   it("requires an explicit revoke confirmation before revoking one batch", async () => {
-    const committed: AccountDataImportBatchSummary = {
-      id: 81,
+    const committed: AccountDataImportBatchSummary = buildBatchSummary({
       status: "committed",
-      source_kind: "platform_export",
-      template_code: "douyin_work_list_v1",
-      row_count: 1,
-      period_start: "2026-07-01",
-      period_end: "2026-07-22",
       committed_at: "2026-07-22T08:25:00Z",
-      revoked_at: null,
-      created_at: "2026-07-22T08:00:00Z",
-    };
+    });
     vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
       clients: [],
       selected_client: null,
@@ -439,5 +548,130 @@ describe("AccountDataCenter", () => {
     await waitFor(() =>
       expect(revokeAccountDataImportBatch).toHaveBeenCalledWith(42, 81),
     );
+  });
+
+  it("downloads artifacts through the authenticated api helper", async () => {
+    const committed = buildBatchSummary({
+      status: "committed",
+      committed_at: "2026-07-22T08:25:00Z",
+    });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [committed] });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(
+      buildPreviewBatch({
+        status: "committed",
+        committed_at: committed.committed_at,
+        conflicts: [],
+        rows: buildPreviewBatch().rows.map((row) => ({
+          ...row,
+          status: "committed" as const,
+          platform_content_record_id: 91,
+        })),
+      }),
+    );
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "下载原文件 works.xlsx" }));
+
+    await waitFor(() =>
+      expect(downloadAccountDataArtifact).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 501,
+          filename: "works.xlsx",
+          download_url: "/account-data/42/imports/81/artifacts/501",
+        }),
+      ),
+    );
+  });
+
+  it("shows a clear revoke permission denial", async () => {
+    const committed = buildBatchSummary({
+      status: "committed",
+      committed_at: "2026-07-22T08:25:00Z",
+    });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [committed] });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(
+      buildPreviewBatch({
+        status: "committed",
+        committed_at: committed.committed_at,
+        conflicts: [],
+        rows: buildPreviewBatch().rows.map((row) => ({
+          ...row,
+          status: "committed" as const,
+          platform_content_record_id: 91,
+        })),
+      }),
+    );
+    vi.mocked(revokeAccountDataImportBatch).mockRejectedValueOnce({
+      response: {
+        status: 403,
+        data: { detail: "只有负责人可以撤销已确认批次。" },
+      },
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "撤销批次 81" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认撤销批次 81" }));
+
+    await waitFor(() =>
+      expect(revokeAccountDataImportBatch).toHaveBeenCalledWith(42, 81),
+    );
+    expect(await screen.findByText("只有负责人可以撤销已确认批次。")).toBeInTheDocument();
+  });
+
+  it("resets stale batch state when the route account changes", async () => {
+    vi.mocked(getWorkspaceContext).mockResolvedValue({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount(42), buildAccount(99)],
+    });
+    vi.mocked(getAccountDataStatus).mockImplementation(async (accountId) =>
+      buildStatus({ account_id: accountId, latest_confirmed_at: accountId === 42 ? null : "2026-07-22T08:10:00Z" }),
+    );
+    vi.mocked(listAccountDataImports).mockImplementation(async (accountId) =>
+      accountId === 42
+        ? { items: [buildBatchSummary()] }
+        : { items: [] },
+    );
+    vi.mocked(getAccountDataImportBatch).mockImplementation(async () =>
+      buildPreviewBatch({
+        rows: buildPreviewBatch().rows.map((row) => ({ ...row, status: "ready" as const })),
+        conflicts: [],
+      }),
+    );
+
+    const initialView = renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认导入" })).toBeEnabled(),
+    );
+
+    initialView.unmount();
+    renderPage("/accounts/99/data", initialView.queryClient);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "确认导入" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("暂无导入历史")).toBeInTheDocument();
+    expect(commitAccountDataImportBatch).not.toHaveBeenCalled();
   });
 });

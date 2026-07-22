@@ -8,9 +8,11 @@ export type AccountDataSourceKind =
 
 export type AccountDataCoverage = "available" | "partial" | "missing";
 export type AccountDataImportBatchStatus =
+  | "uploaded"
   | "preview_ready"
   | "committed"
-  | "revoked";
+  | "revoked"
+  | "failed";
 export type AccountDataImportRowStatus =
   | "ready"
   | "invalid"
@@ -25,6 +27,11 @@ export interface AccountDataImportArtifact {
   byte_size: number;
   sha256: string;
   download_url: string;
+}
+
+function resolveArtifactDownloadPath(downloadUrl: string) {
+  if (downloadUrl.startsWith("/account-data/")) return downloadUrl;
+  throw new Error("invalid account data artifact download path");
 }
 
 export interface AccountDataImportConflict {
@@ -117,6 +124,22 @@ export async function getAccountDataImportBatch(
     `/account-data/${accountId}/imports/${batchId}`,
   );
   return data;
+}
+
+export async function downloadAccountDataArtifact(
+  artifact: AccountDataImportArtifact,
+): Promise<void> {
+  const { data } = await api.get<Blob>(resolveArtifactDownloadPath(artifact.download_url), {
+    responseType: "blob",
+  });
+  const objectUrl = URL.createObjectURL(data);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = artifact.filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 export async function uploadAccountDataImport(

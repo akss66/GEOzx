@@ -5,21 +5,24 @@ import {
 } from "@ant-design/icons";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Skeleton } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import {
   commitAccountDataImportBatch,
+  downloadAccountDataArtifact,
   getAccountDataImportBatch,
   getAccountDataStatus,
   listAccountDataImports,
   resolveAccountDataImportRow,
   revokeAccountDataImportBatch,
   uploadAccountDataImport,
+  type AccountDataImportArtifact,
   type AccountDataImportBatch,
   type AccountDataImportRow,
 } from "../api/accountData";
 import { presentApiError } from "../api/errors";
+import { getBatchStatusLabel } from "../components/account-data/statusMeta";
 import { getWorkspaceContext } from "../api/shell";
 import { PlatformTag, OperationalState, PageHeader } from "../components/ui";
 import { FileImportFlow } from "../components/account-data/FileImportFlow";
@@ -98,6 +101,12 @@ function presentRevokeError(error: unknown) {
   return presentApiError(error, "撤销当前批次失败，请稍后重试。").message;
 }
 
+function presentDownloadError(error: unknown) {
+  const detail = readErrorDetail(error);
+  if (detail) return detail;
+  return presentApiError(error, "下载原文件失败，请稍后重试。").message;
+}
+
 function readErrorDetail(error: unknown) {
   if (!error || typeof error !== "object") return null;
   const response = (error as { response?: { data?: unknown } }).response;
@@ -108,12 +117,32 @@ function readErrorDetail(error: unknown) {
 export default function AccountDataCenter() {
   const params = useParams<{ accountId: string }>();
   const routeAccountId = Number(params.accountId);
+
+  if (!Number.isFinite(routeAccountId)) {
+    return (
+      <OperationalState
+        kind="blocked"
+        title="账号地址无效"
+        description="当前链接没有有效的账号编号，请返回账号矩阵重新选择。"
+      />
+    );
+  }
+
+  return <AccountDataCenterWorkspace key={routeAccountId} routeAccountId={routeAccountId} />;
+}
+
+function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number }) {
   const workspace = useCurrentWorkspace();
   const queryClient = useQueryClient();
   const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
   const [draftBatch, setDraftBatch] = useState<AccountDataImportBatch | null>(null);
   const [flowFeedback, setFlowFeedback] = useState<FlowFeedback>(null);
-  const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => () => {
+    isMountedRef.current = false;
+  }, []);
 
   const contextQuery = useQuery({
     queryKey: ["workspace-context", workspace.clientId, workspace.projectId],
@@ -193,90 +222,107 @@ export default function AccountDataCenter() {
     return total;
   }, [detailsById]);
 
+  async function refreshBatchWorkspace(batchId: number) {
+    const [batch] = await Promise.all([
+      queryClient.fetchQuery({
+        queryKey: ["account-data-import", routeAccountId, batchId],
+        queryFn: () => getAccountDataImportBatch(routeAccountId, batchId),
+      }),
+      historyQuery.refetch(),
+      statusQuery.refetch(),
+    ]);
+    return batch;
+  }
+
   const uploadMutation = useMutation({
     mutationFn: (file: File) => uploadAccountDataImport(routeAccountId, file),
     onSuccess: (batch) => {
+      if (!isMountedRef.current) return;
       setFlowFeedback({
         tone: "success",
         title: "导入预览已生成",
         description: "请先核对行级数据，确认无误后再正式写入当前账号。",
       });
-      setRevokeError(null);
+      setHistoryError(null);
       setActiveBatchId(batch.id);
       setDraftBatch(batch);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
       void historyQuery.refetch();
     },
-    onError: (error) => setFlowFeedback(presentImportError(error)),
+    onError: (error) => {
+      if (!isMountedRef.current) return;
+      setFlowFeedback(presentImportError(error));
+    },
   });
 
   const resolveMutation = useMutation({
     mutationFn: ({
+      batchId,
       rowNumber,
       selectedContentId,
     }: {
+      batchId: number;
       rowNumber: number;
       selectedContentId: number;
-    }) => {
-      if (!activeBatch) throw new Error("missing active batch");
-      return resolveAccountDataImportRow(
+    }) =>
+      resolveAccountDataImportRow(
         routeAccountId,
-        activeBatch.id,
+        batchId,
         rowNumber,
         selectedContentId,
-      );
+      ),
+    onSuccess: async (_row, variables) => {
+      try {
+        const batch = await refreshBatchWorkspace(variables.batchId);
+        if (!isMountedRef.current) return;
+        setHistoryError(null);
+        setActiveBatchId(variables.batchId);
+        setDraftBatch(batch);
+      } catch (error) {
+        if (!isMountedRef.current) return;
+        setFlowFeedback(presentImportError(error));
+      }
     },
-    onSuccess: (row) => {
-      if (!activeBatch) return;
-      const nextBatch = {
-        ...activeBatch,
-        rows: activeBatch.rows.map((item) => item.row_number === row.row_number ? row : item),
-        conflicts: activeBatch.conflicts.filter((item) => item.row_number !== row.row_number),
-      };
-      setDraftBatch(nextBatch);
-      queryClient.setQueryData(["account-data-import", routeAccountId, activeBatch.id], nextBatch);
+    onError: (error) => {
+      if (!isMountedRef.current) return;
+      setFlowFeedback(presentImportError(error));
     },
-    onError: (error) => setFlowFeedback(presentImportError(error)),
   });
 
   const commitMutation = useMutation({
-    mutationFn: () => {
-      if (!activeBatch) throw new Error("missing active batch");
-      return commitAccountDataImportBatch(routeAccountId, activeBatch.id);
-    },
+    mutationFn: (batchId: number) => commitAccountDataImportBatch(routeAccountId, batchId),
     onSuccess: async (batch) => {
+      if (!isMountedRef.current) return;
       setDraftBatch(batch);
       setFlowFeedback({
         tone: "success",
         title: "导入已确认",
         description: "当前批次已经写入账号数据中心，头部状态与历史记录已刷新。",
       });
+      setHistoryError(null);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
       await Promise.all([historyQuery.refetch(), statusQuery.refetch()]);
     },
-    onError: (error) => setFlowFeedback(presentImportError(error)),
+    onError: (error) => {
+      if (!isMountedRef.current) return;
+      setFlowFeedback(presentImportError(error));
+    },
   });
 
   const revokeMutation = useMutation({
     mutationFn: (batchId: number) => revokeAccountDataImportBatch(routeAccountId, batchId),
     onSuccess: async (batch) => {
-      setRevokeError(null);
+      if (!isMountedRef.current) return;
+      setHistoryError(null);
       setDraftBatch((current) => current?.id === batch.id ? batch : current);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
       await Promise.all([historyQuery.refetch(), statusQuery.refetch()]);
     },
-    onError: (error) => setRevokeError(presentRevokeError(error)),
+    onError: (error) => {
+      if (!isMountedRef.current) return;
+      setHistoryError(presentRevokeError(error));
+    },
   });
-
-  if (!Number.isFinite(routeAccountId)) {
-    return (
-      <OperationalState
-        kind="blocked"
-        title="账号地址无效"
-        description="当前链接没有有效的账号编号，请返回账号矩阵重新选择。"
-      />
-    );
-  }
 
   if (contextQuery.isLoading) {
     return (
@@ -386,7 +432,7 @@ export default function AccountDataCenter() {
           </article>
           <article>
             <span>当前批次</span>
-            <strong>{activeBatch?.status === "preview_ready" ? "待写入" : activeBatch?.status === "committed" ? "已确认" : "未开始"}</strong>
+            <strong>{activeBatch ? getBatchStatusLabel(activeBatch.status) : "未开始"}</strong>
           </article>
         </div>
       </section>
@@ -417,15 +463,20 @@ export default function AccountDataCenter() {
           canCommit={canCommit}
           onFileSelected={(file) => {
             setFlowFeedback(null);
+            setHistoryError(null);
             uploadMutation.mutate(file);
           }}
           onResolveRow={(rowNumber, selectedContentId) => {
+            if (!activeBatch) return;
             setFlowFeedback(null);
-            resolveMutation.mutate({ rowNumber, selectedContentId });
+            setHistoryError(null);
+            resolveMutation.mutate({ batchId: activeBatch.id, rowNumber, selectedContentId });
           }}
           onCommit={() => {
+            if (!activeBatch) return;
             setFlowFeedback(null);
-            commitMutation.mutate();
+            setHistoryError(null);
+            commitMutation.mutate(activeBatch.id);
           }}
         />
 
@@ -434,10 +485,17 @@ export default function AccountDataCenter() {
           detailsById={detailsById}
           activeBatchId={activeBatchId}
           revokingBatchId={revokeMutation.isPending ? revokeMutation.variables ?? null : null}
-          revokeError={revokeError}
+          revokeError={historyError}
           onOpenBatch={(batchId) => {
             setActiveBatchId(batchId);
             setDraftBatch(detailsById.get(batchId) ?? null);
+          }}
+          onDownloadArtifact={(artifact: AccountDataImportArtifact) => {
+            setHistoryError(null);
+            void Promise.resolve(downloadAccountDataArtifact(artifact)).catch((error) => {
+              if (!isMountedRef.current) return;
+              setHistoryError(presentDownloadError(error));
+            });
           }}
           onRevoke={(batchId) => revokeMutation.mutate(batchId)}
         />

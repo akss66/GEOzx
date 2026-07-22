@@ -3,15 +3,11 @@ import { Button } from "antd";
 import { useState } from "react";
 
 import type {
+  AccountDataImportArtifact,
   AccountDataImportBatch,
   AccountDataImportBatchSummary,
 } from "../../api/accountData";
-
-function statusLabel(status: AccountDataImportBatchSummary["status"]) {
-  if (status === "preview_ready") return "待提交";
-  if (status === "committed") return "已确认";
-  return "已撤销";
-}
+import { getBatchStatusLabel } from "./statusMeta";
 
 function sourceLabel(sourceKind: AccountDataImportBatchSummary["source_kind"]) {
   if (sourceKind === "official_api") return "官方接口";
@@ -39,6 +35,7 @@ export function ImportBatchHistory({
   revokingBatchId,
   revokeError,
   onOpenBatch,
+  onDownloadArtifact,
   onRevoke,
 }: {
   items: AccountDataImportBatchSummary[];
@@ -47,6 +44,7 @@ export function ImportBatchHistory({
   revokingBatchId: number | null;
   revokeError: string | null;
   onOpenBatch: (batchId: number) => void;
+  onDownloadArtifact: (artifact: AccountDataImportArtifact) => void;
   onRevoke: (batchId: number) => void;
 }) {
   const [confirmingBatchId, setConfirmingBatchId] = useState<number | null>(null);
@@ -64,7 +62,7 @@ export function ImportBatchHistory({
 
       {revokeError ? (
         <div className="account-data-feedback is-error" role="alert">
-          <strong>撤销未完成</strong>
+          <strong>当前操作未完成</strong>
           <p>{revokeError}</p>
         </div>
       ) : null}
@@ -90,7 +88,7 @@ export function ImportBatchHistory({
                 <div className="account-data-history-copy">
                   <div>
                     <span>{`批次 ${item.id}`}</span>
-                    <strong>{statusLabel(item.status)}</strong>
+                    <strong>{getBatchStatusLabel(item.status)}</strong>
                   </div>
                   <p>{`${sourceLabel(item.source_kind)} · ${item.template_code}`}</p>
                   <small>
@@ -102,10 +100,14 @@ export function ImportBatchHistory({
                     {item.status === "preview_ready" ? "查看预览" : "查看详情"}
                   </Button>
                   {firstArtifact ? (
-                    <a href={firstArtifact.download_url} className="account-data-download-link">
-                      <DownloadOutlined />
+                    <Button
+                      size="small"
+                      icon={<DownloadOutlined />}
+                      aria-label={`下载原文件 ${firstArtifact.filename}`}
+                      onClick={() => onDownloadArtifact(firstArtifact)}
+                    >
                       下载原文件
-                    </a>
+                    </Button>
                   ) : null}
                   {item.status === "committed" ? (
                     confirming ? (

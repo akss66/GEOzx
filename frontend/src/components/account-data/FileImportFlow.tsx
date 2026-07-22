@@ -4,6 +4,7 @@ import type { ChangeEvent } from "react";
 
 import type { AccountDataImportBatch } from "../../api/accountData";
 import { ImportPreviewTable } from "./ImportPreviewTable";
+import { getBatchStatusDescription, getBatchStatusLabel } from "./statusMeta";
 
 interface FlowFeedback {
   tone: "error" | "success";
@@ -70,9 +71,14 @@ export function FileImportFlow({
 
       <ol className="account-data-step-strip">
         {STEP_TITLES.map((title, index) => {
-          const isActive = batch
-            ? index < 2 || (index === 2 && batch.rows.length > 0) || batch.status !== "preview_ready"
-            : index === 0;
+          const completedSteps = !batch
+            ? 1
+            : batch.status === "uploaded" || batch.status === "failed"
+              ? 2
+              : batch.status === "preview_ready"
+                ? 3
+                : 4;
+          const isActive = index < completedSteps;
           return (
             <li key={title} className={isActive ? "is-active" : undefined}>
               {title}
@@ -126,13 +132,7 @@ export function FileImportFlow({
             >
               确认导入
             </Button>
-            <span>
-              {batch.status === "preview_ready"
-                ? "校验失败或待人工确认的行会阻止写入。"
-                : batch.status === "committed"
-                  ? "该批次已经确认写入并进入历史记录。"
-                  : "该批次已撤销，只保留留痕与原始证据。"}
-            </span>
+            <span>{`${getBatchStatusLabel(batch.status)}：${getBatchStatusDescription(batch.status)}`}</span>
           </div>
         </div>
       ) : (

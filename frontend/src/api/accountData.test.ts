@@ -1,8 +1,11 @@
+// @vitest-environment jsdom
+
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { api } from "./client";
 import {
   commitAccountDataImportBatch,
+  downloadAccountDataArtifact,
   getAccountDataStatus,
   listAccountDataImports,
   resolveAccountDataImportRow,
@@ -23,7 +26,16 @@ const apiPost = api.post as unknown as Mock;
 const apiPatch = api.patch as unknown as Mock;
 
 describe("account data api", () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubGlobal(
+      "URL",
+      Object.assign(URL, {
+        createObjectURL: vi.fn(() => "blob:account-data"),
+        revokeObjectURL: vi.fn(),
+      }),
+    );
+  });
 
   it("loads source coverage for one explicit account", async () => {
     apiGet.mockResolvedValueOnce({
@@ -87,5 +99,28 @@ describe("account data api", () => {
 
     expect(apiPost).toHaveBeenNthCalledWith(1, "/account-data/9/imports/12/commit");
     expect(apiPost).toHaveBeenNthCalledWith(2, "/account-data/9/imports/12/revoke");
+  });
+
+  it("downloads one import artifact through the authenticated api blob path", async () => {
+    apiGet.mockResolvedValueOnce({ data: new Blob(["file"], { type: "text/csv" }) });
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+
+    await downloadAccountDataArtifact({
+      id: 501,
+      filename: "works.csv",
+      content_type: "text/csv",
+      byte_size: 2048,
+      sha256: "a".repeat(64),
+      download_url: "/account-data/9/imports/12/artifacts/501",
+    });
+
+    expect(apiGet).toHaveBeenCalledWith("/account-data/9/imports/12/artifacts/501", {
+      responseType: "blob",
+    });
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:account-data");
   });
 });
