@@ -81,6 +81,7 @@ async def review_workspace(
     account_id: int,
     days: Annotated[int, Query(ge=7, le=90)] = 30,
 ) -> ReviewWorkspaceOut:
+    """Return an account-scoped review workspace backed by unified account data."""
     if days not in {7, 30, 90}:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

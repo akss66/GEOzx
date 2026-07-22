@@ -1,16 +1,24 @@
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from app.models import (
     Account,
+    AccountMetricSnapshot,
     ContentItem,
+    DataImportBatch,
     MetricSnapshot,
     OptimizationSuggestion,
     Project,
     ProjectMembership,
 )
-from app.models.enums import MetricSource, Platform, WorkspaceRole
+from app.models.enums import (
+    DataSourceKind,
+    ImportBatchStatus,
+    MetricSource,
+    Platform,
+    WorkspaceRole,
+)
 
 
 async def _token(client, email: str, password: str) -> str:
@@ -309,3 +317,54 @@ async def test_legacy_review_endpoints_and_suggestions_respect_project_scope(
     assert overview.json()["total_play"] == 100
     assert [row["title"] for row in snapshots.json()] == ["可见内容"]
     assert [row["suggestion"] for row in suggestions.json()] == ["可见建议"]
+
+
+@pytest.mark.asyncio
+async def test_review_workspace_uses_account_level_imports_when_content_attribution_is_missing(
+    client, admin, session
+):
+    _project, account = await _review_account(session, admin, nickname="Only daily play")
+    batch = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_daily_play_v1",
+        content_sha256="6" * 64,
+        period_start=date.today() - timedelta(days=6),
+        period_end=date.today(),
+        committed_at=datetime.now(UTC),
+    )
+    session.add(batch)
+    await session.flush()
+    session.add(
+        AccountMetricSnapshot(
+            org_id=admin.org_id,
+            account_id=account.id,
+            import_batch_id=batch.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            stat_date=date.today(),
+            total_play=81,
+        )
+    )
+    await session.commit()
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    response = await client.get(
+        "/metrics/review-workspace",
+        headers=_auth(token),
+        params={"account_id": account.id, "days": 7},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_status"]["has_data"] is True
+    assert body["data_status"]["coverage"]["account_metrics"] == "available"
+    assert body["data_status"]["coverage"]["content_metrics"] == "missing"
+    assert body["data_status"]["latest_confirmed_at"] is not None
+    assert body["data_status"]["source_summary"][0]["source_kind"] == "platform_export"
+    assert body["totals"]["play"] == 81
+    assert body["trend"][-1]["play"] == 81
+    assert body["attributions"] == []
+    assert body["evidence"] == []

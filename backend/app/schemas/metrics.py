@@ -134,7 +134,20 @@ class ReviewDataStatusOut(BaseModel):
     sources: list[MetricSource]
     latest_stat_date: date | None = None
     latest_synced_at: datetime | None = None
+    latest_confirmed_at: datetime | None = None
+    coverage: dict[str, str] = Field(default_factory=dict)
+    conflict_count: int = 0
+    source_summary: list["ReviewSourceSummaryOut"] = Field(default_factory=list)
     missing_reasons: list[str] = Field(default_factory=list)
+
+
+class ReviewSourceSummaryOut(BaseModel):
+    batch_id: int | None = None
+    source_kind: str
+    data_domains: list[str] = Field(default_factory=list)
+    confirmed_at: datetime | None = None
+    period_start: date | None = None
+    period_end: date | None = None
 
 
 class ReviewTotalsOut(BaseModel):
