@@ -236,16 +236,72 @@ async def test_platform_content_identity_is_strong_but_weak_fingerprint_is_not_u
     await session.rollback()
 
 
-def test_metric_snapshot_account_data_columns_are_nullable_and_foreign_keyed():
-    import_batch_fk = next(iter(MetricSnapshot.__table__.c.import_batch_id.foreign_keys))
-    content_fk = next(
-        iter(MetricSnapshot.__table__.c.platform_content_record_id.foreign_keys)
+@pytest.mark.asyncio
+async def test_platform_content_record_tracks_canonical_batch_provenance(
+    session, admin, account
+):
+    batch = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_work_list_v1",
     )
+    session.add(batch)
+    await session.flush()
+    content = PlatformContentRecord(
+        org_id=admin.org_id,
+        account_id=account.id,
+        platform=Platform.DOUYIN,
+        external_content_id="canonical-content-1",
+        share_url="https://v.douyin.com/canonical-content-1",
+        title="Canonical content",
+        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+        canonical_import_batch_id=batch.id,
+    )
+    session.add(content)
+    batch_id = batch.id
+    await session.commit()
+    content_id = content.id
+    session.expire_all()
 
-    assert import_batch_fk.target_fullname == "data_import_batches.id"
-    assert import_batch_fk.ondelete == "SET NULL"
-    assert content_fk.target_fullname == "platform_content_records.id"
-    assert content_fk.ondelete == "SET NULL"
+    stored = await session.get(PlatformContentRecord, content_id)
+
+    assert stored is not None
+    assert stored.canonical_import_batch_id == batch_id
+
+
+def test_metric_snapshot_account_data_columns_are_nullable_and_foreign_keyed():
+    constraints = {
+        constraint.name: constraint
+        for constraint in MetricSnapshot.__table__.foreign_key_constraints
+    }
+    import_batch_fk = constraints["fk_metric_snapshots_import_batch_scope"]
+    content_fk = constraints["fk_metric_snapshots_content_scope"]
+
+    assert [column.name for column in import_batch_fk.columns] == [
+        "org_id",
+        "account_id",
+        "import_batch_id",
+    ]
+    assert [element.target_fullname for element in import_batch_fk.elements] == [
+        "data_import_batches.org_id",
+        "data_import_batches.account_id",
+        "data_import_batches.id",
+    ]
+    assert import_batch_fk.ondelete == "CASCADE"
+    assert [column.name for column in content_fk.columns] == [
+        "org_id",
+        "account_id",
+        "platform_content_record_id",
+    ]
+    assert [element.target_fullname for element in content_fk.elements] == [
+        "platform_content_records.org_id",
+        "platform_content_records.account_id",
+        "platform_content_records.id",
+    ]
+    assert content_fk.ondelete == "CASCADE"
     for column_name in (
         "import_batch_id",
         "platform_content_record_id",
@@ -257,6 +313,112 @@ def test_metric_snapshot_account_data_columns_are_nullable_and_foreign_keyed():
         "avg_watch_time_seconds",
     ):
         assert MetricSnapshot.__table__.c[column_name].nullable is True
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_cross_scope_account_data_links():
+    engine = create_async_engine("sqlite+aiosqlite://")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db_session:
+        first_org = Org(name="First scope org")
+        second_org = Org(name="Second scope org")
+        first_owner = User(
+            org=first_org,
+            email="first-scope-owner@test.com",
+            hashed_password=hash_password("first-scope-password"),
+            display_name="First scope owner",
+        )
+        second_owner = User(
+            org=second_org,
+            email="second-scope-owner@test.com",
+            hashed_password=hash_password("second-scope-password"),
+            display_name="Second scope owner",
+        )
+        db_session.add_all([first_owner, second_owner])
+        await db_session.flush()
+        first_account = Account(
+            org_id=first_org.id,
+            platform=Platform.DOUYIN,
+            nickname="First scoped account",
+        )
+        second_account = Account(
+            org_id=second_org.id,
+            platform=Platform.DOUYIN,
+            nickname="Second scoped account",
+        )
+        db_session.add_all([first_account, second_account])
+        await db_session.flush()
+        first_batch = DataImportBatch(
+            org_id=first_org.id,
+            account_id=first_account.id,
+            created_by_id=first_owner.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            status=ImportBatchStatus.PREVIEW_READY,
+            template_code="douyin_work_list_v1",
+        )
+        second_batch = DataImportBatch(
+            org_id=second_org.id,
+            account_id=second_account.id,
+            created_by_id=second_owner.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            status=ImportBatchStatus.PREVIEW_READY,
+            template_code="douyin_work_list_v1",
+        )
+        db_session.add_all([first_batch, second_batch])
+        await db_session.flush()
+        second_content = PlatformContentRecord(
+            org_id=second_org.id,
+            account_id=second_account.id,
+            platform=Platform.DOUYIN,
+            external_content_id="second-content",
+            identity_confidence=ContentIdentityConfidence.CONFIRMED,
+            canonical_import_batch_id=second_batch.id,
+        )
+        db_session.add(second_content)
+        await db_session.commit()
+        first_org_id = first_org.id
+        first_account_id = first_account.id
+        first_batch_id = first_batch.id
+        second_batch_id = second_batch.id
+        second_content_id = second_content.id
+
+        db_session.add(
+            DataArtifact(
+                org_id=first_org_id,
+                account_id=first_account_id,
+                batch_id=second_batch_id,
+                filename="cross-account.xlsx",
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                byte_size=1024,
+                sha256="b" * 64,
+                storage_key="account-data/first/cross-account.xlsx",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await db_session.commit()
+        await db_session.rollback()
+
+        db_session.add(
+            DataImportRow(
+                org_id=first_org_id,
+                account_id=first_account_id,
+                batch_id=first_batch_id,
+                row_number=1,
+                status=ImportRowStatus.READY,
+                platform_content_record_id=second_content_id,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await db_session.commit()
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -297,28 +459,119 @@ async def test_account_owned_import_data_survives_user_deletion_and_cascades_wit
         )
         db_session.add(batch)
         await db_session.flush()
+        artifact = DataArtifact(
+            org_id=org.id,
+            account_id=account.id,
+            batch_id=batch.id,
+            filename="works.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            byte_size=2048,
+            sha256="c" * 64,
+            storage_key="account-data/keep/works.xlsx",
+        )
         content = PlatformContentRecord(
             org_id=org.id,
             account_id=account.id,
             platform=Platform.DOUYIN,
             external_content_id="content-keep",
             identity_confidence=ContentIdentityConfidence.CONFIRMED,
+            canonical_import_batch_id=batch.id,
         )
-        db_session.add(content)
+        db_session.add_all([artifact, content])
+        await db_session.flush()
+        row = DataImportRow(
+            org_id=org.id,
+            account_id=account.id,
+            batch_id=batch.id,
+            row_number=1,
+            status=ImportRowStatus.COMMITTED,
+            platform_content_record_id=content.id,
+        )
+        snapshot = AccountMetricSnapshot(
+            org_id=org.id,
+            account_id=account.id,
+            import_batch_id=batch.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            stat_date=date(2026, 7, 22),
+            follower_count=100,
+        )
+        audience_snapshot = AudienceProfileSnapshot(
+            org_id=org.id,
+            account_id=account.id,
+            import_batch_id=batch.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            stat_date=date(2026, 7, 22),
+            dimension="gender",
+            total_audience=50,
+        )
+        benchmark = BenchmarkSnapshot(
+            org_id=org.id,
+            account_id=account.id,
+            import_batch_id=batch.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            stat_date=date(2026, 7, 22),
+            benchmark_code="median",
+            metric_code="play",
+            metric_value=99.0,
+        )
+        conflict = DataConflict(
+            org_id=org.id,
+            account_id=account.id,
+            batch_id=batch.id,
+            row_number=1,
+            status=ConflictStatus.OPEN,
+            field_name="title",
+            conflict_code="mismatch",
+            message="Needs review",
+        )
+        db_session.add_all([row, snapshot, audience_snapshot, benchmark, conflict])
+        await db_session.flush()
+        audience_item = AudienceProfileItem(
+            org_id=org.id,
+            account_id=account.id,
+            snapshot_id=audience_snapshot.id,
+            label="female",
+            value="0.63",
+            rank=1,
+        )
+        db_session.add(audience_item)
         await db_session.commit()
         owner_id = owner.id
         batch_id = batch.id
+        artifact_id = artifact.id
         content_id = content.id
+        row_id = row.id
+        snapshot_id = snapshot.id
+        audience_snapshot_id = audience_snapshot.id
+        audience_item_id = audience_item.id
+        benchmark_id = benchmark.id
+        conflict_id = conflict.id
         account_id = account.id
 
         await db_session.delete(owner)
         await db_session.commit()
         db_session.expire_all()
         stored_batch = await db_session.get(DataImportBatch, batch_id)
+        stored_artifact = await db_session.get(DataArtifact, artifact_id)
         stored_content = await db_session.get(PlatformContentRecord, content_id)
+        stored_row = await db_session.get(DataImportRow, row_id)
+        stored_snapshot = await db_session.get(AccountMetricSnapshot, snapshot_id)
+        stored_audience_snapshot = await db_session.get(
+            AudienceProfileSnapshot, audience_snapshot_id
+        )
+        stored_audience_item = await db_session.get(AudienceProfileItem, audience_item_id)
+        stored_benchmark = await db_session.get(BenchmarkSnapshot, benchmark_id)
+        stored_conflict = await db_session.get(DataConflict, conflict_id)
         assert stored_batch is not None
         assert stored_batch.created_by_id is None
+        assert stored_artifact is not None
         assert stored_content is not None
+        assert stored_row is not None
+        assert stored_snapshot is not None
+        assert stored_audience_snapshot is not None
+        assert stored_audience_item is not None
+        assert stored_benchmark is not None
+        assert stored_conflict is not None
         assert await db_session.get(User, owner_id) is None
 
         await db_session.delete(account)
@@ -326,5 +579,12 @@ async def test_account_owned_import_data_survives_user_deletion_and_cascades_wit
         db_session.expire_all()
         assert await db_session.get(Account, account_id) is None
         assert await db_session.get(DataImportBatch, batch_id) is None
+        assert await db_session.get(DataArtifact, artifact_id) is None
         assert await db_session.get(PlatformContentRecord, content_id) is None
+        assert await db_session.get(DataImportRow, row_id) is None
+        assert await db_session.get(AccountMetricSnapshot, snapshot_id) is None
+        assert await db_session.get(AudienceProfileSnapshot, audience_snapshot_id) is None
+        assert await db_session.get(AudienceProfileItem, audience_item_id) is None
+        assert await db_session.get(BenchmarkSnapshot, benchmark_id) is None
+        assert await db_session.get(DataConflict, conflict_id) is None
     await engine.dispose()

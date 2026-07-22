@@ -2,10 +2,20 @@
 
 from datetime import date
 
-from sqlalchemy import Date, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Date,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    UniqueConstraint,
+    and_,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+from app.models.account_data import DataImportBatch, PlatformContentRecord
 from app.models.base import BigIntPK, TimestampMixin, pg_enum
 from app.models.enums import MetricSource
 
@@ -18,6 +28,28 @@ class MetricSnapshot(Base, TimestampMixin):
     """
 
     __tablename__ = "metric_snapshots"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "import_batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_metric_snapshots_import_batch_scope",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "platform_content_record_id"],
+            [
+                "platform_content_records.org_id",
+                "platform_content_records.account_id",
+                "platform_content_records.id",
+            ],
+            name="fk_metric_snapshots_content_scope",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -29,13 +61,9 @@ class MetricSnapshot(Base, TimestampMixin):
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id", ondelete="SET NULL"), index=True, nullable=True
     )
-    import_batch_id: Mapped[int | None] = mapped_column(
-        ForeignKey("data_import_batches.id", ondelete="SET NULL"), index=True, nullable=True
-    )
+    import_batch_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
     platform_content_record_id: Mapped[int | None] = mapped_column(
-        ForeignKey("platform_content_records.id", ondelete="SET NULL"),
-        index=True,
-        nullable=True,
+        BigIntPK, index=True, nullable=True
     )
     source: Mapped[MetricSource] = mapped_column(
         pg_enum(MetricSource, "metric_source"), nullable=False
@@ -58,8 +86,32 @@ class MetricSnapshot(Base, TimestampMixin):
     avg_watch_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     org: Mapped["Org"] = relationship()  # noqa: F821
-    import_batch: Mapped["DataImportBatch | None"] = relationship()  # noqa: F821
-    platform_content_record: Mapped["PlatformContentRecord | None"] = relationship()  # noqa: F821
+    import_batch: Mapped["DataImportBatch | None"] = relationship(  # noqa: F821
+        primaryjoin=lambda: and_(
+            MetricSnapshot.org_id == DataImportBatch.org_id,  # noqa: F821
+            MetricSnapshot.account_id == DataImportBatch.account_id,  # noqa: F821
+            MetricSnapshot.import_batch_id == DataImportBatch.id,  # noqa: F821
+        ),
+        foreign_keys=lambda: [
+            MetricSnapshot.org_id,
+            MetricSnapshot.account_id,
+            MetricSnapshot.import_batch_id,
+        ],
+        viewonly=True,
+    )
+    platform_content_record: Mapped["PlatformContentRecord | None"] = relationship(  # noqa: F821
+        primaryjoin=lambda: and_(
+            MetricSnapshot.org_id == PlatformContentRecord.org_id,  # noqa: F821
+            MetricSnapshot.account_id == PlatformContentRecord.account_id,  # noqa: F821
+            MetricSnapshot.platform_content_record_id == PlatformContentRecord.id,  # noqa: F821
+        ),
+        foreign_keys=lambda: [
+            MetricSnapshot.org_id,
+            MetricSnapshot.account_id,
+            MetricSnapshot.platform_content_record_id,
+        ],
+        viewonly=True,
+    )
 
 
 class AccountReviewGoal(Base, TimestampMixin):

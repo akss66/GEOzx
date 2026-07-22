@@ -16,14 +16,21 @@ from app.db import Base, get_session
 from app.main import app
 from app.models import (
     Account,
+    AccountMetricSnapshot,
     AdminSecurityCredential,
     AgentInvocation,
     AgentToolCall,
+    AudienceProfileItem,
+    AudienceProfileSnapshot,
+    BenchmarkSnapshot,
     BrainTask,
     Client,
     ClientMembership,
     ContentItem,
+    DataArtifact,
+    DataConflict,
     DataImportBatch,
+    DataImportRow,
     Deliverable,
     Event,
     GateApproval,
@@ -36,6 +43,7 @@ from app.models import (
     MatrixDistributionPlan,
     Notification,
     Org,
+    PlatformContentRecord,
     Project,
     TaskBrief,
     User,
@@ -43,10 +51,13 @@ from app.models import (
 )
 from app.models.enums import (
     AgentCode,
+    ConflictStatus,
+    ContentIdentityConfidence,
     DataSourceKind,
     DeliverableType,
     GateType,
     ImportBatchStatus,
+    ImportRowStatus,
     KnowledgeCategory,
     Platform,
     UserRole,
@@ -737,8 +748,93 @@ async def test_permanent_delete_keeps_account_owned_import_data_and_counts_redac
         template_code="douyin_work_list_v1",
     )
     session.add(batch)
+    await session.flush()
+    artifact = DataArtifact(
+        org_id=admin.org_id,
+        account_id=account.id,
+        batch_id=batch.id,
+        filename="works.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        byte_size=2048,
+        sha256="d" * 64,
+        storage_key="account-data/delete/works.xlsx",
+    )
+    content = PlatformContentRecord(
+        org_id=admin.org_id,
+        account_id=account.id,
+        platform=Platform.DOUYIN,
+        external_content_id="retained-content",
+        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+        canonical_import_batch_id=batch.id,
+    )
+    session.add_all([artifact, content])
+    await session.flush()
+    row = DataImportRow(
+        org_id=admin.org_id,
+        account_id=account.id,
+        batch_id=batch.id,
+        row_number=1,
+        status=ImportRowStatus.COMMITTED,
+        platform_content_record_id=content.id,
+    )
+    snapshot = AccountMetricSnapshot(
+        org_id=admin.org_id,
+        account_id=account.id,
+        import_batch_id=batch.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        stat_date=datetime(2026, 7, 22, tzinfo=UTC).date(),
+        follower_count=123,
+    )
+    audience_snapshot = AudienceProfileSnapshot(
+        org_id=admin.org_id,
+        account_id=account.id,
+        import_batch_id=batch.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        stat_date=datetime(2026, 7, 22, tzinfo=UTC).date(),
+        dimension="gender",
+        total_audience=321,
+    )
+    benchmark = BenchmarkSnapshot(
+        org_id=admin.org_id,
+        account_id=account.id,
+        import_batch_id=batch.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        stat_date=datetime(2026, 7, 22, tzinfo=UTC).date(),
+        benchmark_code="median",
+        metric_code="play",
+        metric_value=88.0,
+    )
+    conflict = DataConflict(
+        org_id=admin.org_id,
+        account_id=account.id,
+        batch_id=batch.id,
+        row_number=1,
+        status=ConflictStatus.OPEN,
+        field_name="title",
+        conflict_code="mismatch",
+        message="Manual review required",
+    )
+    session.add_all([row, snapshot, audience_snapshot, benchmark, conflict])
+    await session.flush()
+    audience_item = AudienceProfileItem(
+        org_id=admin.org_id,
+        account_id=account.id,
+        snapshot_id=audience_snapshot.id,
+        label="female",
+        value="0.63",
+        rank=1,
+    )
+    session.add(audience_item)
     await session.commit()
     batch_id = batch.id
+    artifact_id = artifact.id
+    content_id = content.id
+    row_id = row.id
+    snapshot_id = snapshot.id
+    audience_snapshot_id = audience_snapshot.id
+    audience_item_id = audience_item.id
+    benchmark_id = benchmark.id
+    conflict_id = conflict.id
 
     token = await _login(client, admin.email, "admin-pw-123")
     await _ready_secondary_password(session, admin)
@@ -750,8 +846,27 @@ async def test_permanent_delete_keeps_account_owned_import_data_and_counts_redac
     assert response.status_code == 200
     session.expire_all()
     stored_batch = await session.get(DataImportBatch, batch_id)
+    stored_artifact = await session.get(DataArtifact, artifact_id)
+    stored_content = await session.get(PlatformContentRecord, content_id)
+    stored_row = await session.get(DataImportRow, row_id)
+    stored_snapshot = await session.get(AccountMetricSnapshot, snapshot_id)
+    stored_audience_snapshot = await session.get(
+        AudienceProfileSnapshot, audience_snapshot_id
+    )
+    stored_audience_item = await session.get(AudienceProfileItem, audience_item_id)
+    stored_benchmark = await session.get(BenchmarkSnapshot, benchmark_id)
+    stored_conflict = await session.get(DataConflict, conflict_id)
     assert stored_batch is not None
     assert stored_batch.created_by_id is None
+    assert stored_artifact is not None
+    assert stored_content is not None
+    assert stored_content.canonical_import_batch_id == batch_id
+    assert stored_row is not None
+    assert stored_snapshot is not None
+    assert stored_audience_snapshot is not None
+    assert stored_audience_item is not None
+    assert stored_benchmark is not None
+    assert stored_conflict is not None
 
 
 @pytest.mark.asyncio

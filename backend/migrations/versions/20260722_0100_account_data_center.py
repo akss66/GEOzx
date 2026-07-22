@@ -77,11 +77,21 @@ def upgrade() -> None:
         sa.Column("row_count", sa.Integer(), server_default="0", nullable=False),
         sa.Column("committed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["created_by_id"], ["users.id"], ondelete="SET NULL"),
+        sa.UniqueConstraint(
+            "org_id",
+            "account_id",
+            "id",
+            name="uq_data_import_batches_org_account_id",
+        ),
     )
     for column in ("org_id", "account_id", "status"):
         op.create_index(op.f(f"ix_data_import_batches_{column}"), "data_import_batches", [column])
@@ -97,11 +107,24 @@ def upgrade() -> None:
         sa.Column("byte_size", sa.Integer(), nullable=False),
         sa.Column("sha256", sa.String(length=64), nullable=False),
         sa.Column("storage_key", sa.String(length=500), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["batch_id"], ["data_import_batches.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_data_artifacts_batch_scope",
+            ondelete="CASCADE",
+        ),
     )
     for column in ("org_id", "account_id", "batch_id", "sha256"):
         op.create_index(op.f(f"ix_data_artifacts_{column}"), "data_artifacts", [column])
@@ -112,18 +135,38 @@ def upgrade() -> None:
         sa.Column("org_id", BigIntPK, nullable=False),
         sa.Column("account_id", BigIntPK, nullable=False),
         sa.Column("platform", platform_enum, nullable=False),
+        sa.Column("canonical_import_batch_id", BigIntPK, nullable=True),
         sa.Column("external_content_id", sa.String(length=128), nullable=True),
         sa.Column("share_url", sa.String(length=1000), nullable=True),
         sa.Column("title", sa.String(length=300), nullable=True),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("identity_confidence", content_identity_confidence, nullable=False),
         sa.Column("weak_fingerprint", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "canonical_import_batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_platform_content_records_canonical_batch_scope",
+        ),
+        sa.UniqueConstraint(
+            "org_id",
+            "account_id",
+            "id",
+            name="uq_platform_content_records_org_account_id",
+        ),
     )
-    for column in ("org_id", "account_id", "platform"):
+    for column in ("org_id", "account_id", "platform", "canonical_import_batch_id"):
         op.create_index(
             op.f(f"ix_platform_content_records_{column}"),
             "platform_content_records",
@@ -163,25 +206,48 @@ def upgrade() -> None:
         sa.Column("normalized_values", JSONVariant, server_default=sa.text("'{}'"), nullable=False),
         sa.Column("field_errors", JSONVariant, server_default=sa.text("'[]'"), nullable=False),
         sa.Column("warnings", JSONVariant, server_default=sa.text("'[]'"), nullable=False),
-        sa.Column("candidate_content_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False),
-        sa.Column("projected_target_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False),
+        sa.Column(
+            "candidate_content_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False
+        ),
+        sa.Column(
+            "projected_target_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False
+        ),
         sa.Column("platform_content_record_id", BigIntPK, nullable=True),
         sa.Column("weak_fingerprint", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["batch_id"], ["data_import_batches.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
-            ["platform_content_record_id"],
-            ["platform_content_records.id"],
-            ondelete="SET NULL",
+            ["org_id", "account_id", "batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_data_import_rows_batch_scope",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "platform_content_record_id"],
+            [
+                "platform_content_records.org_id",
+                "platform_content_records.account_id",
+                "platform_content_records.id",
+            ],
+            name="fk_data_import_rows_content_scope",
         ),
         sa.UniqueConstraint("batch_id", "row_number", name="uq_data_import_rows_batch_row"),
     )
     for column in ("org_id", "account_id", "batch_id", "status", "platform_content_record_id"):
         op.create_index(op.f(f"ix_data_import_rows_{column}"), "data_import_rows", [column])
-    op.create_index("ix_data_import_rows_weak_fingerprint", "data_import_rows", ["weak_fingerprint"])
+    op.create_index(
+        "ix_data_import_rows_weak_fingerprint", "data_import_rows", ["weak_fingerprint"]
+    )
 
     op.create_table(
         "account_metric_snapshots",
@@ -196,11 +262,24 @@ def upgrade() -> None:
         sa.Column("total_play", sa.Integer(), nullable=True),
         sa.Column("total_exposure", sa.Integer(), nullable=True),
         sa.Column("engagement_rate", sa.Float(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["import_batch_id"], ["data_import_batches.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "import_batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_account_metric_snapshots_batch_scope",
+            ondelete="CASCADE",
+        ),
         sa.UniqueConstraint(
             "account_id",
             "import_batch_id",
@@ -225,11 +304,30 @@ def upgrade() -> None:
         sa.Column("stat_date", sa.Date(), nullable=False),
         sa.Column("dimension", sa.String(length=80), nullable=False),
         sa.Column("total_audience", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["import_batch_id"], ["data_import_batches.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "import_batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_audience_profile_snapshots_batch_scope",
+            ondelete="CASCADE",
+        ),
+        sa.UniqueConstraint(
+            "org_id",
+            "account_id",
+            "id",
+            name="uq_audience_profile_snapshots_org_account_id",
+        ),
         sa.UniqueConstraint(
             "account_id",
             "import_batch_id",
@@ -256,14 +354,29 @@ def upgrade() -> None:
         sa.Column("ratio", sa.Float(), nullable=True),
         sa.Column("rank", sa.Integer(), server_default="0", nullable=False),
         sa.Column("meta", JSONVariant, server_default=sa.text("'{}'"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["snapshot_id"], ["audience_profile_snapshots.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "snapshot_id"],
+            [
+                "audience_profile_snapshots.org_id",
+                "audience_profile_snapshots.account_id",
+                "audience_profile_snapshots.id",
+            ],
+            name="fk_audience_profile_items_snapshot_scope",
+            ondelete="CASCADE",
+        ),
     )
     for column in ("org_id", "account_id", "snapshot_id"):
-        op.create_index(op.f(f"ix_audience_profile_items_{column}"), "audience_profile_items", [column])
+        op.create_index(
+            op.f(f"ix_audience_profile_items_{column}"), "audience_profile_items", [column]
+        )
 
     op.create_table(
         "benchmark_snapshots",
@@ -278,11 +391,24 @@ def upgrade() -> None:
         sa.Column("metric_value", sa.Float(), nullable=True),
         sa.Column("sample_size", sa.Integer(), nullable=True),
         sa.Column("meta", JSONVariant, server_default=sa.text("'{}'"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["import_batch_id"], ["data_import_batches.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "import_batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_benchmark_snapshots_batch_scope",
+            ondelete="CASCADE",
+        ),
         sa.UniqueConstraint(
             "account_id",
             "import_batch_id",
@@ -308,14 +434,29 @@ def upgrade() -> None:
         sa.Column("message", sa.Text(), nullable=False),
         sa.Column("existing_value", JSONVariant, nullable=True),
         sa.Column("incoming_value", JSONVariant, nullable=True),
-        sa.Column("candidate_content_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False),
+        sa.Column(
+            "candidate_content_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False
+        ),
         sa.Column("resolved_by_id", BigIntPK, nullable=True),
         sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["batch_id"], ["data_import_batches.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["org_id", "account_id", "batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_data_conflicts_batch_scope",
+            ondelete="CASCADE",
+        ),
         sa.ForeignKeyConstraint(["resolved_by_id"], ["users.id"], ondelete="SET NULL"),
         sa.UniqueConstraint(
             "batch_id",
@@ -337,18 +478,18 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("cover_click_rate", sa.Float(), nullable=True))
         batch_op.add_column(sa.Column("avg_watch_time_seconds", sa.Float(), nullable=True))
         batch_op.create_foreign_key(
-            "fk_metric_snapshots_import_batch_id",
+            "fk_metric_snapshots_import_batch_scope",
             "data_import_batches",
-            ["import_batch_id"],
-            ["id"],
-            ondelete="SET NULL",
+            ["org_id", "account_id", "import_batch_id"],
+            ["org_id", "account_id", "id"],
+            ondelete="CASCADE",
         )
         batch_op.create_foreign_key(
-            "fk_metric_snapshots_platform_content_record_id",
+            "fk_metric_snapshots_content_scope",
             "platform_content_records",
-            ["platform_content_record_id"],
-            ["id"],
-            ondelete="SET NULL",
+            ["org_id", "account_id", "platform_content_record_id"],
+            ["org_id", "account_id", "id"],
+            ondelete="CASCADE",
         )
         batch_op.create_index("ix_metric_snapshots_import_batch_id", ["import_batch_id"])
         batch_op.create_index(
@@ -362,10 +503,13 @@ def downgrade() -> None:
         batch_op.drop_index("ix_metric_snapshots_platform_content_record_id")
         batch_op.drop_index("ix_metric_snapshots_import_batch_id")
         batch_op.drop_constraint(
-            "fk_metric_snapshots_platform_content_record_id",
+            "fk_metric_snapshots_content_scope",
             type_="foreignkey",
         )
-        batch_op.drop_constraint("fk_metric_snapshots_import_batch_id", type_="foreignkey")
+        batch_op.drop_constraint(
+            "fk_metric_snapshots_import_batch_scope",
+            type_="foreignkey",
+        )
         batch_op.drop_column("avg_watch_time_seconds")
         batch_op.drop_column("cover_click_rate")
         batch_op.drop_column("favorite_count")
@@ -384,7 +528,9 @@ def downgrade() -> None:
     op.drop_table("benchmark_snapshots")
 
     for column in ("snapshot_id", "account_id", "org_id"):
-        op.drop_index(op.f(f"ix_audience_profile_items_{column}"), table_name="audience_profile_items")
+        op.drop_index(
+            op.f(f"ix_audience_profile_items_{column}"), table_name="audience_profile_items"
+        )
     op.drop_table("audience_profile_items")
 
     for column in ("stat_date", "import_batch_id", "account_id", "org_id"):
@@ -418,7 +564,7 @@ def downgrade() -> None:
         "ix_platform_content_records_weak_fingerprint",
         table_name="platform_content_records",
     )
-    for column in ("platform", "account_id", "org_id"):
+    for column in ("canonical_import_batch_id", "platform", "account_id", "org_id"):
         op.drop_index(
             op.f(f"ix_platform_content_records_{column}"),
             table_name="platform_content_records",
@@ -433,8 +579,9 @@ def downgrade() -> None:
         op.drop_index(op.f(f"ix_data_import_batches_{column}"), table_name="data_import_batches")
     op.drop_table("data_import_batches")
 
-    op.execute("DROP TYPE IF EXISTS conflict_status")
-    op.execute("DROP TYPE IF EXISTS content_identity_confidence")
-    op.execute("DROP TYPE IF EXISTS import_row_status")
-    op.execute("DROP TYPE IF EXISTS import_batch_status")
-    op.execute("DROP TYPE IF EXISTS data_source_kind")
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("DROP TYPE IF EXISTS conflict_status")
+        op.execute("DROP TYPE IF EXISTS content_identity_confidence")
+        op.execute("DROP TYPE IF EXISTS import_row_status")
+        op.execute("DROP TYPE IF EXISTS import_batch_status")
+        op.execute("DROP TYPE IF EXISTS data_source_kind")
