@@ -3,6 +3,7 @@
 from datetime import date
 
 from sqlalchemy import (
+    CheckConstraint,
     Date,
     Float,
     ForeignKey,
@@ -29,6 +30,11 @@ class MetricSnapshot(Base, TimestampMixin):
 
     __tablename__ = "metric_snapshots"
     __table_args__ = (
+        CheckConstraint(
+            "(import_batch_id IS NULL AND platform_content_record_id IS NULL) "
+            "OR account_id IS NOT NULL",
+            name="ck_metric_snapshots_account_required_for_source_links",
+        ),
         ForeignKeyConstraint(
             ["org_id", "account_id", "import_batch_id"],
             [

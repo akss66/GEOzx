@@ -215,19 +215,32 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         upgraded_content_columns = {
             column["name"] for column in inspector.get_columns("platform_content_records")
         }
+        upgraded_metric_checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("metric_snapshots")
+        }
         assert "import_batch_id" in upgraded_metric_columns
         assert "platform_content_record_id" in upgraded_metric_columns
         assert "canonical_import_batch_id" in upgraded_content_columns
+        assert "ck_metric_snapshots_account_required_for_source_links" in upgraded_metric_checks
 
         migration.downgrade()
         inspector = sa.inspect(connection)
         downgraded_metric_columns = {
             column["name"] for column in inspector.get_columns("metric_snapshots")
         }
+        downgraded_metric_checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("metric_snapshots")
+        }
         assert inspector.has_table("data_import_batches") is False
         assert inspector.has_table("platform_content_records") is False
         assert "import_batch_id" not in downgraded_metric_columns
         assert "platform_content_record_id" not in downgraded_metric_columns
+        assert (
+            "ck_metric_snapshots_account_required_for_source_links"
+            not in downgraded_metric_checks
+        )
 
         migration.upgrade()
         inspector = sa.inspect(connection)
@@ -237,8 +250,13 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         reupgraded_content_columns = {
             column["name"] for column in inspector.get_columns("platform_content_records")
         }
+        reupgraded_metric_checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("metric_snapshots")
+        }
         assert inspector.has_table("data_import_batches") is True
         assert inspector.has_table("platform_content_records") is True
         assert "import_batch_id" in reupgraded_metric_columns
         assert "platform_content_record_id" in reupgraded_metric_columns
         assert "canonical_import_batch_id" in reupgraded_content_columns
+        assert "ck_metric_snapshots_account_required_for_source_links" in reupgraded_metric_checks

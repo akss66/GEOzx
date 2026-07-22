@@ -477,6 +477,11 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("favorite_count", sa.Integer(), nullable=True))
         batch_op.add_column(sa.Column("cover_click_rate", sa.Float(), nullable=True))
         batch_op.add_column(sa.Column("avg_watch_time_seconds", sa.Float(), nullable=True))
+        batch_op.create_check_constraint(
+            "ck_metric_snapshots_account_required_for_source_links",
+            "(import_batch_id IS NULL AND platform_content_record_id IS NULL) "
+            "OR account_id IS NOT NULL",
+        )
         batch_op.create_foreign_key(
             "fk_metric_snapshots_import_batch_scope",
             "data_import_batches",
@@ -502,6 +507,10 @@ def downgrade() -> None:
     with op.batch_alter_table("metric_snapshots") as batch_op:
         batch_op.drop_index("ix_metric_snapshots_platform_content_record_id")
         batch_op.drop_index("ix_metric_snapshots_import_batch_id")
+        batch_op.drop_constraint(
+            "ck_metric_snapshots_account_required_for_source_links",
+            type_="check",
+        )
         batch_op.drop_constraint(
             "fk_metric_snapshots_content_scope",
             type_="foreignkey",

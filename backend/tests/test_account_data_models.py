@@ -277,6 +277,11 @@ def test_metric_snapshot_account_data_columns_are_nullable_and_foreign_keyed():
         constraint.name: constraint
         for constraint in MetricSnapshot.__table__.foreign_key_constraints
     }
+    check_constraints = {
+        constraint.name: constraint.sqltext.text
+        for constraint in MetricSnapshot.__table__.constraints
+        if getattr(constraint, "sqltext", None) is not None
+    }
     import_batch_fk = constraints["fk_metric_snapshots_import_batch_scope"]
     content_fk = constraints["fk_metric_snapshots_content_scope"]
 
@@ -302,6 +307,11 @@ def test_metric_snapshot_account_data_columns_are_nullable_and_foreign_keyed():
         "platform_content_records.id",
     ]
     assert content_fk.ondelete == "CASCADE"
+    assert (
+        check_constraints["ck_metric_snapshots_account_required_for_source_links"]
+        == "(import_batch_id IS NULL AND platform_content_record_id IS NULL) "
+        "OR account_id IS NOT NULL"
+    )
     for column_name in (
         "import_batch_id",
         "platform_content_record_id",
@@ -313,6 +323,86 @@ def test_metric_snapshot_account_data_columns_are_nullable_and_foreign_keyed():
         "avg_watch_time_seconds",
     ):
         assert MetricSnapshot.__table__.c[column_name].nullable is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("linked_field", "linked_value_factory"),
+    [
+        ("import_batch_id", lambda batch, content: batch.id),
+        ("platform_content_record_id", lambda batch, content: content.id),
+    ],
+)
+async def test_metric_snapshot_requires_account_when_source_links_are_set(
+    linked_field, linked_value_factory
+):
+    engine = create_async_engine("sqlite+aiosqlite://")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db_session:
+        org = Org(name=f"Metric scope {linked_field}")
+        owner = User(
+            org=org,
+            email=f"{linked_field}@test.com",
+            hashed_password=hash_password("metric-scope-password"),
+            display_name="Metric scope owner",
+        )
+        db_session.add(owner)
+        await db_session.flush()
+        account = Account(
+            org_id=org.id,
+            platform=Platform.DOUYIN,
+            nickname=f"Metric scope {linked_field}",
+        )
+        db_session.add(account)
+        await db_session.flush()
+        batch = DataImportBatch(
+            org_id=org.id,
+            account_id=account.id,
+            created_by_id=owner.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            status=ImportBatchStatus.COMMITTED,
+            template_code="douyin_work_list_v1",
+        )
+        db_session.add(batch)
+        await db_session.flush()
+        content = PlatformContentRecord(
+            org_id=org.id,
+            account_id=account.id,
+            platform=Platform.DOUYIN,
+            external_content_id=f"metric-scope-{linked_field}",
+            identity_confidence=ContentIdentityConfidence.CONFIRMED,
+            canonical_import_batch_id=batch.id,
+        )
+        db_session.add(content)
+        await db_session.commit()
+
+        metric = MetricSnapshot(
+            org_id=org.id,
+            account_id=None,
+            source=MetricSource.DOUYIN,
+            stat_date=date(2026, 7, 22),
+            play=10,
+            exposure=20,
+            completion_rate=0.2,
+            like_rate=0.1,
+            comment_rate=0.05,
+            share_rate=0.02,
+            follower_delta=1,
+            **{linked_field: linked_value_factory(batch, content)},
+        )
+        db_session.add(metric)
+
+        with pytest.raises(IntegrityError):
+            await db_session.commit()
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
