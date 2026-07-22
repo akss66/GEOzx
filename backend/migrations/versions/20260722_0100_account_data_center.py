@@ -72,6 +72,7 @@ def upgrade() -> None:
         sa.Column("source_kind", data_source_kind, nullable=False),
         sa.Column("status", import_batch_status, nullable=False),
         sa.Column("template_code", sa.String(length=80), nullable=False),
+        sa.Column("content_sha256", sa.String(length=64), nullable=False),
         sa.Column("period_start", sa.Date(), nullable=True),
         sa.Column("period_end", sa.Date(), nullable=True),
         sa.Column("row_count", sa.Integer(), server_default="0", nullable=False),
@@ -95,6 +96,14 @@ def upgrade() -> None:
     )
     for column in ("org_id", "account_id", "status"):
         op.create_index(op.f(f"ix_data_import_batches_{column}"), "data_import_batches", [column])
+    op.create_index(
+        "uq_data_import_batches_active_preview_identity",
+        "data_import_batches",
+        ["org_id", "account_id", "source_kind", "template_code", "content_sha256"],
+        unique=True,
+        sqlite_where=sa.text("committed_at IS NULL AND revoked_at IS NULL"),
+        postgresql_where=sa.text("committed_at IS NULL AND revoked_at IS NULL"),
+    )
 
     op.create_table(
         "data_artifacts",
@@ -138,6 +147,7 @@ def upgrade() -> None:
         sa.Column("canonical_import_batch_id", BigIntPK, nullable=True),
         sa.Column("external_content_id", sa.String(length=128), nullable=True),
         sa.Column("share_url", sa.String(length=1000), nullable=True),
+        sa.Column("canonical_share_url", sa.String(length=1000), nullable=True),
         sa.Column("title", sa.String(length=300), nullable=True),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("identity_confidence", content_identity_confidence, nullable=False),
@@ -186,12 +196,12 @@ def upgrade() -> None:
         postgresql_where=sa.text("external_content_id IS NOT NULL"),
     )
     op.create_index(
-        "uq_platform_content_records_account_share_url",
+        "uq_platform_content_records_account_canonical_share_url",
         "platform_content_records",
-        ["account_id", "platform", "share_url"],
+        ["account_id", "platform", "canonical_share_url"],
         unique=True,
-        sqlite_where=sa.text("share_url IS NOT NULL"),
-        postgresql_where=sa.text("share_url IS NOT NULL"),
+        sqlite_where=sa.text("canonical_share_url IS NOT NULL"),
+        postgresql_where=sa.text("canonical_share_url IS NOT NULL"),
     )
 
     op.create_table(
@@ -213,6 +223,9 @@ def upgrade() -> None:
             "projected_target_ids", JSONVariant, server_default=sa.text("'[]'"), nullable=False
         ),
         sa.Column("platform_content_record_id", BigIntPK, nullable=True),
+        sa.Column("resolution_outcome", sa.String(length=32), nullable=True),
+        sa.Column("resolved_by_id", BigIntPK, nullable=True),
+        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("weak_fingerprint", sa.String(length=255), nullable=True),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
@@ -240,6 +253,12 @@ def upgrade() -> None:
                 "platform_content_records.id",
             ],
             name="fk_data_import_rows_content_scope",
+        ),
+        sa.ForeignKeyConstraint(
+            ["resolved_by_id"],
+            ["users.id"],
+            name="fk_data_import_rows_resolved_by_id_users",
+            ondelete="SET NULL",
         ),
         sa.UniqueConstraint("batch_id", "row_number", name="uq_data_import_rows_batch_row"),
     )
@@ -562,7 +581,7 @@ def downgrade() -> None:
     op.drop_table("data_import_rows")
 
     op.drop_index(
-        "uq_platform_content_records_account_share_url",
+        "uq_platform_content_records_account_canonical_share_url",
         table_name="platform_content_records",
     )
     op.drop_index(
@@ -580,6 +599,10 @@ def downgrade() -> None:
         )
     op.drop_table("platform_content_records")
 
+    op.drop_index(
+        "uq_data_import_batches_active_preview_identity",
+        table_name="data_import_batches",
+    )
     for column in ("sha256", "batch_id", "account_id", "org_id"):
         op.drop_index(op.f(f"ix_data_artifacts_{column}"), table_name="data_artifacts")
     op.drop_table("data_artifacts")

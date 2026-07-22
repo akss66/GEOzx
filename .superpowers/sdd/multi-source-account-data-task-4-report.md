@@ -46,3 +46,32 @@ Results:
 
 - Share URL canonicalization is intentionally conservative: it normalizes scheme/host/default ports, trims trailing slash, and drops query/fragment. If platform-specific URL variants appear later, add explicit canonicalization rules per platform rather than broad fuzzy matching.
 - This task stops at preview durability and manual resolution. Commit-time projection into canonical platform content and metric snapshots still needs later tasks.
+
+## Integrity Follow-up (2026-07-22)
+
+Implemented review-driven hardening on top of commit `4285c16`:
+
+- Added DB-backed active preview identity on `DataImportBatch.content_sha256` with partial uniqueness for active previews only.
+- Added `PlatformContentRecord.canonical_share_url` and switched strong share URL matching to the canonical field.
+- Added terminal manual-resolution audit fields on `DataImportRow`:
+  - `resolution_outcome`
+  - `resolved_by_id`
+  - `resolved_at`
+- Hardened `resolve_row_match` so only `NEEDS_RESOLUTION + OPEN conflict` can transition, `no_match` is explicit and auditable, and later different outcomes are rejected.
+- Added recovery coverage for preview dedupe conflict handling, storage-write failure rollback, query-preserving URL matching, and timestamp normalization across `Z` and offset inputs.
+
+### Exact Evidence
+
+Ran on **Wednesday, July 22, 2026**:
+
+```bash
+cd backend
+python -m pytest tests/test_data_import_preview.py tests/test_content_identity_matching.py tests/test_account_data_models.py tests/test_migrations.py -q
+python -m ruff check app/models/account_data.py app/services/data_import/identity.py app/services/data_import/service.py tests/test_content_identity_matching.py tests/test_data_import_preview.py tests/test_account_data_models.py tests/test_migrations.py
+```
+
+Observed results:
+
+- `37 passed, 1 warning in 7.91s`
+- Warning: Alembic emitted a deprecation warning about missing `path_separator` in `alembic.ini`; no test failures.
+- `All checks passed!`

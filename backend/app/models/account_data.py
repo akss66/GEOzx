@@ -39,6 +39,17 @@ class DataImportBatch(Base, TimestampMixin):
             "id",
             name="uq_data_import_batches_org_account_id",
         ),
+        Index(
+            "uq_data_import_batches_active_preview_identity",
+            "org_id",
+            "account_id",
+            "source_kind",
+            "template_code",
+            "content_sha256",
+            unique=True,
+            sqlite_where=text("committed_at IS NULL AND revoked_at IS NULL"),
+            postgresql_where=text("committed_at IS NULL AND revoked_at IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -58,6 +69,7 @@ class DataImportBatch(Base, TimestampMixin):
         pg_enum(ImportBatchStatus, "import_batch_status"), index=True, nullable=False
     )
     template_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
@@ -174,13 +186,13 @@ class PlatformContentRecord(Base, TimestampMixin):
             postgresql_where=text("external_content_id IS NOT NULL"),
         ),
         Index(
-            "uq_platform_content_records_account_share_url",
+            "uq_platform_content_records_account_canonical_share_url",
             "account_id",
             "platform",
-            "share_url",
+            "canonical_share_url",
             unique=True,
-            sqlite_where=text("share_url IS NOT NULL"),
-            postgresql_where=text("share_url IS NOT NULL"),
+            sqlite_where=text("canonical_share_url IS NOT NULL"),
+            postgresql_where=text("canonical_share_url IS NOT NULL"),
         ),
         ForeignKeyConstraint(
             ["org_id", "account_id", "canonical_import_batch_id"],
@@ -212,6 +224,7 @@ class PlatformContentRecord(Base, TimestampMixin):
     )
     external_content_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     share_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    canonical_share_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     title: Mapped[str | None] = mapped_column(String(300), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     identity_confidence: Mapped[ContentIdentityConfidence] = mapped_column(
@@ -258,6 +271,12 @@ class DataImportRow(Base, TimestampMixin):
             ],
             name="fk_data_import_rows_content_scope",
         ),
+        ForeignKeyConstraint(
+            ["resolved_by_id"],
+            ["users.id"],
+            name="fk_data_import_rows_resolved_by_id_users",
+            ondelete="SET NULL",
+        ),
         Index("ix_data_import_rows_weak_fingerprint", "weak_fingerprint"),
     )
 
@@ -286,6 +305,9 @@ class DataImportRow(Base, TimestampMixin):
     platform_content_record_id: Mapped[int | None] = mapped_column(
         BigIntPK, index=True, nullable=True
     )
+    resolution_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resolved_by_id: Mapped[int | None] = mapped_column(BigIntPK, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     weak_fingerprint: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     batch: Mapped[DataImportBatch] = relationship(

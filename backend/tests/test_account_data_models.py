@@ -56,6 +56,7 @@ async def test_import_batch_owns_artifact_and_staging_rows(session, admin, accou
         source_kind=DataSourceKind.PLATFORM_EXPORT,
         status=ImportBatchStatus.PREVIEW_READY,
         template_code="douyin_work_list_v1",
+        content_sha256="d" * 64,
     )
     session.add(batch)
     await session.flush()
@@ -86,6 +87,7 @@ async def test_import_batch_owns_artifact_and_staging_rows(session, admin, accou
         platform=Platform.DOUYIN,
         external_content_id="7299001",
         share_url="https://www.douyin.com/video/7299001",
+        canonical_share_url="https://www.douyin.com/video/7299001",
         title="Video A",
         published_at=datetime(2026, 7, 18, 14, 11, 20),
         identity_confidence=ContentIdentityConfidence.CONFIRMED,
@@ -190,6 +192,7 @@ async def test_platform_content_identity_is_strong_but_weak_fingerprint_is_not_u
         platform=Platform.DOUYIN,
         external_content_id="content-1",
         share_url="https://v.douyin.com/content-1",
+        canonical_share_url="https://v.douyin.com/content-1",
         title="Shared fingerprint A",
         identity_confidence=ContentIdentityConfidence.CONFIRMED,
         weak_fingerprint="same-fingerprint",
@@ -200,6 +203,7 @@ async def test_platform_content_identity_is_strong_but_weak_fingerprint_is_not_u
         platform=Platform.DOUYIN,
         external_content_id="content-2",
         share_url="https://v.douyin.com/content-2",
+        canonical_share_url="https://v.douyin.com/content-2",
         title="Shared fingerprint B",
         identity_confidence=ContentIdentityConfidence.CONFIRMED,
         weak_fingerprint="same-fingerprint",
@@ -226,8 +230,9 @@ async def test_platform_content_identity_is_strong_but_weak_fingerprint_is_not_u
         org_id=org_id,
         account_id=account_id,
         platform=Platform.DOUYIN,
-        share_url="https://v.douyin.com/content-2",
-        title="Duplicate share url",
+        share_url="https://V.DOUYIN.com:443/content-2/",
+        canonical_share_url="https://v.douyin.com/content-2",
+        title="Duplicate canonical share url",
         identity_confidence=ContentIdentityConfidence.CONFIRMED,
     )
     session.add(duplicate_share_url)
@@ -247,6 +252,7 @@ async def test_platform_content_record_tracks_canonical_batch_provenance(
         source_kind=DataSourceKind.PLATFORM_EXPORT,
         status=ImportBatchStatus.COMMITTED,
         template_code="douyin_work_list_v1",
+        content_sha256="e" * 64,
     )
     session.add(batch)
     await session.flush()
@@ -256,6 +262,7 @@ async def test_platform_content_record_tracks_canonical_batch_provenance(
         platform=Platform.DOUYIN,
         external_content_id="canonical-content-1",
         share_url="https://v.douyin.com/canonical-content-1",
+        canonical_share_url="https://v.douyin.com/canonical-content-1",
         title="Canonical content",
         identity_confidence=ContentIdentityConfidence.CONFIRMED,
         canonical_import_batch_id=batch.id,
@@ -369,6 +376,7 @@ async def test_metric_snapshot_requires_account_when_source_links_are_set(
             source_kind=DataSourceKind.PLATFORM_EXPORT,
             status=ImportBatchStatus.COMMITTED,
             template_code="douyin_work_list_v1",
+            content_sha256="f" * 64,
         )
         db_session.add(batch)
         await db_session.flush()
@@ -377,6 +385,7 @@ async def test_metric_snapshot_requires_account_when_source_links_are_set(
             account_id=account.id,
             platform=Platform.DOUYIN,
             external_content_id=f"metric-scope-{linked_field}",
+            canonical_share_url=f"https://www.douyin.com/video/metric-scope-{linked_field}",
             identity_confidence=ContentIdentityConfidence.CONFIRMED,
             canonical_import_batch_id=batch.id,
         )
@@ -452,6 +461,7 @@ async def test_database_rejects_cross_scope_account_data_links():
             source_kind=DataSourceKind.PLATFORM_EXPORT,
             status=ImportBatchStatus.PREVIEW_READY,
             template_code="douyin_work_list_v1",
+            content_sha256="1" * 64,
         )
         second_batch = DataImportBatch(
             org_id=second_org.id,
@@ -460,6 +470,7 @@ async def test_database_rejects_cross_scope_account_data_links():
             source_kind=DataSourceKind.PLATFORM_EXPORT,
             status=ImportBatchStatus.PREVIEW_READY,
             template_code="douyin_work_list_v1",
+            content_sha256="2" * 64,
         )
         db_session.add_all([first_batch, second_batch])
         await db_session.flush()
@@ -468,6 +479,7 @@ async def test_database_rejects_cross_scope_account_data_links():
             account_id=second_account.id,
             platform=Platform.DOUYIN,
             external_content_id="second-content",
+            canonical_share_url="https://www.douyin.com/video/second-content",
             identity_confidence=ContentIdentityConfidence.CONFIRMED,
             canonical_import_batch_id=second_batch.id,
         )
@@ -546,6 +558,7 @@ async def test_account_owned_import_data_survives_user_deletion_and_cascades_wit
             source_kind=DataSourceKind.PLATFORM_EXPORT,
             status=ImportBatchStatus.PREVIEW_READY,
             template_code="douyin_work_list_v1",
+            content_sha256="3" * 64,
         )
         db_session.add(batch)
         await db_session.flush()
@@ -564,6 +577,7 @@ async def test_account_owned_import_data_survives_user_deletion_and_cascades_wit
             account_id=account.id,
             platform=Platform.DOUYIN,
             external_content_id="content-keep",
+            canonical_share_url="https://www.douyin.com/video/content-keep",
             identity_confidence=ContentIdentityConfidence.CONFIRMED,
             canonical_import_batch_id=batch.id,
         )
@@ -678,3 +692,39 @@ async def test_account_owned_import_data_survives_user_deletion_and_cascades_wit
         assert await db_session.get(BenchmarkSnapshot, benchmark_id) is None
         assert await db_session.get(DataConflict, conflict_id) is None
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_active_preview_identity_is_unique_until_commit_or_revoke(session, admin, account):
+    first = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.PREVIEW_READY,
+        template_code="douyin_work_list_v1",
+        content_sha256="4" * 64,
+    )
+    session.add(first)
+    await session.commit()
+
+    duplicate = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.PREVIEW_READY,
+        template_code="douyin_work_list_v1",
+        content_sha256="4" * 64,
+    )
+    session.add(duplicate)
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()
+
+    first.committed_at = datetime(2026, 7, 22, 12, 0, 0)
+    await session.commit()
+    session.add(duplicate)
+    await session.commit()
+    await session.refresh(duplicate)
+    assert duplicate.id is not None

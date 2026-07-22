@@ -101,6 +101,13 @@ def test_account_data_center_migration_is_linear_and_additive() -> None:
     assert '"metric_snapshots"' in upgrade_source
     assert '"import_batch_id"' in upgrade_source
     assert '"platform_content_record_id"' in upgrade_source
+    assert '"content_sha256"' in upgrade_source
+    assert '"canonical_share_url"' in upgrade_source
+    assert '"resolution_outcome"' in upgrade_source
+    assert '"resolved_by_id"' in upgrade_source
+    assert '"resolved_at"' in upgrade_source
+    assert "uq_data_import_batches_active_preview_identity" in upgrade_source
+    assert "uq_platform_content_records_account_canonical_share_url" in upgrade_source
     assert 'drop_table("data_conflicts")' in downgrade_source
 
 
@@ -215,13 +222,35 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         upgraded_content_columns = {
             column["name"] for column in inspector.get_columns("platform_content_records")
         }
+        upgraded_batch_columns = {
+            column["name"] for column in inspector.get_columns("data_import_batches")
+        }
+        upgraded_row_columns = {
+            column["name"] for column in inspector.get_columns("data_import_rows")
+        }
         upgraded_metric_checks = {
             constraint["name"]
             for constraint in inspector.get_check_constraints("metric_snapshots")
         }
+        upgraded_batch_indexes = {
+            index["name"] for index in inspector.get_indexes("data_import_batches")
+        }
+        upgraded_content_indexes = {
+            index["name"] for index in inspector.get_indexes("platform_content_records")
+        }
         assert "import_batch_id" in upgraded_metric_columns
         assert "platform_content_record_id" in upgraded_metric_columns
+        assert "content_sha256" in upgraded_batch_columns
         assert "canonical_import_batch_id" in upgraded_content_columns
+        assert "canonical_share_url" in upgraded_content_columns
+        assert "resolution_outcome" in upgraded_row_columns
+        assert "resolved_by_id" in upgraded_row_columns
+        assert "resolved_at" in upgraded_row_columns
+        assert "uq_data_import_batches_active_preview_identity" in upgraded_batch_indexes
+        assert (
+            "uq_platform_content_records_account_canonical_share_url"
+            in upgraded_content_indexes
+        )
         assert "ck_metric_snapshots_account_required_for_source_links" in upgraded_metric_checks
 
         migration.downgrade()
@@ -250,6 +279,12 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         reupgraded_content_columns = {
             column["name"] for column in inspector.get_columns("platform_content_records")
         }
+        reupgraded_batch_columns = {
+            column["name"] for column in inspector.get_columns("data_import_batches")
+        }
+        reupgraded_row_columns = {
+            column["name"] for column in inspector.get_columns("data_import_rows")
+        }
         reupgraded_metric_checks = {
             constraint["name"]
             for constraint in inspector.get_check_constraints("metric_snapshots")
@@ -258,5 +293,8 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         assert inspector.has_table("platform_content_records") is True
         assert "import_batch_id" in reupgraded_metric_columns
         assert "platform_content_record_id" in reupgraded_metric_columns
+        assert "content_sha256" in reupgraded_batch_columns
         assert "canonical_import_batch_id" in reupgraded_content_columns
+        assert "canonical_share_url" in reupgraded_content_columns
+        assert "resolution_outcome" in reupgraded_row_columns
         assert "ck_metric_snapshots_account_required_for_source_links" in reupgraded_metric_checks

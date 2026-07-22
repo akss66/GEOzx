@@ -157,6 +157,45 @@ async def test_create_preview_reuses_identical_hash_for_same_scope(
 
 
 @pytest.mark.asyncio
+async def test_create_preview_allows_new_batch_after_commit_or_revoke(
+    session, admin, account, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    payload = _workbook_payload()
+
+    first = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+    first.committed_at = datetime(2026, 7, 22, 12, 0, 0)
+    await session.commit()
+
+    second = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+    assert second.id != first.id
+
+    second.revoked_at = datetime(2026, 7, 22, 12, 1, 0)
+    await session.commit()
+    third = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+
+    assert third.id != second.id
+
+
+@pytest.mark.asyncio
 async def test_create_preview_does_not_reuse_hash_across_accounts(
     session, admin, account, other_account, monkeypatch, tmp_path
 ):
@@ -184,6 +223,47 @@ async def test_create_preview_does_not_reuse_hash_across_accounts(
 
 
 @pytest.mark.asyncio
+async def test_create_preview_recovers_from_unique_conflict_and_reuses_winner(
+    session, admin, account, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    payload = _workbook_payload()
+    winner = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+
+    from app.services.data_import import service as preview_service
+
+    original_find_existing_preview = preview_service._find_existing_preview
+    calls = {"count": 0}
+
+    async def _delayed_find(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return None
+        return await original_find_existing_preview(*args, **kwargs)
+
+    monkeypatch.setattr(preview_service, "_find_existing_preview", _delayed_find)
+
+    reused = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=payload,
+    )
+
+    batch_count = await session.scalar(select(func.count()).select_from(DataImportBatch))
+    assert reused.id == winner.id
+    assert batch_count == 1
+    assert len(list(tmp_path.rglob("*.xlsx"))) == 1
+
+
+@pytest.mark.asyncio
 async def test_create_preview_cleans_up_orphaned_file_when_commit_fails(
     session, admin, account, monkeypatch, tmp_path
 ):
@@ -207,6 +287,32 @@ async def test_create_preview_cleans_up_orphaned_file_when_commit_fails(
 
     assert list(tmp_path.rglob("*.xlsx")) == []
     monkeypatch.setattr(session, "commit", original_commit)
+
+
+@pytest.mark.asyncio
+async def test_create_preview_rolls_back_rows_and_artifacts_when_storage_write_fails(
+    session, admin, account, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.services.data_import.service._write_artifact_atomic", _boom)
+
+    with pytest.raises(OSError, match="disk full"):
+        await create_preview(
+            session,
+            user=admin,
+            account=account,
+            filename="works.xlsx",
+            content=_workbook_payload(),
+        )
+
+    assert list(tmp_path.rglob("*.xlsx")) == []
+    assert await session.scalar(select(func.count()).select_from(DataImportBatch)) == 0
+    assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 0
+    assert await session.scalar(select(func.count()).select_from(DataImportRow)) == 0
 
 
 @pytest.mark.asyncio
@@ -264,11 +370,89 @@ async def test_resolve_row_match_is_idempotent_and_auditable(
     assert first_result.id == second_result.id
     assert first_result.status is ImportRowStatus.READY
     assert first_result.platform_content_record_id == first.id
+    assert first_result.resolution_outcome == "matched"
+    assert first_result.resolved_by_id == admin.id
+    assert first_result.resolved_at is not None
     assert first_result.candidate_content_ids == [first.id, second.id]
     assert conflict is not None
     assert conflict.status is ConflictStatus.RESOLVED
     assert conflict.resolved_by_id == admin.id
     assert conflict.resolved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_resolve_row_match_records_explicit_no_match_and_rejects_later_changes(
+    session, admin, account, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    candidate = PlatformContentRecord(
+        org_id=admin.org_id,
+        account_id=account.id,
+        platform=Platform.DOUYIN,
+        title="作品 A",
+        published_at=datetime(2026, 7, 18, 14, 11, 20),
+        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+    )
+    session.add(candidate)
+    await session.commit()
+
+    batch = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=_workbook_payload(),
+    )
+
+    first_result = await resolve_row_match(
+        session,
+        batch=batch,
+        row_number=2,
+        resolution=RowMatchResolution(selected_content_id=None, resolved_by=admin),
+    )
+    replay_result = await resolve_row_match(
+        session,
+        batch=batch,
+        row_number=2,
+        resolution=RowMatchResolution(selected_content_id=None, resolved_by=admin),
+    )
+
+    assert first_result.id == replay_result.id
+    assert first_result.status is ImportRowStatus.READY
+    assert first_result.platform_content_record_id is None
+    assert first_result.resolution_outcome == "no_match"
+    assert first_result.resolved_by_id == admin.id
+    assert first_result.resolved_at is not None
+
+    with pytest.raises(ValueError, match="already resolved"):
+        await resolve_row_match(
+            session,
+            batch=batch,
+            row_number=2,
+            resolution=RowMatchResolution(selected_content_id=candidate.id, resolved_by=admin),
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_row_match_rejects_rows_without_open_resolution_conflict(
+    session, admin, account, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    batch = await create_preview(
+        session,
+        user=admin,
+        account=account,
+        filename="works.xlsx",
+        content=_workbook_payload(title="unmatched title"),
+    )
+
+    with pytest.raises(ValueError, match="needs_resolution"):
+        await resolve_row_match(
+            session,
+            batch=batch,
+            row_number=2,
+            resolution=RowMatchResolution(selected_content_id=None, resolved_by=admin),
+        )
 
 
 @pytest.mark.asyncio

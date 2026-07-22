@@ -7,7 +7,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from uuid import uuid4
 
-from sqlalchemy import and_, select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,13 +47,18 @@ async def create_preview(
     filename: str,
     content: bytes,
 ) -> DataImportBatch:
+    owns_transaction = False
+    if not session.in_transaction():
+        await session.begin()
+        owns_transaction = True
+
     _assert_org_account_scope(user=user, account=account)
     source = {"filename": filename, "data": content}
     adapter = _resolve_adapter(source)
     parsed = adapter.parse(source)
     rows = adapter.validate(adapter.normalize(parsed))
     preview = adapter.preview(rows, template_code=parsed.template_code)
-    sha256 = hashlib.sha256(content).hexdigest()
+    content_sha256 = hashlib.sha256(content).hexdigest()
 
     existing = await _find_existing_preview(
         session,
@@ -60,71 +66,63 @@ async def create_preview(
         account_id=account.id,
         source_kind=adapter.source_kind,
         template_code=parsed.template_code,
-        sha256=sha256,
+        content_sha256=content_sha256,
     )
     if existing is not None:
+        if owns_transaction:
+            await session.commit()
         return existing
 
     extension = _validated_extension(filename)
-    batch = DataImportBatch(
-        org_id=account.org_id,
-        account_id=account.id,
-        created_by_id=user.id,
-        source_kind=adapter.source_kind,
-        status=ImportBatchStatus.PREVIEW_READY,
-        template_code=parsed.template_code,
-        row_count=preview.total_rows,
-        period_start=_derive_period_boundary(rows, field_name="period_start", reducer=min),
-        period_end=_derive_period_boundary(rows, field_name="period_end", reducer=max),
-    )
-    session.add(batch)
-    await session.flush()
-
-    storage_key = _build_storage_key(
-        org_id=account.org_id,
-        account_id=account.id,
-        batch_id=batch.id,
-        sha256=sha256,
+    inserted = await _insert_preview_graph(
+        session=session,
+        user=user,
+        account=account,
+        parsed_template_code=parsed.template_code,
+        preview_row_count=preview.total_rows,
+        rows=rows,
+        content_sha256=content_sha256,
+        filename=filename,
         extension=extension,
+        content=content,
+        source_kind=adapter.source_kind,
     )
-    artifact = DataArtifact(
-        org_id=account.org_id,
-        account_id=account.id,
-        batch_id=batch.id,
-        filename=_sanitize_filename(filename, extension=extension),
-        content_type=_content_type_for_extension(extension),
-        byte_size=len(content),
-        sha256=sha256,
-        storage_key=storage_key,
-    )
-    session.add(artifact)
-
-    persisted_rows: list[DataImportRow] = []
-    conflicts: list[DataConflict] = []
-    for row in rows:
-        persisted_row, conflict = await _build_row_persistence(
-            session=session,
-            account=account,
-            batch=batch,
-            row=row,
+    if inserted is None:
+        winner = await _find_existing_preview(
+            session,
+            org_id=account.org_id,
+            account_id=account.id,
+            source_kind=adapter.source_kind,
+            template_code=parsed.template_code,
+            content_sha256=content_sha256,
         )
-        persisted_rows.append(persisted_row)
-        if conflict is not None:
-            conflicts.append(conflict)
-    session.add_all([*persisted_rows, *conflicts])
+        if winner is not None:
+            if owns_transaction:
+                await session.commit()
+            return winner
+        raise RuntimeError("Preview dedupe conflict occurred but no winning preview was found")
 
+    batch_id, storage_key = inserted
     wrote_file = False
     try:
         _write_artifact_atomic(storage_key, content)
         wrote_file = True
         await session.commit()
     except Exception:
-        await session.rollback()
+        if session.in_transaction():
+            await session.rollback()
         if wrote_file:
             _delete_artifact(storage_key)
+        if batch_id is not None:
+            try:
+                await _discard_preview_batch(session, batch_id=batch_id)
+            except Exception:
+                session.sync_session.expunge_all()
+                raise
+        session.sync_session.expunge_all()
         raise
 
-    return await _load_batch(session, batch_id=batch.id)
+    return await _load_batch(session, batch_id=batch_id)
 
 
 async def resolve_row_match(
@@ -135,24 +133,23 @@ async def resolve_row_match(
     resolution: RowMatchResolution,
 ) -> DataImportRow:
     _assert_batch_scope(batch=batch, user=resolution.resolved_by)
-    row = await session.scalar(
-        select(DataImportRow)
-        .where(
-            DataImportRow.org_id == batch.org_id,
-            DataImportRow.account_id == batch.account_id,
-            DataImportRow.batch_id == batch.id,
-            DataImportRow.row_number == row_number,
-        )
-        .options(selectinload(DataImportRow.batch))
+    row, conflict = await _load_resolution_targets(
+        session=session,
+        batch=batch,
+        row_number=row_number,
     )
     if row is None:
         raise ValueError(f"Import row {row_number} does not exist in batch {batch.id}")
     if row.status is ImportRowStatus.INVALID:
         raise ValueError("Invalid rows cannot be resolved")
+    if row.status is not ImportRowStatus.NEEDS_RESOLUTION or conflict is None:
+        return _resolved_replay_or_error(row=row, conflict=conflict, resolution=resolution)
+    if conflict.status is not ConflictStatus.OPEN:
+        return _resolved_replay_or_error(row=row, conflict=conflict, resolution=resolution)
 
     selected_content_id = resolution.selected_content_id
     if selected_content_id is not None:
-        if row.candidate_content_ids and selected_content_id not in row.candidate_content_ids:
+        if selected_content_id not in row.candidate_content_ids:
             raise ValueError("selected candidate is not available for this import row")
         candidate = await session.get(PlatformContentRecord, selected_content_id)
         if (
@@ -161,31 +158,92 @@ async def resolve_row_match(
             or candidate.account_id != batch.account_id
         ):
             raise ValueError("selected candidate is outside the batch account scope")
-    if (
-        row.platform_content_record_id is not None
-        and row.platform_content_record_id != selected_content_id
-        and row.status is ImportRowStatus.READY
-    ):
-        raise ValueError("import row has already been resolved with a different candidate")
 
-    conflict = await session.scalar(
-        select(DataConflict).where(
-            DataConflict.org_id == batch.org_id,
-            DataConflict.account_id == batch.account_id,
-            DataConflict.batch_id == batch.id,
-            DataConflict.row_number == row_number,
-            DataConflict.field_name == "platform_content_record_id",
-        )
-    )
-    row.platform_content_record_id = selected_content_id
     row.status = ImportRowStatus.READY
-    if conflict is not None and conflict.status is ConflictStatus.OPEN:
-        conflict.status = ConflictStatus.RESOLVED
-        conflict.resolved_by_id = resolution.resolved_by.id
-        conflict.resolved_at = datetime.now(UTC)
-
+    row.platform_content_record_id = selected_content_id
+    row.resolution_outcome = "matched" if selected_content_id is not None else "no_match"
+    row.resolved_by_id = resolution.resolved_by.id
+    row.resolved_at = datetime.now(UTC)
+    conflict.status = ConflictStatus.RESOLVED
+    conflict.resolved_by_id = resolution.resolved_by.id
+    conflict.resolved_at = row.resolved_at
     await session.commit()
-    return row
+    return await _load_row(session, row_id=row.id)
+
+
+async def _insert_preview_graph(
+    session: AsyncSession,
+    *,
+    user: User,
+    account: Account,
+    parsed_template_code: str,
+    preview_row_count: int,
+    rows: list,
+    content_sha256: str,
+    filename: str,
+    extension: str,
+    content: bytes,
+    source_kind,
+) -> tuple[int, str] | None:
+    savepoint = await session.begin_nested()
+    try:
+        batch = DataImportBatch(
+            org_id=account.org_id,
+            account_id=account.id,
+            created_by_id=user.id,
+            source_kind=source_kind,
+            status=ImportBatchStatus.PREVIEW_READY,
+            template_code=parsed_template_code,
+            content_sha256=content_sha256,
+            row_count=preview_row_count,
+            period_start=_derive_period_boundary(rows, field_name="period_start", reducer=min),
+            period_end=_derive_period_boundary(rows, field_name="period_end", reducer=max),
+        )
+        session.add(batch)
+        await session.flush()
+
+        storage_key = _build_storage_key(
+            org_id=account.org_id,
+            account_id=account.id,
+            batch_id=batch.id,
+            sha256=content_sha256,
+            extension=extension,
+        )
+        artifact = DataArtifact(
+            org_id=account.org_id,
+            account_id=account.id,
+            batch_id=batch.id,
+            filename=_sanitize_filename(filename, extension=extension),
+            content_type=_content_type_for_extension(extension),
+            byte_size=len(content),
+            sha256=content_sha256,
+            storage_key=storage_key,
+        )
+        session.add(artifact)
+
+        persisted_rows: list[DataImportRow] = []
+        conflicts: list[DataConflict] = []
+        for row in rows:
+            persisted_row, conflict = await _build_row_persistence(
+                session=session,
+                account=account,
+                batch=batch,
+                row=row,
+            )
+            persisted_rows.append(persisted_row)
+            if conflict is not None:
+                conflicts.append(conflict)
+        session.add_all([*persisted_rows, *conflicts])
+        await session.flush()
+    except IntegrityError:
+        await savepoint.rollback()
+        return None
+    except Exception:
+        await savepoint.rollback()
+        raise
+
+    await savepoint.commit()
+    return batch.id, storage_key
 
 
 async def _build_row_persistence(
@@ -277,18 +335,10 @@ async def _find_existing_preview(
     account_id: int,
     source_kind,
     template_code: str,
-    sha256: str,
+    content_sha256: str,
 ) -> DataImportBatch | None:
     existing = await session.scalar(
         select(DataImportBatch)
-        .join(
-            DataArtifact,
-            and_(
-                DataArtifact.org_id == DataImportBatch.org_id,
-                DataArtifact.account_id == DataImportBatch.account_id,
-                DataArtifact.batch_id == DataImportBatch.id,
-            ),
-        )
         .options(
             selectinload(DataImportBatch.artifacts),
             selectinload(DataImportBatch.rows),
@@ -299,9 +349,9 @@ async def _find_existing_preview(
             DataImportBatch.account_id == account_id,
             DataImportBatch.source_kind == source_kind,
             DataImportBatch.template_code == template_code,
+            DataImportBatch.content_sha256 == content_sha256,
             DataImportBatch.committed_at.is_(None),
             DataImportBatch.revoked_at.is_(None),
-            DataArtifact.sha256 == sha256,
         )
         .order_by(DataImportBatch.id.desc())
     )
@@ -326,6 +376,68 @@ async def _load_batch(session: AsyncSession, *, batch_id: int) -> DataImportBatc
     if batch is None:
         raise ValueError(f"Import batch {batch_id} no longer exists")
     return batch
+
+
+async def _load_row(session: AsyncSession, *, row_id: int) -> DataImportRow:
+    row = await session.scalar(select(DataImportRow).where(DataImportRow.id == row_id))
+    if row is None:
+        raise ValueError(f"Import row {row_id} no longer exists")
+    return row
+
+
+async def _discard_preview_batch(session: AsyncSession, *, batch_id: int) -> None:
+    await session.execute(delete(DataConflict).where(DataConflict.batch_id == batch_id))
+    await session.execute(delete(DataImportRow).where(DataImportRow.batch_id == batch_id))
+    await session.execute(delete(DataArtifact).where(DataArtifact.batch_id == batch_id))
+    await session.execute(delete(DataImportBatch).where(DataImportBatch.id == batch_id))
+    await session.commit()
+
+
+async def _load_resolution_targets(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row_number: int,
+) -> tuple[DataImportRow | None, DataConflict | None]:
+    row_query = select(DataImportRow).where(
+        DataImportRow.org_id == batch.org_id,
+        DataImportRow.account_id == batch.account_id,
+        DataImportRow.batch_id == batch.id,
+        DataImportRow.row_number == row_number,
+    )
+    conflict_query = select(DataConflict).where(
+        DataConflict.org_id == batch.org_id,
+        DataConflict.account_id == batch.account_id,
+        DataConflict.batch_id == batch.id,
+        DataConflict.row_number == row_number,
+        DataConflict.field_name == "platform_content_record_id",
+    )
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        row_query = row_query.with_for_update()
+        conflict_query = conflict_query.with_for_update()
+    row = await session.scalar(row_query)
+    conflict = await session.scalar(conflict_query)
+    return row, conflict
+
+
+def _resolved_replay_or_error(
+    *,
+    row: DataImportRow,
+    conflict: DataConflict | None,
+    resolution: RowMatchResolution,
+) -> DataImportRow:
+    if row.resolution_outcome in {"matched", "no_match"} and conflict is not None:
+        replay_matches = (
+            row.resolution_outcome == "no_match"
+            and resolution.selected_content_id is None
+        ) or (
+            row.resolution_outcome == "matched"
+            and row.platform_content_record_id == resolution.selected_content_id
+        )
+        if replay_matches:
+            return row
+        raise ValueError("import row has already resolved to a different terminal outcome")
+    raise ValueError("import row must be in needs_resolution with an open conflict")
 
 
 def _resolve_adapter(source) -> object:
