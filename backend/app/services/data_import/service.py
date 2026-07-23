@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -16,6 +17,8 @@ from app.core import storage
 from app.models import (
     Account,
     AccountMetricSnapshot,
+    AudienceProfileItem,
+    AudienceProfileSnapshot,
     BenchmarkSnapshot,
     DataArtifact,
     DataConflict,
@@ -60,6 +63,7 @@ class DataImportRevokeConflictError(RuntimeError):
 class RowMatchResolution:
     selected_content_id: int | None
     resolved_by: User
+    confirmed: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +231,159 @@ async def create_preview(
     return await _load_batch(session, batch_id=batch_id)
 
 
+async def create_manual_preview(
+    session: AsyncSession,
+    *,
+    user: User,
+    account: Account,
+    payload: dict,
+    screenshot_filename: str | None = None,
+    screenshot_content: bytes | None = None,
+) -> DataImportBatch:
+    _assert_org_account_scope(user=user, account=account)
+    data_domain = str(payload["data_domain"])
+    template_code = {
+        "account_period_totals": "manual_account_period_v1",
+        "audience_dimension": "manual_audience_dimension_v1",
+        "benchmark": "manual_benchmark_v1",
+    }.get(data_domain)
+    if template_code is None:
+        raise ValueError("Unsupported manual data domain")
+
+    normalized_values = _manual_normalized_values(payload)
+    canonical_payload = json.dumps(
+        normalized_values,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    artifact_content = screenshot_content or b""
+    content_sha256 = hashlib.sha256(canonical_payload + b"\0" + artifact_content).hexdigest()
+    source_kind = (
+        DataSourceKind.SCREENSHOT_VERIFIED
+        if screenshot_content is not None
+        else DataSourceKind.MANUAL_ENTRY
+    )
+    image_meta = None
+    if screenshot_content is not None:
+        image_meta = _validated_screenshot(
+            screenshot_filename or "evidence.png",
+            screenshot_content,
+        )
+
+    existing = await _find_active_preview(
+        session,
+        org_id=account.org_id,
+        account_id=account.id,
+        source_kind=source_kind,
+        template_code=template_code,
+        content_sha256=content_sha256,
+    )
+    if existing is not None:
+        return existing
+
+    owns_transaction = not session.in_transaction()
+    preview_scope = None if owns_transaction else await session.begin_nested()
+    storage_key: str | None = None
+    try:
+        batch = DataImportBatch(
+            org_id=account.org_id,
+            account_id=account.id,
+            created_by_id=user.id,
+            source_kind=source_kind,
+            status=ImportBatchStatus.PREVIEW_READY,
+            template_code=template_code,
+            content_sha256=content_sha256,
+            row_count=1,
+            period_start=_coerce_date(payload.get("period_start")),
+            period_end=(
+                _coerce_date(payload.get("period_end"))
+                or _coerce_date(payload["stat_date"])
+            ),
+        )
+        session.add(batch)
+        await session.flush()
+
+        row_status = (
+            ImportRowStatus.NEEDS_RESOLUTION
+            if screenshot_content is not None
+            else ImportRowStatus.READY
+        )
+        row = DataImportRow(
+            org_id=account.org_id,
+            account_id=account.id,
+            batch_id=batch.id,
+            row_number=1,
+            status=row_status,
+            raw_values=normalized_values,
+            normalized_values=normalized_values,
+            field_errors=[],
+            warnings=[],
+            candidate_content_ids=[],
+            projected_target_ids=[],
+        )
+        session.add(row)
+
+        if screenshot_content is not None and image_meta is not None:
+            extension, content_type = image_meta
+            storage_key = _build_storage_key(
+                org_id=account.org_id,
+                account_id=account.id,
+                batch_id=batch.id,
+                sha256=hashlib.sha256(screenshot_content).hexdigest(),
+                extension=extension,
+            )
+            session.add(
+                DataArtifact(
+                    org_id=account.org_id,
+                    account_id=account.id,
+                    batch_id=batch.id,
+                    filename=_sanitize_filename(
+                        screenshot_filename or f"evidence{extension}",
+                        extension=extension,
+                    ),
+                    content_type=content_type,
+                    byte_size=len(screenshot_content),
+                    sha256=hashlib.sha256(screenshot_content).hexdigest(),
+                    storage_key=storage_key,
+                )
+            )
+            session.add(
+                DataConflict(
+                    org_id=account.org_id,
+                    account_id=account.id,
+                    batch_id=batch.id,
+                    row_number=1,
+                    status=ConflictStatus.OPEN,
+                    field_name="manual_confirmation",
+                    conflict_code="screenshot_requires_confirmation",
+                    message="Screenshot-backed values require explicit human confirmation",
+                    incoming_value=normalized_values,
+                    candidate_content_ids=[],
+                )
+            )
+
+        await session.flush()
+        if storage_key is not None and screenshot_content is not None:
+            _write_artifact_atomic(storage_key, screenshot_content)
+        await _commit_preview_scope(
+            session=session,
+            owns_transaction=owns_transaction,
+            preview_scope=preview_scope,
+        )
+    except Exception:
+        await _rollback_preview_scope(
+            session=session,
+            owns_transaction=owns_transaction,
+            preview_scope=preview_scope,
+        )
+        if storage_key is not None:
+            _delete_artifact(storage_key)
+        raise
+
+    return await _load_batch(session, batch_id=batch.id)
+
+
 async def resolve_row_match(
     session: AsyncSession,
     *,
@@ -248,6 +405,21 @@ async def resolve_row_match(
         return _resolved_replay_or_error(row=row, conflict=conflict, resolution=resolution)
     if conflict.status is not ConflictStatus.OPEN:
         return _resolved_replay_or_error(row=row, conflict=conflict, resolution=resolution)
+
+    if conflict.conflict_code == "screenshot_requires_confirmation":
+        if resolution.confirmed is not True:
+            raise ValueError("screenshot-backed values require explicit confirmation")
+        if resolution.selected_content_id is not None:
+            raise ValueError("screenshot confirmation does not accept a content candidate")
+        row.status = ImportRowStatus.READY
+        row.resolution_outcome = "confirmed"
+        row.resolved_by_id = resolution.resolved_by.id
+        row.resolved_at = datetime.now(UTC)
+        conflict.status = ConflictStatus.RESOLVED
+        conflict.resolved_by_id = resolution.resolved_by.id
+        conflict.resolved_at = row.resolved_at
+        await session.commit()
+        return await _load_row(session, row_id=row.id)
 
     selected_content_id = resolution.selected_content_id
     if selected_content_id is not None:
@@ -356,6 +528,7 @@ async def account_status_summary(
     coverage = {
         "account_metrics": "missing",
         "content_metrics": "missing",
+        "audience_profiles": "missing",
         "benchmarks": "missing",
     }
     sources: list[dict[str, object]] = []
@@ -814,7 +987,7 @@ async def _load_resolution_targets(
         DataConflict.account_id == batch.account_id,
         DataConflict.batch_id == batch.id,
         DataConflict.row_number == row_number,
-        DataConflict.field_name == "platform_content_record_id",
+        DataConflict.field_name.in_({"platform_content_record_id", "manual_confirmation"}),
     )
     if session.bind is not None and session.bind.dialect.name == "postgresql":
         row_query = row_query.with_for_update()
@@ -893,6 +1066,12 @@ async def _project_row_targets(
         return await _project_daily_play_row(session=session, batch=batch, row=row)
     if batch.template_code == "douyin_period_aggregate_v1":
         return await _project_period_aggregate_row(session=session, batch=batch, row=row)
+    if batch.template_code == "manual_account_period_v1":
+        return await _project_daily_play_row(session=session, batch=batch, row=row)
+    if batch.template_code == "manual_audience_dimension_v1":
+        return await _project_audience_dimension_row(session=session, batch=batch, row=row)
+    if batch.template_code == "manual_benchmark_v1":
+        return await _project_manual_benchmark_row(session=session, batch=batch, row=row)
     raise DataImportStateError(f"unsupported template_code: {batch.template_code}")
 
 
@@ -1007,6 +1186,68 @@ async def _project_period_aggregate_row(
                 "kind": "benchmark_snapshot",
                 "id": snapshot.id,
                 "metric_code": metric_code,
+                "action": action,
+            }
+        )
+    return targets
+
+
+async def _project_audience_dimension_row(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    snapshot = AudienceProfileSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=batch.id,
+        source_kind=batch.source_kind,
+        stat_date=_row_stat_date(batch=batch, row=row),
+        dimension=str(row.normalized_values["dimension"]),
+        total_audience=_int_or_none(row.normalized_values.get("total_audience")),
+    )
+    session.add(snapshot)
+    await session.flush()
+    for rank, item in enumerate(row.normalized_values.get("audience_items") or [], start=1):
+        session.add(
+            AudienceProfileItem(
+                org_id=batch.org_id,
+                account_id=batch.account_id,
+                snapshot_id=snapshot.id,
+                label=str(item["label"]),
+                value=str(item["value"]),
+                ratio=_float_or_none(item.get("ratio")),
+                rank=rank,
+                meta={},
+            )
+        )
+    await session.flush()
+    return [{"kind": "audience_profile_snapshot", "id": snapshot.id, "action": "created"}]
+
+
+async def _project_manual_benchmark_row(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    row: DataImportRow,
+) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = []
+    for item in row.normalized_values.get("benchmark_metrics") or []:
+        snapshot, action = await _upsert_benchmark_snapshot(
+            session=session,
+            batch=batch,
+            row=row,
+            metric_code=str(item["metric_code"]),
+            metric_value=_float_or_none(item.get("metric_value")),
+            benchmark_code=str(row.normalized_values["benchmark_code"]),
+            sample_size=_int_or_none(item.get("sample_size")),
+        )
+        targets.append(
+            {
+                "kind": "benchmark_snapshot",
+                "id": snapshot.id,
+                "metric_code": snapshot.metric_code,
                 "action": action,
             }
         )
@@ -1167,6 +1408,10 @@ async def _delete_row_targets(
             snapshot = await session.get(BenchmarkSnapshot, int(target["id"]))
             if snapshot is not None and snapshot.import_batch_id == batch.id:
                 await session.delete(snapshot)
+        elif target.get("kind") == "audience_profile_snapshot":
+            snapshot = await session.get(AudienceProfileSnapshot, int(target["id"]))
+            if snapshot is not None and snapshot.import_batch_id == batch.id:
+                await session.delete(snapshot)
         elif target.get("kind") == "platform_content_record" and target.get("action") == "created":
             content = await session.get(PlatformContentRecord, int(target["id"]))
             if content is not None and content.canonical_import_batch_id == batch.id:
@@ -1287,13 +1532,17 @@ async def _upsert_account_metric_snapshot(
         org_id=batch.org_id,
         account_id=batch.account_id,
         import_batch_id=batch.id,
-        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        source_kind=batch.source_kind,
         stat_date=stat_date,
     )
-    snapshot.total_play = _int_or_none(row.normalized_values.get("play"))
+    snapshot.total_play = _int_or_none(
+        row.normalized_values.get("total_play", row.normalized_values.get("play"))
+    )
     snapshot.follower_count = _int_or_none(row.normalized_values.get("follower_count"))
     snapshot.follower_delta = _int_or_none(row.normalized_values.get("follower_delta"))
-    snapshot.total_exposure = _int_or_none(row.normalized_values.get("exposure"))
+    snapshot.total_exposure = _int_or_none(
+        row.normalized_values.get("total_exposure", row.normalized_values.get("exposure"))
+    )
     snapshot.engagement_rate = _float_or_none(row.normalized_values.get("engagement_rate"))
     if existing is None:
         savepoint = await session.begin_nested()
@@ -1326,9 +1575,11 @@ async def _upsert_benchmark_snapshot(
     row: DataImportRow,
     metric_code: str,
     metric_value: float | None,
+    benchmark_code: str | None = None,
+    sample_size: int | None = None,
 ) -> tuple[BenchmarkSnapshot, str]:
     stat_date = _row_stat_date(batch=batch, row=row)
-    benchmark_code = _benchmark_code(row=row)
+    benchmark_code = benchmark_code or _benchmark_code(row=row)
     existing = await session.scalar(
         select(BenchmarkSnapshot).where(
             BenchmarkSnapshot.account_id == batch.account_id,
@@ -1343,13 +1594,15 @@ async def _upsert_benchmark_snapshot(
         org_id=batch.org_id,
         account_id=batch.account_id,
         import_batch_id=batch.id,
-        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        source_kind=batch.source_kind,
         stat_date=stat_date,
         benchmark_code=benchmark_code,
         metric_code=metric_code,
     )
     snapshot.metric_value = metric_value
-    snapshot.sample_size = _int_or_none(row.normalized_values.get("publish_count"))
+    snapshot.sample_size = sample_size
+    if sample_size is None:
+        snapshot.sample_size = _int_or_none(row.normalized_values.get("publish_count"))
     snapshot.meta = {
         "content_format": row.normalized_values.get("content_format"),
         "vertical": row.normalized_values.get("vertical"),
@@ -1396,6 +1649,12 @@ async def _projected_domains_for_batch(
         select(BenchmarkSnapshot.id).where(BenchmarkSnapshot.import_batch_id == batch.id)
     ):
         projected_domains.add("benchmarks")
+    if await session.scalar(
+        select(AudienceProfileSnapshot.id).where(
+            AudienceProfileSnapshot.import_batch_id == batch.id
+        )
+    ):
+        projected_domains.add("audience_profiles")
     if await session.scalar(
         select(PlatformContentRecord.id).where(
             PlatformContentRecord.canonical_import_batch_id == batch.id
@@ -1492,6 +1751,10 @@ def _resolved_replay_or_error(
     conflict: DataConflict | None,
     resolution: RowMatchResolution,
 ) -> DataImportRow:
+    if row.resolution_outcome == "confirmed" and conflict is not None:
+        if resolution.confirmed is True and resolution.selected_content_id is None:
+            return row
+        raise ValueError("import row has already resolved to a different terminal outcome")
     if row.resolution_outcome in {"matched", "no_match"} and conflict is not None:
         replay_matches = (
             row.resolution_outcome == "no_match"
@@ -1519,6 +1782,25 @@ def _validated_extension(filename: str) -> str:
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError("Unsupported preview artifact extension")
     return extension
+
+
+def _validated_screenshot(filename: str, content: bytes) -> tuple[str, str]:
+    if len(content) > 5 * 1024 * 1024:
+        raise ValueError("Screenshot image exceeds the 5 MB limit")
+    extension = Path(filename).suffix.lower()
+    detected: tuple[str, str] | None = None
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        detected = (".png", "image/png")
+    elif content.startswith(b"\xff\xd8\xff"):
+        detected = (".jpg", "image/jpeg")
+    elif len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        detected = (".webp", "image/webp")
+    if detected is None:
+        raise ValueError("Screenshot must contain a valid PNG, JPEG, or WebP image")
+    allowed_extensions = {".jpg", ".jpeg"} if detected[0] == ".jpg" else {detected[0]}
+    if extension not in allowed_extensions:
+        raise ValueError("Screenshot extension does not match the image content")
+    return detected
 
 
 def _sanitize_filename(filename: str, *, extension: str) -> str:
@@ -1575,6 +1857,43 @@ def _derive_period_boundary(rows: list, *, field_name: str, reducer):
         elif isinstance(value, date):
             values.append(value)
     return reducer(values) if values else None
+
+
+def _manual_normalized_values(payload: dict) -> dict:
+    values = {
+        "data_domain": payload["data_domain"],
+        "stat_date": payload["stat_date"],
+        "period_start": payload.get("period_start"),
+        "period_end": payload.get("period_end"),
+    }
+    if payload["data_domain"] == "account_period_totals":
+        values.update(payload.get("account_metrics") or {})
+    elif payload["data_domain"] == "audience_dimension":
+        values.update(
+            {
+                "dimension": payload.get("dimension"),
+                "total_audience": payload.get("total_audience"),
+                "audience_items": payload.get("audience_items") or [],
+            }
+        )
+    else:
+        values.update(
+            {
+                "benchmark_code": payload.get("benchmark_code"),
+                "benchmark_metrics": payload.get("benchmark_metrics") or [],
+            }
+        )
+    return _json_ready(values)
+
+
+def _coerce_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    return None
 
 
 def _issue_to_dict(issue: RowIssue) -> dict[str, str | None]:

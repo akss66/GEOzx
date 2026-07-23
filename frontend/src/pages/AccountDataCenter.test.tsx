@@ -17,6 +17,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  confirmManualAccountDataRow,
+  createManualAccountDataPreview,
   downloadAccountDataArtifact,
   type AccountDataImportArtifact,
   type AccountDataImportBatch,
@@ -47,6 +49,8 @@ vi.mock("../api/accountData", () => ({
   listAccountDataImports: vi.fn(),
   getAccountDataImportBatch: vi.fn(),
   uploadAccountDataImport: vi.fn(),
+  createManualAccountDataPreview: vi.fn(),
+  confirmManualAccountDataRow: vi.fn(),
   resolveAccountDataImportRow: vi.fn(),
   commitAccountDataImportBatch: vi.fn(),
   revokeAccountDataImportBatch: vi.fn(),
@@ -88,6 +92,7 @@ function buildStatus(overrides: Partial<AccountDataStatus> = {}): AccountDataSta
     coverage: {
       account_metrics: "available",
       content_metrics: "partial",
+      audience_profiles: "missing",
       benchmarks: "missing",
     },
     sources: [
@@ -290,7 +295,7 @@ describe("AccountDataCenter", () => {
       accounts: [buildAccount()],
     });
     vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
-    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [] });
+    vi.mocked(listAccountDataImports).mockResolvedValue({ items: [] });
     vi.mocked(uploadAccountDataImport).mockRejectedValueOnce({
       response: {
         status: 422,
@@ -359,6 +364,61 @@ describe("AccountDataCenter", () => {
 
     expect(await screen.findByText("导入预览已生成")).toBeInTheDocument();
     expect(screen.getByText("douyin_daily_play_v1")).toBeInTheDocument();
+  });
+
+  it("creates a manual account-period preview through the page workspace", async () => {
+    const preview = buildPreviewBatch({
+      id: 91,
+      source_kind: "manual_entry",
+      template_code: "manual_account_period_v1",
+      conflicts: [],
+      rows: [
+        {
+          ...buildPreviewBatch().rows[0],
+          row_number: 1,
+          status: "ready",
+          raw_values: {},
+          normalized_values: { follower_count: 1200, total_play: 8900 },
+          candidate_content_ids: [],
+        },
+      ],
+      artifacts: [],
+    });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValue({ items: [] });
+    vi.mocked(createManualAccountDataPreview).mockResolvedValueOnce(preview);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "人工录入" }));
+    fireEvent.change(screen.getByLabelText("统计日期"), { target: { value: "2026-07-22" } });
+    fireEvent.change(screen.getByLabelText("粉丝总数"), { target: { value: "1200" } });
+    fireEvent.change(screen.getByLabelText("播放量"), { target: { value: "8900" } });
+    fireEvent.click(screen.getByRole("button", { name: "生成录入预览" }));
+
+    await waitFor(() => expect(createManualAccountDataPreview).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        data_domain: "account_period_totals",
+        stat_date: "2026-07-22",
+        account_metrics: expect.objectContaining({
+          follower_count: 1200,
+          total_play: 8900,
+          total_exposure: null,
+        }),
+      }),
+      null,
+    ));
+    expect(await screen.findByText("人工数据预览已生成")).toBeInTheDocument();
+    expect(screen.getByText("manual_account_period_v1")).toBeInTheDocument();
+    expect(confirmManualAccountDataRow).not.toHaveBeenCalled();
   });
 
   it("blocks commit while one row is invalid", async () => {

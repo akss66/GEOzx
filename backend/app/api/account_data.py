@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import storage
@@ -20,6 +21,7 @@ from app.schemas.account_data import (
     ImportBatchSummaryOut,
     ImportConflictOut,
     ImportRowOut,
+    ManualPreviewRequest,
     ResolveImportRowRequest,
 )
 from app.services.data_import.parser import ParseFailure
@@ -31,6 +33,7 @@ from app.services.data_import.service import (
     RowMatchResolution,
     account_status_summary,
     commit_batch,
+    create_manual_preview,
     create_preview,
     list_scoped_batches,
     load_scoped_artifact,
@@ -40,6 +43,7 @@ from app.services.data_import.service import (
 )
 
 router = APIRouter(prefix="/account-data", tags=["account-data"])
+MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -121,6 +125,44 @@ async def upload_import(
     return _batch_out(batch)
 
 
+@router.post(
+    "/{account_id}/manual-previews",
+    response_model=ImportBatchOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_manual_data_preview(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    payload: Annotated[str, Form(...)],
+    screenshot: Annotated[UploadFile | None, File()] = None,
+) -> ImportBatchOut:
+    account = await require_account_access(session, user, account_id, roles=OPERATE_ROLES)
+    try:
+        request = ManualPreviewRequest.model_validate_json(payload)
+        screenshot_content = (
+            await screenshot.read(MAX_SCREENSHOT_BYTES + 1)
+            if screenshot is not None
+            else None
+        )
+        batch = await create_manual_preview(
+            session,
+            user=user,
+            account=account,
+            payload=request.model_dump(mode="json"),
+            screenshot_filename=screenshot.filename if screenshot is not None else None,
+            screenshot_content=screenshot_content,
+        )
+    except ValidationError as exc:
+        raise _bad_request(
+            "Manual data fields are invalid",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        ) from exc
+    except ValueError as exc:
+        raise _bad_request(str(exc), status_code=status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    return _batch_out(batch)
+
+
 @router.get("/{account_id}/imports", response_model=ImportBatchListOut)
 async def list_imports(
     account_id: int,
@@ -179,6 +221,7 @@ async def resolve_import_row(
             resolution=RowMatchResolution(
                 selected_content_id=body.selected_content_id,
                 resolved_by=user,
+                confirmed=body.confirmed,
             ),
         )
     except DataImportBatchNotFoundError as exc:

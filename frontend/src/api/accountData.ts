@@ -102,6 +102,39 @@ export interface AccountDataStatus {
   sources: AccountDataStatusSource[];
 }
 
+export interface ManualAccountMetrics {
+  follower_count: number | null;
+  follower_delta: number | null;
+  total_play: number | null;
+  total_exposure: number | null;
+  engagement_rate: number | null;
+}
+
+export interface ManualAudienceItem {
+  label: string;
+  value: string;
+  ratio: number | null;
+}
+
+export interface ManualBenchmarkMetric {
+  metric_code: string;
+  metric_value: number | null;
+  sample_size: number | null;
+}
+
+export interface ManualPreviewPayload {
+  data_domain: "account_period_totals" | "audience_dimension" | "benchmark";
+  stat_date: string;
+  period_start: string | null;
+  period_end: string | null;
+  account_metrics?: ManualAccountMetrics;
+  dimension?: string;
+  total_audience?: number | null;
+  audience_items?: ManualAudienceItem[];
+  benchmark_code?: string;
+  benchmark_metrics?: ManualBenchmarkMetric[];
+}
+
 export async function getAccountDataStatus(accountId: number): Promise<AccountDataStatus> {
   const { data } = await api.get<AccountDataStatus>(`/account-data/${accountId}/status`);
   return data;
@@ -154,6 +187,34 @@ export async function uploadAccountDataImport(
     {
       headers: { "Content-Type": "multipart/form-data" },
     },
+  );
+  return data;
+}
+
+export async function createManualAccountDataPreview(
+  accountId: number,
+  payload: ManualPreviewPayload,
+  screenshot: File | null,
+): Promise<AccountDataImportBatch> {
+  const formData = new FormData();
+  formData.append("payload", JSON.stringify(payload));
+  if (screenshot) formData.append("screenshot", screenshot);
+  const { data } = await api.post<AccountDataImportBatch>(
+    `/account-data/${accountId}/manual-previews`,
+    formData,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return data;
+}
+
+export async function confirmManualAccountDataRow(
+  accountId: number,
+  batchId: number,
+  rowNumber: number,
+): Promise<AccountDataImportRow> {
+  const { data } = await api.patch<AccountDataImportRow>(
+    `/account-data/${accountId}/imports/${batchId}/rows/${rowNumber}`,
+    { confirmed: true },
   );
   return data;
 }

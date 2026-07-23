@@ -101,9 +101,197 @@
 
 .account-data-coverage {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-top: 14px;
+}
+
+.account-data-entry-switch,
+.account-data-domain-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--tz-line);
+  border-radius: 10px;
+  background: #f4f1eb;
+}
+
+.account-data-entry-switch {
+  margin: 18px 0 12px;
+}
+
+.account-data-entry-switch button,
+.account-data-domain-tabs button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dy-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.account-data-entry-switch button.is-active,
+.account-data-domain-tabs button.is-active {
+  background: #fff;
+  color: var(--dy-text);
+  box-shadow: 0 1px 2px rgba(32, 24, 18, 0.08);
+}
+
+.account-data-manual-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+  gap: 18px;
+}
+
+.account-data-manual-fields,
+.account-data-manual-list {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.account-data-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-data-field-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.account-data-field-grid label,
+.account-data-wide-field {
+  display: grid;
+  gap: 7px;
+}
+
+.account-data-field-grid label > span,
+.account-data-wide-field > span {
+  color: var(--dy-muted);
+  font-size: 12px;
+}
+
+.account-data-field-grid input,
+.account-data-wide-field input,
+.account-data-repeat-row input {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--tz-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--dy-text);
+  font: inherit;
+  outline: none;
+}
+
+.account-data-field-grid input:focus,
+.account-data-wide-field input:focus,
+.account-data-repeat-row input:focus {
+  border-color: rgba(201, 22, 29, 0.48);
+  box-shadow: 0 0 0 3px rgba(201, 22, 29, 0.08);
+}
+
+.account-data-repeat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(110px, 0.6fr);
+  gap: 10px;
+}
+
+.account-data-evidence-pane {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 10px;
+  background: #faf8f4;
+}
+
+.account-data-evidence-pane > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 9px;
+}
+
+.account-data-evidence-pane > div p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--dy-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.account-data-evidence-pane > span {
+  overflow: hidden;
+  color: var(--dy-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-data-evidence-pane img {
+  width: 100%;
+  max-height: 360px;
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 8px;
+  object-fit: contain;
+  background: #fff;
+}
+
+.account-data-evidence-upload {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 36px;
+  border: 1px dashed var(--tz-line);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.account-data-evidence-upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.account-data-manual-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--tz-line);
+  border-radius: 10px;
+  background: #faf8f4;
+}
+
+.account-data-manual-preview > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.account-data-manual-preview span,
+.account-data-manual-preview p {
+  margin: 0;
+  color: var(--dy-muted);
+  font-size: 12px;
+}
+
+.account-data-manual-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .account-data-coverage-item {

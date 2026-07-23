@@ -432,6 +432,7 @@ async def test_commit_projects_daily_play_into_account_metric_snapshots_and_stat
     assert coverage.json()["coverage"] == {
         "account_metrics": "available",
         "content_metrics": "missing",
+        "audience_profiles": "missing",
         "benchmarks": "missing",
     }
 
@@ -578,6 +579,7 @@ async def test_commit_projects_period_aggregate_into_benchmark_snapshots_and_sta
     assert coverage.json()["coverage"] == {
         "account_metrics": "missing",
         "content_metrics": "missing",
+        "audience_profiles": "missing",
         "benchmarks": "available",
     }
 
@@ -612,6 +614,7 @@ async def test_status_does_not_claim_coverage_from_template_code_without_committ
     assert coverage.json()["coverage"] == {
         "account_metrics": "missing",
         "content_metrics": "missing",
+        "audience_profiles": "missing",
         "benchmarks": "missing",
     }
     assert coverage.json()["sources"] == []

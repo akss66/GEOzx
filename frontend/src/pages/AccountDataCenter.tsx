@@ -10,6 +10,8 @@ import { useParams } from "react-router-dom";
 
 import {
   commitAccountDataImportBatch,
+  confirmManualAccountDataRow,
+  createManualAccountDataPreview,
   downloadAccountDataArtifact,
   getAccountDataImportBatch,
   getAccountDataStatus,
@@ -20,6 +22,7 @@ import {
   type AccountDataImportArtifact,
   type AccountDataImportBatch,
   type AccountDataImportRow,
+  type ManualPreviewPayload,
 } from "../api/accountData";
 import { presentApiError } from "../api/errors";
 import { getBatchStatusLabel } from "../components/account-data/statusMeta";
@@ -27,6 +30,7 @@ import { getWorkspaceContext } from "../api/shell";
 import { PlatformTag, OperationalState, PageHeader } from "../components/ui";
 import { FileImportFlow } from "../components/account-data/FileImportFlow";
 import { ImportBatchHistory } from "../components/account-data/ImportBatchHistory";
+import { ManualDataEntry } from "../components/account-data/ManualDataEntry";
 import { useCurrentWorkspace } from "../stores/currentWorkspace";
 import "../styles/account-data-center.css";
 
@@ -36,9 +40,12 @@ type FlowFeedback = {
   description: string;
 } | null;
 
+type DataEntryMode = "file" | "manual";
+
 const COVERAGE_LABEL: Record<string, string> = {
   account_metrics: "账号概览",
   content_metrics: "作品表现",
+  audience_profiles: "粉丝画像",
   benchmarks: "对标基准",
 };
 
@@ -136,6 +143,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
   const queryClient = useQueryClient();
   const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
   const [draftBatch, setDraftBatch] = useState<AccountDataImportBatch | null>(null);
+  const [entryMode, setEntryMode] = useState<DataEntryMode>("file");
   const [flowFeedback, setFlowFeedback] = useState<FlowFeedback>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
@@ -198,6 +206,11 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     const next = historyQuery.data.items.find((item) => item.status === "preview_ready")
       ?? historyQuery.data.items[0];
     setActiveBatchId(next.id);
+    setEntryMode(
+      next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified"
+        ? "manual"
+        : "file",
+    );
   }, [activeBatchId, historyQuery.data]);
 
   const activeBatch = useMemo(() => {
@@ -247,6 +260,32 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
         description: "请先核对行级数据，确认无误后再正式写入当前账号。",
       });
       setHistoryError(null);
+      setEntryMode("file");
+      setActiveBatchId(batch.id);
+      setDraftBatch(batch);
+      queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
+      void historyQuery.refetch();
+    },
+    onError: (error) => {
+      if (!isMountedRef.current) return;
+      setFlowFeedback(presentImportError(error));
+    },
+  });
+
+  const manualPreviewMutation = useMutation({
+    mutationFn: ({ payload, screenshot }: { payload: ManualPreviewPayload; screenshot: File | null }) =>
+      createManualAccountDataPreview(routeAccountId, payload, screenshot),
+    onSuccess: (batch) => {
+      if (!isMountedRef.current) return;
+      setFlowFeedback({
+        tone: "success",
+        title: "人工数据预览已生成",
+        description: batch.source_kind === "screenshot_verified"
+          ? "请对照截图确认字段，确认后才能正式写入当前账号。"
+          : "请核对结构化字段，确认无误后再正式写入当前账号。",
+      });
+      setHistoryError(null);
+      setEntryMode("manual");
       setActiveBatchId(batch.id);
       setDraftBatch(batch);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
@@ -279,6 +318,33 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
         const batch = await refreshBatchWorkspace(variables.batchId);
         if (!isMountedRef.current) return;
         setHistoryError(null);
+        setActiveBatchId(variables.batchId);
+        setDraftBatch(batch);
+      } catch (error) {
+        if (!isMountedRef.current) return;
+        setFlowFeedback(presentImportError(error));
+      }
+    },
+    onError: (error) => {
+      if (!isMountedRef.current) return;
+      setFlowFeedback(presentImportError(error));
+    },
+  });
+
+  const confirmManualMutation = useMutation({
+    mutationFn: ({ batchId, rowNumber }: { batchId: number; rowNumber: number }) =>
+      confirmManualAccountDataRow(routeAccountId, batchId, rowNumber),
+    onSuccess: async (_row, variables) => {
+      try {
+        const batch = await refreshBatchWorkspace(variables.batchId);
+        if (!isMountedRef.current) return;
+        setFlowFeedback({
+          tone: "success",
+          title: "截图数据已确认",
+          description: "确认人和确认时间已记录，现在可以正式写入账号数据中心。",
+        });
+        setHistoryError(null);
+        setEntryMode("manual");
         setActiveBatchId(variables.batchId);
         setDraftBatch(batch);
       } catch (error) {
@@ -427,7 +493,10 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           </article>
           <article>
             <span>来源覆盖</span>
-            <strong>{Object.values(statusQuery.data?.coverage ?? {}).filter((item) => item !== "missing").length} / 3</strong>
+            <strong>
+              {Object.values(statusQuery.data?.coverage ?? {}).filter((item) => item !== "missing").length}
+              {` / ${Object.keys(statusQuery.data?.coverage ?? {}).length || 4}`}
+            </strong>
           </article>
           <article>
             <span>冲突数量</span>
@@ -456,32 +525,87 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
         </div>
       ) : null}
 
+      <div className="account-data-entry-switch" role="tablist" aria-label="数据补录方式">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={entryMode === "file"}
+          className={entryMode === "file" ? "is-active" : undefined}
+          onClick={() => {
+            setEntryMode("file");
+            setFlowFeedback(null);
+          }}
+        >
+          文件导入
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={entryMode === "manual"}
+          className={entryMode === "manual" ? "is-active" : undefined}
+          onClick={() => {
+            setEntryMode("manual");
+            setFlowFeedback(null);
+          }}
+        >
+          人工录入
+        </button>
+      </div>
+
       <div className="account-data-layout">
-        <FileImportFlow
-          batch={activeBatch ?? null}
-          feedback={flowFeedback}
-          uploading={uploadMutation.isPending}
-          resolvingRowNumber={resolveMutation.isPending ? resolveMutation.variables?.rowNumber ?? null : null}
-          committing={commitMutation.isPending}
-          canCommit={canCommit}
-          onFileSelected={(file) => {
-            setFlowFeedback(null);
-            setHistoryError(null);
-            uploadMutation.mutate(file);
-          }}
-          onResolveRow={(rowNumber, selectedContentId) => {
-            if (!activeBatch) return;
-            setFlowFeedback(null);
-            setHistoryError(null);
-            resolveMutation.mutate({ batchId: activeBatch.id, rowNumber, selectedContentId });
-          }}
-          onCommit={() => {
-            if (!activeBatch) return;
-            setFlowFeedback(null);
-            setHistoryError(null);
-            commitMutation.mutate(activeBatch.id);
-          }}
-        />
+        {entryMode === "file" ? (
+          <FileImportFlow
+            batch={activeBatch?.source_kind === "platform_export" ? activeBatch : null}
+            feedback={flowFeedback}
+            uploading={uploadMutation.isPending}
+            resolvingRowNumber={resolveMutation.isPending ? resolveMutation.variables?.rowNumber ?? null : null}
+            committing={commitMutation.isPending}
+            canCommit={canCommit}
+            onFileSelected={(file) => {
+              setFlowFeedback(null);
+              setHistoryError(null);
+              uploadMutation.mutate(file);
+            }}
+            onResolveRow={(rowNumber, selectedContentId) => {
+              if (!activeBatch) return;
+              setFlowFeedback(null);
+              setHistoryError(null);
+              resolveMutation.mutate({ batchId: activeBatch.id, rowNumber, selectedContentId });
+            }}
+            onCommit={() => {
+              if (!activeBatch) return;
+              setFlowFeedback(null);
+              setHistoryError(null);
+              commitMutation.mutate(activeBatch.id);
+            }}
+          />
+        ) : (
+          <ManualDataEntry
+            batch={activeBatch?.source_kind === "manual_entry" || activeBatch?.source_kind === "screenshot_verified" ? activeBatch : null}
+            feedback={flowFeedback}
+            creating={manualPreviewMutation.isPending}
+            confirming={confirmManualMutation.isPending}
+            committing={commitMutation.isPending}
+            canCommit={canCommit}
+            onPreview={(payload, screenshot) => {
+              setFlowFeedback(null);
+              setHistoryError(null);
+              manualPreviewMutation.mutate({ payload, screenshot });
+            }}
+            onConfirmRow={(rowNumber) => {
+              if (!activeBatch) return;
+              setFlowFeedback(null);
+              setHistoryError(null);
+              confirmManualMutation.mutate({ batchId: activeBatch.id, rowNumber });
+            }}
+            onCommit={() => {
+              if (!activeBatch) return;
+              setFlowFeedback(null);
+              setHistoryError(null);
+              commitMutation.mutate(activeBatch.id);
+            }}
+          />
+        )}
 
         <ImportBatchHistory
           items={historyQuery.data?.items ?? []}
@@ -490,8 +614,17 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           revokingBatchId={revokeMutation.isPending ? revokeMutation.variables ?? null : null}
           revokeError={historyError}
           onOpenBatch={(batchId) => {
+            const opened = detailsById.get(batchId);
             setActiveBatchId(batchId);
-            setDraftBatch(detailsById.get(batchId) ?? null);
+            setDraftBatch(opened ?? null);
+            if (opened) {
+              setEntryMode(
+                opened.source_kind === "manual_entry"
+                  || opened.source_kind === "screenshot_verified"
+                  ? "manual"
+                  : "file",
+              );
+            }
           }}
           onDownloadArtifact={(artifact: AccountDataImportArtifact) => {
             setHistoryError(null);
