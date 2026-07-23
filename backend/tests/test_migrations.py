@@ -7,6 +7,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy import event
+from sqlalchemy.dialects import postgresql
 
 
 def get_head_revision() -> str | None:
@@ -84,6 +85,8 @@ def test_account_data_center_migration_is_linear_and_additive() -> None:
     module = importlib.import_module("migrations.versions.20260722_0100_account_data_center")
 
     assert module.down_revision == "20260721_0400"
+    assert isinstance(module.platform_enum, postgresql.ENUM)
+    assert module.platform_enum.create_type is False
     upgrade_source = inspect.getsource(module.upgrade)
     downgrade_source = inspect.getsource(module.downgrade)
     for table_name in (

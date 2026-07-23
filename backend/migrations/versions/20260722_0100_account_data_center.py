@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 from app.models.base import BigIntPK, JSONVariant
 
@@ -53,7 +54,7 @@ conflict_status = sa.Enum(
     "ignored",
     name="conflict_status",
 )
-platform_enum = sa.Enum(
+platform_enum = postgresql.ENUM(
     "douyin",
     "xiaohongshu",
     "shipinhao",
