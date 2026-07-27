@@ -89,7 +89,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        NGINX_CONF: nginx.local.conf
     ports:
       - "3000:80"
     depends_on:
