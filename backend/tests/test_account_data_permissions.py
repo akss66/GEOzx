@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.models import DataImportBatch
 from tests import test_account_data_import_api as account_data_api
 
 _auth = account_data_api._auth
@@ -179,3 +180,71 @@ async def test_only_lead_or_admin_can_revoke_committed_batches(
     )
 
     assert admin_revoke.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_only_lead_or_admin_can_permanently_delete_scoped_batches(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    reviewer_token,
+    lead_token,
+    admin_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    other_account = account_access_setup["other_account"]
+
+    first_preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "lead-delete.xlsx",
+                _workbook_payload(title="Lead delete title"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert first_preview.status_code == 201
+    first_batch_id = first_preview.json()["id"]
+    delete_url = f"/account-data/{account.id}/imports/{first_batch_id}"
+
+    operator_delete = await client.delete(delete_url, headers=_auth(operator_token))
+    reviewer_delete = await client.delete(delete_url, headers=_auth(reviewer_token))
+    cross_account_delete = await client.delete(
+        f"/account-data/{other_account.id}/imports/{first_batch_id}",
+        headers=_auth(lead_token),
+    )
+    lead_delete = await client.delete(delete_url, headers=_auth(lead_token))
+
+    assert operator_delete.status_code == 403
+    assert reviewer_delete.status_code == 403
+    assert cross_account_delete.status_code == 404
+    assert lead_delete.status_code == 204
+    assert await session.get(DataImportBatch, first_batch_id) is None
+
+    second_preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "admin-delete.xlsx",
+                _workbook_payload(title="Admin delete title"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert second_preview.status_code == 201
+    second_batch_id = second_preview.json()["id"]
+
+    admin_delete = await client.delete(
+        f"/account-data/{account.id}/imports/{second_batch_id}",
+        headers=_auth(admin_token),
+    )
+
+    assert admin_delete.status_code == 204
+    assert await session.get(DataImportBatch, second_batch_id) is None
