@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.base import extract_json
 from app.llm.gateway import gateway
 from app.models.enums import AgentCode, BrainTaskType
+from app.orchestrator.agent_identity import with_operations_brain_public_identity
 from app.services.agent_management import apply_management_policies
 
 
@@ -136,8 +137,8 @@ class BrainPlanner:
             payload = extract_json(result.content)
             selected = _valid_codes(payload.get("selected_agent_codes"))
             if not selected:
-                raise ValueError("主 Agent 未选择有效专家")
-            summary = str(payload.get("summary") or "主 Agent 已按目标选择所需专家。")
+                raise ValueError("运营大脑未选择有效专家")
+            summary = str(payload.get("summary") or "运营大脑已按目标选择所需专家。")
             steps, quality_gates = await apply_management_policies(
                 session, org_id, _build_steps(selected)
             )
@@ -148,7 +149,7 @@ class BrainPlanner:
             )
             return PlanningDecision(
                 steps,
-                "主 Agent 已根据目标选择必要专家；执行中可继续调整。",
+                "运营大脑已根据目标选择必要专家；执行中可继续调整。",
                 "fallback",
                 quality_gates,
             )
@@ -158,7 +159,8 @@ def _planner_system_prompt() -> str:
     capabilities = "\n".join(
         f"- {code}: {spec['agent_name']}，{spec['intent']}" for code, spec in _CATALOG.items()
     )
-    return f"""你是同舟行运营大脑的主 Agent。根据用户目标只选择真正需要的专家，禁止固定全流程调用。
+    return with_operations_brain_public_identity(
+        f"""你是同舟行运营大脑的主 Agent。根据用户目标只选择真正需要的专家，禁止固定全流程调用。
 
 可用专家：
 {capabilities}
@@ -171,6 +173,7 @@ def _planner_system_prompt() -> str:
 2. 只生成脚本时不调用美术、视频、剪辑或运营专家。
 3. 只有目标明确要求对应交付物时才选择美术、视频、剪辑或发布准备能力。
 4. 选择结果必须使用上面列出的 code，不能发明专家。"""
+    )
 
 
 def _valid_codes(value: Any) -> list[str]:

@@ -56,6 +56,7 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
     assert decision.clarifying_question == "你这次最想优先改善播放、互动，还是转化？"
     assert decision.suggested_expert_codes == []
     assert captured["system"].startswith("# 同舟行主 Agent：意图路由")
+    assert "面向用户时统一使用“运营大脑”" in captured["system"]
     assert captured["context"].prompt_id == "main-agent.intent"
     assert captured["context"].prompt_schema_version == "intent-decision/v1"
     assert captured["context"].response_format == {"type": "json_object"}
@@ -154,4 +155,5 @@ async def test_next_step_can_request_scoped_tool_calls(monkeypatch):
     assert "call_tools" in system_prompts[0]
     assert "idempotency_key" in system_prompts[0]
     assert system_prompts[0].startswith("# 同舟行主 Agent：受控 ReAct 下一步")
+    assert "面向用户时统一使用“运营大脑”" in system_prompts[0]
     assert "account.metrics_summary" in system_prompts[0]

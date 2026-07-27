@@ -561,6 +561,7 @@ async def test_brain_conversation_keeps_operations_identity_and_account_context(
         message["content"] for message in captured_messages if message["role"] == "system"
     )
     assert system_prompt.startswith("# 同舟行主 Agent：自然对话")
+    assert "面向用户时统一使用“运营大脑”" in system_prompt
     assert "不是泛化生活陪聊助手" in system_prompt
     assert "账号定位" in system_prompt
     assert "内容策划" in system_prompt
@@ -1486,7 +1487,7 @@ async def test_brain_confirm_keeps_greeting_as_plain_chat(client, admin):
     assert confirmed.status_code == 200
     confirmed_body = confirmed.json()
     assert confirmed_body["status"] == "completed"
-    assert confirmed_body["current_focus"] == "主 Agent 已完成普通对话，未启动专家工作流"
+    assert confirmed_body["current_focus"] == "运营大脑已完成普通对话，未启动专家工作流"
 
     runtime = await client.get(f"/brain/tasks/{draft_body['id']}/runtime", headers=headers)
     runtime_body = runtime.json()

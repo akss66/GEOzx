@@ -139,7 +139,7 @@ async def _create_direct_agent_run_legacy(
         cycle="独立专家调用",
         content_goal=f"由{spec.name}产出可审阅、可采用的正式成果。",
         expected_outputs=[spec.deliverable_title],
-        confirmation_actions=["采用成果", "提出修改", "交回主 Agent"],
+        confirmation_actions=["采用成果", "提出修改", "交回运营大脑"],
     )
     task.plan = OrchestrationPlan(
         summary=f"独立调用{spec.name}，成果进入人工验收后再写入正式工作流。",
@@ -365,7 +365,7 @@ async def create_direct_agent_run(
         cycle="独立专家调用",
         content_goal=f"由{spec.name}产出可审阅、可采用的正式成果。",
         expected_outputs=[spec.deliverable_title],
-        confirmation_actions=["采用成果", "提出修改", "交回主 Agent"],
+        confirmation_actions=["采用成果", "提出修改", "交回运营大脑"],
     )
     task.plan = OrchestrationPlan(
         summary=f"独立调用{spec.name}，成果进入人工验收。",
@@ -637,7 +637,7 @@ def _spec(code: AgentCode) -> AgentSpec:
     if spec is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="运营大脑请从主 Agent 对话入口使用",
+            detail="请从运营大脑对话入口使用此能力",
         )
     return spec
 
