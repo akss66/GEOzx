@@ -3,11 +3,11 @@ import {
   ClockCircleFilled,
   DownOutlined,
   LoadingOutlined,
-  MessageOutlined,
 } from "@ant-design/icons";
 import { Collapse, Empty } from "antd";
 import { useEffect, useMemo, useState } from "react";
 
+import { AgentAvatar } from "../agents/AgentAvatar";
 import {
   previewOrchestrationAdapter,
   type AgentStep,
@@ -54,9 +54,7 @@ export function AgentOrchestration({ goal }: Props) {
   return (
     <section className="dy-agent-stage" aria-label="专家团接力执行">
       <div className="dy-agent-master">
-        <div className="dy-agent-master-avatar">
-          <MessageOutlined />
-        </div>
+        <AgentAvatar code="00-decision" className="dy-agent-master-avatar" />
         <div>
           <div className="dy-agent-master-label">主 Agent</div>
           <p>{session.intro}</p>

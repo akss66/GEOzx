@@ -454,6 +454,9 @@ describe("BrainHome", () => {
     expect(conversation).toBeInTheDocument();
     expect(within(conversation).getByText("主 Agent")).toBeInTheDocument();
     expect(await screen.findByText("今天，想推进什么？")).toBeInTheDocument();
+    expect(
+      document.querySelector(".tz-brain-welcome__agent img"),
+    ).toHaveAttribute("src", "/main-agent-avatar.png");
     expect(conversation).not.toHaveTextContent("分析当前账号定位，生成下周内容计划");
     expect(conversation).not.toHaveTextContent("帮我诊断账号数据");
     expect(screen.queryByLabelText("需要用户确认")).not.toBeInTheDocument();
@@ -463,7 +466,7 @@ describe("BrainHome", () => {
     expect(screen.queryByRole("button", { name: /执行详情/ })).not.toBeInTheDocument();
   });
 
-  it("uses the Tongzhouxing brand mark for the main Agent identity", async () => {
+  it("uses the dedicated avatar for the main Agent identity", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_tasks",
       JSON.stringify({ version: 1, accounts: { 3: 12 } }),
@@ -475,7 +478,10 @@ describe("BrainHome", () => {
     await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
     const identities = screen.getAllByRole("img", { name: "主 Agent" });
     expect(identities.length).toBeGreaterThan(0);
-    expect(identities[0].querySelector("img")).toHaveAttribute("src", "/logo.png");
+    expect(identities[0].querySelector("img")).toHaveAttribute(
+      "src",
+      "/main-agent-avatar.png",
+    );
   });
 
   it("restores only the active task explicitly saved for the selected account", async () => {

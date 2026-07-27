@@ -617,7 +617,7 @@ function ConversationEmpty({
   return (
     <div className="tz-brain-welcome">
       <div className="tz-brain-welcome__agent">
-        <img src="/logo.png" alt="" />
+        <AgentAvatar code="00-decision" className="tz-brain-welcome__avatar" />
         <strong>主 Agent</strong>
       </div>
       <h1>{account ? "今天，想推进什么？" : "先选择一个抖音账号"}</h1>

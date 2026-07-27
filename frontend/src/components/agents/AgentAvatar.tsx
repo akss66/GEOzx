@@ -23,6 +23,8 @@ const EXPERT_ICONS: Partial<Record<AgentCode, ReactNode>> = {
   "08-customer-service": <CustomerServiceOutlined />,
 };
 
+const MAIN_AGENT_AVATAR_SRC = "/main-agent-avatar.png";
+
 export function AgentAvatar({
   code,
   className = "",
@@ -36,7 +38,7 @@ export function AgentAvatar({
   if (code === "00-decision") {
     return (
       <span className={`${classes} is-main-agent`} role="img" aria-label={label ?? "主 Agent"}>
-        <img src="/logo.png" alt="" />
+        <img src={MAIN_AGENT_AVATAR_SRC} alt="" />
       </span>
     );
   }

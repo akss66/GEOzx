@@ -142,10 +142,10 @@
   font-size: 13px;
 }
 
-.tz-brain-welcome__agent img {
+.tz-brain-welcome__avatar {
   width: 29px;
   height: 29px;
-  object-fit: contain;
+  border-radius: 9px;
 }
 
 .tz-brain-welcome h1 {

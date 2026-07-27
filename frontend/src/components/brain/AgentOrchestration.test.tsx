@@ -25,6 +25,11 @@ describe("AgentOrchestration", () => {
     render(<AgentOrchestration goal="为抖音账号做一轮冷启动内容规划" />);
 
     expect(screen.getByText("主 Agent")).toBeInTheDocument();
+    const mainAgentAvatar = screen.getByRole("img", { name: "主 Agent" });
+    expect(mainAgentAvatar.querySelector("img")).toHaveAttribute(
+      "src",
+      "/main-agent-avatar.png",
+    );
     expect(screen.getByText("账号定位专家")).toBeInTheDocument();
     expect(screen.queryByText("内容策略专家")).not.toBeInTheDocument();
 
