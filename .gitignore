@@ -47,6 +47,7 @@ frontend/.artifacts/
 .superpowers/
 .tools/
 .impeccable/
+.worktrees/
 cloudflare/**/.wrangler/
 cloudflare/**/.dev.vars
 抖音自媒体运营Agent团队配置表.xlsx
