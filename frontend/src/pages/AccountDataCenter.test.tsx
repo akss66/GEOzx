@@ -787,6 +787,50 @@ describe("AccountDataCenter", () => {
     expect(await screen.findByText("暂无导入历史")).toBeInTheDocument();
   });
 
+  it("selects the next preview batch after permanently deleting the active batch", async () => {
+    const current = buildBatchSummary();
+    const replacement = buildBatchSummary({ id: 82 });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus)
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports)
+      .mockResolvedValueOnce({ items: [current] })
+      .mockResolvedValueOnce({ items: [replacement] });
+    vi.mocked(getAccountDataImportBatch)
+      .mockResolvedValueOnce(buildPreviewBatch())
+      .mockResolvedValueOnce(
+        buildPreviewBatch({
+          id: 82,
+          artifacts: [
+            buildArtifact({
+              id: 502,
+              download_url: "/account-data/42/imports/82/artifacts/502",
+            }),
+          ],
+        }),
+      );
+    vi.mocked(deleteAccountDataImportBatch).mockResolvedValueOnce();
+
+    const { container } = renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
+
+    expect(await screen.findByText("批次 82")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(container.querySelector(".account-data-history-item.is-active"))
+        .toHaveTextContent("批次 82"),
+    );
+    expect(screen.getByRole("button", { name: "查看预览" })).toBeEnabled();
+  });
+
   it("keeps a batch visible when permanent deletion has a later-data conflict", async () => {
     const committed = buildBatchSummary({
       status: "committed",
