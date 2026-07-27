@@ -19,7 +19,7 @@ from app.core.approval_access import (
     task_project_ids,
 )
 from app.core.approval_audit import add_approval_decided
-from app.core.auth import CurrentUser
+from app.core.auth import AdminUser, CurrentUser
 from app.core.workspace_access import (
     accessible_account_ids,
     require_project_access,
@@ -34,6 +34,8 @@ from app.models import (
     BrainTask,
     DecisionTrace,
     DeliverableAcceptance,
+    ExperienceMemory,
+    LLMCall,
     MatrixDistributionItem,
     MatrixDistributionPlan,
     OrchestrationPlan,
@@ -49,6 +51,7 @@ from app.models.enums import (
     DeliverableAcceptanceStatus,
     Platform,
     RerunScope,
+    UserRole,
 )
 from app.orchestrator.brain_adapter import rerun_brain_acceptance
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
@@ -63,6 +66,9 @@ from app.orchestrator.generation_control import generation_control
 from app.schemas.ai_coo import (
     AgentQualityScoreOut,
     DecisionTraceOut,
+    ExperienceMemoryOut,
+    ExperienceVerificationRequest,
+    OperationIntelligenceOut,
     ReflectionRecordOut,
     StrategyPlanOut,
 )
@@ -81,6 +87,7 @@ from app.schemas.brain import (
     DeliverableAcceptanceOut,
     DraftBrainTaskRequest,
     IntentDecision,
+    LLMCallAuditOut,
     RegenerateBrainMessageRequest,
     RejudgeDeliverableRequest,
     RerunDeliverableRequest,
@@ -101,6 +108,7 @@ from app.services.agent_runs import (
     request_agent_run_cancel,
     utc_now,
 )
+from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.publishing import sync_publish_jobs_after_approval
 
 router = APIRouter(prefix="/brain", tags=["brain"])
@@ -510,7 +518,7 @@ async def create_brain_task_draft(
         )
     plan_steps = planning.steps if planning is not None else []
     expected_outputs = (
-        ["主 Agent 普通回复"]
+        ["运营大脑普通回复"]
         if is_casual
         else [str(step["expected_output"]) for step in plan_steps]
     )
@@ -547,7 +555,7 @@ async def create_brain_task_draft(
     )
     task.plan = OrchestrationPlan(
         summary=(
-            "主 Agent 将直接回应这条普通消息，不调用专家团。" if is_casual else planning.summary
+            "运营大脑将直接回应这条普通消息，不调用专家团。" if is_casual else planning.summary
         ),
         steps=plan_steps,
         quality_gates=[] if is_casual else quality_gate_labels(planning.quality_gates),
@@ -602,7 +610,7 @@ async def _send_brain_message(
                 },
             )
         existing_task = await _load_task_for_user(session, run.task_id, user)
-        return await _runtime_response(session, existing_task)
+        return await _runtime_response(session, existing_task, user)
 
     run_id = run.id
     if settings.agent_runtime_async_enabled and body.task_id is not None:
@@ -631,7 +639,7 @@ async def _send_brain_message(
                 body.message,
                 client_message_id=client_message_id,
             )
-            return await _runtime_response(session, existing_task)
+            return await _runtime_response(session, existing_task, user)
 
     run.status = "running"
     run.phase = "request"
@@ -754,7 +762,7 @@ async def _execute_brain_message(
             type=task_type,
             status=BrainTaskStatus.RUNNING,
             progress=0,
-            current_focus="主 Agent 正在理解你的消息",
+            current_focus="运营大脑正在理解你的消息",
             risk_count=1 if intent.intent == "action" else 0,
             runtime_mode="langgraph",
         )
@@ -768,7 +776,7 @@ async def _execute_brain_message(
             account_ids=bindings["account_ids"],
             cycle="当前对话",
             budget=None,
-            content_goal="由主 Agent 根据对话动态决定下一步。",
+            content_goal="由运营大脑根据对话动态决定下一步。",
             risk_constraints=risk_constraints,
             expected_outputs=expected_outputs,
             confirmation_actions=confirmation_actions,
@@ -785,7 +793,7 @@ async def _execute_brain_message(
         task.type = task_type
         task.status = BrainTaskStatus.RUNNING
         task.progress = 0
-        task.current_focus = "主 Agent 正在理解你的新消息"
+        task.current_focus = "运营大脑正在理解你的新消息"
         task.risk_count = 1 if intent.intent == "action" else 0
         task.runtime_mode = "langgraph"
         task.brief.goal = body.message
@@ -793,7 +801,7 @@ async def _execute_brain_message(
         task.brief.project_name = bindings["project_name"]
         task.brief.platforms = bindings["platforms"]
         task.brief.account_ids = bindings["account_ids"]
-        task.brief.content_goal = "由主 Agent 根据本轮消息动态决定下一步。"
+        task.brief.content_goal = "由运营大脑根据本轮消息动态决定下一步。"
         task.brief.risk_constraints = risk_constraints
         task.brief.expected_outputs = expected_outputs
         task.brief.confirmation_actions = confirmation_actions
@@ -836,7 +844,7 @@ async def _execute_brain_message(
         )
         await _submit_durable_agent_run(agent_run_id)
         task = await _load_task(session, task.id, user.org_id)
-        return await _runtime_response(session, task)
+        return await _runtime_response(session, task, user)
 
     generation_org_id = user.org_id
     generation_user_id = user.id
@@ -878,7 +886,7 @@ async def _execute_brain_message(
                 body.client_message_id,
             )
     task = await _load_task(session, generation_task_id, generation_org_id)
-    return await _runtime_response(session, task)
+    return await _runtime_response(session, task, user)
 
 
 @router.post(
@@ -991,7 +999,7 @@ async def get_task(task_id: int, user: CurrentUser, session: SessionDep) -> Brai
 @router.get("/tasks/{task_id}/runtime", response_model=BrainRuntimeOut)
 async def get_task_runtime(task_id: int, user: CurrentUser, session: SessionDep) -> BrainRuntimeOut:
     task = await _load_task_for_user(session, task_id, user)
-    return await _runtime_response(session, task)
+    return await _runtime_response(session, task, user)
 
 
 @router.get("/tasks/{task_id}/strategy", response_model=StrategyPlanOut | None)
@@ -1075,7 +1083,121 @@ async def get_task_reflection(
     return ReflectionRecordOut.model_validate(row) if row is not None else None
 
 
-async def _runtime_response(session: AsyncSession, task: BrainTask) -> BrainRuntimeOut:
+@router.post(
+    "/tasks/{task_id}/observation/refresh",
+    response_model=ReflectionRecordOut,
+)
+@router.post(
+    "/tasks/{task_id}/resume-observation",
+    response_model=ReflectionRecordOut,
+)
+async def refresh_task_observation(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ReflectionRecordOut:
+    task = await _load_task_for_user(session, task_id, user)
+    try:
+        reflection = await runtime_graph.refresh_observation(session, task)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return ReflectionRecordOut.model_validate(reflection)
+
+
+@router.get(
+    "/tasks/{task_id}/experience-memories",
+    response_model=list[ExperienceMemoryOut],
+)
+async def get_task_experience_memories(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> list[ExperienceMemoryOut]:
+    task = await _load_task_for_user(session, task_id, user)
+    rows = (
+        await session.scalars(
+            select(ExperienceMemory)
+            .where(
+                ExperienceMemory.task_id == task.id,
+                ExperienceMemory.org_id == task.org_id,
+            )
+            .order_by(ExperienceMemory.id)
+        )
+    ).all()
+    return [ExperienceMemoryOut.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/tasks/{task_id}/experience-candidates/{candidate_key}/verify",
+    response_model=ExperienceMemoryOut,
+)
+async def verify_task_experience_candidate(
+    task_id: int,
+    candidate_key: str,
+    body: ExperienceVerificationRequest,
+    admin: AdminUser,
+    session: SessionDep,
+) -> ExperienceMemoryOut:
+    if body.candidate_key != candidate_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="候选经验标识不一致",
+        )
+    task = await _load_task_for_user(session, task_id, admin)
+    reflection = await session.scalar(
+        select(ReflectionRecord)
+        .where(
+            ReflectionRecord.task_id == task.id,
+            ReflectionRecord.org_id == task.org_id,
+        )
+        .order_by(ReflectionRecord.id.desc())
+        .limit(1)
+    )
+    if reflection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="任务尚未形成可核验的复盘记录",
+        )
+    try:
+        memory = await ai_coo_learning_service.verify_experience_candidate(
+            session,
+            reflection=reflection,
+            candidate_key=candidate_key,
+            verified_by_id=admin.id,
+            verification_note=body.verification_note,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return ExperienceMemoryOut.model_validate(memory)
+
+
+@router.get(
+    "/tasks/{task_id}/operation-intelligence",
+    response_model=OperationIntelligenceOut,
+)
+async def get_task_operation_intelligence(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> OperationIntelligenceOut:
+    task = await _load_task_for_user(session, task_id, user)
+    return await ai_coo_learning_service.operation_intelligence(
+        session,
+        task=task,
+    )
+
+
+async def _runtime_response(
+    session: AsyncSession,
+    task: BrainTask,
+    viewer,
+) -> BrainRuntimeOut:
     tool_calls = (
         await session.scalars(
             select(AgentToolCall)
@@ -1091,6 +1213,70 @@ async def _runtime_response(session: AsyncSession, task: BrainTask) -> BrainRunt
     events = await runtime_events(session, task.id)
     intent = _runtime_intent(events)
     pending_decisions = _pending_runtime_decisions(events)
+    strategy = await session.scalar(
+        select(StrategyPlan)
+        .where(
+            StrategyPlan.task_id == task.id,
+            StrategyPlan.org_id == task.org_id,
+        )
+        .order_by(StrategyPlan.version.desc(), StrategyPlan.id.desc())
+        .limit(1)
+    )
+    decisions = (
+        await session.scalars(
+            select(DecisionTrace)
+            .where(
+                DecisionTrace.task_id == task.id,
+                DecisionTrace.org_id == task.org_id,
+            )
+            .order_by(DecisionTrace.id)
+        )
+    ).all()
+    quality_scores = (
+        await session.scalars(
+            select(AgentQualityScore)
+            .where(
+                AgentQualityScore.task_id == task.id,
+                AgentQualityScore.org_id == task.org_id,
+            )
+            .order_by(AgentQualityScore.id)
+        )
+    ).all()
+    reflection = await session.scalar(
+        select(ReflectionRecord)
+        .where(
+            ReflectionRecord.task_id == task.id,
+            ReflectionRecord.org_id == task.org_id,
+        )
+        .order_by(ReflectionRecord.id.desc())
+        .limit(1)
+    )
+    experience_memories = (
+        await session.scalars(
+            select(ExperienceMemory)
+            .where(
+                ExperienceMemory.task_id == task.id,
+                ExperienceMemory.org_id == task.org_id,
+            )
+            .order_by(ExperienceMemory.id)
+        )
+    ).all()
+    operation_intelligence = await ai_coo_learning_service.operation_intelligence(
+        session,
+        task=task,
+    )
+    llm_calls = []
+    if viewer.role == UserRole.ADMIN:
+        llm_calls = (
+            await session.scalars(
+                select(LLMCall)
+                .where(
+                    LLMCall.task_id == task.id,
+                    LLMCall.org_id == task.org_id,
+                )
+                .order_by(LLMCall.id)
+            )
+        ).all()
     return BrainRuntimeOut(
         task=BrainTaskOut.model_validate(task),
         thread_id=task.thread_id,
@@ -1102,6 +1288,19 @@ async def _runtime_response(session: AsyncSession, task: BrainTask) -> BrainRunt
         pending_permissions=[AgentToolCallOut.model_validate(row) for row in pending_permissions],
         intent=intent,
         pending_decisions=pending_decisions,
+        strategy=StrategyPlanOut.model_validate(strategy) if strategy is not None else None,
+        decisions=[DecisionTraceOut.model_validate(row) for row in decisions],
+        quality_scores=[AgentQualityScoreOut.model_validate(row) for row in quality_scores],
+        reflection=(
+            ReflectionRecordOut.model_validate(reflection)
+            if reflection is not None
+            else None
+        ),
+        experience_memories=[
+            ExperienceMemoryOut.model_validate(row) for row in experience_memories
+        ],
+        operation_intelligence=operation_intelligence,
+        llm_calls=[LLMCallAuditOut.model_validate(row) for row in llm_calls],
         next_actions=await next_actions(session, task),
     )
 
@@ -1165,7 +1364,7 @@ async def select_brain_decision(
             choice_title=choice.title,
         )
         task.status = BrainTaskStatus.RUNNING
-        task.current_focus = "主 Agent 正在根据你的选择恢复执行"
+        task.current_focus = "运营大脑正在根据你的选择恢复执行"
         await session.commit()
         await _queue_runtime_resume(
             session,
@@ -1188,7 +1387,11 @@ async def select_brain_decision(
             choice_id=choice.id,
             choice_title=choice.title,
         )
-    return await _runtime_response(session, await _load_task(session, task.id, user.org_id))
+    return await _runtime_response(
+        session,
+        await _load_task(session, task.id, user.org_id),
+        user,
+    )
 
 
 @router.post(
@@ -1217,7 +1420,11 @@ async def revise_brain_decision(
         comment=body.comment,
         request_new_options=body.request_new_options,
     )
-    return await _runtime_response(session, await _load_task(session, task.id, user.org_id))
+    return await _runtime_response(
+        session,
+        await _load_task(session, task.id, user.org_id),
+        user,
+    )
 
 
 @router.post("/tasks/{task_id}/confirm", response_model=BrainTaskOut)
@@ -1433,7 +1640,7 @@ async def approve_tool_call(
     if settings.agent_runtime_async_enabled:
         if remaining_permission is None:
             task.status = BrainTaskStatus.RUNNING
-            task.current_focus = "主 Agent 正在恢复受控任务"
+            task.current_focus = "运营大脑正在恢复受控任务"
             await session.commit()
             await _queue_runtime_resume(
                 session,

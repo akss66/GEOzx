@@ -8,6 +8,26 @@
 
 **Tech Stack:** FastAPI、SQLAlchemy 2、Alembic、Pydantic v2、LangGraph、PostgreSQL/SQLite、React、TypeScript、Vitest。
 
+## Verified Implementation Status
+
+截至 2026-07-27，本计划的代码实现与自动化质量门已经完成：
+
+- 五类 AI COO 运营语义表、严格 schema、迁移与旧任务兼容已落地。
+- 证据支持的态势服务、策略/决策/质量/反思/经验 API 已落地。
+- 主运行图和观测运行图已接入真实 LangGraph Runtime，不使用页面 Mock 代替执行。
+- Critic 五维评分、最多两轮改进、人工权限门、反思和经验验证已落地。
+- Operation Intelligence 使用 30/25/25/20 确定性权重。
+- 运营大脑对话流和管理员执行详情已接入真实 Runtime 数据。
+- Ruff 0 错误；后端全量 618 项、迁移 13 项、前端 281 项测试通过；生产构建通过。
+
+尚未由自动化替代、必须人工完成的验收：
+
+- 使用真实模型和真实账号跑通目标、策略、专家、Critic 与人工审批。
+- 投稿能力获批后跑通抖音 H5 投稿、作品绑定和回流。
+- 真实观测周期结束后验证效果分析、反思和经验晋升。
+
+下方原始任务清单保留，用于追溯实施设计和测试意图；实际文件拆分以当前代码为准。
+
 ## Global Constraints
 
 - 保持已有 API、数据库模型、权限体系向后兼容。

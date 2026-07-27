@@ -26,10 +26,12 @@ import {
   listBrainTasks,
   rejectDeliverableAcceptance,
   regenerateBrainMessage,
+  refreshBrainObservation,
   reviseBrainDecision,
   selectBrainDecision,
   sendBrainMessage,
   stopBrainGeneration,
+  verifyBrainExperienceCandidate,
 } from "../api/brain";
 import { presentApiError } from "../api/errors";
 import { getWorkspaceContext } from "../api/shell";
@@ -47,10 +49,15 @@ import {
   getActiveBrainTaskId,
   setActiveBrainTaskId,
 } from "../stores/brainConversation";
+import { useAuth } from "../stores/auth";
 import {
   resolveWorkspaceAccount,
   useCurrentWorkspace,
 } from "../stores/currentWorkspace";
+import {
+  OPERATIONS_BRAIN_DISPLAY_NAME,
+  presentOperationsBrainSystemCopy,
+} from "../utils/operationsBrainCopy";
 import type {
   Account,
   AgentInvocation,
@@ -101,6 +108,7 @@ export default function BrainHome() {
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [approvalComment, setApprovalComment] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
   const { clientId, projectId, platform, accountId } = useCurrentWorkspace();
   const location = useLocation();
@@ -295,6 +303,52 @@ export default function BrainHome() {
     ),
   });
 
+  const refreshObservationMutation = useMutation({
+    mutationFn: (taskId: number) => refreshBrainObservation(taskId),
+    onSuccess: (reflection, taskId) => {
+      qc.setQueryData<BrainRuntime>(["brain-runtime", taskId], (current) =>
+        current ? { ...current, reflection } : current
+      );
+      void qc.invalidateQueries({
+        queryKey: ["brain-runtime", taskId],
+        refetchType: "none",
+      });
+      if (reflection.status === "observed") {
+        message.success("已回收最新真实效果数据");
+      } else {
+        message.info("当前观察窗口尚未满足，系统会保留待回查状态");
+      }
+    },
+    onError: (error) => message.error(
+      presentApiError(error, "真实效果回查失败，请稍后重试。").message,
+    ),
+  });
+
+  const verifyExperienceMutation = useMutation({
+    mutationFn: (input: {
+      taskId: number;
+      candidateKey: string;
+      verificationNote: string;
+    }) => verifyBrainExperienceCandidate(input),
+    onSuccess: (memory, input) => {
+      qc.setQueryData<BrainRuntime>(["brain-runtime", input.taskId], (current) => {
+        if (!current) return current;
+        const memories = current.experience_memories ?? [];
+        return {
+          ...current,
+          experience_memories: [
+            ...memories.filter((item) => item.id !== memory.id),
+            memory,
+          ],
+        };
+      });
+      message.success("该经验已通过人工核验并沉淀");
+    },
+    onError: (error) => message.error(
+      presentApiError(error, "经验核验失败，请检查依据后重试。").message,
+    ),
+  });
+
   const tasks = useMemo(
     () => mergeTasks(localTasks, tasksQuery.data ?? []),
     [localTasks, tasksQuery.data],
@@ -358,7 +412,7 @@ export default function BrainHome() {
     if (isGenerating) return;
     const trimmed = goal.trim();
     if (!trimmed) {
-      message.warning("先写下要交给主 Agent 的运营目标");
+      message.warning("先写下要交给运营大脑的运营目标");
       return;
     }
     if (!effectiveAccount) {
@@ -437,7 +491,7 @@ export default function BrainHome() {
           <AgentAvatar code="00-decision" className="tz-brain-wordmark" />
           <div>
             <strong>运营大脑</strong>
-            <span>主 Agent · 目标理解与专家编排</span>
+            <span>运营大脑 · 目标理解与专家编排</span>
           </div>
         </div>
         <div className="tz-brain-toolbar-actions">
@@ -455,7 +509,7 @@ export default function BrainHome() {
           <OperationalState
             kind="error"
             title="运营上下文加载失败"
-            description="当前账号选择不会被替换。重新加载后，主 Agent 会继续使用顶部明确选择的账号。"
+            description="当前账号选择不会被替换。重新加载后，运营大脑会继续使用顶部明确选择的账号。"
             diagnostic={contextError.diagnostic}
             actionLabel="重新加载"
             onAction={() => void contextQuery.refetch()}
@@ -576,7 +630,19 @@ export default function BrainHome() {
         onClose={() => setDetailsOpen(false)}
         className="tz-brain-details-drawer"
       >
-        <ExecutionDetails task={visibleTask} runtime={visibleRuntime} />
+        <ExecutionDetails
+          task={visibleTask}
+          runtime={visibleRuntime}
+          isAdmin={isAdmin}
+          refreshingObservation={refreshObservationMutation.isPending}
+          verifyingCandidateKey={
+            verifyExperienceMutation.isPending
+              ? verifyExperienceMutation.variables?.candidateKey ?? null
+              : null
+          }
+          onRefreshObservation={(taskId) => refreshObservationMutation.mutate(taskId)}
+          onVerifyCandidate={(input) => verifyExperienceMutation.mutate(input)}
+        />
       </Drawer>
     </div>
   );
@@ -618,7 +684,7 @@ function ConversationEmpty({
     <div className="tz-brain-welcome">
       <div className="tz-brain-welcome__agent">
         <AgentAvatar code="00-decision" className="tz-brain-welcome__avatar" />
-        <strong>主 Agent</strong>
+        <strong>运营大脑</strong>
       </div>
       <h1>{account ? "今天，想推进什么？" : "先选择一个抖音账号"}</h1>
       <p>
@@ -700,6 +766,8 @@ function ConversationStream({
         );
       })}
 
+      <AICOOConversationRecord runtime={runtime} />
+
       {(runtime.pending_decisions ?? []).map((decision) => (
         <DecisionRequest
           key={decision.id}
@@ -742,6 +810,128 @@ function ConversationStream({
   );
 }
 
+function AICOOConversationRecord({ runtime }: { runtime: BrainRuntime }) {
+  const strategy = runtime.strategy;
+  const qualityScores = runtime.quality_scores ?? [];
+  const quality = qualityScores[qualityScores.length - 1] ?? null;
+  const decisions = runtime.decisions ?? [];
+  const decision = decisions[decisions.length - 1] ?? null;
+  const reflection = runtime.reflection;
+
+  if (!strategy && !quality && !reflection) return null;
+
+  const periodDays = recordNumber(strategy?.strategy, "period_days") ?? 30;
+  const primaryAction =
+    recordText(decision?.selected_option, "title")
+    || recordText(strategy?.strategy, "primary_action");
+  const nextStrategy = nextStrategyCopy(reflection?.next_strategy);
+
+  return (
+    <article className="tz-coo-record" aria-label="AI COO 运营决策">
+      <AgentAvatar code="00-decision" className="tz-coo-record-avatar" />
+      <div className="tz-coo-record-body">
+        <header className="tz-coo-record-head">
+          <div>
+            <span>运营大脑 · 运营决策</span>
+            {strategy ? <strong>{periodDays} 天运营策略</strong> : <strong>运营复盘</strong>}
+          </div>
+          {quality ? (
+            <Tag color={quality.passed ? "success" : "warning"} style={{ marginInlineEnd: 0 }}>
+              质量审核 {Math.round(quality.score)} 分
+            </Tag>
+          ) : null}
+        </header>
+
+        {strategy ? (
+          <>
+            <p className="tz-coo-record-goal">{cleanBrainCopy(strategy.goal)}</p>
+            {strategy.rationale_summary ? (
+              <p className="tz-coo-record-summary">
+                {cleanBrainCopy(strategy.rationale_summary)}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+
+        {primaryAction ? (
+          <section className="tz-coo-decision">
+            <span>关键决定</span>
+            <strong>{cleanBrainCopy(primaryAction)}</strong>
+            {decision?.decision_reason ? (
+              <p>{cleanBrainCopy(decision.decision_reason)}</p>
+            ) : null}
+            {decision?.action_summary ? (
+              <p>{cleanBrainCopy(decision.action_summary)}</p>
+            ) : null}
+          </section>
+        ) : null}
+
+        {strategy && (
+          strategy.kpis.length > 0
+          || strategy.risks.length > 0
+          || strategy.evidence_refs.length > 0
+          || (quality?.issues.length ?? 0) > 0
+          || (quality?.suggestions.length ?? 0) > 0
+        ) ? (
+          <details className="tz-coo-record-details">
+            <summary>查看策略依据与审核意见</summary>
+            <div>
+              {strategy.kpis.length > 0 ? (
+                <section>
+                  <strong>关键指标</strong>
+                  <ul>
+                    {strategy.kpis.map((item, index) => (
+                      <li key={`kpi-${index}`}>{kpiCopy(item)}</li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {strategy.risks.length > 0 ? (
+                <section>
+                  <strong>主要风险</strong>
+                  <ul>
+                    {strategy.risks.map((risk) => (
+                      <li key={risk}>{cleanBrainCopy(risk)}</li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {quality && (quality.issues.length > 0 || quality.suggestions.length > 0) ? (
+                <section>
+                  <strong>质量审核</strong>
+                  <ul>
+                    {[...quality.issues, ...quality.suggestions].map((item) => (
+                      <li key={item}>{cleanBrainCopy(item)}</li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {strategy.evidence_refs.length > 0 ? (
+                <p className="tz-coo-evidence-count">
+                  已引用 {strategy.evidence_refs.length} 条真实数据依据
+                </p>
+              ) : null}
+            </div>
+          </details>
+        ) : null}
+
+        {reflection ? (
+          <section className="tz-coo-reflection">
+            <span>复盘结论</span>
+            <p>{cleanBrainCopy(reflection.conclusion)}</p>
+            {nextStrategy ? (
+              <>
+                <span>下一轮建议</span>
+                <p>{nextStrategy}</p>
+              </>
+            ) : null}
+          </section>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
 function PendingConversation({ turn }: { turn: PendingTurn }) {
   return (
     <div className="dy-brain-message-stack" aria-live="polite">
@@ -777,7 +967,11 @@ function AgentMessage({ message }: { message: LiveRuntimeMessage }) {
       <AgentAvatar code="00-decision" className="dy-chat-avatar" />
       <div className="dy-chat-bubble">
         <div className="dy-chat-title-line">
-          <span>{hasSystemError ? "系统提示" : message.agentName}</span>
+          <span>
+            {hasSystemError
+              ? "系统提示"
+              : presentOperationsBrainSystemCopy(message.agentName)}
+          </span>
           <Tag style={{ marginInlineEnd: 0 }}>
             {hasSystemError
               ? "需配置"
@@ -800,7 +994,7 @@ function RuntimeStatusMessage({ content }: { content: string }) {
   return (
     <div className="tz-brain-handoff" role="status">
       <span aria-hidden="true" />
-      <p>{cleanBrainCopy(content)}</p>
+      <p>{presentOperationsBrainSystemCopy(cleanBrainCopy(content))}</p>
     </div>
   );
 }
@@ -849,7 +1043,7 @@ function ExpertMessage({
         </Typography.Paragraph>
         {lifecycleMessage ? (
           <p className="dy-chat-expert-lifecycle" role="status">
-            {cleanBrainCopy(lifecycleMessage)}
+            {presentOperationsBrainSystemCopy(cleanBrainCopy(lifecycleMessage))}
           </p>
         ) : null}
         <details className="dy-chat-expert-details">
@@ -950,9 +1144,23 @@ function ArtifactMessage({
 function ExecutionDetails({
   task,
   runtime,
+  isAdmin,
+  refreshingObservation,
+  verifyingCandidateKey,
+  onRefreshObservation,
+  onVerifyCandidate,
 }: {
   task: BrainTask | null;
   runtime: BrainRuntime | null;
+  isAdmin: boolean;
+  refreshingObservation: boolean;
+  verifyingCandidateKey: string | null;
+  onRefreshObservation: (taskId: number) => void;
+  onVerifyCandidate: (input: {
+    taskId: number;
+    candidateKey: string;
+    verificationNote: string;
+  }) => void;
 }) {
   if (!task) {
     return (
@@ -975,7 +1183,9 @@ function ExecutionDetails({
           </div>
           <div>
             <ExclamationCircleFilled />
-            <span>{cleanBrainCopy(task.current_focus)}</span>
+            <span>
+              {presentOperationsBrainSystemCopy(cleanBrainCopy(task.current_focus))}
+            </span>
           </div>
           {task.brief.risk_constraints.map((risk) => (
             <div key={risk}>
@@ -1015,7 +1225,270 @@ function ExecutionDetails({
           </div>
         </section>
       )}
+
+      {runtime?.operation_intelligence ? (
+        <OperationIntelligenceDetails value={runtime.operation_intelligence} />
+      ) : null}
+
+      {runtime && isAdmin ? <ModelCallAudit runtime={runtime} /> : null}
+
+      {runtime ? (
+        <section className="tz-observation-control">
+          <div className="tz-observation-control__head">
+            <div>
+              <h3>效果回查</h3>
+              <p>{observationStatusCopy(runtime.reflection)}</p>
+            </div>
+            <Button
+              aria-label="检查最新效果"
+              icon={<RedoOutlined />}
+              loading={refreshingObservation}
+              onClick={() => onRefreshObservation(runtime.task.id)}
+            >
+              检查最新效果
+            </Button>
+          </div>
+
+          {runtime.reflection?.status === "observed" ? (
+            <ExperienceCandidateList
+              taskId={runtime.task.id}
+              candidates={runtime.reflection.experience_candidates}
+              verifiedMemories={runtime.experience_memories ?? []}
+              verifyingCandidateKey={verifyingCandidateKey}
+              onVerify={onVerifyCandidate}
+            />
+          ) : null}
+        </section>
+      ) : null}
     </div>
+  );
+}
+
+function ModelCallAudit({ runtime }: { runtime: BrainRuntime }) {
+  const promptContracts = [
+    runtime.strategy?.prompt_id
+      ? {
+          key: "strategy",
+          label: "策略规划",
+          id: runtime.strategy.prompt_id,
+          version: runtime.strategy.prompt_version,
+        }
+      : null,
+    ...(runtime.quality_scores ?? [])
+      .filter((item) => item.critic_prompt_id)
+      .map((item) => ({
+        key: `critic-${item.id}`,
+        label: `质量审核 · 第 ${item.iteration} 轮`,
+        id: item.critic_prompt_id,
+        version: item.critic_prompt_version,
+      })),
+  ].filter((item): item is {
+    key: string;
+    label: string;
+    id: string;
+    version: string | null | undefined;
+  } => item != null);
+
+  return (
+    <section className="tz-model-audit">
+      <div className="tz-model-audit__head">
+        <div>
+          <h3>模型调用审计</h3>
+          <p>仅管理员可见的安全摘要，不包含密钥与原始上下文。</p>
+        </div>
+        <Tag bordered={false}>管理员</Tag>
+      </div>
+
+      {promptContracts.length > 0 ? (
+        <div className="tz-model-audit__contracts">
+          {promptContracts.map((item) => (
+            <div key={item.key}>
+              <span>{item.label}</span>
+              <strong>{item.id} · {item.version ?? "未标记版本"}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {(runtime.llm_calls ?? []).length > 0 ? (
+        <div className="tz-model-audit__calls">
+          {(runtime.llm_calls ?? []).map((call) => (
+            <article key={call.id}>
+              <div className="tz-model-audit__call-head">
+                <div>
+                  <strong>{call.agent_code ?? "runtime"} · {call.model}</strong>
+                  <span>{call.provider}</span>
+                </div>
+                <Tag color={call.status === "success" ? "success" : "error"}>
+                  {call.status === "success" ? "成功" : "异常"}
+                </Tag>
+              </div>
+              <p>{call.prompt_id ?? "未记录 Prompt"} · {call.prompt_version ?? "未标记版本"}</p>
+              <div className="tz-model-audit__metrics">
+                <span>{call.total_tokens} Token</span>
+                <span>${Number(call.cost_usd).toFixed(4)}</span>
+                <span>{call.latency_ms} ms</span>
+              </div>
+              {call.error ? <div className="tz-model-audit__error">{call.error}</div> : null}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="tz-model-audit__empty">本任务暂未记录模型调用。</p>
+      )}
+    </section>
+  );
+}
+
+function OperationIntelligenceDetails({
+  value,
+}: {
+  value: NonNullable<BrainRuntime["operation_intelligence"]>;
+}) {
+  const componentLabels: Record<string, string> = {
+    strategy_quality: "策略质量",
+    evidence_quality: "数据依据",
+    execution_effect: "执行效果",
+    learning_quality: "学习能力",
+  };
+
+  return (
+    <section className="tz-operation-score">
+      <h3>运营智能评分</h3>
+      <div className="tz-operation-score__headline">
+        <strong>{Math.round(value.score)}</strong>
+        <div>
+          <span>本轮综合评分</span>
+          <p>{dataSufficiencyCopy(value.data_sufficiency)}</p>
+        </div>
+      </div>
+      <div className="tz-operation-score__components">
+        {Object.entries(value.components).map(([key, score]) => (
+          <div key={key}>
+            <span>{componentLabels[key] ?? "运营能力"}</span>
+            <strong>{Math.round(score)}</strong>
+          </div>
+        ))}
+      </div>
+      {value.basis.length > 0 ? (
+        <details>
+          <summary>查看评分依据</summary>
+          <ul>
+            {value.basis.map((item) => (
+              <li key={item}>{cleanBrainCopy(item)}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function ExperienceCandidateList({
+  taskId,
+  candidates,
+  verifiedMemories,
+  verifyingCandidateKey,
+  onVerify,
+}: {
+  taskId: number;
+  candidates: Record<string, unknown>[];
+  verifiedMemories: NonNullable<BrainRuntime["experience_memories"]>;
+  verifyingCandidateKey: string | null;
+  onVerify: (input: {
+    taskId: number;
+    candidateKey: string;
+    verificationNote: string;
+  }) => void;
+}) {
+  const pendingCandidates = candidates.filter(
+    (candidate) => !verifiedMemories.some(
+      (memory) =>
+        memory.action === recordText(candidate, "action")
+        && memory.condition === recordText(candidate, "condition"),
+    ),
+  );
+
+  if (pendingCandidates.length === 0) {
+    return (
+      <p className="tz-observation-control__empty">
+        本轮没有待核验的运营经验。只有真实数据支持的候选才会出现在这里。
+      </p>
+    );
+  }
+
+  return (
+    <div className="tz-experience-candidates">
+      <strong>待人工核验的经验候选</strong>
+      {pendingCandidates.map((candidate, index) => {
+        const key = recordText(candidate, "key") || `candidate-${index}`;
+        return (
+          <ExperienceCandidate
+            key={key}
+            taskId={taskId}
+            candidateKey={key}
+            candidate={candidate}
+            verifying={verifyingCandidateKey === key}
+            onVerify={onVerify}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function ExperienceCandidate({
+  taskId,
+  candidateKey,
+  candidate,
+  verifying,
+  onVerify,
+}: {
+  taskId: number;
+  candidateKey: string;
+  candidate: Record<string, unknown>;
+  verifying: boolean;
+  onVerify: (input: {
+    taskId: number;
+    candidateKey: string;
+    verificationNote: string;
+  }) => void;
+}) {
+  const [note, setNote] = useState("");
+  const action = recordText(candidate, "action");
+  const condition = recordText(candidate, "condition");
+  const result = recordText(candidate, "result");
+  const confidence = recordNumber(candidate, "confidence");
+
+  return (
+    <article className="tz-experience-candidate">
+      <div>
+        <span>{condition || "已满足真实数据观察条件"}</span>
+        <strong>{action || "待核验运营动作"}</strong>
+        {result ? <p>{result}</p> : null}
+        {confidence != null ? (
+          <small>数据置信度 {Math.round(confidence * 100)}%</small>
+        ) : null}
+      </div>
+      <Input.TextArea
+        value={note}
+        rows={2}
+        maxLength={500}
+        placeholder="写下人工核验依据"
+        onChange={(event) => setNote(event.target.value)}
+      />
+      <Button
+        loading={verifying}
+        disabled={!note.trim()}
+        onClick={() => onVerify({
+          taskId,
+          candidateKey,
+          verificationNote: note.trim(),
+        })}
+      >
+        确认沉淀经验
+      </Button>
+    </article>
   );
 }
 
@@ -1146,7 +1619,7 @@ function pendingAgentMessage(turn: PendingTurn): LiveRuntimeMessage {
     id: `${turn.clientMessageId}:pending`,
     taskId: turn.taskId ?? -1,
     agentCode: "00-decision",
-    agentName: "主 Agent",
+    agentName: OPERATIONS_BRAIN_DISPLAY_NAME,
     content: "",
     status: "streaming",
   };
@@ -1178,7 +1651,7 @@ function runtimeMessageFromEvent(runtime: BrainRuntime, event: BrainRuntime["tim
     id: String(payload.message_id ?? event.id),
     taskId: runtime.task.id,
     agentCode: String(payload.agent_code ?? ""),
-    agentName: String(payload.agent_name ?? "Agent"),
+    agentName: presentOperationsBrainSystemCopy(String(payload.agent_name ?? "Agent")),
     model: typeof payload.model === "string" ? payload.model : undefined,
     content: String(payload.content ?? payload.message ?? payload.error ?? ""),
     status: event.type.endsWith("error") ? "error" : "done",
@@ -1209,7 +1682,9 @@ function ingestRuntimeEvent(
   const taskId = Number(payload.task_id);
   const id = String(payload.message_id);
   const agentCode = String(payload.agent_code ?? "");
-  const agentName = String(payload.agent_name ?? (agentCode || "Agent"));
+  const agentName = presentOperationsBrainSystemCopy(
+    String(payload.agent_name ?? (agentCode || "Agent")),
+  );
   const model = typeof payload.model === "string" ? payload.model : undefined;
 
   if (event.type === "brain.runtime.message_start") {
@@ -1294,7 +1769,7 @@ function cleanBrainCopy(value: string) {
 }
 
 function formatAgentContent(value: string) {
-  const cleaned = cleanBrainCopy(value).trim();
+  const cleaned = presentOperationsBrainSystemCopy(cleanBrainCopy(value)).trim();
   const parsed = parseJsonObject(cleaned);
   if (!parsed) return cleaned;
   return objectToReadableSummary(parsed);
@@ -1362,6 +1837,76 @@ function readableKey(key: string) {
   return labels[key] ?? key.replace(/_/g, " ");
 }
 
+function recordText(value: Record<string, unknown> | null | undefined, key: string) {
+  const entry = value?.[key];
+  return typeof entry === "string" ? entry.trim() : "";
+}
+
+function recordNumber(value: Record<string, unknown> | null | undefined, key: string) {
+  const entry = value?.[key];
+  if (typeof entry === "number" && Number.isFinite(entry)) return entry;
+  if (typeof entry === "string") {
+    const parsed = Number(entry);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function kpiCopy(value: Record<string, unknown>) {
+  const metricLabels: Record<string, string> = {
+    qualified_leads: "有效咨询",
+    views: "播放量",
+    completion_rate: "完播率",
+    engagement_rate: "互动率",
+    follower_growth: "粉丝增长",
+  };
+  const metric = recordText(value, "metric");
+  const target = value.target;
+  const targetText =
+    typeof target === "number" || typeof target === "string"
+      ? String(target)
+      : "待确认";
+  return `${metricLabels[metric] ?? cleanBrainCopy(metric || "运营指标")}：${targetText}`;
+}
+
+function nextStrategyCopy(value: Record<string, unknown> | null | undefined) {
+  const action = recordText(value, "action");
+  const actions: Record<string, string> = {
+    continue_and_expand_observation: "延续当前有效策略，并扩大真实数据观察窗口。",
+    adjust_strategy: "根据本轮偏差调整策略，再进入下一轮执行。",
+    wait_for_measurement: "等待结果数据满足观察窗口后再做策略判断。",
+    stop_and_review: "暂停扩展执行，先完成风险与目标复核。",
+  };
+  if (actions[action]) return actions[action];
+  const recommendation =
+    recordText(value, "recommendation")
+    || recordText(value, "summary")
+    || recordText(value, "next_action");
+  return recommendation ? cleanBrainCopy(recommendation) : "";
+}
+
+function dataSufficiencyCopy(value: "insufficient" | "partial" | "sufficient") {
+  const labels = {
+    insufficient: "真实数据不足，评分仅供风险判断",
+    partial: "已有部分真实数据，建议继续观察",
+    sufficient: "真实数据满足本轮评估条件",
+  };
+  return labels[value];
+}
+
+function observationStatusCopy(reflection: BrainRuntime["reflection"]) {
+  if (!reflection) {
+    return "任务完成后可检查真实效果；系统不会用模型猜测结果。";
+  }
+  const labels: Record<string, string> = {
+    pending_observation: "正在等待真实数据满足观察窗口。",
+    observed: reflection.conclusion || "已回收本轮真实效果。",
+    insufficient_data: "当前真实数据不足，暂不形成运营结论。",
+    failed: "最近一次效果回查失败，请检查数据源后重试。",
+  };
+  return cleanBrainCopy(labels[reflection.status] ?? reflection.conclusion);
+}
+
 function runtimeProgressCopy(runtime: BrainRuntime) {
   if (runtime.pending_permissions.length > 0) {
     return `等待你确认：${toolCallHumanName(runtime.pending_permissions[0])}`;
@@ -1371,14 +1916,14 @@ function runtimeProgressCopy(runtime: BrainRuntime) {
   if (runtime.status === "completed") {
     return runtime.invocations.length > 0
       ? "本轮专家协作已完成"
-      : "主 Agent 已完成本轮回复";
+      : "运营大脑已完成本轮回复";
   }
   if (runtime.status === "failed") return "运行失败，需要处理";
   const runningExpert = runtime.invocations.find((item) => item.status === "running");
   if (runningExpert) return `${runningExpert.agent_name} 正在处理`;
   const lastExpert = [...runtime.invocations].reverse().find((item) => item.status === "done");
-  if (lastExpert) return `${lastExpert.agent_name} 已完成，主 Agent 正在推进下一步`;
-  return "主 Agent 正在理解目标并组织专家";
+  if (lastExpert) return `${lastExpert.agent_name} 已完成，运营大脑正在推进下一步`;
+  return "运营大脑正在理解目标并组织专家";
 }
 
 function expertRoleCopy(code: AgentInvocation["agent_code"]) {

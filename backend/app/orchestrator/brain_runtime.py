@@ -31,10 +31,33 @@ from app.llm.gateway import (
     reset_stream_observer,
     set_stream_observer,
 )
-from app.models import Account, AgentInvocation, AgentToolCall, BrainTask, Event, User
-from app.models.enums import AgentCode, BrainTaskStatus
+from app.models import (
+    Account,
+    AgentInvocation,
+    AgentToolCall,
+    BrainTask,
+    Deliverable,
+    DeliverableAcceptance,
+    Event,
+    ReflectionRecord,
+    StrategyPlan,
+    User,
+)
+from app.models.enums import (
+    AgentCode,
+    BrainTaskStatus,
+    DeliverableAcceptanceStatus,
+)
 from app.orchestrator.agent_harness import agent_harness
+from app.orchestrator.agent_identity import (
+    OPERATIONS_BRAIN_DISPLAY_NAME,
+    with_operations_brain_public_identity,
+)
 from app.orchestrator.agent_kernel import AgentKernelPolicyError, main_kernel_policy
+from app.orchestrator.ai_coo_critic import (
+    CriticDisposition,
+    ai_coo_critic_service,
+)
 from app.orchestrator.ai_coo_runtime import ai_coo_operating_service
 from app.orchestrator.brain_adapter import run_brain_task_pipeline
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
@@ -46,6 +69,7 @@ from app.orchestrator.tool_executor import DurableToolExecutor
 from app.prompts import prompt_registry
 from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeToolCall
 from app.services.ai_coo_evidence import build_account_situation
+from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.runtime_memory import runtime_memory_service
 
 
@@ -79,10 +103,20 @@ class BrainRuntimeState(TypedDict, total=False):
     normalized_goal: dict[str, Any]
     situation_summary: dict[str, Any]
     evidence_refs: list[dict[str, Any]]
+    memory_context: dict[str, Any]
     strategy_plan_id: int
     strategy_status: str
     decision_trace_id: int
     task_plan: list[dict[str, Any]]
+    current_outputs: list[dict[str, Any]]
+    quality_score_ids: list[int]
+    critic_iteration: int
+    critic_route: str
+    critic_feedback: list[dict[str, Any]]
+    reflection_record_id: int
+    reflection_status: str
+    experience_candidate_ids: list[str]
+    next_strategy: dict[str, Any]
 
 
 _runtime_session: ContextVar[AsyncSession | None] = ContextVar(
@@ -156,6 +190,39 @@ class BrainRuntimeGraph:
     def graph_config(thread_id: str) -> dict[str, dict[str, str]]:
         return {"configurable": {"thread_id": thread_id}}
 
+    async def refresh_observation(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+    ) -> ReflectionRecord:
+        """Run the evidence-gated post-execution learning graph."""
+
+        task.thread_id = task.thread_id or self.thread_id_for(task.id)
+        runtime_session_token = _runtime_session.set(session)
+        try:
+            await self._observation_graph.ainvoke(
+                {
+                    "task_id": task.id,
+                    "thread_id": task.thread_id,
+                    "status": "refreshing_observation",
+                },
+                config=self.graph_config(f"{task.thread_id}:observation"),
+            )
+        finally:
+            _runtime_session.reset(runtime_session_token)
+        reflection = await session.scalar(
+            select(ReflectionRecord)
+            .where(
+                ReflectionRecord.org_id == task.org_id,
+                ReflectionRecord.task_id == task.id,
+            )
+            .order_by(ReflectionRecord.id.desc())
+            .limit(1)
+        )
+        if reflection is None:
+            raise ValueError("任务尚未形成效果观测记录")
+        return reflection
+
     def _compile_graphs(self, checkpointer: Any | None) -> None:
         self._native_interrupts = checkpointer is not None
         graph = StateGraph(BrainRuntimeState)
@@ -192,24 +259,37 @@ class BrainRuntimeGraph:
 
         smart_graph = StateGraph(BrainRuntimeState)
         smart_graph.add_node("goal_understanding", self._goal_understanding)
+        smart_graph.add_node("context_resolution", self._context_resolution)
         smart_graph.add_node("situation_awareness", self._situation_awareness)
         smart_graph.add_node("strategy_planning", self._strategy_planning)
         smart_graph.add_node("task_planning", self._task_planning)
         smart_graph.add_node("dispatch_round", self._dispatch_round)
         smart_graph.add_node("execute_tools", self._execute_tools)
         smart_graph.add_node("observe_round", self._observe_round)
+        smart_graph.add_node("critic_review", self._critic_review)
         smart_graph.add_node("collect_permissions", self._collect_permissions)
         smart_graph.add_node("smart_permission_gate", self._smart_permission_gate)
         smart_graph.add_node("decide_next", self._decide_next)
         smart_graph.add_node("decision_gate", self._decision_gate)
         smart_graph.add_node("smart_summarize", self._smart_summarize)
+        smart_graph.add_node("wait_for_measurement", self._wait_for_measurement)
         smart_graph.add_edge(START, "goal_understanding")
-        smart_graph.add_edge("goal_understanding", "situation_awareness")
+        smart_graph.add_edge("goal_understanding", "context_resolution")
+        smart_graph.add_edge("context_resolution", "situation_awareness")
         smart_graph.add_edge("situation_awareness", "strategy_planning")
         smart_graph.add_edge("strategy_planning", "task_planning")
         smart_graph.add_edge("task_planning", "decide_next")
         smart_graph.add_edge("dispatch_round", "observe_round")
-        smart_graph.add_edge("observe_round", "collect_permissions")
+        smart_graph.add_edge("observe_round", "critic_review")
+        smart_graph.add_conditional_edges(
+            "critic_review",
+            self._route_after_critic,
+            {
+                "pass": "collect_permissions",
+                "improve": "dispatch_round",
+                "human": "collect_permissions",
+            },
+        )
         smart_graph.add_edge("collect_permissions", "smart_permission_gate")
         smart_graph.add_conditional_edges(
             "smart_permission_gate",
@@ -233,7 +313,8 @@ class BrainRuntimeGraph:
             self._route_after_decision_gate,
             {"continue": "decide_next", "waiting": END},
         )
-        smart_graph.add_edge("smart_summarize", END)
+        smart_graph.add_edge("smart_summarize", "wait_for_measurement")
+        smart_graph.add_edge("wait_for_measurement", END)
         self._smart_graph = smart_graph.compile(checkpointer=checkpointer)
 
         smart_resume_graph = StateGraph(BrainRuntimeState)
@@ -241,9 +322,11 @@ class BrainRuntimeGraph:
         smart_resume_graph.add_node("dispatch_round", self._dispatch_round)
         smart_resume_graph.add_node("execute_tools", self._execute_tools)
         smart_resume_graph.add_node("observe_round", self._observe_round)
+        smart_resume_graph.add_node("critic_review", self._critic_review)
         smart_resume_graph.add_node("smart_permission_gate", self._smart_permission_gate)
         smart_resume_graph.add_node("decision_gate", self._decision_gate)
         smart_resume_graph.add_node("smart_summarize", self._smart_summarize)
+        smart_resume_graph.add_node("wait_for_measurement", self._wait_for_measurement)
         smart_resume_graph.add_edge(START, "decide_next")
         smart_resume_graph.add_conditional_edges(
             "decide_next",
@@ -263,14 +346,46 @@ class BrainRuntimeGraph:
             {"continue": "decide_next", "waiting": END},
         )
         smart_resume_graph.add_edge("dispatch_round", "observe_round")
-        smart_resume_graph.add_edge("observe_round", "smart_permission_gate")
+        smart_resume_graph.add_edge("observe_round", "critic_review")
+        smart_resume_graph.add_conditional_edges(
+            "critic_review",
+            self._route_after_critic,
+            {
+                "pass": "smart_permission_gate",
+                "improve": "dispatch_round",
+                "human": "smart_permission_gate",
+            },
+        )
         smart_resume_graph.add_conditional_edges(
             "smart_permission_gate",
             self._route_after_smart_permission,
             {"waiting": END, "continue": "decide_next"},
         )
-        smart_resume_graph.add_edge("smart_summarize", END)
+        smart_resume_graph.add_edge("smart_summarize", "wait_for_measurement")
+        smart_resume_graph.add_edge("wait_for_measurement", END)
         self._smart_resume_graph = smart_resume_graph.compile(checkpointer=checkpointer)
+
+        observation_graph = StateGraph(BrainRuntimeState)
+        observation_graph.add_node("performance_analysis", self._performance_analysis)
+        observation_graph.add_node("reflection", self._reflection)
+        observation_graph.add_node(
+            "experience_verification",
+            self._experience_verification,
+        )
+        observation_graph.add_node("next_strategy", self._next_strategy)
+        observation_graph.add_edge(START, "performance_analysis")
+        observation_graph.add_conditional_edges(
+            "performance_analysis",
+            self._route_after_performance_analysis,
+            {
+                "pending": END,
+                "observed": "reflection",
+            },
+        )
+        observation_graph.add_edge("reflection", "experience_verification")
+        observation_graph.add_edge("experience_verification", "next_strategy")
+        observation_graph.add_edge("next_strategy", END)
+        self._observation_graph = observation_graph.compile(checkpointer=checkpointer)
 
     async def start_smart(
         self,
@@ -287,14 +402,14 @@ class BrainRuntimeGraph:
         task.runtime_mode = "langgraph"
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         task.status = BrainTaskStatus.RUNNING
-        task.current_focus = "主 Agent 正在理解你的目标"
+        task.current_focus = "运营大脑正在理解你的目标"
         await session.commit()
         await self._record_event(
             session,
             task,
             "brain.runtime.started",
             {
-                "message": "主 Agent 已接收你的消息。",
+                "message": "运营大脑已接收你的消息。",
                 "client_message_id": client_message_id,
             },
         )
@@ -327,7 +442,7 @@ class BrainRuntimeGraph:
                 )
                 task.status = BrainTaskStatus.COMPLETED
                 task.progress = 100
-                task.current_focus = "主 Agent 已完成回复，未调用专家"
+                task.current_focus = "运营大脑已完成回复，未调用专家"
                 await session.commit()
                 return task
 
@@ -345,7 +460,7 @@ class BrainRuntimeGraph:
                             AgentCode.DECISION.value,
                         ),
                         "agent_code": AgentCode.DECISION.value,
-                        "agent_name": "主 Agent",
+                        "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                         "model": "system",
                         "message": question,
                         "content": question,
@@ -361,7 +476,7 @@ class BrainRuntimeGraph:
                 return task
 
             task.runtime_mode = "coo_v1"
-            task.current_focus = "主 Agent 正在建立运营态势与策略上下文"
+            task.current_focus = "运营大脑正在建立运营态势与策略上下文"
             await session.commit()
             await self._stream_main_agent_turn(session, task)
             await self._smart_graph.ainvoke(
@@ -382,6 +497,10 @@ class BrainRuntimeGraph:
                     "tool_call_count": 0,
                     "token_count": 0,
                     "cost_usd": 0.0,
+                    "current_outputs": [],
+                    "quality_score_ids": [],
+                    "critic_iteration": 0,
+                    "critic_feedback": [],
                 },
                 config=self.graph_config(task.thread_id),
             )
@@ -395,13 +514,13 @@ class BrainRuntimeGraph:
         task.runtime_mode = "langgraph"
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         task.status = BrainTaskStatus.RUNNING
-        task.current_focus = "主 Agent 正在理解目标并准备调度专家"
+        task.current_focus = "运营大脑正在理解目标并准备调度专家"
         await session.commit()
         await self._record_event(
             session,
             task,
             "brain.runtime.started",
-            {"message": "主 Agent 已接收目标，开始建立运行时上下文。"},
+            {"message": "运营大脑已接收目标，开始建立运行时上下文。"},
         )
 
         runtime_session_token = _runtime_session.set(session)
@@ -425,7 +544,7 @@ class BrainRuntimeGraph:
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         task.status = BrainTaskStatus.COMPLETED
         task.progress = 100
-        task.current_focus = "主 Agent 已完成普通对话，未启动专家工作流"
+        task.current_focus = "运营大脑已完成普通对话，未启动专家工作流"
         await session.commit()
         await self._record_event(
             session,
@@ -434,7 +553,7 @@ class BrainRuntimeGraph:
             {
                 "message_id": _runtime_message_id(None, AgentCode.DECISION.value),
                 "agent_code": "00-decision",
-                "agent_name": "主 Agent",
+                "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                 "model": "system",
                 "message": _casual_reply(task.brief.goal if task.brief else ""),
                 "content": _casual_reply(task.brief.goal if task.brief else ""),
@@ -461,7 +580,7 @@ class BrainRuntimeGraph:
             task,
             "brain.runtime.resumed",
             {
-                "message": "人工确认已返回，主 Agent 正在检查是否可以继续执行。",
+                "message": "人工确认已返回，运营大脑正在检查是否可以继续执行。",
                 "tool_call_id": tool_call.id,
                 "tool_code": tool_call.tool_code,
                 "approved": approved,
@@ -559,7 +678,7 @@ class BrainRuntimeGraph:
             task,
             "brain.runtime.regeneration_requested",
             {
-                "message": "主 Agent 正在重新生成这一轮回答。",
+                "message": "运营大脑正在重新生成这一轮回答。",
                 "source_event_id": source_event_id,
                 "client_message_id": client_message_id,
             },
@@ -606,7 +725,7 @@ class BrainRuntimeGraph:
                 choice_id=choice_id,
                 choice_title=choice_title,
             )
-        task.current_focus = "主 Agent 正在根据你的选择继续"
+        task.current_focus = "运营大脑正在根据你的选择继续"
         await session.commit()
 
         runtime_session_token = _runtime_session.set(session)
@@ -704,7 +823,7 @@ class BrainRuntimeGraph:
                 "brain.runtime.message_error",
                 {
                     "agent_code": AgentCode.DECISION.value,
-                    "agent_name": "主 Agent",
+                    "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                     "message": str(exc),
                     "error": str(exc),
                     "decision_id": decision.id,
@@ -722,7 +841,7 @@ class BrainRuntimeGraph:
             task,
             "brain.runtime.decision_revised",
             {
-                "message": "已收到你的修改方向，主 Agent 会据此重新整理方案。",
+                "message": "已收到你的修改方向，运营大脑会据此重新整理方案。",
                 "decision_id": decision.id,
                 "comment": comment,
                 "request_new_options": request_new_options,
@@ -744,13 +863,13 @@ class BrainRuntimeGraph:
     async def _load_context(self, state: BrainRuntimeState) -> BrainRuntimeState:
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
-            task.current_focus = "主 Agent 已锁定当前账号、平台与任务边界"
+            task.current_focus = "运营大脑已锁定当前账号、平台与任务边界"
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.context_loaded",
                 {
-                    "message": "主 Agent 已加载账号上下文。",
+                    "message": "运营大脑已加载账号上下文。",
                     "platforms": task.brief.platforms if task.brief else [],
                     "account_ids": task.brief.account_ids if task.brief else [],
                 },
@@ -760,14 +879,14 @@ class BrainRuntimeGraph:
     async def _plan_execution(self, state: BrainRuntimeState) -> BrainRuntimeState:
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
-            task.current_focus = "主 Agent 已生成专家执行计划"
+            task.current_focus = "运营大脑已生成专家执行计划"
             steps = task.plan.steps if task.plan else []
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.plan_created",
                 {
-                    "message": "主 Agent 已生成执行计划，准备派发专家。",
+                    "message": "运营大脑已生成执行计划，准备派发专家。",
                     "steps": [
                         {
                             "id": step.get("id"),
@@ -799,7 +918,7 @@ class BrainRuntimeGraph:
                     task,
                     "brain.runtime.subagent_started",
                     {
-                        "message": f"主 Agent 正在调用 {first_step.get('agent_name')}。",
+                        "message": f"运营大脑正在调用 {first_step.get('agent_name')}。",
                         "agent_code": first_step.get("agent_code"),
                         "agent_name": first_step.get("agent_name"),
                     },
@@ -823,6 +942,7 @@ class BrainRuntimeGraph:
                 task.brief.goal if task.brief else task.title
             )
             evidence_refs = list(state.get("selected_expert_evidence_refs", []))
+            current_outputs: list[dict[str, Any]] = []
             for code in selected:
                 await self._record_event(
                     session,
@@ -836,7 +956,7 @@ class BrainRuntimeGraph:
                     },
                 )
                 agent_code = AgentCode(code)
-                await agent_harness.execute(
+                result = await agent_harness.execute(
                     session,
                     user=user,
                     task=task,
@@ -847,13 +967,31 @@ class BrainRuntimeGraph:
                     step_key=f"round-{round_index}:{agent_code.value}",
                     attempt=state.get("agent_run_attempt", 0),
                 )
-        return {**state, "status": "round_dispatched"}
+                if result is not None:
+                    current_outputs.append(
+                        {
+                            "agent_code": code,
+                            "invocation_id": result.invocation.id,
+                            "deliverable_id": result.deliverable.id,
+                            "acceptance_id": result.acceptance.id,
+                        }
+                    )
+        return {
+            **state,
+            "status": "round_dispatched",
+            "current_outputs": current_outputs,
+        }
 
     async def _observe_round(self, state: BrainRuntimeState) -> BrainRuntimeState:
         await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
             selected = set(state.get("selected_experts", []))
+            current_invocation_ids = {
+                int(item["invocation_id"])
+                for item in state.get("current_outputs", [])
+                if item.get("invocation_id") is not None
+            }
             rows = (
                 await session.scalars(
                     select(AgentInvocation)
@@ -861,7 +999,22 @@ class BrainRuntimeGraph:
                     .order_by(AgentInvocation.id)
                 )
             ).all()
-            current = [row for row in rows if _agent_code_value(row.agent_code) in selected]
+            current = [
+                row
+                for row in rows
+                if (
+                    row.id in current_invocation_ids
+                    if current_invocation_ids
+                    else (
+                        _agent_code_value(row.agent_code) in selected
+                        and row.step_key
+                        == (
+                            f"round-{state.get('round_index', 1)}:"
+                            f"{_agent_code_value(row.agent_code)}"
+                        )
+                    )
+                )
+            ]
             observations = list(state.get("observations", []))
             for invocation in current:
                 code = _agent_code_value(invocation.agent_code)
@@ -872,6 +1025,7 @@ class BrainRuntimeGraph:
                     if hasattr(invocation.status, "value")
                     else str(invocation.status),
                     "summary": invocation.output_summary,
+                    "invocation_id": invocation.id,
                 }
                 observations.append(observation)
                 await self._record_event(
@@ -887,6 +1041,207 @@ class BrainRuntimeGraph:
                     },
                 )
         return {**state, "status": "round_observed", "observations": observations}
+
+    async def _critic_review(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        """Score only the current expert round and bound autonomous rework."""
+
+        await self._check_main_turn_boundary(state)
+        outputs = list(state.get("current_outputs", []))
+        if not outputs:
+            return {**state, "status": "critic_passed", "critic_route": "pass"}
+
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            strategy = (
+                await session.get(StrategyPlan, state["strategy_plan_id"])
+                if state.get("strategy_plan_id") is not None
+                else None
+            )
+            iteration = int(state.get("critic_iteration", 0))
+            failed: list[dict[str, Any]] = []
+            quality_score_ids = list(state.get("quality_score_ids", []))
+
+            for output in outputs:
+                invocation = await session.get(
+                    AgentInvocation,
+                    int(output["invocation_id"]),
+                )
+                deliverable = await session.get(
+                    Deliverable,
+                    int(output["deliverable_id"]),
+                )
+                if (
+                    invocation is None
+                    or invocation.task_id != task.id
+                    or deliverable is None
+                ):
+                    failed.append(
+                        {
+                            **output,
+                            "issues": ["质量审核找不到本轮专家交付物。"],
+                            "suggestions": ["转人工核对调用账本与交付物。"],
+                            "disposition": CriticDisposition.HUMAN.value,
+                        }
+                    )
+                    continue
+
+                try:
+                    review = await brain_intelligence.review_expert_output(
+                        session,
+                        task.org_id,
+                        goal=task.brief.goal if task.brief else task.title,
+                        expert_code=_agent_code_value(invocation.agent_code),
+                        expert_name=invocation.agent_name,
+                        deliverable=deliverable.payload,
+                        situation=dict(state.get("situation_summary", {})),
+                        strategy=dict(strategy.strategy if strategy else {}),
+                        evidence_refs=list(state.get("evidence_refs", [])),
+                        iteration=iteration,
+                    )
+                    recorded = await ai_coo_critic_service.record(
+                        session,
+                        task=task,
+                        invocation=invocation,
+                        deliverable_id=deliverable.id,
+                        evaluation=review.evaluation,
+                        iteration=iteration,
+                        evidence_refs=list(state.get("evidence_refs", [])),
+                        prompt_id=review.prompt.spec.id,
+                        prompt_version=review.prompt.spec.version,
+                        prompt_hash=review.prompt.content_hash,
+                        critic_model=review.model,
+                    )
+                except IntelligenceUnavailable as exc:
+                    failed.append(
+                        {
+                            **output,
+                            "agent_name": invocation.agent_name,
+                            "issues": [str(exc)],
+                            "suggestions": ["转人工审核当前专家交付物。"],
+                            "disposition": CriticDisposition.HUMAN.value,
+                        }
+                    )
+                    await self._record_event(
+                        session,
+                        task,
+                        "brain.runtime.critic_unavailable",
+                        {
+                            "message": "质量审核暂时不可用，已转交人工处理。",
+                            "invocation_id": invocation.id,
+                            "deliverable_id": deliverable.id,
+                            "error": str(exc),
+                        },
+                    )
+                    continue
+
+                quality_score_ids.append(recorded.score.id)
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.critic_scored",
+                    {
+                        "message": (
+                            f"{invocation.agent_name}质量评分 "
+                            f"{recorded.score.score} 分。"
+                        ),
+                        "invocation_id": invocation.id,
+                        "deliverable_id": deliverable.id,
+                        "quality_score_id": recorded.score.id,
+                        "score": recorded.score.score,
+                        "dimensions": recorded.score.dimensions,
+                        "issues": recorded.score.issues,
+                        "suggestions": recorded.score.suggestions,
+                        "passed": recorded.score.passed,
+                        "iteration": iteration,
+                    },
+                )
+                if recorded.disposition != CriticDisposition.PASS:
+                    failed.append(
+                        {
+                            **output,
+                            "agent_name": invocation.agent_name,
+                            "issues": recorded.score.issues,
+                            "suggestions": recorded.score.suggestions,
+                            "disposition": recorded.disposition.value,
+                        }
+                    )
+
+            if not failed:
+                return {
+                    **state,
+                    "status": "critic_passed",
+                    "critic_route": "pass",
+                    "critic_iteration": 0,
+                    "critic_feedback": [],
+                    "quality_score_ids": quality_score_ids,
+                }
+
+            requires_human = any(
+                item["disposition"] == CriticDisposition.HUMAN.value
+                for item in failed
+            )
+            if not requires_human and iteration < 2:
+                for item in failed:
+                    acceptance = await session.get(
+                        DeliverableAcceptance,
+                        int(item["acceptance_id"]),
+                    )
+                    if acceptance is not None:
+                        acceptance.status = DeliverableAcceptanceStatus.RERUN_REQUESTED
+                selected = list(dict.fromkeys(str(item["agent_code"]) for item in failed))
+                feedback_text = "\n".join(
+                    (
+                        f"{item.get('agent_name') or _agent_display_name(item['agent_code'])}: "
+                        f"{'; '.join(item['suggestions'] or item['issues'])}"
+                    )
+                    for item in failed
+                )
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.improvement_requested",
+                    {
+                        "message": "质量审核未通过，已要求相关专家按意见返工。",
+                        "iteration": iteration + 1,
+                        "expert_codes": selected,
+                        "feedback": failed,
+                    },
+                )
+                return {
+                    **state,
+                    "status": "critic_improve",
+                    "critic_route": "improve",
+                    "critic_iteration": iteration + 1,
+                    "critic_feedback": failed,
+                    "quality_score_ids": quality_score_ids,
+                    "selected_experts": selected,
+                    "selected_expert_purpose": (
+                        f"{state.get('selected_expert_purpose', '')}\n"
+                        f"Critic 返工要求：\n{feedback_text}"
+                    ).strip(),
+                    "round_index": int(state.get("round_index", 1)) + 1,
+                    "current_outputs": [],
+                }
+
+            task.status = BrainTaskStatus.PENDING_ACCEPTANCE
+            task.current_focus = "质量审核需要人工接管"
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.approval_required",
+                {
+                    "message": "自动返工已达到上限，当前交付物需要人工审核。",
+                    "reason": "critic_human_takeover",
+                    "feedback": failed,
+                },
+            )
+            return {
+                **state,
+                "status": "critic_human",
+                "critic_route": "human",
+                "critic_feedback": failed,
+                "quality_score_ids": quality_score_ids,
+            }
 
     async def _execute_tools(self, state: BrainRuntimeState) -> BrainRuntimeState:
         await self._check_main_turn_boundary(state)
@@ -911,7 +1266,7 @@ class BrainRuntimeGraph:
                     task,
                     "brain.runtime.tool_started",
                     {
-                        "message": f"主 Agent 正在调用 {request.tool_code}。",
+                        "message": f"运营大脑正在调用 {request.tool_code}。",
                         "tool_code": request.tool_code,
                         "purpose": request.purpose,
                     },
@@ -989,13 +1344,13 @@ class BrainRuntimeGraph:
                 "platforms": list(brief.platforms) if brief else [],
                 "account_ids": list(brief.account_ids) if brief else [],
             }
-            task.current_focus = "主 Agent 正在理解目标与约束"
+            task.current_focus = "运营大脑正在理解目标与约束"
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.goal_understood",
                 {
-                    "message": "主 Agent 已明确本轮目标、账号范围与风险约束。",
+                    "message": "运营大脑已明确本轮目标、账号范围与风险约束。",
                     "normalized_goal": normalized_goal,
                 },
             )
@@ -1003,6 +1358,35 @@ class BrainRuntimeGraph:
             **state,
             "status": "goal_understood",
             "normalized_goal": normalized_goal,
+        }
+
+    async def _context_resolution(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            account_ids = list(task.brief.account_ids if task.brief else [])
+            account_id = int(account_ids[0]) if account_ids else None
+            scope = await ai_coo_operating_service.resolve_context(
+                session,
+                task=task,
+                account_id=account_id,
+            )
+            task.current_focus = "运营大脑正在确认账号、客户与项目上下文"
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.context_resolved",
+                {
+                    "message": "运营大脑已锁定本轮可访问的运营上下文。",
+                    "account_id": account_id,
+                    **scope,
+                },
+            )
+        return {
+            **state,
+            "status": "context_resolved",
+            "account_id": account_id,
+            **scope,
         }
 
     async def _situation_awareness(self, state: BrainRuntimeState) -> BrainRuntimeState:
@@ -1031,16 +1415,16 @@ class BrainRuntimeGraph:
                 evidence_refs = [
                     item.model_dump(mode="json") for item in situation.evidence_refs
                 ]
-            task.current_focus = "主 Agent 正在核对真实数据与运营态势"
+            task.current_focus = "运营大脑正在核对真实数据与运营态势"
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.situation_assessed",
                 {
                     "message": (
-                        "主 Agent 已完成运营态势核对。"
+                        "运营大脑已完成运营态势核对。"
                         if evidence_refs
-                        else "当前证据不足，主 Agent 不会生成无依据诊断。"
+                        else "当前证据不足，运营大脑不会生成无依据诊断。"
                     ),
                     "account_id": account_id,
                     "data_sufficiency": situation_summary["data_sufficiency"],
@@ -1066,7 +1450,7 @@ class BrainRuntimeGraph:
                 run_id=state.get("agent_run_id"),
                 required_expert_codes=_required_expert_codes(state, task),
             )
-            task.current_focus = "主 Agent 已形成证据约束下的运营策略"
+            task.current_focus = "运营大脑已形成证据约束下的运营策略"
             await self._record_event(
                 session,
                 task,
@@ -1075,7 +1459,7 @@ class BrainRuntimeGraph:
                     "message": (
                         "真实数据不足，先补齐基线并继续必要的专业分析。"
                         if result.strategy_status == "data_collection_required"
-                        else "主 Agent 已基于真实证据形成本轮运营策略。"
+                        else "运营大脑已基于真实证据形成本轮运营策略。"
                     ),
                     "strategy_plan_id": result.strategy_plan_id,
                     "decision_trace_id": result.decision_trace_id,
@@ -1092,6 +1476,7 @@ class BrainRuntimeGraph:
             "normalized_goal": result.normalized_goal,
             "situation_summary": result.situation_summary,
             "evidence_refs": result.evidence_refs,
+            "memory_context": result.memory_context.model_dump(mode="json"),
             "strategy_plan_id": result.strategy_plan_id,
             "strategy_status": result.strategy_status,
             "decision_trace_id": result.decision_trace_id,
@@ -1103,14 +1488,14 @@ class BrainRuntimeGraph:
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
             task_plan = list(state.get("task_plan", []))
-            task.current_focus = "主 Agent 正在按需调度必要专家"
+            task.current_focus = "运营大脑正在按需调度必要专家"
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.task_planned",
                 {
                     "message": (
-                        "主 Agent 已完成按需任务拆解，接下来只调用必要专家。"
+                        "运营大脑已完成按需任务拆解，接下来只调用必要专家。"
                     ),
                     "steps": task_plan,
                 },
@@ -1163,7 +1548,7 @@ class BrainRuntimeGraph:
                     "brain.runtime.message_error",
                     {
                         "agent_code": AgentCode.DECISION.value,
-                        "agent_name": "主 Agent",
+                        "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                         "message": str(exc),
                         "error": str(exc),
                     },
@@ -1202,7 +1587,7 @@ class BrainRuntimeGraph:
                             ],
                             "rationale": (
                                 "专业任务必须先取得对应专家的有效结论，"
-                                "主 Agent 才能汇总或结束本轮。"
+                                "运营大脑才能汇总或结束本轮。"
                             ),
                             "handoff_message": (
                                 "我先把这项专业任务交给对应专家处理，"
@@ -1221,7 +1606,7 @@ class BrainRuntimeGraph:
                     task,
                     "brain.runtime.policy_denied",
                     {
-                        "message": "主 Agent 请求的下一步不符合运行时权限策略。",
+                        "message": "运营大脑请求的下一步不符合运行时权限策略。",
                         "action": step.action,
                         "reason": str(exc),
                     },
@@ -1347,7 +1732,7 @@ class BrainRuntimeGraph:
                     {
                         "message_id": _runtime_message_id(None, AgentCode.DECISION.value),
                         "agent_code": AgentCode.DECISION.value,
-                        "agent_name": "主 Agent",
+                        "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                         "model": "runtime-decision",
                         "message": step.handoff_message,
                         "content": step.handoff_message,
@@ -1423,9 +1808,161 @@ class BrainRuntimeGraph:
             )
         return {**state, "status": "completed"}
 
+    async def _wait_for_measurement(
+        self,
+        state: BrainRuntimeState,
+    ) -> BrainRuntimeState:
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            strategy = None
+            if state.get("strategy_plan_id"):
+                strategy = await session.get(StrategyPlan, state["strategy_plan_id"])
+            if strategy is None:
+                strategy = await session.scalar(
+                    select(StrategyPlan)
+                    .where(
+                        StrategyPlan.org_id == task.org_id,
+                        StrategyPlan.task_id == task.id,
+                    )
+                    .order_by(StrategyPlan.version.desc(), StrategyPlan.id.desc())
+                    .limit(1)
+                )
+            if strategy is None:
+                return {**state, "status": "completed"}
+            reflection = await ai_coo_learning_service.ensure_pending_observation(
+                session,
+                task=task,
+                strategy=strategy,
+                run_id=state.get("agent_run_id"),
+            )
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.waiting_for_measurement",
+                {
+                    "message": "本轮执行已完成，等待新的真实数据进入效果观测。",
+                    "reflection_record_id": reflection.id,
+                    "strategy_plan_id": strategy.id,
+                },
+            )
+        return {
+            **state,
+            "reflection_record_id": reflection.id,
+            "reflection_status": reflection.status,
+            "status": "completed",
+        }
+
+    async def _performance_analysis(
+        self,
+        state: BrainRuntimeState,
+    ) -> BrainRuntimeState:
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            reflection = await ai_coo_learning_service.refresh_observation(
+                session,
+                task=task,
+            )
+            candidate_ids = [
+                str(item.get("key"))
+                for item in reflection.experience_candidates
+                if item.get("key")
+            ]
+            event_type = (
+                "brain.runtime.performance_observed"
+                if reflection.status == "observed"
+                else "brain.runtime.observation_pending"
+            )
+            await self._record_event(
+                session,
+                task,
+                event_type,
+                {
+                    "message": reflection.conclusion,
+                    "reflection_record_id": reflection.id,
+                    "evidence_refs": reflection.evidence_refs,
+                    "observed_outcome": reflection.observed_outcome,
+                },
+            )
+        return {
+            **state,
+            "reflection_record_id": reflection.id,
+            "reflection_status": reflection.status,
+            "experience_candidate_ids": candidate_ids,
+            "next_strategy": reflection.next_strategy,
+            "status": reflection.status,
+        }
+
+    async def _reflection(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            reflection = await session.get(
+                ReflectionRecord,
+                state.get("reflection_record_id"),
+            )
+            if reflection is None:
+                raise ValueError("效果观测记录不存在")
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.reflection_completed",
+                {
+                    "message": reflection.conclusion,
+                    "diagnosis": reflection.diagnosis,
+                    "evidence_refs": reflection.evidence_refs,
+                },
+            )
+        return state
+
+    async def _experience_verification(
+        self,
+        state: BrainRuntimeState,
+    ) -> BrainRuntimeState:
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            candidate_ids = list(state.get("experience_candidate_ids") or [])
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.experience_candidates_ready",
+                {
+                    "message": (
+                        "已形成有数据依据的经验候选，等待管理员核验。"
+                        if candidate_ids
+                        else "本轮没有形成可验证的运营经验。"
+                    ),
+                    "candidate_keys": candidate_ids,
+                    "requires_human_verification": bool(candidate_ids),
+                },
+            )
+        return state
+
+    async def _next_strategy(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            next_strategy = dict(state.get("next_strategy") or {})
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.next_strategy_ready",
+                {
+                    "message": "已根据真实结果形成下一轮策略建议。",
+                    "next_strategy": next_strategy,
+                },
+            )
+        return {**state, "status": "learning_completed"}
+
+    @staticmethod
+    def _route_after_performance_analysis(state: BrainRuntimeState) -> str:
+        return "observed" if state.get("reflection_status") == "observed" else "pending"
+
     @staticmethod
     def _route_after_smart_permission(state: BrainRuntimeState) -> str:
         return "waiting" if state.get("pending_permissions") else "continue"
+
+    @staticmethod
+    def _route_after_critic(state: BrainRuntimeState) -> str:
+        route = state.get("critic_route")
+        return route if route in {"pass", "improve", "human"} else "human"
 
     @staticmethod
     def _route_after_smart_decision(state: BrainRuntimeState) -> str:
@@ -1541,7 +2078,7 @@ class BrainRuntimeGraph:
                 session,
                 task,
                 "brain.runtime.completed",
-                {"message": "主 Agent 已完成本轮专家调度，等待用户验收交付物。"},
+                {"message": "运营大脑已完成本轮专家调度，等待用户验收交付物。"},
             )
         return {**state, "status": "completed"}
 
@@ -1662,7 +2199,7 @@ class BrainRuntimeGraph:
                         AgentCode.DECISION.value,
                     ),
                     "agent_code": AgentCode.DECISION.value,
-                    "agent_name": "主 Agent",
+                    "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                     "model": result.model,
                     "message": result.content,
                     "content": result.content,
@@ -2020,7 +2557,13 @@ async def _chat_main_agent(
             session,
             task.org_id,
             AgentCode.DECISION.value,
-            [{"role": "system", "content": prompt.content}, *messages],
+            [
+                {
+                    "role": "system",
+                    "content": with_operations_brain_public_identity(prompt.content),
+                },
+                *messages,
+            ],
         )
 
 
@@ -2086,7 +2629,7 @@ def _successful_expert_codes(observations: list[dict[str, Any]]) -> set[str]:
 
 def _agent_display_name(agent_code: str) -> str:
     names = {
-        "00-decision": "主 Agent",
+        "00-decision": "运营大脑",
         "01-positioning": "账号定位专家",
         "02-content-director": "编导文案专家",
         "03-art-director": "美术提示词专家",

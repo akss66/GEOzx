@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
@@ -18,13 +19,29 @@ from app.llm.gateway import (
     set_stream_observer,
 )
 from app.models.enums import AgentCode
+from app.orchestrator.agent_identity import with_operations_brain_public_identity
 from app.prompts import prompt_registry
 from app.prompts.manifest import LoadedPrompt
+from app.schemas.ai_coo import CriticEvaluation, OperatingStrategyDraft
 from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeNextStep
 
 
 class IntelligenceUnavailable(RuntimeError):
     """Raised when a formal routing decision cannot be produced safely."""
+
+
+@dataclass(frozen=True)
+class CriticModelReview:
+    evaluation: CriticEvaluation
+    prompt: LoadedPrompt
+    model: str
+
+
+@dataclass(frozen=True)
+class OperatingStrategyModelPlan:
+    draft: OperatingStrategyDraft
+    prompt: LoadedPrompt
+    model: str
 
 
 _CASUAL_MESSAGES = {
@@ -76,7 +93,10 @@ class BrainIntelligence:
                 org_id,
                 prompt,
                 [
-                    {"role": "system", "content": prompt.content},
+                    {
+                        "role": "system",
+                        "content": with_operations_brain_public_identity(prompt.content),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -88,9 +108,9 @@ class BrainIntelligence:
             )
             decision = IntentDecision.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:
-            raise IntelligenceUnavailable("主 Agent 暂时无法可靠理解这条需求") from exc
+            raise IntelligenceUnavailable("运营大脑暂时无法可靠理解这条需求") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
-            raise IntelligenceUnavailable("主 Agent 暂时不可用，请稍后重试") from exc
+            raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
 
         decision = _sanitize_intent_decision(decision)
         if decision.requires_account_context and not has_account:
@@ -137,7 +157,10 @@ class BrainIntelligence:
                 org_id,
                 prompt,
                 [
-                    {"role": "system", "content": prompt.content},
+                    {
+                        "role": "system",
+                        "content": with_operations_brain_public_identity(prompt.content),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -150,9 +173,9 @@ class BrainIntelligence:
             )
             step = RuntimeNextStep.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:
-            raise IntelligenceUnavailable("主 Agent 暂时无法决定可靠的下一步") from exc
+            raise IntelligenceUnavailable("运营大脑暂时无法决定可靠的下一步") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
-            raise IntelligenceUnavailable("主 Agent 暂时不可用，请稍后重试") from exc
+            raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
 
         filtered_experts = [
             code for code in step.expert_codes if code.value in allowed_experts
@@ -183,7 +206,10 @@ class BrainIntelligence:
                 org_id,
                 prompt,
                 [
-                    {"role": "system", "content": prompt.content},
+                    {
+                        "role": "system",
+                        "content": with_operations_brain_public_identity(prompt.content),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -197,11 +223,127 @@ class BrainIntelligence:
             )
             revised = DecisionRequest.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:
-            raise IntelligenceUnavailable("主 Agent 暂时无法可靠地重整方案") from exc
+            raise IntelligenceUnavailable("运营大脑暂时无法可靠地重整方案") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
-            raise IntelligenceUnavailable("主 Agent 暂时不可用，请稍后重试") from exc
+            raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
 
         return revised.model_copy(update={"status": "pending"})
+
+    async def review_expert_output(
+        self,
+        session: AsyncSession,
+        org_id: int,
+        *,
+        goal: str,
+        expert_code: str,
+        expert_name: str,
+        deliverable: dict[str, Any],
+        situation: dict[str, Any],
+        strategy: dict[str, Any],
+        evidence_refs: list[dict[str, Any]],
+        iteration: int,
+    ) -> CriticModelReview:
+        """Evaluate one specialist deliverable without allowing model-owned gates."""
+
+        prompt = prompt_registry.load("main-agent.critic")
+        payload = {
+            "goal": goal,
+            "expert": {"code": expert_code, "name": expert_name},
+            "iteration": iteration,
+            "situation": situation,
+            "strategy": strategy,
+            "evidence_refs": evidence_refs,
+            "deliverable": deliverable,
+        }
+        try:
+            primary_model, _fallback_model = await gateway.resolve_models(
+                session,
+                org_id,
+                AgentCode.DECISION.value,
+            )
+            result, _cost = await _structured_chat(
+                session,
+                org_id,
+                prompt,
+                [
+                    {
+                        "role": "system",
+                        "content": with_operations_brain_public_identity(prompt.content),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False, default=str),
+                    },
+                ],
+            )
+            evaluation = CriticEvaluation.model_validate(extract_json(result.content))
+        except (ValidationError, ValueError, TypeError, KeyError) as exc:
+            raise IntelligenceUnavailable("质量审核结果不符合结构化契约") from exc
+        except Exception as exc:  # noqa: BLE001 - provider failures require human takeover
+            raise IntelligenceUnavailable("质量审核模型暂时不可用") from exc
+        return CriticModelReview(
+            evaluation=evaluation,
+            prompt=prompt,
+            model=primary_model,
+        )
+
+    async def plan_operating_strategy(
+        self,
+        session: AsyncSession,
+        org_id: int,
+        *,
+        goal: str,
+        situation: dict[str, Any],
+        evidence_refs: list[dict[str, Any]],
+        suggested_expert_codes: list[str],
+        memory_context: dict[str, Any],
+    ) -> OperatingStrategyModelPlan:
+        """Build a strategy draft; persistence code enforces every evidence reference."""
+
+        prompt = prompt_registry.load("main-agent.strategy-planning")
+        payload = {
+            "goal": goal,
+            "situation": situation,
+            "evidence_refs": [
+                {
+                    **item,
+                    "evidence_id": (
+                        f"{item.get('source_type')}:{item.get('source_id')}:"
+                        f"{item.get('metric')}"
+                    ),
+                }
+                for item in evidence_refs
+            ],
+            "suggested_expert_codes": suggested_expert_codes,
+            "memory_context": memory_context,
+        }
+        try:
+            result, _cost = await _structured_chat(
+                session,
+                org_id,
+                prompt,
+                [
+                    {
+                        "role": "system",
+                        "content": with_operations_brain_public_identity(prompt.content),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False, default=str),
+                    },
+                ],
+            )
+            return OperatingStrategyModelPlan(
+                draft=OperatingStrategyDraft.model_validate(
+                    extract_json(result.content)
+                ),
+                prompt=prompt,
+                model=result.model,
+            )
+        except (ValidationError, ValueError, TypeError, KeyError) as exc:
+            raise IntelligenceUnavailable("运营策略结果不符合结构化契约") from exc
+        except Exception as exc:  # noqa: BLE001 - provider failures use safe fallback
+            raise IntelligenceUnavailable("运营策略模型暂时不可用") from exc
 
 
 def _normalize_casual_message(message: str) -> str:

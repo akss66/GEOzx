@@ -128,6 +128,7 @@ def test_production_prompt_manifest_contains_main_agent_and_all_eight_experts():
     expected = {
         "main-agent.intent",
         "main-agent.next-step",
+        "main-agent.strategy-planning",
         "main-agent.decision-revision",
         "main-agent.acknowledgement",
         "main-agent.summary",
@@ -150,3 +151,12 @@ def test_production_prompt_manifest_contains_main_agent_and_all_eight_experts():
         assert prompt.spec.status == "active"
         assert "TODO" not in prompt.content
         assert "草稿" not in prompt.content
+
+
+def test_strategy_prompt_requires_measurable_kpis_and_verified_experience_memory():
+    prompt = PromptRegistry.production().load("main-agent.strategy-planning")
+
+    assert '"baseline": 0' in prompt.content
+    assert '"direction": "increase|decrease|maintain|observe"' in prompt.content
+    assert "无法建立数值目标时只能使用 `observe`" in prompt.content
+    assert "只能使用 `memory_context.experience.verified_items`" in prompt.content

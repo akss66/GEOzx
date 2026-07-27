@@ -22,6 +22,7 @@ from app.api import (
     brain,
     clients,
     costs,
+    experience_memories,
     feedback,
     health,
     knowledge,
@@ -92,6 +93,7 @@ app.include_router(workspace_context.router)
 app.include_router(notifications.router)
 app.include_router(search.router)
 app.include_router(brain.router)
+app.include_router(experience_memories.router)
 app.include_router(costs.router)
 app.include_router(agents.router)
 app.include_router(llm.router)

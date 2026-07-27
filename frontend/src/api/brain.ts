@@ -6,6 +6,8 @@ import type {
   BrainTask,
   DeliverableAcceptance,
   DraftBrainTaskInput,
+  ExperienceMemorySummary,
+  ReflectionRecordSummary,
   RerunScope,
 } from "../types";
 
@@ -27,6 +29,30 @@ export async function confirmBrainTask(task: BrainTask): Promise<BrainTask> {
 
 export async function getBrainTaskRuntime(taskId: number): Promise<BrainRuntime> {
   const { data } = await api.get<BrainRuntime>(`/brain/tasks/${taskId}/runtime`);
+  return data;
+}
+
+export async function refreshBrainObservation(
+  taskId: number,
+): Promise<ReflectionRecordSummary> {
+  const { data } = await api.post<ReflectionRecordSummary>(
+    `/brain/tasks/${taskId}/observation/refresh`,
+  );
+  return data;
+}
+
+export async function verifyBrainExperienceCandidate(input: {
+  taskId: number;
+  candidateKey: string;
+  verificationNote: string;
+}): Promise<ExperienceMemorySummary> {
+  const { data } = await api.post<ExperienceMemorySummary>(
+    `/brain/tasks/${input.taskId}/experience-candidates/${encodeURIComponent(input.candidateKey)}/verify`,
+    {
+      candidate_key: input.candidateKey,
+      verification_note: input.verificationNote,
+    },
+  );
   return data;
 }
 

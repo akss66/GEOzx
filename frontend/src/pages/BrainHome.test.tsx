@@ -15,10 +15,13 @@ import {
   listBrainTasks,
   rejectDeliverableAcceptance,
   regenerateBrainMessage,
+  refreshBrainObservation,
   sendBrainMessage,
   stopBrainGeneration,
+  verifyBrainExperienceCandidate,
 } from "../api/brain";
 import { getWorkspaceContext } from "../api/shell";
+import { useAuth } from "../stores/auth";
 import type {
   Account,
   AgentInvocation,
@@ -317,12 +320,48 @@ vi.mock("../api/brain", () => ({
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
   regenerateBrainMessage: vi.fn(async () => mocks.runtime),
+  refreshBrainObservation: vi.fn(async () => ({
+    id: 61,
+    status: "observed",
+    goal_snapshot: {},
+    expected_outcome: {},
+    observed_outcome: {},
+    evidence_refs: [],
+    diagnosis: [],
+    conclusion: "真实效果已经回收。",
+    next_strategy: {},
+    experience_candidates: [
+      {
+        key: "case-content-growth",
+        industry: "家居建材",
+        action: "提高真实案例内容占比",
+        condition: "账号处于增长期",
+        result: "有效咨询提升",
+        confidence: 0.86,
+        source_refs: [{ source_type: "account_metric_snapshot", source_id: "snapshot:2" }],
+      },
+    ],
+    measured_at: "2026-07-27T08:00:00Z",
+  })),
   reviseBrainDecision: vi.fn(async () => mocks.runtime),
   selectBrainDecision: vi.fn(async () => mocks.runtime),
   sendBrainMessage: vi.fn(async () => mocks.runtime),
   stopBrainGeneration: vi.fn(async () => ({
     client_message_id: "pending-turn",
     stop_requested: true,
+  })),
+  verifyBrainExperienceCandidate: vi.fn(async () => ({
+    id: 71,
+    status: "verified",
+    industry: "家居建材",
+    action: "提高真实案例内容占比",
+    condition: "账号处于增长期",
+    result: "有效咨询提升",
+    confidence: 0.86,
+    source_refs: [],
+    verification_method: "manual_confirmation",
+    verification_note: "已由运营负责人复核。",
+    verified_at: "2026-07-27T08:05:00Z",
   })),
 }));
 
@@ -352,6 +391,9 @@ describe("BrainHome", () => {
     mocks.streamOptions = null;
     mocks.account.auth_status = "manual";
     mocks.contextAccounts.splice(0, mocks.contextAccounts.length, mocks.account);
+    mocks.runtime.timeline[0].payload.message = "分析当前账号定位，生成下周内容计划";
+    mocks.runtime.timeline[1].payload.agent_name = "主 Agent";
+    mocks.runtime.timeline[1].payload.content = "好的，我先理解目标，然后调用账号定位专家。";
   });
 
   it("requires the account selected in the global shell instead of silently picking one", async () => {
@@ -361,7 +403,7 @@ describe("BrainHome", () => {
 
     expect(await screen.findByText("尚未选择抖音账号")).toBeInTheDocument();
     expect(screen.getByText("运营任务必须绑定真实账号，系统不会替你默认选择。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /发送给主 Agent/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /发送给运营大脑/ })).toBeDisabled();
     expect(listBrainTasks).not.toHaveBeenCalled();
     expect(getBrainTaskRuntime).not.toHaveBeenCalled();
     expect(sendBrainMessage).not.toHaveBeenCalled();
@@ -389,7 +431,7 @@ describe("BrainHome", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("任务记录加载失败");
     expect(screen.queryByText(/你可以直接输入运营目标/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /发送给主 Agent/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /发送给运营大脑/ })).toBeDisabled();
 
     fireEvent.click(within(alert).getByRole("button", { name: /重\s*试/ }));
     expect(await screen.findByText("本地开发账号")).toBeInTheDocument();
@@ -420,7 +462,7 @@ describe("BrainHome", () => {
     renderBrainHome();
 
     expect(await screen.findByText("尚未选择抖音账号")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /发送给主 Agent/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /发送给运营大脑/ })).toBeDisabled();
     expect(listBrainTasks).not.toHaveBeenCalled();
     expect(getBrainTaskRuntime).not.toHaveBeenCalled();
     expect(sendBrainMessage).not.toHaveBeenCalled();
@@ -433,7 +475,7 @@ describe("BrainHome", () => {
 
     await waitFor(() => expect(getWorkspaceContext).toHaveBeenCalledWith(1, 2));
     expect(await screen.findByText("尚未选择抖音账号")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /发送给主 Agent/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /发送给运营大脑/ })).toBeDisabled();
     expect(sendBrainMessage).not.toHaveBeenCalled();
   });
 
@@ -444,7 +486,7 @@ describe("BrainHome", () => {
 
     expect(await screen.findByText("本地开发账号")).toBeInTheDocument();
     expect(screen.getByText("当前账号尚未完成授权，请先到账号矩阵完成抖音授权。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /发送给主 Agent/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /发送给运营大脑/ })).toBeDisabled();
   });
 
   it("does not auto-open historical runtime tasks as the current conversation", async () => {
@@ -452,7 +494,7 @@ describe("BrainHome", () => {
 
     const conversation = await screen.findByLabelText("运营大脑对话流");
     expect(conversation).toBeInTheDocument();
-    expect(within(conversation).getByText("主 Agent")).toBeInTheDocument();
+    expect(within(conversation).getByText("运营大脑")).toBeInTheDocument();
     expect(await screen.findByText("今天，想推进什么？")).toBeInTheDocument();
     expect(
       document.querySelector(".tz-brain-welcome__agent img"),
@@ -476,12 +518,31 @@ describe("BrainHome", () => {
 
     await screen.findByLabelText("运营大脑对话流");
     await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
-    const identities = screen.getAllByRole("img", { name: "主 Agent" });
+    const identities = screen.getAllByRole("img", { name: "运营大脑" });
     expect(identities.length).toBeGreaterThan(0);
     expect(identities[0].querySelector("img")).toHaveAttribute(
       "src",
       "/main-agent-avatar.png",
     );
+  });
+
+  it("normalizes legacy system identity copy without rewriting the user message", async () => {
+    mocks.runtime.timeline[0].payload.message = "请解释主 Agent 和专家的分工";
+    mocks.runtime.timeline[1].payload.agent_name = "主 Agent";
+    mocks.runtime.timeline[1].payload.content = "主 Agent 正在理解目标";
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    const conversation = await screen.findByLabelText("运营大脑对话流");
+    expect(await within(conversation).findByText("请解释主 Agent 和专家的分工"))
+      .toBeInTheDocument();
+    expect(within(conversation).getByText("运营大脑")).toBeInTheDocument();
+    expect(within(conversation).getByText("运营大脑正在理解目标"))
+      .toBeInTheDocument();
   });
 
   it("restores only the active task explicitly saved for the selected account", async () => {
@@ -523,7 +584,7 @@ describe("BrainHome", () => {
 
     const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
     await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
 
     fireEvent.click(await screen.findByRole("button", { name: /执行详情/ }));
@@ -538,7 +599,7 @@ describe("BrainHome", () => {
 
     const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
     await waitFor(() => {
       expect(vi.mocked(sendBrainMessage).mock.calls[0]?.[0]).toEqual({
@@ -579,7 +640,7 @@ describe("BrainHome", () => {
       "输入目标、补充要求、打断指令，或直接问一个问题。",
     );
     fireEvent.change(input, { target: { value: "分析这个账号最近的内容表现" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
     expect(await screen.findByText("分析这个账号最近的内容表现")).toBeVisible();
     expect(input).toHaveValue("");
@@ -598,7 +659,7 @@ describe("BrainHome", () => {
       "输入目标、补充要求、打断指令，或直接问一个问题。",
     );
     fireEvent.change(input, { target: { value: "先生成三个内容方向" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送给主 Agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
     await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
     const request = vi.mocked(sendBrainMessage).mock.calls[0][0];
 
@@ -716,7 +777,7 @@ describe("BrainHome", () => {
       "输入目标、补充要求、打断指令，或直接问一个问题。",
     );
     fireEvent.change(input, { target: { value: "继续流式分析" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
     await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
     const request = vi.mocked(sendBrainMessage).mock.calls[0]?.[0] as {
@@ -771,7 +832,7 @@ describe("BrainHome", () => {
 
     const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
     await screen.findByRole("article", { name: "正式成果：账号定位诊断" });
 
     fireEvent.click(screen.getByRole("button", { name: "修改并重做" }));
@@ -837,7 +898,7 @@ describe("BrainHome", () => {
 
     const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
     fireEvent.change(input, { target: { value: "你好" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
     const conversation = await screen.findByLabelText("运营大脑对话流");
     const userMessage = within(conversation).getByRole("article", { name: "你的消息" });
@@ -862,9 +923,9 @@ describe("BrainHome", () => {
 
     const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
-    const composer = await screen.findByLabelText("主 Agent 输入区");
+    const composer = await screen.findByLabelText("运营大脑输入区");
     fireEvent.click(within(composer).getByRole("button", { name: "修改要求" }));
     const comment = within(composer).getByPlaceholderText("写下希望专家如何调整；驳回后会按此要求重做");
     fireEvent.change(comment, { target: { value: "标题更克制，先不要进入发布。" } });
@@ -914,6 +975,154 @@ describe("BrainHome", () => {
     expect(conversation).not.toHaveTextContent("RAW_EXPERT_STREAM_SHOULD_COLLAPSE");
   });
 
+  it("presents AI COO strategy, quality and reflection as readable conversation records", async () => {
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      strategy: {
+        id: 31,
+        task_id: 12,
+        status: "active",
+        version: 1,
+        goal: "提升有效咨询",
+        situation_snapshot: { data_sufficiency: "partial" },
+        strategy: { period_days: 30, primary_action: "提高真实案例内容占比" },
+        kpis: [{ metric: "qualified_leads", target: 20 }],
+        risks: ["样本窗口较短"],
+        evidence_refs: [{ source_type: "account_metric_snapshot", source_id: "snapshot:1" }],
+        rationale_summary: "真实案例内容的咨询效率高于普通产品介绍。",
+      },
+      decisions: [
+        {
+          id: 41,
+          trace_key: "strategy-1",
+          goal: "提升有效咨询",
+          evidence_refs: [],
+          alternatives: [],
+          selected_option: { title: "提高真实案例内容占比" },
+          decision_reason: "近两周真实案例带来的咨询效率更高。",
+          action_summary: "下一周期优先制作真实案例内容。",
+          outcome: {},
+          status: "decided",
+        },
+      ],
+      quality_scores: [
+        {
+          id: 51,
+          score: 86,
+          dimensions: { factual_accuracy: 92 },
+          issues: ["观察窗口较短"],
+          suggestions: ["继续跟踪有效咨询"],
+          passed: true,
+          iteration: 0,
+          evidence_refs: [],
+          critic_model: "deepseek-chat",
+        },
+      ],
+      reflection: {
+        id: 61,
+        status: "observed",
+        goal_snapshot: {},
+        expected_outcome: {},
+        observed_outcome: {},
+        evidence_refs: [],
+        diagnosis: [],
+        conclusion: "真实案例内容带来的有效咨询达到目标。",
+        next_strategy: { action: "continue_and_expand_observation" },
+        experience_candidates: [],
+        measured_at: "2026-07-27T08:00:00Z",
+      },
+      operation_intelligence: {
+        task_id: 12,
+        score: 84,
+        components: {
+          strategy_quality: 88,
+          evidence_quality: 80,
+          execution_effect: 86,
+          learning_quality: 78,
+        },
+        weights: {
+          strategy_quality: 0.3,
+          evidence_quality: 0.25,
+          execution_effect: 0.25,
+          learning_quality: 0.2,
+        },
+        basis: ["策略版本 1"],
+        data_sufficiency: "sufficient",
+        calculated_at: "2026-07-27T08:00:00Z",
+      },
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    const conversation = await screen.findByLabelText("运营大脑对话流");
+    expect(await within(conversation).findByText("30 天运营策略")).toBeInTheDocument();
+    expect(conversation).toHaveTextContent("提升有效咨询");
+    expect(conversation).toHaveTextContent("质量审核 86 分");
+    expect(conversation).toHaveTextContent("真实案例内容带来的有效咨询达到目标");
+    expect(conversation).not.toHaveTextContent('"primary_action"');
+
+    fireEvent.click(screen.getByRole("button", { name: /执行详情/ }));
+    expect(await screen.findByText("运营智能评分")).toBeInTheDocument();
+    expect(screen.getByText("84")).toBeInTheDocument();
+  });
+
+  it("checks real performance and verifies an evidence-backed experience from execution details", async () => {
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      reflection: {
+        id: 61,
+        status: "observed",
+        goal_snapshot: {},
+        expected_outcome: {},
+        observed_outcome: {},
+        evidence_refs: [{ source_type: "account_metric_snapshot", source_id: "snapshot:2" }],
+        diagnosis: [],
+        conclusion: "真实案例内容带来的有效咨询达到目标。",
+        next_strategy: {},
+        experience_candidates: [
+          {
+            key: "case-content-growth",
+            industry: "家居建材",
+            action: "提高真实案例内容占比",
+            condition: "账号处于增长期",
+            result: "有效咨询提升",
+            confidence: 0.86,
+            source_refs: [{ source_type: "account_metric_snapshot", source_id: "snapshot:2" }],
+          },
+        ],
+        measured_at: "2026-07-27T08:00:00Z",
+      },
+      experience_memories: [],
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
+    fireEvent.click(screen.getByRole("button", { name: /执行详情/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "检查最新效果" }));
+    await waitFor(() => expect(refreshBrainObservation).toHaveBeenCalledWith(12));
+
+    const note = screen.getByPlaceholderText("写下人工核验依据");
+    fireEvent.change(note, { target: { value: "已由运营负责人复核。" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认沉淀经验" }));
+
+    await waitFor(() => {
+      expect(verifyBrainExperienceCandidate).toHaveBeenCalledWith({
+        taskId: 12,
+        candidateKey: "case-content-growth",
+        verificationNote: "已由运营负责人复核。",
+      });
+    });
+  });
+
   it("continues an active runtime in the same task thread", async () => {
     vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
       ...mocks.runtime,
@@ -930,7 +1139,7 @@ describe("BrainHome", () => {
 
     const input = screen.getByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
     fireEvent.change(input, { target: { value: "先补充三个更年轻化的选题" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
     await waitFor(() => expect(vi.mocked(sendBrainMessage).mock.calls.at(-1)?.[0]).toEqual({
       message: "先补充三个更年轻化的选题",
@@ -940,6 +1149,121 @@ describe("BrainHome", () => {
       account_id: 3,
       platform: "douyin",
     }));
+  });
+  it("shows sanitized model-call audit only to administrators", async () => {
+    useAuth.setState({
+      token: "admin-token",
+      user: {
+        id: 1,
+        email: "admin@tzxai.top",
+        display_name: "系统管理员",
+        role: "admin",
+        is_active: true,
+      },
+    });
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      strategy: {
+        id: 31,
+        task_id: 12,
+        status: "active",
+        version: 1,
+        goal: "提升有效咨询",
+        situation_snapshot: {},
+        strategy: {},
+        kpis: [],
+        risks: [],
+        evidence_refs: [],
+        rationale_summary: "基于账号真实表现制定。",
+        prompt_id: "main-agent.strategy-planning",
+        prompt_version: "v1",
+        prompt_hash: "strategy-hash",
+      },
+      quality_scores: [
+        {
+          id: 41,
+          score: 86,
+          dimensions: {},
+          issues: [],
+          suggestions: [],
+          passed: true,
+          iteration: 1,
+          evidence_refs: [],
+          critic_prompt_id: "main-agent.critic",
+          critic_prompt_version: "v1",
+          critic_prompt_hash: "critic-hash",
+          critic_model: "deepseek-v4",
+        },
+      ],
+      llm_calls: [
+        {
+          id: 51,
+          invocation_id: 90,
+          trace_id: "trace-51",
+          agent_code: "01-positioning",
+          prompt_id: "expert.positioning",
+          prompt_version: "v3",
+          prompt_hash: "positioning-hash",
+          prompt_schema_version: "1",
+          provider: "deepseek",
+          model: "deepseek-v4",
+          prompt_tokens: 120,
+          completion_tokens: 80,
+          total_tokens: 200,
+          cost_usd: 0.012,
+          latency_ms: 850,
+          status: "failed",
+          error: "上游超时",
+          created_at: "2026-07-27T08:00:00Z",
+        },
+      ],
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+    await waitFor(() => expect(getBrainTaskRuntime).toHaveBeenCalledWith(12));
+    const detailsButton = document.querySelector<HTMLButtonElement>(
+      ".tz-brain-toolbar-actions button:last-child",
+    );
+    expect(detailsButton).not.toBeNull();
+    fireEvent.click(detailsButton!);
+
+    expect(await screen.findByText("模型调用审计")).toBeInTheDocument();
+    expect(screen.getByText("main-agent.strategy-planning · v1")).toBeInTheDocument();
+    expect(screen.getByText("main-agent.critic · v1")).toBeInTheDocument();
+    expect(screen.getByText("expert.positioning · v3")).toBeInTheDocument();
+    expect(screen.getByText("200 Token")).toBeInTheDocument();
+    expect(screen.getByText("$0.0120")).toBeInTheDocument();
+    expect(screen.getByText("上游超时")).toBeInTheDocument();
+
+    cleanup();
+    useAuth.setState({
+      token: "member-token",
+      user: {
+        id: 2,
+        email: "member@tzxai.top",
+        display_name: "运营成员",
+        role: "user",
+        is_active: true,
+      },
+    });
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      llm_calls: [],
+    });
+    renderBrainHome();
+    await waitFor(() => expect(getBrainTaskRuntime).toHaveBeenCalledTimes(2));
+    const memberDetailsButton = document.querySelector<HTMLButtonElement>(
+      ".tz-brain-toolbar-actions button:last-child",
+    );
+    expect(memberDetailsButton).not.toBeNull();
+    fireEvent.click(memberDetailsButton!);
+    expect(screen.queryByText("模型调用审计")).not.toBeInTheDocument();
+
+    useAuth.setState({ token: null, user: null });
   });
 });
 

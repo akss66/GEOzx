@@ -148,11 +148,25 @@ PRODUCTION_PROMPTS: tuple[PromptSpec, ...] = (
         "runtime-next-step/v1",
     ),
     PromptSpec(
+        "main-agent.strategy-planning",
+        "1.0.0",
+        "main-agent/strategy-planning/v1.md",
+        "0c82d2f5e2bb825112bf6524b23fa2c093d2812c858e0cc12e0e761685862041",
+        "operating-strategy/v1",
+    ),
+    PromptSpec(
         "main-agent.decision-revision",
         "1.0.0",
         "main-agent/decision-revision/v1.md",
         "a0789a6c51825debe17d847f8956b6a81fe0f4cc354614b14aeb103b6cf80004",
         "decision-request/v1",
+    ),
+    PromptSpec(
+        "main-agent.critic",
+        "1.0.0",
+        "main-agent/critic/v1.md",
+        "cbd9d1e469c2961e3939d9b5616dcc4f60912498c7ef2eaccedfaa6e248d2900",
+        "critic-evaluation/v1",
     ),
     PromptSpec(
         "main-agent.acknowledgement",

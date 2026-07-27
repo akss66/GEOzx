@@ -478,6 +478,110 @@ export interface BrainDecisionRequest {
   status: "pending" | "selected" | "revised";
 }
 
+export interface StrategyPlanSummary {
+  id: number;
+  task_id: number;
+  status: string;
+  version: number;
+  goal: string;
+  situation_snapshot: Record<string, unknown>;
+  strategy: Record<string, unknown>;
+  kpis: Record<string, unknown>[];
+  risks: string[];
+  evidence_refs: Record<string, unknown>[];
+  rationale_summary: string;
+  prompt_id?: string | null;
+  prompt_version?: string | null;
+  prompt_hash?: string | null;
+}
+
+export interface DecisionTraceSummary {
+  id: number;
+  trace_key: string;
+  goal: string;
+  evidence_refs: Record<string, unknown>[];
+  alternatives: Record<string, unknown>[];
+  selected_option: Record<string, unknown>;
+  decision_reason: string;
+  action_summary: string;
+  outcome: Record<string, unknown>;
+  status: string;
+}
+
+export interface AgentQualityScoreSummary {
+  id: number;
+  score: number;
+  dimensions: Record<string, unknown>;
+  issues: string[];
+  suggestions: string[];
+  passed: boolean;
+  iteration: number;
+  evidence_refs: Record<string, unknown>[];
+  critic_prompt_id?: string | null;
+  critic_prompt_version?: string | null;
+  critic_prompt_hash?: string | null;
+  critic_model: string | null;
+}
+
+export interface LLMCallAuditSummary {
+  id: number;
+  invocation_id: number | null;
+  trace_id: string | null;
+  agent_code: string | null;
+  prompt_id: string | null;
+  prompt_version: string | null;
+  prompt_hash: string | null;
+  prompt_schema_version: string | null;
+  provider: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  latency_ms: number;
+  status: string;
+  error: string | null;
+  created_at: string;
+}
+
+export interface ReflectionRecordSummary {
+  id: number;
+  status: string;
+  goal_snapshot: Record<string, unknown>;
+  expected_outcome: Record<string, unknown>;
+  observed_outcome: Record<string, unknown>;
+  evidence_refs: Record<string, unknown>[];
+  diagnosis: Record<string, unknown>[];
+  conclusion: string;
+  next_strategy: Record<string, unknown>;
+  experience_candidates: Record<string, unknown>[];
+  measured_at: string | null;
+}
+
+export interface ExperienceMemorySummary {
+  id: number;
+  status: string;
+  industry: string;
+  action: string;
+  condition: string;
+  result: string;
+  confidence: number | string;
+  source_refs: Record<string, unknown>[];
+  verification_method: string;
+  verification_note: string;
+  verified_at: string | null;
+}
+
+export interface OperationIntelligenceSummary {
+  task_id: number;
+  score: number;
+  components: Record<string, number>;
+  weights: Record<string, number>;
+  basis: string[];
+  data_sufficiency: "insufficient" | "partial" | "sufficient";
+  calculated_at: string;
+}
+
 export interface BrainRuntime {
   task: BrainTask;
   thread_id: string | null;
@@ -489,6 +593,13 @@ export interface BrainRuntime {
   pending_permissions: AgentToolCall[];
   intent?: BrainIntentDecision | null;
   pending_decisions?: BrainDecisionRequest[];
+  strategy?: StrategyPlanSummary | null;
+  decisions?: DecisionTraceSummary[];
+  quality_scores?: AgentQualityScoreSummary[];
+  reflection?: ReflectionRecordSummary | null;
+  experience_memories?: ExperienceMemorySummary[];
+  operation_intelligence?: OperationIntelligenceSummary | null;
+  llm_calls?: LLMCallAuditSummary[];
   next_actions: string[];
 }
 

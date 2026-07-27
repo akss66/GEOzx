@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import func, select
 
@@ -9,8 +11,17 @@ from app.models import (
     TaskBrief,
 )
 from app.models.enums import AgentCode, Platform
-from app.orchestrator.ai_coo_runtime import ai_coo_operating_service
+from app.orchestrator.ai_coo_runtime import (
+    ai_coo_operating_service,
+    validate_strategy_draft_evidence,
+)
+from app.orchestrator.brain_intelligence import (
+    OperatingStrategyModelPlan,
+    brain_intelligence,
+)
 from app.orchestrator.brain_runtime import BrainRuntimeGraph
+from app.prompts import prompt_registry
+from app.schemas.ai_coo import AccountSituationOut, OperatingStrategyDraft
 
 
 async def _task_with_account(session, admin) -> tuple[Account, BrainTask]:
@@ -61,6 +72,10 @@ async def test_operating_context_uses_data_collection_strategy_when_evidence_is_
     assert result.situation_summary["data_sufficiency"] == "insufficient"
     assert result.situation_summary["diagnosis"] == []
     assert result.evidence_refs == []
+    assert result.memory_context.account.account_id == account.id
+    assert result.memory_context.account.situation_summary["data_sufficiency"] == (
+        "insufficient"
+    )
     assert result.strategy_status == "data_collection_required"
     assert result.task_plan == [
         {
@@ -150,6 +165,120 @@ async def test_operating_context_is_idempotent_for_one_task(
     )
 
 
+@pytest.mark.asyncio
+async def test_operating_context_persists_evidence_grounded_model_strategy(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account, task = await _task_with_account(session, admin)
+    evidence_id = "account_metric_snapshot:41:engagement_rate"
+    captured_memory = {}
+
+    async def fake_situation(*_args, **_kwargs):
+        return AccountSituationOut.model_validate(
+            {
+                "account_id": account.id,
+                "generated_at": datetime.now(UTC),
+                "data_sufficiency": "partial",
+                "conclusion": "已建立部分真实数据基线",
+                "diagnosis": [],
+                "evidence_refs": [
+                    {
+                        "source_type": "account_metric_snapshot",
+                        "source_id": "41",
+                        "metric": "engagement_rate",
+                        "value": 0.012,
+                        "time_range": {
+                            "start": "2026-07-20",
+                            "end": "2026-07-20",
+                        },
+                        "collected_at": datetime.now(UTC),
+                        "freshness": "fresh",
+                    }
+                ],
+                "missing_data": ["有效咨询量"],
+                "confidence": 0.45,
+            }
+        )
+
+    async def fake_strategy(*_args, **kwargs):
+        captured_memory.update(kwargs["memory_context"])
+        prompt = prompt_registry.load("main-agent.strategy-planning")
+        return OperatingStrategyModelPlan(
+            draft=OperatingStrategyDraft.model_validate(
+                {
+                "account_stage": "growth",
+                "main_problem": "互动基础存在，但缺少转化基线",
+                "data_sufficiency": "partial",
+                "missing_data": ["有效咨询量"],
+                "confidence": 0.7,
+                "diagnosis": [
+                    {
+                        "issue": "已有互动率基线，但无法判断咨询转化",
+                        "evidence_ids": [evidence_id],
+                    }
+                ],
+                "strategy": {
+                    "period_days": 30,
+                    "primary_action": "提高真实案例内容占比",
+                    "content_mix": {"真实案例": 60, "专业知识": 40},
+                    "stage_goals": ["建立咨询转化基线"],
+                    "content_direction": ["真实案例"],
+                    "user_strategy": ["高意向用户"],
+                    "conversion_path": ["内容", "主页", "咨询"],
+                },
+                "kpis": [
+                    {
+                        "metric": "互动率",
+                        "target": "不低于当前基线",
+                        "evidence_ids": [evidence_id],
+                    }
+                ],
+                "risks": ["咨询数据仍需人工录入"],
+                "rationale_summary": "先保持互动基线并补齐咨询数据。",
+                "required_expert_codes": [
+                    AgentCode.POSITIONING.value,
+                    AgentCode.OPERATOR.value,
+                ],
+                }
+            ),
+            prompt=prompt,
+            model="deepseek-chat",
+        )
+
+    monkeypatch.setattr(ai_coo_operating_service, "_situation", fake_situation)
+    monkeypatch.setattr(
+        brain_intelligence,
+        "plan_operating_strategy",
+        fake_strategy,
+        raising=False,
+    )
+
+    result = await ai_coo_operating_service.prepare(
+        session,
+        task=task,
+        run_id=None,
+        required_expert_codes=[AgentCode.POSITIONING.value],
+    )
+
+    strategy = await session.get(StrategyPlan, result.strategy_plan_id)
+    assert strategy is not None
+    assert strategy.strategy["stage_goals"] == ["建立咨询转化基线"]
+    assert strategy.strategy["primary_action"] == "提高真实案例内容占比"
+    assert strategy.kpis[0]["metric"] == "互动率"
+    assert strategy.situation_snapshot["account_stage"] == "growth"
+    assert strategy.prompt_id == "main-agent.strategy-planning"
+    assert strategy.prompt_version == "1.0.0"
+    assert strategy.prompt_hash
+    assert captured_memory["account"]["account_id"] == account.id
+    assert captured_memory["experience"]["items"] == []
+    assert [step["agent_code"] for step in result.task_plan] == [
+        AgentCode.POSITIONING.value,
+        AgentCode.OPERATOR.value,
+    ]
+
+
 def test_smart_runtime_enters_ai_coo_operating_nodes_before_dynamic_dispatch() -> None:
     graph = BrainRuntimeGraph()._smart_graph.get_graph()
     nodes = set(graph.nodes)
@@ -157,12 +286,76 @@ def test_smart_runtime_enters_ai_coo_operating_nodes_before_dynamic_dispatch() -
 
     assert {
         "goal_understanding",
+        "context_resolution",
         "situation_awareness",
         "strategy_planning",
         "task_planning",
     }.issubset(nodes)
     assert ("__start__", "goal_understanding") in edges
-    assert ("goal_understanding", "situation_awareness") in edges
+    assert ("goal_understanding", "context_resolution") in edges
+    assert ("context_resolution", "situation_awareness") in edges
     assert ("situation_awareness", "strategy_planning") in edges
     assert ("strategy_planning", "task_planning") in edges
     assert ("task_planning", "decide_next") in edges
+    assert ("smart_summarize", "wait_for_measurement") in edges
+
+
+def test_observation_runtime_uses_real_learning_nodes() -> None:
+    graph = BrainRuntimeGraph()._observation_graph.get_graph()
+    nodes = set(graph.nodes)
+    edges = {(edge.source, edge.target) for edge in graph.edges}
+
+    assert {
+        "performance_analysis",
+        "reflection",
+        "experience_verification",
+        "next_strategy",
+    }.issubset(nodes)
+    assert ("__start__", "performance_analysis") in edges
+    assert ("reflection", "experience_verification") in edges
+    assert ("experience_verification", "next_strategy") in edges
+
+
+def test_strategy_draft_cannot_reference_evidence_outside_runtime_context() -> None:
+    draft = OperatingStrategyDraft.model_validate(
+        {
+            "account_stage": "growth",
+            "main_problem": "内容转化承接不足",
+            "data_sufficiency": "partial",
+            "missing_data": ["有效咨询量"],
+            "confidence": 0.7,
+            "diagnosis": [
+                {
+                    "issue": "近期内容数量充足但缺少转化证据",
+                    "evidence_ids": ["platform_content_record:12:content_record_count"],
+                }
+            ],
+            "strategy": {
+                "period_days": 30,
+                "primary_action": "建立真实转化基线",
+                "content_mix": {"真实案例": 100},
+                "stage_goals": ["建立转化基线"],
+                "content_direction": ["真实案例"],
+                "user_strategy": ["高意向用户"],
+                "conversion_path": ["内容", "主页", "咨询"],
+            },
+            "kpis": [
+                {
+                    "metric": "有效咨询量",
+                    "target": "建立基线",
+                    "evidence_ids": ["invented:999:qualified_leads"],
+                }
+            ],
+            "risks": ["缺少转化数据"],
+            "rationale_summary": "先建立真实转化基线。",
+            "required_expert_codes": [AgentCode.POSITIONING.value],
+        }
+    )
+
+    with pytest.raises(ValueError, match="unknown evidence ids"):
+        validate_strategy_draft_evidence(
+            draft,
+            {
+                "platform_content_record:12:content_record_count",
+            },
+        )

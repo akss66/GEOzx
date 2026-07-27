@@ -20,6 +20,14 @@ from app.models.enums import (
     Platform,
     RerunScope,
 )
+from app.schemas.ai_coo import (
+    AgentQualityScoreOut,
+    DecisionTraceOut,
+    ExperienceMemoryOut,
+    OperationIntelligenceOut,
+    ReflectionRecordOut,
+    StrategyPlanOut,
+)
 
 ToolPermissionMode = Literal["auto", "confirm", "manual", "disabled"]
 IntentKind = Literal["conversation", "clarification", "analysis", "workflow", "action"]
@@ -317,6 +325,31 @@ class RuntimeEventOut(BaseModel):
     created_at: datetime
 
 
+class LLMCallAuditOut(BaseModel):
+    """管理员可见的模型调用安全摘要，不返回输入上下文或预算细节。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    invocation_id: int | None
+    trace_id: str | None
+    agent_code: str | None
+    prompt_id: str | None
+    prompt_version: str | None
+    prompt_hash: str | None
+    prompt_schema_version: str | None
+    provider: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_usd: float
+    latency_ms: int
+    status: str
+    error: str | None
+    created_at: datetime
+
+
 class BrainRuntimeOut(BaseModel):
     task: BrainTaskOut
     thread_id: str | None
@@ -328,6 +361,13 @@ class BrainRuntimeOut(BaseModel):
     pending_permissions: list[AgentToolCallOut]
     intent: IntentDecision | None = None
     pending_decisions: list[DecisionRequest] = Field(default_factory=list)
+    strategy: StrategyPlanOut | None = None
+    decisions: list[DecisionTraceOut] = Field(default_factory=list)
+    quality_scores: list[AgentQualityScoreOut] = Field(default_factory=list)
+    reflection: ReflectionRecordOut | None = None
+    experience_memories: list[ExperienceMemoryOut] = Field(default_factory=list)
+    operation_intelligence: OperationIntelligenceOut | None = None
+    llm_calls: list[LLMCallAuditOut] = Field(default_factory=list)
     next_actions: list[str]
 
 

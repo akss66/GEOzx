@@ -1,7 +1,34 @@
 # 当前执行清单
 
-> 更新时间：2026-07-21
-> 当前阶段：P10 生产级 Agent Runtime 与双层记忆已确认，正在按风险优先顺序实施。未经本地完整验收和用户批准，不部署生产。
+> 更新时间：2026-07-27
+> 当前阶段：P11 AI COO Runtime 已完成自动化技术验收，等待真实模型、真实抖音账号和人工审批桌面验收。未经用户批准，不部署生产。
+
+## P11: AI COO 运营闭环
+
+- [x] 保持现有 `BrainTask`、`AgentInvocation`、`AgentToolCall`、`Deliverable`、`Event` 与权限体系兼容。
+- [x] 建立 Goal → Context → Situation → Strategy → Task → Expert → Critic → Approval → Observation → Reflection → Experience → Next Strategy 的 LangGraph 运行图。
+- [x] 态势感知只引用持久化真实数据；证据不足时返回数据不足。
+- [x] 主 Agent 只负责决策、调度、监督和汇总，专家继续使用隔离上下文和工具白名单。
+- [x] Critic 五维评分、最多两轮自动改进和质量账本。
+- [x] 策略、决策、反思、质量评分和经验记忆五类运营语义账本。
+- [x] Business、Account、Content、Experience 四层 Memory。
+- [x] 经验候选必须经规则或人工验证后才能成为已验证经验。
+- [x] Operation Intelligence 使用策略 30%、证据 25%、执行 25%、学习 20% 的确定性评分。
+- [x] 运营大脑对话流展示态势、策略、专家协作、Critic、审批、反思和下一步，隐藏底层 JSON。
+- [x] 管理员执行详情可查看 Node、Invocation、Prompt 版本、Token、成本、重试和安全错误摘要。
+- [x] 后端 Ruff 0 错误；全量测试 618 项通过；迁移测试 13 项通过。
+- [x] 前端 63 个文件、281 项测试通过；TypeScript 与生产构建通过；ESLint 0 错误。
+- [ ] 使用真实模型和真实抖音账号完成目标到人工审批的桌面验收。
+- [ ] 投稿能力获批后完成 H5 投稿、作品绑定和官方字段回流验收。
+- [ ] 等待真实观测周期后验收效果分析、反思与经验验证结果。
+
+### 2026-07-27 本地候选版本说明
+
+- 详细设计与能力边界：`docs/superpowers/specs/2026-07-27-ai-coo-douyin-publishing-loop-design.md`。
+- 实施计划：`docs/superpowers/plans/2026-07-27-ai-coo-runtime.md`。
+- 本轮不使用 Mock 运营数据，不承诺网站应用自动获得完整抖音经营指标。
+- 自动化验收与真实账号验收分开记录；当前没有部署生产。
+- 已知非阻断项：前端保留 13 条既有 Hooks ESLint 警告，构建保留 Ant Design 与图表大 chunk 警告，后续按性能专项治理。
 
 ## P10: 生产级 Agent Runtime 与双层记忆
 

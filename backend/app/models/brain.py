@@ -5,6 +5,7 @@
 
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -31,6 +32,15 @@ from app.models.enums import (
     Platform,
     RerunScope,
 )
+
+if TYPE_CHECKING:
+    from app.models.ai_coo import (
+        AgentQualityScore,
+        DecisionTrace,
+        ExperienceMemory,
+        ReflectionRecord,
+        StrategyPlan,
+    )
 
 
 class BrainTask(Base, TimestampMixin):

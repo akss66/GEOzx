@@ -16,9 +16,11 @@ import {
   rejectDeliverableAcceptance,
   reviseBrainDecision,
   regenerateBrainMessage,
+  refreshBrainObservation,
   selectBrainDecision,
   sendBrainMessage,
   stopBrainGeneration,
+  verifyBrainExperienceCandidate,
 } from "./brain";
 import { api } from "./client";
 import type { AgentToolCall, BrainRuntime, BrainTask, DeliverableAcceptance } from "../types";
@@ -268,6 +270,60 @@ describe("brain api", () => {
       2,
       "/brain/tasks/12/regenerate",
       { client_message_id: "turn-2" },
+    );
+  });
+
+  it("refreshes real observations and verifies experience candidates through dedicated endpoints", async () => {
+    const reflection = {
+      id: 61,
+      status: "observed",
+      goal_snapshot: {},
+      expected_outcome: {},
+      observed_outcome: {},
+      evidence_refs: [],
+      diagnosis: [],
+      conclusion: "真实效果已经回收。",
+      next_strategy: {},
+      experience_candidates: [],
+      measured_at: "2026-07-27T08:00:00Z",
+    };
+    const memory = {
+      id: 71,
+      status: "verified",
+      industry: "家居建材",
+      action: "提高真实案例内容占比",
+      condition: "账号处于增长期",
+      result: "有效咨询提升",
+      confidence: 0.86,
+      source_refs: [],
+      verification_method: "manual_confirmation",
+      verification_note: "已由运营负责人复核。",
+      verified_at: "2026-07-27T08:05:00Z",
+    };
+    apiPost
+      .mockResolvedValueOnce({ data: reflection })
+      .mockResolvedValueOnce({ data: memory });
+
+    await expect(refreshBrainObservation(12)).resolves.toEqual(reflection);
+    await expect(
+      verifyBrainExperienceCandidate({
+        taskId: 12,
+        candidateKey: "case-content-growth",
+        verificationNote: "已由运营负责人复核。",
+      }),
+    ).resolves.toEqual(memory);
+
+    expect(apiPost).toHaveBeenNthCalledWith(
+      1,
+      "/brain/tasks/12/observation/refresh",
+    );
+    expect(apiPost).toHaveBeenNthCalledWith(
+      2,
+      "/brain/tasks/12/experience-candidates/case-content-growth/verify",
+      {
+        candidate_key: "case-content-growth",
+        verification_note: "已由运营负责人复核。",
+      },
     );
   });
 
