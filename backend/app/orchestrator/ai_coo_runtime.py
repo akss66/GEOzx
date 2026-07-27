@@ -1,0 +1,332 @@
+"""Evidence-first operating context for the AI COO runtime."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    Account,
+    AccountClient,
+    BrainTask,
+    DecisionTrace,
+    Project,
+    ProjectAccount,
+    StrategyPlan,
+)
+from app.services.ai_coo_evidence import build_account_situation
+
+_EXPERT_PURPOSES = {
+    "01-positioning": "账号定位诊断",
+    "02-content-director": "内容策略与脚本规划",
+    "03-art-director": "视觉方向规划",
+    "04-video-creator": "视频素材规划",
+    "05-editor": "成片剪辑规划",
+    "06-operator": "账号运营与发布规划",
+    "07-advertiser": "投放策略规划",
+    "08-customer-service": "用户反馈与客服策略",
+}
+
+
+@dataclass(frozen=True)
+class OperatingContextResult:
+    account_id: int | None
+    active_client_id: int | None
+    active_project_id: int | None
+    available_client_ids: list[int]
+    available_project_ids: list[int]
+    normalized_goal: dict[str, Any]
+    situation_summary: dict[str, Any]
+    evidence_refs: list[dict[str, Any]]
+    strategy_plan_id: int
+    strategy_status: str
+    decision_trace_id: int
+    task_plan: list[dict[str, Any]]
+
+
+class AICOOOperatingService:
+    """Create the auditable operating baseline before expert execution."""
+
+    async def prepare(
+        self,
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        run_id: int | None,
+        required_expert_codes: list[str],
+    ) -> OperatingContextResult:
+        brief = task.brief
+        goal = (brief.goal if brief else task.title).strip()
+        account_id = _first_account_id(task)
+        scope = await _resolve_scope(session, task, account_id)
+        situation = await self._situation(
+            session,
+            task=task,
+            account_id=account_id,
+        )
+        situation_payload = situation.model_dump(mode="json")
+        evidence_refs = [
+            item.model_dump(mode="json") for item in situation.evidence_refs
+        ]
+        normalized_goal = {
+            "objective": goal,
+            "content_goal": brief.content_goal if brief else "",
+            "expected_outputs": list(brief.expected_outputs) if brief else [],
+            "risk_constraints": list(brief.risk_constraints) if brief else [],
+            "platforms": list(brief.platforms) if brief else [],
+            "account_id": account_id,
+        }
+        task_plan = _build_task_plan(required_expert_codes)
+
+        existing_strategy = await session.scalar(
+            select(StrategyPlan)
+            .where(StrategyPlan.task_id == task.id)
+            .order_by(StrategyPlan.version.desc(), StrategyPlan.id.desc())
+            .limit(1)
+        )
+        existing_trace = await session.scalar(
+            select(DecisionTrace)
+            .where(
+                DecisionTrace.task_id == task.id,
+                DecisionTrace.trace_key == "initial-operating-strategy-v1",
+            )
+            .limit(1)
+        )
+        if existing_strategy is not None and existing_trace is not None:
+            return OperatingContextResult(
+                account_id=account_id,
+                active_client_id=scope["active_client_id"],
+                active_project_id=scope["active_project_id"],
+                available_client_ids=scope["available_client_ids"],
+                available_project_ids=scope["available_project_ids"],
+                normalized_goal=normalized_goal,
+                situation_summary=situation_payload,
+                evidence_refs=evidence_refs,
+                strategy_plan_id=existing_strategy.id,
+                strategy_status=existing_strategy.status,
+                decision_trace_id=existing_trace.id,
+                task_plan=task_plan,
+            )
+
+        data_insufficient = situation.data_sufficiency == "insufficient"
+        strategy_status = "data_collection_required" if data_insufficient else "draft"
+        strategy_payload = (
+            {
+                "mode": "evidence_first",
+                "period_days": 30,
+                "next_action": "collect_baseline",
+                "expert_sequence": [
+                    step["agent_code"] for step in task_plan
+                ],
+            }
+            if data_insufficient
+            else {
+                "mode": "evidence_grounded",
+                "period_days": 30,
+                "next_action": "execute_task_plan",
+                "expert_sequence": [
+                    step["agent_code"] for step in task_plan
+                ],
+            }
+        )
+        rationale = (
+            "当前缺少可追溯的账号数据，先补齐运营基线，再形成业务判断。"
+            if data_insufficient
+            else "当前已存在可追溯账号数据，按目标组织必要专家继续分析。"
+        )
+        strategy = StrategyPlan(
+            org_id=task.org_id,
+            task_id=task.id,
+            run_id=run_id,
+            client_id=scope["active_client_id"],
+            project_id=scope["active_project_id"],
+            account_id=account_id,
+            created_by_id=task.created_by_id,
+            status=strategy_status,
+            version=1,
+            goal=goal,
+            situation_snapshot=situation_payload,
+            strategy=strategy_payload,
+            kpis=[
+                {
+                    "metric": "evidence_coverage",
+                    "target": "required_sources_present",
+                }
+            ],
+            risks=list(situation.missing_data),
+            evidence_refs=evidence_refs,
+            rationale_summary=rationale,
+        )
+        session.add(strategy)
+        await session.flush()
+
+        selected_key = "collect_baseline" if data_insufficient else "execute_task_plan"
+        trace = DecisionTrace(
+            org_id=task.org_id,
+            task_id=task.id,
+            run_id=run_id,
+            client_id=scope["active_client_id"],
+            project_id=scope["active_project_id"],
+            account_id=account_id,
+            trace_key="initial-operating-strategy-v1",
+            goal=goal,
+            evidence_refs=evidence_refs,
+            alternatives=[
+                {
+                    "key": "collect_baseline",
+                    "label": "补齐真实运营基线",
+                },
+                {
+                    "key": "execute_task_plan",
+                    "label": "按现有证据执行专家计划",
+                },
+            ],
+            selected_option={"key": selected_key},
+            decision_reason=rationale,
+            action_summary=" → ".join(
+                step["purpose"] for step in task_plan
+            )
+            or "暂不调度专家，等待明确目标。",
+            status="decided",
+            decided_at=datetime.now(UTC),
+        )
+        session.add(trace)
+        await session.commit()
+        await session.refresh(strategy)
+        await session.refresh(trace)
+        return OperatingContextResult(
+            account_id=account_id,
+            active_client_id=scope["active_client_id"],
+            active_project_id=scope["active_project_id"],
+            available_client_ids=scope["available_client_ids"],
+            available_project_ids=scope["available_project_ids"],
+            normalized_goal=normalized_goal,
+            situation_summary=situation_payload,
+            evidence_refs=evidence_refs,
+            strategy_plan_id=strategy.id,
+            strategy_status=strategy.status,
+            decision_trace_id=trace.id,
+            task_plan=task_plan,
+        )
+
+    async def _situation(
+        self,
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        account_id: int | None,
+    ):
+        if account_id is not None:
+            return await build_account_situation(
+                session,
+                org_id=task.org_id,
+                account_id=account_id,
+            )
+        from app.schemas.ai_coo import AccountSituationOut
+
+        return AccountSituationOut(
+            account_id=0,
+            generated_at=datetime.now(UTC),
+            data_sufficiency="insufficient",
+            conclusion="数据不足",
+            diagnosis=[],
+            evidence_refs=[],
+            missing_data=["账号上下文"],
+            confidence=0,
+        )
+
+
+def _first_account_id(task: BrainTask) -> int | None:
+    if task.brief and task.brief.account_ids:
+        return int(task.brief.account_ids[0])
+    return None
+
+
+async def _resolve_scope(
+    session: AsyncSession,
+    task: BrainTask,
+    account_id: int | None,
+) -> dict[str, Any]:
+    if account_id is None:
+        return {
+            "active_client_id": None,
+            "active_project_id": task.brief.project_id if task.brief else None,
+            "available_client_ids": [],
+            "available_project_ids": [],
+        }
+    account = await session.scalar(
+        select(Account).where(
+            Account.id == account_id,
+            Account.org_id == task.org_id,
+        )
+    )
+    if account is None:
+        raise ValueError("brain task account is unavailable")
+
+    client_ids = set(
+        (
+            await session.scalars(
+                select(AccountClient.client_id).where(
+                    AccountClient.account_id == account_id
+                )
+            )
+        ).all()
+    )
+    project_ids = set(
+        (
+            await session.scalars(
+                select(ProjectAccount.project_id).where(
+                    ProjectAccount.account_id == account_id
+                )
+            )
+        ).all()
+    )
+    if account.client_id is not None:
+        client_ids.add(account.client_id)
+    if account.project_id is not None:
+        project_ids.add(account.project_id)
+
+    requested_project_id = task.brief.project_id if task.brief else None
+    active_project_id = (
+        requested_project_id
+        if requested_project_id in project_ids
+        else account.project_id
+    )
+    active_client_id = account.client_id
+    if active_project_id is not None:
+        project_client_id = await session.scalar(
+            select(Project.client_id).where(
+                Project.id == active_project_id,
+                Project.org_id == task.org_id,
+            )
+        )
+        if project_client_id is not None:
+            active_client_id = project_client_id
+            client_ids.add(project_client_id)
+
+    return {
+        "active_client_id": active_client_id,
+        "active_project_id": active_project_id,
+        "available_client_ids": sorted(client_ids),
+        "available_project_ids": sorted(project_ids),
+    }
+
+
+def _build_task_plan(required_expert_codes: list[str]) -> list[dict[str, Any]]:
+    return [
+        {
+            "order": index,
+            "agent_code": code,
+            "purpose": _EXPERT_PURPOSES.get(code, "完成本轮专业任务"),
+            "status": "planned",
+        }
+        for index, code in enumerate(dict.fromkeys(required_expert_codes), start=1)
+        if code in _EXPERT_PURPOSES
+    ]
+
+
+ai_coo_operating_service = AICOOOperatingService()

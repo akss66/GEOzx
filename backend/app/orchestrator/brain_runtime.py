@@ -35,6 +35,7 @@ from app.models import Account, AgentInvocation, AgentToolCall, BrainTask, Event
 from app.models.enums import AgentCode, BrainTaskStatus
 from app.orchestrator.agent_harness import agent_harness
 from app.orchestrator.agent_kernel import AgentKernelPolicyError, main_kernel_policy
+from app.orchestrator.ai_coo_runtime import ai_coo_operating_service
 from app.orchestrator.brain_adapter import run_brain_task_pipeline
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
 from app.orchestrator.capability_registry import runtime_capabilities
@@ -44,6 +45,7 @@ from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.prompts import prompt_registry
 from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeToolCall
+from app.services.ai_coo_evidence import build_account_situation
 from app.services.runtime_memory import runtime_memory_service
 
 
@@ -69,6 +71,18 @@ class BrainRuntimeState(TypedDict, total=False):
     selected_expert_evidence_refs: list[str]
     termination_reason: str
     kernel_route: str
+    active_client_id: int
+    active_project_id: int
+    account_id: int
+    available_client_ids: list[int]
+    available_project_ids: list[int]
+    normalized_goal: dict[str, Any]
+    situation_summary: dict[str, Any]
+    evidence_refs: list[dict[str, Any]]
+    strategy_plan_id: int
+    strategy_status: str
+    decision_trace_id: int
+    task_plan: list[dict[str, Any]]
 
 
 _runtime_session: ContextVar[AsyncSession | None] = ContextVar(
@@ -177,6 +191,10 @@ class BrainRuntimeGraph:
         self._resume_graph = resume_graph.compile(checkpointer=checkpointer)
 
         smart_graph = StateGraph(BrainRuntimeState)
+        smart_graph.add_node("goal_understanding", self._goal_understanding)
+        smart_graph.add_node("situation_awareness", self._situation_awareness)
+        smart_graph.add_node("strategy_planning", self._strategy_planning)
+        smart_graph.add_node("task_planning", self._task_planning)
         smart_graph.add_node("dispatch_round", self._dispatch_round)
         smart_graph.add_node("execute_tools", self._execute_tools)
         smart_graph.add_node("observe_round", self._observe_round)
@@ -185,7 +203,11 @@ class BrainRuntimeGraph:
         smart_graph.add_node("decide_next", self._decide_next)
         smart_graph.add_node("decision_gate", self._decision_gate)
         smart_graph.add_node("smart_summarize", self._smart_summarize)
-        smart_graph.add_edge(START, "decide_next")
+        smart_graph.add_edge(START, "goal_understanding")
+        smart_graph.add_edge("goal_understanding", "situation_awareness")
+        smart_graph.add_edge("situation_awareness", "strategy_planning")
+        smart_graph.add_edge("strategy_planning", "task_planning")
+        smart_graph.add_edge("task_planning", "decide_next")
         smart_graph.add_edge("dispatch_round", "observe_round")
         smart_graph.add_edge("observe_round", "collect_permissions")
         smart_graph.add_edge("collect_permissions", "smart_permission_gate")
@@ -338,6 +360,9 @@ class BrainRuntimeGraph:
                 )
                 return task
 
+            task.runtime_mode = "coo_v1"
+            task.current_focus = "主 Agent 正在建立运营态势与策略上下文"
+            await session.commit()
             await self._stream_main_agent_turn(session, task)
             await self._smart_graph.ainvoke(
                 {
@@ -428,7 +453,7 @@ class BrainRuntimeGraph:
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
     ) -> BrainTask:
-        if task.runtime_mode != "langgraph":
+        if not _is_runtime_mode(task.runtime_mode):
             return task
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         await self._record_event(
@@ -950,6 +975,147 @@ class BrainRuntimeGraph:
     async def _smart_permission_gate(self, state: BrainRuntimeState) -> BrainRuntimeState:
         await self._check_main_turn_boundary(state)
         return await self._run_permission_gate(state, ready_status="ready_to_decide")
+
+    async def _goal_understanding(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            brief = task.brief
+            normalized_goal = {
+                "objective": (brief.goal if brief else task.title).strip(),
+                "content_goal": brief.content_goal if brief else "",
+                "expected_outputs": list(brief.expected_outputs) if brief else [],
+                "risk_constraints": list(brief.risk_constraints) if brief else [],
+                "platforms": list(brief.platforms) if brief else [],
+                "account_ids": list(brief.account_ids) if brief else [],
+            }
+            task.current_focus = "主 Agent 正在理解目标与约束"
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.goal_understood",
+                {
+                    "message": "主 Agent 已明确本轮目标、账号范围与风险约束。",
+                    "normalized_goal": normalized_goal,
+                },
+            )
+        return {
+            **state,
+            "status": "goal_understood",
+            "normalized_goal": normalized_goal,
+        }
+
+    async def _situation_awareness(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            account_ids = list(task.brief.account_ids if task.brief else [])
+            account_id = int(account_ids[0]) if account_ids else None
+            if account_id is None:
+                situation_summary = {
+                    "data_sufficiency": "insufficient",
+                    "conclusion": "数据不足",
+                    "diagnosis": [],
+                    "evidence_refs": [],
+                    "missing_data": ["账号上下文"],
+                    "confidence": "0",
+                }
+                evidence_refs: list[dict[str, Any]] = []
+            else:
+                situation = await build_account_situation(
+                    session,
+                    org_id=task.org_id,
+                    account_id=account_id,
+                )
+                situation_summary = situation.model_dump(mode="json")
+                evidence_refs = [
+                    item.model_dump(mode="json") for item in situation.evidence_refs
+                ]
+            task.current_focus = "主 Agent 正在核对真实数据与运营态势"
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.situation_assessed",
+                {
+                    "message": (
+                        "主 Agent 已完成运营态势核对。"
+                        if evidence_refs
+                        else "当前证据不足，主 Agent 不会生成无依据诊断。"
+                    ),
+                    "account_id": account_id,
+                    "data_sufficiency": situation_summary["data_sufficiency"],
+                    "evidence_count": len(evidence_refs),
+                    "missing_data": situation_summary["missing_data"],
+                },
+            )
+        return {
+            **state,
+            "status": "situation_assessed",
+            "account_id": account_id,
+            "situation_summary": situation_summary,
+            "evidence_refs": evidence_refs,
+        }
+
+    async def _strategy_planning(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            result = await ai_coo_operating_service.prepare(
+                session,
+                task=task,
+                run_id=state.get("agent_run_id"),
+                required_expert_codes=_required_expert_codes(state, task),
+            )
+            task.current_focus = "主 Agent 已形成证据约束下的运营策略"
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.strategy_planned",
+                {
+                    "message": (
+                        "真实数据不足，先补齐基线并继续必要的专业分析。"
+                        if result.strategy_status == "data_collection_required"
+                        else "主 Agent 已基于真实证据形成本轮运营策略。"
+                    ),
+                    "strategy_plan_id": result.strategy_plan_id,
+                    "decision_trace_id": result.decision_trace_id,
+                    "strategy_status": result.strategy_status,
+                },
+            )
+        return {
+            **state,
+            "status": "strategy_planned",
+            "active_client_id": result.active_client_id,
+            "active_project_id": result.active_project_id,
+            "available_client_ids": result.available_client_ids,
+            "available_project_ids": result.available_project_ids,
+            "normalized_goal": result.normalized_goal,
+            "situation_summary": result.situation_summary,
+            "evidence_refs": result.evidence_refs,
+            "strategy_plan_id": result.strategy_plan_id,
+            "strategy_status": result.strategy_status,
+            "decision_trace_id": result.decision_trace_id,
+            "task_plan": result.task_plan,
+        }
+
+    async def _task_planning(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            task_plan = list(state.get("task_plan", []))
+            task.current_focus = "主 Agent 正在按需调度必要专家"
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.task_planned",
+                {
+                    "message": (
+                        "主 Agent 已完成按需任务拆解，接下来只调用必要专家。"
+                    ),
+                    "steps": task_plan,
+                },
+            )
+        return {**state, "status": "task_planned"}
 
     async def _decide_next(self, state: BrainRuntimeState) -> BrainRuntimeState:
         await self._check_main_turn_boundary(state)
@@ -1607,6 +1773,10 @@ class BrainRuntimeGraph:
 runtime_graph = BrainRuntimeGraph()
 
 
+def _is_runtime_mode(value: str | None) -> bool:
+    return value in {"langgraph", "coo_v1"}
+
+
 def _casual_reply(goal: str) -> str:
     normalized = goal.strip()
     if "谢" in normalized:
@@ -1627,7 +1797,7 @@ async def runtime_events(session: AsyncSession, task_id: int) -> list[Event]:
 
 
 async def runtime_status(session: AsyncSession, task: BrainTask) -> str:
-    if task.runtime_mode != "langgraph":
+    if not _is_runtime_mode(task.runtime_mode):
         return "legacy"
     events = await runtime_events(session, task.id)
     latest_started_id = max(

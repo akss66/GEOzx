@@ -214,6 +214,10 @@ async def test_brain_runtime_checks_cancellation_before_dispatching_an_expert(
 @pytest.mark.parametrize(
     "node_name",
     [
+        "_goal_understanding",
+        "_situation_awareness",
+        "_strategy_planning",
+        "_task_planning",
         "_dispatch_round",
         "_execute_tools",
         "_observe_round",
