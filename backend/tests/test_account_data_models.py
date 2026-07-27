@@ -984,6 +984,16 @@ async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_bat
         field_name="manual_confirmation",
         status=ConflictStatus.OPEN,
     )
+    authoritative_artifact = DataArtifact(
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        filename="works.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        byte_size=2048,
+        sha256="a" * 64,
+        storage_key="account-data/1/2/3/works.xlsx",
+    )
 
     class _FakeBind:
         dialect = postgresql.dialect()
@@ -1006,6 +1016,8 @@ async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_bat
                 return [authoritative_row]
             if "FROM data_conflicts" in compiled:
                 return [authoritative_conflict]
+            if "FROM data_artifacts" in compiled:
+                return [authoritative_artifact]
             return []
 
     def _record_committed_value(instance, key, value):
@@ -1028,6 +1040,7 @@ async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_bat
     assert loaded.status is ImportBatchStatus.COMMITTED
     assert loaded.committed_at == datetime(2026, 7, 22, 9, 30)
     assert committed_relationships == [
+        (authoritative_batch, "artifacts", [authoritative_artifact]),
         (authoritative_batch, "rows", [authoritative_row]),
         (authoritative_batch, "conflicts", [authoritative_conflict]),
     ]
