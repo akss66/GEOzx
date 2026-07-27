@@ -37,7 +37,7 @@ export function AgentAvatar({
   const classes = ["tz-agent-avatar", className].filter(Boolean).join(" ");
   if (code === "00-decision") {
     return (
-      <span className={`${classes} is-main-agent`} role="img" aria-label={label ?? "主 Agent"}>
+      <span className={`${classes} is-main-agent`} role="img" aria-label={label ?? "运营大脑"}>
         <img src={MAIN_AGENT_AVATAR_SRC} alt="" />
       </span>
     );

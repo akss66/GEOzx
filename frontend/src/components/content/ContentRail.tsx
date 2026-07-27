@@ -82,7 +82,7 @@ export function ContentRail({
           <div className="content-rail__empty">
             <FileTextOutlined />
             <strong>项目里还没有内容</strong>
-            <span>从一个明确主题开始，主 Agent 和专家会在这里留下正式成果。</span>
+            <span>从一个明确主题开始，运营大脑和专家会在这里留下正式成果。</span>
             {canCreate ? (
               <Button type="link" onClick={() => setComposerOpen(true)}>创建第一条内容</Button>
             ) : null}

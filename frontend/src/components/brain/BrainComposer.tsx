@@ -9,6 +9,7 @@ import { Button, Input } from "antd";
 import { useEffect, useState } from "react";
 
 import type { AgentToolCall } from "../../types";
+import { presentOperationsBrainSystemCopy } from "../../utils/operationsBrainCopy";
 
 export function BrainComposer({
   value,
@@ -49,7 +50,7 @@ export function BrainComposer({
   return (
     <section
       className="dy-brain-chat-composer"
-      aria-label="主 Agent 输入区"
+      aria-label="运营大脑输入区"
       data-mode={mode}
     >
       <div className="dy-brain-composer-box" data-mode={mode}>
@@ -148,7 +149,7 @@ export function BrainComposer({
                 <Button
                   type="primary"
                   size="large"
-                  aria-label="发送给主 Agent"
+                  aria-label="发送给运营大脑"
                   icon={<SendOutlined />}
                   disabled={disabled}
                   onClick={onSubmit}
@@ -179,5 +180,9 @@ function permissionName(toolCall: AgentToolCall) {
 }
 
 function permissionPurpose(toolCall: AgentToolCall) {
-  return toolCall.output_summary || toolCall.input_summary || "确认后主 Agent 将继续当前工作流。";
+  return presentOperationsBrainSystemCopy(
+    toolCall.output_summary
+      || toolCall.input_summary
+      || "确认后运营大脑将继续当前工作流。",
+  );
 }

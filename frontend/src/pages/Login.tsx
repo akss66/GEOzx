@@ -60,7 +60,7 @@ export default function Login() {
             到一整套执行
           </Typography.Title>
           <Typography.Paragraph className="dy-login-hero-support">
-            主 Agent 理解目标，专家 Agent 接力推进，把新媒体运营变成可追踪的执行流。
+            运营大脑理解目标，专家 Agent 接力推进，把新媒体运营变成可追踪的执行流。
           </Typography.Paragraph>
         </div>
 

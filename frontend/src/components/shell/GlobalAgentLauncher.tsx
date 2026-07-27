@@ -25,11 +25,11 @@ export function GlobalAgentLauncher({ clientName, projectName, accountName }: Gl
   return (
     <div className="tz-agent-launcher">
       {open ? (
-        <section className="tz-agent-launcher-panel" aria-label="主 Agent">
+        <section className="tz-agent-launcher-panel" aria-label="运营大脑">
           <header>
             <span className="tz-agent-symbol"><RobotOutlined /></span>
-            <span><strong>主 Agent</strong><small>当前工作空间已带入</small></span>
-            <button type="button" aria-label="关闭主 Agent" onClick={() => setOpen(false)}><CloseOutlined /></button>
+            <span><strong>运营大脑</strong><small>当前工作空间已带入</small></span>
+            <button type="button" aria-label="关闭运营大脑" onClick={() => setOpen(false)}><CloseOutlined /></button>
           </header>
           <div className="tz-agent-context-line">
             <span>{clientName ?? "未选客户"}</span>
@@ -39,7 +39,7 @@ export function GlobalAgentLauncher({ clientName, projectName, accountName }: Gl
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder="告诉主 Agent 你想完成什么"
+            placeholder="告诉运营大脑你想完成什么"
             rows={4}
           />
           <footer>
@@ -49,7 +49,7 @@ export function GlobalAgentLauncher({ clientName, projectName, accountName }: Gl
             </div>
             <button type="button" className="tz-agent-submit" disabled={!draft.trim()} onClick={submit}>
               <ArrowUpOutlined />
-              <span>交给主 Agent</span>
+              <span>交给运营大脑</span>
             </button>
           </footer>
         </section>
@@ -57,12 +57,12 @@ export function GlobalAgentLauncher({ clientName, projectName, accountName }: Gl
       <button
         type="button"
         className="tz-agent-fab"
-        aria-label="打开主 Agent"
+        aria-label="打开运营大脑"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
         <RobotOutlined />
-        <span>主 Agent</span>
+        <span>运营大脑</span>
       </button>
     </div>
   );

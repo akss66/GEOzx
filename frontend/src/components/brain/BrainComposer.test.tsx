@@ -77,7 +77,7 @@ describe("BrainComposer", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "发送给主 Agent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "发送给运营大脑" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
     expect(onStop).toHaveBeenCalledOnce();
   });
@@ -125,7 +125,7 @@ describe("BrainComposer", () => {
       />,
     );
 
-    const composer = screen.getByRole("region", { name: "主 Agent 输入区" });
+    const composer = screen.getByRole("region", { name: "运营大脑输入区" });
     expect(composer).toHaveAttribute("data-mode", "permission");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/输入目标/)).not.toBeInTheDocument();

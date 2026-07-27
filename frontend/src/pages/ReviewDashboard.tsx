@@ -80,7 +80,7 @@ export default function ReviewDashboard() {
     mutationFn: sendOptimizationSuggestionToBrain,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["brain-tasks"] });
-      message.success("建议已交给主 Agent");
+      message.success("建议已交给运营大脑");
       navigate("/brain");
     },
   });

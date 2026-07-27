@@ -43,7 +43,7 @@ export function AgentOrchestration({ goal }: Props) {
       <div className="dy-agent-empty">
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="输入运营目标后，这里会显示主 Agent 调度专家的过程"
+          description="输入运营目标后，这里会显示运营大脑调度专家的过程"
         />
       </div>
     );
@@ -56,7 +56,7 @@ export function AgentOrchestration({ goal }: Props) {
       <div className="dy-agent-master">
         <AgentAvatar code="00-decision" className="dy-agent-master-avatar" />
         <div>
-          <div className="dy-agent-master-label">主 Agent</div>
+          <div className="dy-agent-master-label">运营大脑</div>
           <p>{session.intro}</p>
           <div className="dy-agent-goal">目标：{session.goal}</div>
         </div>
@@ -87,7 +87,7 @@ function AgentCard({ step, index }: { step: AgentStep; index: number }) {
     ? step.summary
     : running
       ? "正在分析输入目标、账号约束与下一步交付物。"
-      : "等待主 Agent 调度。";
+      : "等待运营大脑调度。";
 
   return (
     <article className={`dy-agent-card dy-agent-card-${step.status}`}>

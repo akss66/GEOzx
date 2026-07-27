@@ -123,7 +123,7 @@ export function ExpertArtifact({
         </Popconfirm>
         <Button icon={<EditOutlined />} onClick={onRevise}>继续修改</Button>
         <Button icon={<SwapOutlined />} loading={handingOff} onClick={onHandoff}>
-          交给主 Agent
+          交给运营大脑
         </Button>
         <Popconfirm
           title="将这份成果建议沉淀到知识库？"

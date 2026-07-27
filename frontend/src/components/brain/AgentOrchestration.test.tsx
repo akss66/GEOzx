@@ -16,7 +16,7 @@ describe("AgentOrchestration", () => {
   it("shows an empty state before the user enters a goal", () => {
     render(<AgentOrchestration goal="" />);
 
-    expect(screen.getByText("输入运营目标后，这里会显示主 Agent 调度专家的过程")).toBeInTheDocument();
+    expect(screen.getByText("输入运营目标后，这里会显示运营大脑调度专家的过程")).toBeInTheDocument();
   });
 
   it("reveals expert handoff cards as a relay instead of a graph", async () => {
@@ -24,8 +24,8 @@ describe("AgentOrchestration", () => {
 
     render(<AgentOrchestration goal="为抖音账号做一轮冷启动内容规划" />);
 
-    expect(screen.getByText("主 Agent")).toBeInTheDocument();
-    const mainAgentAvatar = screen.getByRole("img", { name: "主 Agent" });
+    expect(screen.getByText("运营大脑")).toBeInTheDocument();
+    const mainAgentAvatar = screen.getByRole("img", { name: "运营大脑" });
     expect(mainAgentAvatar.querySelector("img")).toHaveAttribute(
       "src",
       "/main-agent-avatar.png",

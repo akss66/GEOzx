@@ -32,7 +32,7 @@ export function DecisionRequest({
   }, [decision.id, recommendedChoice?.id]);
 
   return (
-    <article className="tz-brain-decision" aria-label="主 Agent 方案选择">
+    <article className="tz-brain-decision" aria-label="运营大脑方案选择">
       <div className="tz-brain-decision-head">
         <span className="tz-brain-decision-mark" aria-hidden="true">?</span>
         <div>
@@ -79,7 +79,7 @@ export function DecisionRequest({
             rows={2}
             maxLength={1000}
             autoFocus
-            placeholder="写下你希望主 Agent 采用的新方向"
+            placeholder="写下你希望运营大脑采用的新方向"
             onChange={(event) => setCustomDirection(event.target.value)}
           />
           <Button

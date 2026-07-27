@@ -159,7 +159,7 @@ export default function Config() {
               <p>{selected.code}</p>
             </div>
             <label className="expert-admin__availability">
-              <span><strong>{draft.enabled ? "参与工作流" : "暂停调度"}</strong><small>{draft.enabled ? "可被主 Agent 和独立入口调用" : "保存后停止新任务调用"}</small></span>
+              <span><strong>{draft.enabled ? "参与工作流" : "暂停调度"}</strong><small>{draft.enabled ? "可被运营大脑和独立入口调用" : "保存后停止新任务调用"}</small></span>
               <Switch
                 aria-label={`启用${selected.name}`}
                 checked={draft.enabled}
@@ -225,7 +225,7 @@ export default function Config() {
               <header><span>03</span><div><h3>质量门</h3><p>命中的质量门会随专家计划进入任务账本，并在必要时进入人工审批。</p></div></header>
               {selected.available_quality_gates.length === 0 ? (
                 <div className="expert-admin__quiet-state">
-                  <CheckOutlined /><span>该专家当前没有独立质量门，由上游或主 Agent 统一验收。</span>
+                  <CheckOutlined /><span>该专家当前没有独立质量门，由上游或运营大脑统一验收。</span>
                 </div>
               ) : (
                 <div className="expert-admin__gate-grid">

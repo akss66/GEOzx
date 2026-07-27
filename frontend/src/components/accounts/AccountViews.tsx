@@ -7,6 +7,7 @@ import {
 import { Button, Empty, Progress, Tag } from "antd";
 
 import type { Account, AccountGroup, Platform, Project } from "../../types";
+import { presentOperationsBrainSystemCopy } from "../../utils/operationsBrainCopy";
 
 const PLATFORM_LABEL: Record<Platform, string> = {
   douyin: "抖音",
@@ -184,7 +185,11 @@ function TaskSnapshot({ account }: { account: Account }) {
       <div>
         <PlayCircleOutlined />
         <strong>{account.current_task.title}</strong>
-        <span>{account.current_task.current_focus || "主 Agent 正在推进"}</span>
+        <span>
+          {presentOperationsBrainSystemCopy(
+            account.current_task.current_focus || "运营大脑正在推进",
+          )}
+        </span>
       </div>
       <Progress percent={account.current_task.progress} showInfo={false} size="small" />
     </div>
