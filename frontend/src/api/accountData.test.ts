@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { api } from "./client";
 import {
   commitAccountDataImportBatch,
+  deleteAccountDataImportBatch,
   downloadAccountDataArtifact,
   getAccountDataStatus,
   listAccountDataImports,
@@ -18,12 +19,14 @@ vi.mock("./client", () => ({
     get: vi.fn(),
     post: vi.fn(),
     patch: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
 const apiGet = api.get as unknown as Mock;
 const apiPost = api.post as unknown as Mock;
 const apiPatch = api.patch as unknown as Mock;
+const apiDelete = api.delete as unknown as Mock;
 
 describe("account data api", () => {
   beforeEach(() => {
@@ -99,6 +102,14 @@ describe("account data api", () => {
 
     expect(apiPost).toHaveBeenNthCalledWith(1, "/account-data/9/imports/12/commit");
     expect(apiPost).toHaveBeenNthCalledWith(2, "/account-data/9/imports/12/revoke");
+  });
+
+  it("permanently deletes one scoped import batch", async () => {
+    apiDelete.mockResolvedValueOnce({ data: undefined });
+
+    await deleteAccountDataImportBatch(9, 12);
+
+    expect(apiDelete).toHaveBeenCalledWith("/account-data/9/imports/12");
   });
 
   it("downloads one import artifact through the authenticated api blob path", async () => {

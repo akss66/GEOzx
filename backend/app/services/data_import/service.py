@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -43,6 +44,8 @@ from app.services.data_import.identity import build_weak_fingerprint, match_cont
 from app.services.data_import.parser import SUPPORTED_EXTENSIONS, RowIssue
 from app.services.data_import.templates import KNOWN_TEMPLATES
 
+logger = logging.getLogger(__name__)
+
 
 class DataImportBatchNotFoundError(LookupError):
     pass
@@ -60,6 +63,10 @@ class DataImportRevokeConflictError(RuntimeError):
     pass
 
 
+class DataImportDeleteConflictError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class RowMatchResolution:
     selected_content_id: int | None
@@ -72,6 +79,12 @@ class PreviewRecoveryResult:
     batch: DataImportBatch | None = None
     wrote_storage_key: str | None = None
     retired_stale_batch: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class QuarantinedArtifact:
+    original: Path
+    quarantined: Path
 
 
 async def create_preview(
@@ -669,6 +682,44 @@ async def revoke_batch(
     )
 
 
+async def delete_batch_permanently(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+    actor: User,
+) -> None:
+    batch = await _load_mutation_batch(
+        session,
+        org_id=org_id,
+        account_id=account_id,
+        batch_id=batch_id,
+    )
+    _assert_batch_scope(batch=batch, user=actor)
+    if batch.status is ImportBatchStatus.COMMITTED:
+        conflicts = await _find_revoke_conflicts(session=session, batch=batch)
+        if conflicts:
+            raise DataImportDeleteConflictError("batch contains superseded projections")
+        for row in batch.rows:
+            await _delete_row_targets(session=session, batch=batch, row=row)
+
+    storage_keys = [artifact.storage_key for artifact in batch.artifacts]
+    quarantined = _quarantine_artifacts(storage_keys)
+    try:
+        await session.delete(batch)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        _restore_quarantined_artifacts(quarantined)
+        raise
+
+    try:
+        _purge_quarantined_artifacts(quarantined)
+    except OSError:
+        logger.exception("failed to purge quarantined account data artifacts")
+
+
 async def _insert_preview_graph(
     session: AsyncSession,
     *,
@@ -1043,6 +1094,19 @@ async def _load_mutation_batch(
                 .with_for_update()
             )
         )
+        artifacts = list(
+            await session.scalars(
+                select(DataArtifact)
+                .where(
+                    DataArtifact.org_id == org_id,
+                    DataArtifact.account_id == account_id,
+                    DataArtifact.batch_id == batch_id,
+                )
+                .order_by(DataArtifact.id)
+                .with_for_update()
+            )
+        )
+        set_committed_value(batch, "artifacts", artifacts)
         set_committed_value(batch, "rows", rows)
         set_committed_value(batch, "conflicts", conflicts)
         return batch
@@ -1868,6 +1932,34 @@ def _delete_artifact(storage_key: str) -> None:
     target = storage.resolve(storage_key)
     if target.exists():
         target.unlink()
+
+
+def _quarantine_artifacts(storage_keys: list[str]) -> list[QuarantinedArtifact]:
+    moved: list[QuarantinedArtifact] = []
+    try:
+        for storage_key in storage_keys:
+            original = storage.resolve(storage_key)
+            if not original.exists():
+                continue
+            quarantined = original.with_name(f".{original.name}.{uuid4().hex}.deleting")
+            os.replace(original, quarantined)
+            moved.append(QuarantinedArtifact(original=original, quarantined=quarantined))
+    except Exception:
+        _restore_quarantined_artifacts(moved)
+        raise
+    return moved
+
+
+def _restore_quarantined_artifacts(items: list[QuarantinedArtifact]) -> None:
+    for item in reversed(items):
+        if item.quarantined.exists():
+            item.original.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(item.quarantined, item.original)
+
+
+def _purge_quarantined_artifacts(items: list[QuarantinedArtifact]) -> None:
+    for item in items:
+        item.quarantined.unlink(missing_ok=True)
 
 
 def _derive_period_boundary(rows: list, *, field_name: str, reducer):

@@ -251,3 +251,10 @@ export async function revokeAccountDataImportBatch(
   );
   return data;
 }
+
+export async function deleteAccountDataImportBatch(
+  accountId: number,
+  batchId: number,
+): Promise<void> {
+  await api.delete(`/account-data/${accountId}/imports/${batchId}`);
+}

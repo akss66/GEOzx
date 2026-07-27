@@ -326,6 +326,176 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
 
 
 @pytest.mark.asyncio
+async def test_lead_can_permanently_delete_preview_batch_and_source_file(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    lead_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "works.xlsx",
+                _workbook_payload(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+    download_url = preview.json()["artifacts"][0]["download_url"]
+    assert len(list(tmp_path.rglob("*.xlsx"))) == 1
+
+    deleted = await client.delete(
+        f"/account-data/{account.id}/imports/{batch_id}",
+        headers=_auth(lead_token),
+    )
+
+    assert deleted.status_code == 204
+    assert await session.get(DataImportBatch, batch_id) is None
+    assert list(tmp_path.rglob("*.xlsx")) == []
+    missing_download = await client.get(download_url, headers=_auth(lead_token))
+    assert missing_download.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_of_committed_batch_removes_owned_projection(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    lead_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "daily.xlsx",
+                _daily_play_workbook_payload(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+    committed = await client.post(
+        f"/account-data/{account.id}/imports/{batch_id}/commit",
+        headers=_auth(operator_token),
+    )
+    assert committed.status_code == 200
+    assert await session.scalar(
+        select(AccountMetricSnapshot).where(AccountMetricSnapshot.import_batch_id == batch_id)
+    ) is not None
+
+    deleted = await client.delete(
+        f"/account-data/{account.id}/imports/{batch_id}",
+        headers=_auth(lead_token),
+    )
+
+    assert deleted.status_code == 204
+    assert await session.get(DataImportBatch, batch_id) is None
+    assert await session.scalar(
+        select(AccountMetricSnapshot).where(AccountMetricSnapshot.import_batch_id == batch_id)
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "batch_status",
+    [
+        ImportBatchStatus.UPLOADED,
+        ImportBatchStatus.PREVIEW_READY,
+        ImportBatchStatus.FAILED,
+        ImportBatchStatus.REVOKED,
+    ],
+)
+@pytest.mark.asyncio
+async def test_permanent_delete_accepts_every_non_committed_batch_status(
+    client,
+    session,
+    account_access_setup,
+    lead_token,
+    batch_status,
+):
+    account = account_access_setup["account"]
+    batch = DataImportBatch(
+        org_id=account.org_id,
+        account_id=account.id,
+        created_by_id=account_access_setup["lead"].id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=batch_status,
+        template_code="douyin_work_list_v1",
+        content_sha256=f"{batch_status.value}:permanent-delete".encode().hex().ljust(64, "0")[:64],
+        revoked_at=datetime.now(UTC) if batch_status is ImportBatchStatus.REVOKED else None,
+    )
+    session.add(batch)
+    await session.commit()
+
+    deleted = await client.delete(
+        f"/account-data/{account.id}/imports/{batch.id}",
+        headers=_auth(lead_token),
+    )
+
+    assert deleted.status_code == 204
+    assert await session.get(DataImportBatch, batch.id) is None
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_restores_source_file_when_database_commit_fails(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    lead_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "rollback.xlsx",
+                _workbook_payload(title="Rollback delete title"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+    source_file = next(tmp_path.rglob("*.xlsx"))
+    original_content = source_file.read_bytes()
+    real_commit = session.commit
+
+    async def fail_commit():
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await client.delete(
+            f"/account-data/{account.id}/imports/{batch_id}",
+            headers=_auth(lead_token),
+        )
+    monkeypatch.setattr(session, "commit", real_commit)
+
+    assert source_file.read_bytes() == original_content
+    assert await session.get(DataImportBatch, batch_id) is not None
+
+
+@pytest.mark.asyncio
 async def test_commit_rejects_unresolved_rows_without_partial_projection(
     client,
     session,
@@ -773,3 +943,14 @@ async def test_revoke_creates_conflict_when_projection_was_superseded(
     content = await session.get(PlatformContentRecord, content_target["id"])
     assert content is not None
     assert content.canonical_import_batch_id == later_batch.id
+
+    source_file = next(tmp_path.rglob("*.xlsx"))
+    deleted = await client.delete(
+        f"/account-data/{account.id}/imports/{batch_id}",
+        headers=_auth(lead_token),
+    )
+
+    assert deleted.status_code == 409
+    assert "superseded" in deleted.json()["detail"]
+    assert await session.get(DataImportBatch, batch_id) is not None
+    assert source_file.exists()

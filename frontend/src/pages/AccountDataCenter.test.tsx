@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   confirmManualAccountDataRow,
   createManualAccountDataPreview,
+  deleteAccountDataImportBatch,
   downloadAccountDataArtifact,
   type AccountDataImportArtifact,
   type AccountDataImportBatch,
@@ -56,6 +57,7 @@ vi.mock("../api/accountData", () => ({
   resolveAccountDataImportRow: vi.fn(),
   commitAccountDataImportBatch: vi.fn(),
   revokeAccountDataImportBatch: vi.fn(),
+  deleteAccountDataImportBatch: vi.fn(),
   downloadAccountDataArtifact: vi.fn(),
 }));
 
@@ -731,6 +733,177 @@ describe("AccountDataCenter", () => {
     await waitFor(() =>
       expect(revokeAccountDataImportBatch).toHaveBeenCalledWith(42, 81),
     );
+  });
+
+  it("permanently deletes a committed batch after explicit confirmation", async () => {
+    const committed = buildBatchSummary({
+      status: "committed",
+      committed_at: "2026-07-22T08:25:00Z",
+    });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus)
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus({
+        latest_confirmed_at: null,
+        sources: [],
+      }));
+    vi.mocked(listAccountDataImports)
+      .mockResolvedValueOnce({ items: [committed] })
+      .mockResolvedValueOnce({ items: [] });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(
+      buildPreviewBatch({
+        status: "committed",
+        committed_at: committed.committed_at,
+        conflicts: [],
+        rows: buildPreviewBatch().rows.map((row) => ({
+          ...row,
+          status: "committed" as const,
+        })),
+      }),
+    );
+    vi.mocked(deleteAccountDataImportBatch).mockResolvedValueOnce();
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    expect(
+      screen.getByText("将先撤销该批次产生的数据，再永久删除原文件和历史记录。"),
+    ).toBeInTheDocument();
+    expect(deleteAccountDataImportBatch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
+
+    await waitFor(() =>
+      expect(deleteAccountDataImportBatch).toHaveBeenCalledWith(42, 81),
+    );
+    await waitFor(() => expect(listAccountDataImports).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getAccountDataStatus).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("导入批次已永久删除")).toBeInTheDocument();
+    expect(await screen.findByText("暂无导入历史")).toBeInTheDocument();
+  });
+
+  it("selects the next preview batch after permanently deleting the active batch", async () => {
+    const current = buildBatchSummary();
+    const replacement = buildBatchSummary({ id: 82 });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus)
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports)
+      .mockResolvedValueOnce({ items: [current] })
+      .mockResolvedValueOnce({ items: [replacement] });
+    vi.mocked(getAccountDataImportBatch)
+      .mockResolvedValueOnce(buildPreviewBatch())
+      .mockResolvedValueOnce(
+        buildPreviewBatch({
+          id: 82,
+          artifacts: [
+            buildArtifact({
+              id: 502,
+              download_url: "/account-data/42/imports/82/artifacts/502",
+            }),
+          ],
+        }),
+      );
+    vi.mocked(deleteAccountDataImportBatch).mockResolvedValueOnce();
+
+    const { container } = renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
+
+    expect(await screen.findByText("批次 82")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(container.querySelector(".account-data-history-item.is-active"))
+        .toHaveTextContent("批次 82"),
+    );
+    expect(screen.getByRole("button", { name: "查看预览" })).toBeEnabled();
+  });
+
+  it("keeps a batch visible when permanent deletion has a later-data conflict", async () => {
+    const committed = buildBatchSummary({
+      status: "committed",
+      committed_at: "2026-07-22T08:25:00Z",
+    });
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [committed] });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(
+      buildPreviewBatch({
+        status: "committed",
+        committed_at: committed.committed_at,
+        conflicts: [],
+      }),
+    );
+    vi.mocked(deleteAccountDataImportBatch).mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: { detail: "该批次已被后续数据引用，不能永久删除。" },
+      },
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
+
+    expect(
+      await screen.findByText("该批次已被后续数据引用，不能永久删除。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("批次 81")).toBeInTheDocument();
+  });
+
+  it("treats an already-missing batch as successfully deleted", async () => {
+    const preview = buildBatchSummary();
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus)
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus({
+        latest_confirmed_at: null,
+        sources: [],
+      }));
+    vi.mocked(listAccountDataImports)
+      .mockResolvedValueOnce({ items: [preview] })
+      .mockResolvedValueOnce({ items: [] });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(buildPreviewBatch());
+    vi.mocked(deleteAccountDataImportBatch).mockRejectedValueOnce({
+      response: {
+        status: 404,
+        data: { detail: "import batch does not exist" },
+      },
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
+
+    expect(await screen.findByText("导入批次已永久删除")).toBeInTheDocument();
+    expect(await screen.findByText("暂无导入历史")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("downloads artifacts through the authenticated api helper", async () => {

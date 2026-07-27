@@ -129,6 +129,15 @@ test("imports a Douyin work list and exposes its provenance to review", async ({
   await expect(page.getByText("平台导出", { exact: true })).toBeVisible();
   await expect(page.getByText("数据证据")).toBeVisible();
 
+  await page.goto("/accounts/1/data");
+  await page.getByRole("button", { name: "\u6c38\u4e45\u5220\u9664\u6279\u6b21 81" }).click();
+  await expect(
+    page.getByText("\u5c06\u5148\u64a4\u9500\u8be5\u6279\u6b21\u4ea7\u751f\u7684\u6570\u636e\uff0c\u518d\u6c38\u4e45\u5220\u9664\u539f\u6587\u4ef6\u548c\u5386\u53f2\u8bb0\u5f55\u3002"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "\u786e\u8ba4\u6c38\u4e45\u5220\u9664\u6279\u6b21 81" }).click();
+  await expect(page.getByText("\u5bfc\u5165\u6279\u6b21\u5df2\u6c38\u4e45\u5220\u9664")).toBeVisible();
+  await expect(page.getByText("\u6682\u65e0\u5bfc\u5165\u5386\u53f2")).toBeVisible();
+
   const layout = await page.evaluate(() => ({
     clientWidth: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth,
@@ -150,6 +159,7 @@ async function mockAccountDataApi(page: Page) {
     const method = request.method();
 
     if (method === "GET" && path === "/auth/me") return json(route, admin);
+    if (method === "GET" && path === "/accounts/1") return json(route, account);
     if (method === "GET" && path === "/notifications/unread-count") {
       return json(route, { count: 0 });
     }
@@ -213,6 +223,10 @@ async function mockAccountDataApi(page: Page) {
     if (method === "POST" && path === "/account-data/1/imports/81/commit") {
       batch = buildBatch("committed");
       return json(route, batch);
+    }
+    if (method === "DELETE" && path === "/account-data/1/imports/81") {
+      batch = null;
+      return route.fulfill({ status: 204 });
     }
     if (method === "GET" && path === "/metrics/review-workspace") {
       return json(route, buildReviewWorkspace());

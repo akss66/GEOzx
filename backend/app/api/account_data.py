@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from app.services.data_import.parser import ParseFailure
 from app.services.data_import.service import (
     DataImportBatchNotFoundError,
     DataImportCommitConflictError,
+    DataImportDeleteConflictError,
     DataImportRevokeConflictError,
     DataImportStateError,
     RowMatchResolution,
@@ -35,6 +36,7 @@ from app.services.data_import.service import (
     commit_batch,
     create_manual_preview,
     create_preview,
+    delete_batch_permanently,
     list_scoped_batches,
     load_scoped_artifact,
     load_scoped_batch,
@@ -290,6 +292,36 @@ async def revoke_import_batch(
     except DataImportStateError as exc:
         raise _bad_request(str(exc), status_code=status.HTTP_409_CONFLICT) from exc
     return _batch_out(batch)
+
+
+@router.delete(
+    "/{account_id}/imports/{batch_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_import_batch(
+    account_id: int,
+    batch_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Response:
+    account = await require_account_access(session, user, account_id, roles=REVOKE_ROLES)
+    try:
+        await delete_batch_permanently(
+            session,
+            org_id=user.org_id,
+            account_id=account.id,
+            batch_id=batch_id,
+            actor=user,
+        )
+    except DataImportBatchNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="import batch does not exist",
+        ) from exc
+    except DataImportDeleteConflictError as exc:
+        raise _bad_request(str(exc), status_code=status.HTTP_409_CONFLICT) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{account_id}/imports/{batch_id}/artifacts/{artifact_id}")
