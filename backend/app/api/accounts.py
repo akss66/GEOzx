@@ -41,6 +41,7 @@ from app.models.enums import (
     UserRole,
     WorkspaceRole,
 )
+from app.schemas.ai_coo import AccountSituationOut
 from app.schemas.workspace import (
     AccountGroupOut,
     AccountMatrixGroupOut,
@@ -57,6 +58,7 @@ from app.schemas.workspace import (
     UpdateAccountRequest,
     account_out,
 )
+from app.services.ai_coo_evidence import build_account_situation
 
 router = APIRouter(tags=["accounts"])
 
@@ -610,6 +612,20 @@ async def get_account(
 ) -> AccountOut:
     account = await require_account_access(session, user, account_id)
     return await _account_response(session, account)
+
+
+@router.get("/accounts/{account_id}/situation", response_model=AccountSituationOut)
+async def get_account_situation(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> AccountSituationOut:
+    account = await require_account_access(session, user, account_id)
+    return await build_account_situation(
+        session,
+        org_id=account.org_id,
+        account_id=account.id,
+    )
 
 
 @router.put("/accounts/{account_id}/assignments", response_model=AccountOut)

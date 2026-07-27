@@ -86,6 +86,21 @@ class BrainTask(Base, TimestampMixin):
     acceptances: Mapped[list["DeliverableAcceptance"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
+    strategy_plans: Mapped[list["StrategyPlan"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    decision_traces: Mapped[list["DecisionTrace"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    reflection_records: Mapped[list["ReflectionRecord"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    quality_scores: Mapped[list["AgentQualityScore"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    experience_memories: Mapped[list["ExperienceMemory"]] = relationship(
+        back_populates="task"
+    )
 
 
 class TaskBrief(Base, TimestampMixin):

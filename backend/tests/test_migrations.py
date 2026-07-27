@@ -77,8 +77,33 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_platform_content_source() -> None:
-    assert get_head_revision() == "20260727_0200"
+def test_migration_head_is_ai_coo_runtime() -> None:
+    assert get_head_revision() == "20260727_0300"
+
+
+def test_ai_coo_runtime_migration_is_additive_and_reversible() -> None:
+    module = importlib.import_module(
+        "migrations.versions.20260727_0300_ai_coo_runtime"
+    )
+
+    assert module.down_revision == "20260727_0200"
+    upgrade_source = inspect.getsource(module.upgrade)
+    downgrade_source = inspect.getsource(module.downgrade)
+    for table_name in (
+        '"strategy_plans"',
+        '"decision_traces"',
+        '"experience_memories"',
+        '"reflection_records"',
+        '"agent_quality_scores"',
+    ):
+        assert table_name in upgrade_source
+    assert 'drop_table("brain_tasks")' not in upgrade_source
+    assert 'drop_column("brain_tasks"' not in upgrade_source
+    assert 'drop_table("strategy_plans")' in downgrade_source
+    assert 'drop_table("decision_traces")' in downgrade_source
+    assert 'drop_table("experience_memories")' in downgrade_source
+    assert 'drop_table("reflection_records")' in downgrade_source
+    assert 'drop_table("agent_quality_scores")' in downgrade_source
 
 
 def test_platform_publish_jobs_migration_is_additive_and_reversible() -> None:

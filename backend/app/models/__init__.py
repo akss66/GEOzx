@@ -15,6 +15,13 @@ from app.models.account_data import (
     PlatformContentRecord,
 )
 from app.models.agent_runtime import AgentRun
+from app.models.ai_coo import (
+    AgentQualityScore,
+    DecisionTrace,
+    ExperienceMemory,
+    ReflectionRecord,
+    StrategyPlan,
+)
 from app.models.brain import (
     AgentInvocation,
     AgentToolCall,
@@ -84,6 +91,11 @@ __all__ = [
     "MatrixDistributionItem",
     "BrainTask",
     "AgentRun",
+    "StrategyPlan",
+    "DecisionTrace",
+    "ExperienceMemory",
+    "ReflectionRecord",
+    "AgentQualityScore",
     "TaskBrief",
     "OrchestrationPlan",
     "AgentInvocation",

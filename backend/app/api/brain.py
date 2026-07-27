@@ -28,13 +28,17 @@ from app.db import get_session
 from app.models import (
     Account,
     AccountGroup,
+    AgentQualityScore,
     AgentRun,
     AgentToolCall,
     BrainTask,
+    DecisionTrace,
     DeliverableAcceptance,
     MatrixDistributionItem,
     MatrixDistributionPlan,
     OrchestrationPlan,
+    ReflectionRecord,
+    StrategyPlan,
     TaskBrief,
 )
 from app.models.enums import (
@@ -56,6 +60,12 @@ from app.orchestrator.brain_runtime import (
     runtime_status,
 )
 from app.orchestrator.generation_control import generation_control
+from app.schemas.ai_coo import (
+    AgentQualityScoreOut,
+    DecisionTraceOut,
+    ReflectionRecordOut,
+    StrategyPlanOut,
+)
 from app.schemas.brain import (
     AcceptDeliverableRequest,
     AgentInvocationOut,
@@ -982,6 +992,87 @@ async def get_task(task_id: int, user: CurrentUser, session: SessionDep) -> Brai
 async def get_task_runtime(task_id: int, user: CurrentUser, session: SessionDep) -> BrainRuntimeOut:
     task = await _load_task_for_user(session, task_id, user)
     return await _runtime_response(session, task)
+
+
+@router.get("/tasks/{task_id}/strategy", response_model=StrategyPlanOut | None)
+async def get_task_strategy(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> StrategyPlanOut | None:
+    task = await _load_task_for_user(session, task_id, user)
+    row = await session.scalar(
+        select(StrategyPlan)
+        .where(
+            StrategyPlan.task_id == task.id,
+            StrategyPlan.org_id == task.org_id,
+        )
+        .order_by(StrategyPlan.version.desc(), StrategyPlan.id.desc())
+        .limit(1)
+    )
+    return StrategyPlanOut.model_validate(row) if row is not None else None
+
+
+@router.get("/tasks/{task_id}/decisions", response_model=list[DecisionTraceOut])
+async def list_task_decisions(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> list[DecisionTraceOut]:
+    task = await _load_task_for_user(session, task_id, user)
+    rows = (
+        await session.scalars(
+            select(DecisionTrace)
+            .where(
+                DecisionTrace.task_id == task.id,
+                DecisionTrace.org_id == task.org_id,
+            )
+            .order_by(DecisionTrace.id)
+        )
+    ).all()
+    return [DecisionTraceOut.model_validate(row) for row in rows]
+
+
+@router.get(
+    "/tasks/{task_id}/quality-scores",
+    response_model=list[AgentQualityScoreOut],
+)
+async def list_task_quality_scores(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> list[AgentQualityScoreOut]:
+    task = await _load_task_for_user(session, task_id, user)
+    rows = (
+        await session.scalars(
+            select(AgentQualityScore)
+            .where(
+                AgentQualityScore.task_id == task.id,
+                AgentQualityScore.org_id == task.org_id,
+            )
+            .order_by(AgentQualityScore.id)
+        )
+    ).all()
+    return [AgentQualityScoreOut.model_validate(row) for row in rows]
+
+
+@router.get("/tasks/{task_id}/reflection", response_model=ReflectionRecordOut | None)
+async def get_task_reflection(
+    task_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ReflectionRecordOut | None:
+    task = await _load_task_for_user(session, task_id, user)
+    row = await session.scalar(
+        select(ReflectionRecord)
+        .where(
+            ReflectionRecord.task_id == task.id,
+            ReflectionRecord.org_id == task.org_id,
+        )
+        .order_by(ReflectionRecord.id.desc())
+        .limit(1)
+    )
+    return ReflectionRecordOut.model_validate(row) if row is not None else None
 
 
 async def _runtime_response(session: AsyncSession, task: BrainTask) -> BrainRuntimeOut:
