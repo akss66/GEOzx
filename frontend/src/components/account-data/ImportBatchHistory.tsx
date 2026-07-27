@@ -1,4 +1,9 @@
-import { DownloadOutlined, HistoryOutlined, StopOutlined } from "@ant-design/icons";
+import {
+  DeleteOutlined,
+  DownloadOutlined,
+  HistoryOutlined,
+  StopOutlined,
+} from "@ant-design/icons";
 import { Button } from "antd";
 import { useState } from "react";
 
@@ -33,21 +38,26 @@ export function ImportBatchHistory({
   detailsById,
   activeBatchId,
   revokingBatchId,
+  deletingBatchId,
   revokeError,
   onOpenBatch,
   onDownloadArtifact,
   onRevoke,
+  onDelete,
 }: {
   items: AccountDataImportBatchSummary[];
   detailsById: Map<number, AccountDataImportBatch>;
   activeBatchId: number | null;
   revokingBatchId: number | null;
+  deletingBatchId: number | null;
   revokeError: string | null;
   onOpenBatch: (batchId: number) => void;
   onDownloadArtifact: (artifact: AccountDataImportArtifact) => void;
   onRevoke: (batchId: number) => void;
+  onDelete: (batchId: number) => void;
 }) {
   const [confirmingBatchId, setConfirmingBatchId] = useState<number | null>(null);
+  const [confirmingDeleteBatchId, setConfirmingDeleteBatchId] = useState<number | null>(null);
 
   return (
     <section className="account-data-history" aria-label="导入历史">
@@ -78,6 +88,8 @@ export function ImportBatchHistory({
             const detail = detailsById.get(item.id);
             const firstArtifact = detail?.artifacts[0] ?? null;
             const confirming = confirmingBatchId === item.id;
+            const confirmingDelete = confirmingDeleteBatchId === item.id;
+            const deleting = deletingBatchId === item.id;
             return (
               <article
                 key={item.id}
@@ -96,13 +108,18 @@ export function ImportBatchHistory({
                   </small>
                 </div>
                 <div className="account-data-history-actions">
-                  <Button size="small" onClick={() => onOpenBatch(item.id)}>
+                  <Button
+                    size="small"
+                    disabled={deleting}
+                    onClick={() => onOpenBatch(item.id)}
+                  >
                     {item.status === "preview_ready" ? "查看预览" : "查看详情"}
                   </Button>
                   {firstArtifact ? (
                     <Button
                       size="small"
                       icon={<DownloadOutlined />}
+                      disabled={deleting}
                       aria-label={`下载原文件 ${firstArtifact.filename}`}
                       onClick={() => onDownloadArtifact(firstArtifact)}
                     >
@@ -111,18 +128,23 @@ export function ImportBatchHistory({
                   ) : null}
                   {item.status === "committed" ? (
                     confirming ? (
-                      <div className="account-data-revoke-confirm">
+                      <div className="account-data-destructive-confirm">
                         <span>确认撤销这次写入？</span>
                         <Button
                           size="small"
                           danger
                           loading={revokingBatchId === item.id}
+                          disabled={deleting}
                           aria-label={`确认撤销批次 ${item.id}`}
                           onClick={() => onRevoke(item.id)}
                         >
                           确认撤销
                         </Button>
-                        <Button size="small" onClick={() => setConfirmingBatchId(null)}>
+                        <Button
+                          size="small"
+                          disabled={deleting}
+                          onClick={() => setConfirmingBatchId(null)}
+                        >
                           取消
                         </Button>
                       </div>
@@ -130,13 +152,56 @@ export function ImportBatchHistory({
                       <Button
                         size="small"
                         icon={<StopOutlined />}
+                        disabled={deleting}
                         aria-label={`撤销批次 ${item.id}`}
-                        onClick={() => setConfirmingBatchId(item.id)}
+                        onClick={() => {
+                          setConfirmingDeleteBatchId(null);
+                          setConfirmingBatchId(item.id);
+                        }}
                       >
                         撤销导入
                       </Button>
                     )
                   ) : null}
+                  {confirmingDelete ? (
+                    <div className="account-data-destructive-confirm">
+                      <span>
+                        {item.status === "committed"
+                          ? "将先撤销该批次产生的数据，再永久删除原文件和历史记录。"
+                          : "将永久删除原文件、预览数据和历史记录，且无法恢复。"}
+                      </span>
+                      <Button
+                        size="small"
+                        danger
+                        loading={deleting}
+                        aria-label={`确认永久删除批次 ${item.id}`}
+                        onClick={() => onDelete(item.id)}
+                      >
+                        确认永久删除
+                      </Button>
+                      <Button
+                        size="small"
+                        disabled={deleting}
+                        onClick={() => setConfirmingDeleteBatchId(null)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      disabled={deleting}
+                      aria-label={`永久删除批次 ${item.id}`}
+                      onClick={() => {
+                        setConfirmingBatchId(null);
+                        setConfirmingDeleteBatchId(item.id);
+                      }}
+                    >
+                      永久删除
+                    </Button>
+                  )}
                 </div>
               </article>
             );

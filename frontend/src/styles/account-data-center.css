@@ -768,14 +768,14 @@
   color: var(--dy-accent);
 }
 
-.account-data-revoke-confirm {
+.account-data-destructive-confirm {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.account-data-revoke-confirm > span {
+.account-data-destructive-confirm > span {
   color: var(--dy-muted);
   font-size: 12px;
 }

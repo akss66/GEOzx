@@ -12,6 +12,7 @@ import {
   commitAccountDataImportBatch,
   confirmManualAccountDataRow,
   createManualAccountDataPreview,
+  deleteAccountDataImportBatch,
   downloadAccountDataArtifact,
   getAccountDataImportBatch,
   getAccountDataStatus,
@@ -417,6 +418,57 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     },
   });
 
+  async function refreshAfterBatchDeletion(batchId: number) {
+    queryClient.removeQueries({
+      queryKey: ["account-data-import", routeAccountId, batchId],
+      exact: true,
+    });
+    const [historyResult] = await Promise.all([
+      historyQuery.refetch(),
+      statusQuery.refetch(),
+    ]);
+    if (!isMountedRef.current) return;
+    setHistoryError(null);
+    setFlowFeedback({
+      tone: "success",
+      title: "导入批次已永久删除",
+      description: "原文件、批次记录及其产生的数据已完成清理。",
+    });
+    if (activeBatchId === batchId) {
+      const items = historyResult.data?.items ?? [];
+      const next = items.find((item) => item.status === "preview_ready") ?? items[0] ?? null;
+      setActiveBatchId(next?.id ?? null);
+      setDraftBatch(null);
+      if (next) {
+        setEntryMode(
+          next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified"
+            ? "manual"
+            : "file",
+        );
+      }
+    }
+  }
+
+  const deleteMutation = useMutation({
+    mutationFn: (batchId: number) =>
+      deleteAccountDataImportBatch(routeAccountId, batchId),
+    onSuccess: async (_result, batchId) => {
+      await refreshAfterBatchDeletion(batchId);
+    },
+    onError: async (error, batchId) => {
+      if (!isMountedRef.current) return;
+      const response = (error as { response?: { status?: number } }).response;
+      if (response?.status === 404) {
+        await refreshAfterBatchDeletion(batchId);
+        return;
+      }
+      setHistoryError(
+        readErrorDetail(error)
+          ?? presentApiError(error, "永久删除当前批次失败，请稍后重试。").message,
+      );
+    },
+  });
+
   if (accountQuery.isLoading) {
     return (
       <div className="account-data-center account-data-center--loading" aria-label="账号数据中心加载中">
@@ -634,6 +686,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           detailsById={detailsById}
           activeBatchId={activeBatchId}
           revokingBatchId={revokeMutation.isPending ? revokeMutation.variables ?? null : null}
+          deletingBatchId={deleteMutation.isPending ? deleteMutation.variables ?? null : null}
           revokeError={historyError}
           onOpenBatch={(batchId) => {
             const opened = detailsById.get(batchId);
@@ -656,6 +709,10 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
             });
           }}
           onRevoke={(batchId) => revokeMutation.mutate(batchId)}
+          onDelete={(batchId) => {
+            setHistoryError(null);
+            deleteMutation.mutate(batchId);
+          }}
         />
       </div>
 
