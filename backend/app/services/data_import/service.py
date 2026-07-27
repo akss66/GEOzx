@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core import storage
 from app.models import (
@@ -1018,7 +1019,7 @@ async def _load_mutation_batch(
         )
         if batch is None:
             raise DataImportBatchNotFoundError("import batch does not exist")
-        batch.rows = list(
+        rows = list(
             await session.scalars(
                 select(DataImportRow)
                 .where(
@@ -1030,7 +1031,7 @@ async def _load_mutation_batch(
                 .with_for_update()
             )
         )
-        batch.conflicts = list(
+        conflicts = list(
             await session.scalars(
                 select(DataConflict)
                 .where(
@@ -1042,6 +1043,8 @@ async def _load_mutation_batch(
                 .with_for_update()
             )
         )
+        set_committed_value(batch, "rows", rows)
+        set_committed_value(batch, "conflicts", conflicts)
         return batch
 
     return await load_scoped_batch(
@@ -1099,11 +1102,6 @@ async def _project_work_list_row(
     gap = _projection_gap(
         row=row,
         missing_fields=[
-            "content_format",
-            "review_status",
-            "completion_rate_5s",
-            "bounce_rate_2s",
-            "profile_visit_count",
             "exposure",
         ],
     )
@@ -1119,18 +1117,20 @@ async def _project_single_content_row(
     row: DataImportRow,
 ) -> list[dict[str, object]]:
     content_record, targets = await _project_content_record(session=session, batch=batch, row=row)
-    row.platform_content_record_id = content_record.id
-    gap = _projection_gap(
+    metric, action = await _upsert_metric_snapshot(
+        session=session,
+        batch=batch,
         row=row,
-        missing_fields=[
-            "play",
-            "completion_rate_5s",
-            "bounce_rate_2s",
-            "avg_watch_time_seconds",
-        ],
+        content_record=content_record,
     )
-    if gap is not None:
-        targets.append(gap)
+    row.platform_content_record_id = content_record.id
+    targets.append(
+        {
+            "kind": "metric_snapshot",
+            "id": metric.id,
+            "action": action,
+        }
+    )
     return targets
 
 
@@ -1290,6 +1290,12 @@ async def _ensure_platform_content_record(
         org_id=batch.org_id,
         account_id=batch.account_id,
         platform=_batch_platform(batch),
+        source_kind=batch.source_kind,
+        source_metadata={
+            "import_batch_id": batch.id,
+            "row_number": row.row_number,
+            "template_code": batch.template_code,
+        },
         canonical_import_batch_id=batch.id,
         canonical_import_row_number=row.row_number,
         title=row.normalized_values.get("title"),
@@ -1429,6 +1435,8 @@ async def _project_content_record(
         batch=batch,
         row=row,
     )
+    content_record.content_format = _string_or_none(row.normalized_values.get("content_format"))
+    content_record.review_status = _string_or_none(row.normalized_values.get("review_status"))
     return content_record, [
         {
             "kind": "platform_content_record",
@@ -1487,6 +1495,13 @@ async def _upsert_metric_snapshot(
     metric.cover_click_rate = _float_or_none(row.normalized_values.get("cover_click_rate"))
     metric.avg_watch_time_seconds = _float_or_none(
         row.normalized_values.get("avg_watch_time_seconds")
+    )
+    metric.completion_rate_5s = _float_or_none(
+        row.normalized_values.get("completion_rate_5s")
+    )
+    metric.bounce_rate_2s = _float_or_none(row.normalized_values.get("bounce_rate_2s"))
+    metric.profile_visit_count = _int_or_none(
+        row.normalized_values.get("profile_visit_count")
     )
     if existing is None:
         savepoint = await session.begin_nested()
@@ -1743,6 +1758,13 @@ def _int_or_none(value) -> int | None:
 
 def _float_or_none(value) -> float | None:
     return None if value is None else float(value)
+
+
+def _string_or_none(value) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _resolved_replay_or_error(

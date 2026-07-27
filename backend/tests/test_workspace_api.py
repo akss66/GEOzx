@@ -199,6 +199,22 @@ async def test_update_and_archive_project(client, admin):
     assert archived["status"] == "archived"
 
 
+@pytest.mark.asyncio
+async def test_admin_can_archive_client(client, admin):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    workspace = (
+        await client.post("/clients", headers=headers, json={"name": "待归档客户"})
+    ).json()
+
+    response = await client.delete(f"/clients/{workspace['id']}", headers=headers)
+
+    assert response.status_code == 204
+    listing = await client.get("/clients", headers=headers)
+    archived = next(row for row in listing.json() if row["id"] == workspace["id"])
+    assert archived["status"] == "archived"
+
+
 # —— 账号分组 + 账号 ——
 
 

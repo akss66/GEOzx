@@ -6,7 +6,16 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -135,10 +144,25 @@ class AgentInvocation(Base, TimestampMixin):
     """一次子 Agent 调用 Trace。"""
 
     __tablename__ = "agent_invocations"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "step_key",
+            "attempt",
+            name="uq_agent_invocation_run_step",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     task_id: Mapped[int] = mapped_column(
         ForeignKey("brain_tasks.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    step_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    attempt: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
     )
     agent_code: Mapped[AgentCode] = mapped_column(
         pg_enum(AgentCode, "agent_code"), index=True, nullable=False
@@ -170,6 +194,15 @@ class AgentToolCall(Base, TimestampMixin):
     """Durable tool-call ledger shared by agent modules."""
 
     __tablename__ = "agent_tool_calls"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id",
+            "task_id",
+            "tool_code",
+            "idempotency_key",
+            name="uq_agent_tool_call_idempotency",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -185,6 +218,7 @@ class AgentToolCall(Base, TimestampMixin):
     agent_code: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     tool_code: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     tool_name: Mapped[str] = mapped_column(String(180), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="planned", index=True, nullable=False)
     permission_mode: Mapped[str] = mapped_column(String(40), default="auto", nullable=False)
     requires_human_confirmation: Mapped[bool] = mapped_column(

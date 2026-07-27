@@ -102,6 +102,10 @@ class Account(Base, TimestampMixin):
 
     org: Mapped["Org"] = relationship()  # noqa: F821
     client: Mapped["Client | None"] = relationship(back_populates="accounts")  # noqa: F821
+    clients: Mapped[list["Client"]] = relationship(  # noqa: F821
+        secondary="account_clients",
+        overlaps="account,client,linked_accounts",
+    )
     project: Mapped["Project | None"] = relationship(  # noqa: F821
         back_populates="legacy_accounts", foreign_keys=[project_id]
     )

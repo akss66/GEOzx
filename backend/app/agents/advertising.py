@@ -1,4 +1,4 @@
-"""07 投流专家。"""
+"""07 投流专家，使用 Prompt Registry `experts/07-advertiser/v1.md`。"""
 
 from app.agents.base import LLMAgent
 from app.models.enums import DeliverableType

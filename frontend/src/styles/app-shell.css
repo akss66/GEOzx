@@ -97,6 +97,44 @@
   font-weight: 760;
 }
 
+.tz-workspace-monogram .anticon {
+  color: var(--tz-brand-red);
+  font-size: 14px;
+}
+
+.tz-agent-avatar {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+}
+
+.tz-agent-avatar.is-main-agent {
+  border: 1px solid color-mix(in srgb, var(--tz-brand-red) 18%, var(--tz-line));
+  background: color-mix(in srgb, var(--tz-brand-frame) 78%, white);
+}
+
+.tz-agent-avatar.is-main-agent img {
+  width: 72%;
+  height: 72%;
+  object-fit: contain;
+}
+
+.tz-agent-avatar.is-expert {
+  border: 1px solid color-mix(in srgb, currentColor 22%, var(--tz-line));
+  background: color-mix(in srgb, currentColor 9%, white);
+  color: var(--tz-brand-red);
+  font-size: 17px;
+}
+
+.tz-agent-avatar[data-agent-code="02-content-director"] { color: #315e8a; }
+.tz-agent-avatar[data-agent-code="03-art-director"] { color: #9a5b16; }
+.tz-agent-avatar[data-agent-code="04-video-creator"] { color: #16747b; }
+.tz-agent-avatar[data-agent-code="05-editor"] { color: #4d5055; }
+.tz-agent-avatar[data-agent-code="06-operator"] { color: #267052; }
+.tz-agent-avatar[data-agent-code="07-advertiser"] { color: #a24724; }
+.tz-agent-avatar[data-agent-code="08-customer-service"] { color: #3d6480; }
+
 .tz-workspace-copy {
   display: grid;
   min-width: 0;
@@ -411,6 +449,13 @@
   background: var(--tz-surface-soft);
   font-size: 11px;
   font-weight: 700;
+  overflow: hidden;
+}
+
+.tz-account-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .tz-account-panel button > span:nth-child(2) {
@@ -498,7 +543,7 @@
   border: 1px solid rgba(23, 22, 20, 0.12);
   border-radius: var(--tz-radius-floating);
   background: var(--tz-surface);
-  box-shadow: var(--tz-shadow-floating);
+  box-shadow: none;
 }
 
 .tz-command-input {

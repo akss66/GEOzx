@@ -1,17 +1,21 @@
+import asyncio
 import json
 
 import pytest
 from sqlalchemy import select
 
 from app.llm.adapters import CompletionResult
-from app.models import BrainTask, ContentItem, Event, GateApproval
-from app.models.enums import GateStatus, GateType
+from app.models import AgentRun, BrainTask, ContentItem, Event, GateApproval
+from app.models.enums import GateStatus, GateType, UserRole
 from app.schemas.brain import (
     DecisionChoice,
     DecisionRequest,
     IntentDecision,
     RuntimeNextStep,
+    RuntimeToolCall,
 )
+from app.tools import ToolAdapter, ToolSpec
+from app.tools.adapter import EmptyParams
 
 _POSITIONING_JSON = json.dumps(
     {
@@ -49,7 +53,7 @@ def _stub_pipeline_llm(monkeypatch):
     async def fake_chat(self, session, org_id, agent_code, messages):
         if agent_code == "01-positioning":
             content = _POSITIONING_JSON
-        elif agent_code == "06-operation":
+        elif agent_code in {"06-operation", "06-operator"}:
             content = _REVIEW_JSON
         else:
             content = _SCRIPT_JSON
@@ -66,6 +70,40 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _project_bound_douyin_account(
+    client,
+    headers: dict[str, str],
+    *,
+    account_name: str = "Agent runtime account",
+    project_name: str = "Agent runtime project",
+) -> tuple[int, int]:
+    project_id = (
+        await client.post("/projects", headers=headers, json={"name": project_name})
+    ).json()["id"]
+    account = (
+        await client.post(
+            "/accounts",
+            headers=headers,
+            json={
+                "nickname": account_name,
+                "platform": "douyin",
+                "external_account_id": f"open-id-{project_id}",
+                "project_id": project_id,
+            },
+        )
+    ).json()
+    await client.patch(
+        f"/accounts/{account['id']}/integration",
+        headers=headers,
+        json={
+            "integration_status": "manual",
+            "auth_status": "manual",
+            "data_sync_status": "manual",
+        },
+    )
+    return project_id, account["id"]
 
 
 async def _authorized_douyin_account(
@@ -93,14 +131,12 @@ async def _authorized_douyin_account(
 
 
 @pytest.mark.asyncio
-async def test_brain_message_greeting_stays_in_main_agent_conversation(
-    client, session, admin
-):
+async def test_brain_message_greeting_stays_in_main_agent_conversation(client, session, admin):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     response = await client.post(
         "/brain/messages",
         headers=_auth(token),
-        json={"message": "你好"},
+        json={"message": "你好", "client_message_id": "message-greeting-1"},
     )
 
     assert response.status_code == 201
@@ -108,10 +144,167 @@ async def test_brain_message_greeting_stays_in_main_agent_conversation(
     assert runtime["intent"]["intent"] == "conversation"
     assert runtime["invocations"] == []
     assert runtime["pending_decisions"] == []
-    assert any(event["type"] == "brain.runtime.message_done" for event in runtime["timeline"])
+    completed_message = next(
+        event for event in runtime["timeline"] if event["type"] == "brain.runtime.message_done"
+    )
+    assert completed_message["payload"]["client_message_id"] == "message-greeting-1"
+    assert completed_message["payload"]["message_id"].startswith("message-greeting-1:")
     task = await session.get(BrainTask, runtime["task"]["id"])
     assert task is not None
     assert task.created_by_id == admin.id
+
+
+@pytest.mark.asyncio
+async def test_brain_message_client_id_is_idempotent(client, session, admin):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    payload = {"message": "你好", "client_message_id": "idempotent-turn-1"}
+
+    first = await client.post("/brain/messages", headers=headers, json=payload)
+    repeated = await client.post("/brain/messages", headers=headers, json=payload)
+
+    assert first.status_code == 201
+    assert repeated.status_code == 201
+    first_runtime = first.json()
+    repeated_runtime = repeated.json()
+    assert repeated_runtime["task"]["id"] == first_runtime["task"]["id"]
+
+    task_id = first_runtime["task"]["id"]
+    events = [
+        event
+        for event in await session.scalars(select(Event).order_by(Event.id))
+        if (event.payload or {}).get("task_id") == task_id
+    ]
+    user_messages = [event for event in events if event.type == "brain.runtime.user_message"]
+    completed = [event for event in events if event.type == "brain.runtime.message_done"]
+    assert len(user_messages) == 1
+    assert len(completed) == 1
+
+
+@pytest.mark.asyncio
+async def test_brain_message_enqueues_runtime_when_async_execution_is_enabled(
+    client, session, admin, monkeypatch
+):
+    enqueued: list[dict] = []
+
+    async def fake_enqueue(**payload):
+        enqueued.append(payload)
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", True)
+    monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", fake_enqueue)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+
+    response = await client.post(
+        "/brain/messages",
+        headers=_auth(token),
+        json={"message": "你好", "client_message_id": "queued-turn-1"},
+    )
+
+    assert response.status_code == 201
+    runtime = response.json()
+    assert runtime["status"] == "running"
+    assert not any(
+        event["type"] == "brain.runtime.message_done" for event in runtime["timeline"]
+    )
+    assert len(enqueued) == 1
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "queued-turn-1")
+    )
+    assert run is not None
+    assert run.status == "queued"
+    assert run.task_id == runtime["task"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_async_followup_waits_without_mutating_the_active_turn(
+    client, session, admin, monkeypatch
+):
+    enqueued: list[dict] = []
+
+    async def fake_enqueue(**payload):
+        enqueued.append(payload)
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", True)
+    monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", fake_enqueue)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    first = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={"message": "你好", "client_message_id": "serialized-turn-1"},
+    )
+    assert first.status_code == 201
+    task_id = first.json()["task"]["id"]
+
+    followup = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "谢谢",
+            "client_message_id": "serialized-turn-2",
+            "task_id": task_id,
+        },
+    )
+
+    assert followup.status_code == 201
+    assert len(enqueued) == 1
+    task = await session.get(BrainTask, task_id)
+    assert task is not None
+    await session.refresh(task, attribute_names=["brief"])
+    assert task.brief.goal == "你好"
+    run = await session.scalar(
+        select(AgentRun).where(
+            AgentRun.client_message_id == "serialized-turn-2"
+        )
+    )
+    assert run is not None
+    assert run.status == "waiting_predecessor"
+    events = [
+        event
+        for event in await session.scalars(select(Event).order_by(Event.id))
+        if (event.payload or {}).get("task_id") == task_id
+        and event.type == "brain.runtime.user_message"
+    ]
+    assert [event.payload["message"] for event in events] == ["你好", "谢谢"]
+
+
+@pytest.mark.asyncio
+async def test_stop_generation_marks_queued_run_and_aborts_worker_job(
+    client, session, admin, monkeypatch
+):
+    aborted: list[int] = []
+
+    async def fake_enqueue(**payload):
+        return None
+
+    async def fake_abort(run_id: int):
+        aborted.append(run_id)
+        return True
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", True)
+    monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", fake_enqueue)
+    monkeypatch.setattr("app.api.brain.abort_agent_runtime", fake_abort)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={"message": "你好", "client_message_id": "queued-stop-1"},
+    )
+
+    stopped = await client.post(
+        "/brain/generations/queued-stop-1/stop",
+        headers=headers,
+        json={},
+    )
+
+    assert stopped.status_code == 202
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "queued-stop-1")
+    )
+    assert run is not None
+    assert run.cancel_requested_at is not None
+    assert aborted == [run.id]
 
 
 @pytest.mark.asyncio
@@ -122,7 +315,7 @@ async def test_brain_message_continues_in_the_same_runtime_thread(client, admin)
     first = await client.post(
         "/brain/messages",
         headers=headers,
-        json={"message": "你好"},
+        json={"message": "你好", "client_message_id": "conversation-turn-1"},
     )
     assert first.status_code == 201
     first_runtime = first.json()
@@ -132,6 +325,7 @@ async def test_brain_message_continues_in_the_same_runtime_thread(client, admin)
         headers=headers,
         json={
             "message": "谢谢",
+            "client_message_id": "conversation-turn-2",
             "task_id": first_runtime["task"]["id"],
         },
     )
@@ -141,14 +335,122 @@ async def test_brain_message_continues_in_the_same_runtime_thread(client, admin)
     assert runtime["task"]["id"] == first_runtime["task"]["id"]
     assert runtime["thread_id"] == first_runtime["thread_id"]
     user_messages = [
-        event
-        for event in runtime["timeline"]
-        if event["type"] == "brain.runtime.user_message"
+        event for event in runtime["timeline"] if event["type"] == "brain.runtime.user_message"
     ]
     assert [event["payload"]["message"] for event in user_messages] == [
         "你好",
         "谢谢",
     ]
+    assistant_message_ids = [
+        event["payload"]["message_id"]
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.message_done"
+    ]
+    assert len(assistant_message_ids) == 2
+    assert len(set(assistant_message_ids)) == 2
+    assert assistant_message_ids[0].startswith("conversation-turn-1:")
+    assert assistant_message_ids[1].startswith("conversation-turn-2:")
+
+
+@pytest.mark.asyncio
+async def test_brain_message_can_be_stopped_while_the_model_is_generating(
+    client, admin, monkeypatch
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    generation_started = asyncio.Event()
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="conversation",
+            confidence=1,
+            reason="普通对话。",
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    async def blocking_chat(self, session, org_id, agent_code, messages):
+        generation_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("停止生成后不应继续返回模型结果")
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify", fake_classify
+    )
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", blocking_chat)
+
+    request = asyncio.create_task(
+        client.post(
+            "/brain/messages",
+            headers=headers,
+            json={"message": "帮我想一个选题", "client_message_id": "stop-turn-1"},
+        )
+    )
+    await asyncio.wait_for(generation_started.wait(), timeout=10)
+
+    stopped = await client.post(
+        "/brain/generations/stop-turn-1/stop",
+        headers=headers,
+        json={},
+    )
+    response = await asyncio.wait_for(request, timeout=2)
+
+    assert stopped.status_code == 202
+    assert stopped.json() == {
+        "client_message_id": "stop-turn-1",
+        "stop_requested": True,
+    }
+    assert response.status_code == 201
+    runtime = response.json()
+    assert runtime["status"] == "stopped"
+    stopped_event = next(
+        event
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.generation_stopped"
+    )
+    assert stopped_event["payload"]["client_message_id"] == "stop-turn-1"
+
+
+@pytest.mark.asyncio
+async def test_brain_message_regeneration_reuses_the_last_user_turn_without_duplication(
+    client, admin
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    first = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={"message": "你好", "client_message_id": "original-turn"},
+    )
+    assert first.status_code == 201
+    task_id = first.json()["task"]["id"]
+
+    regenerated = await client.post(
+        f"/brain/tasks/{task_id}/regenerate",
+        headers=headers,
+        json={"client_message_id": "regenerated-turn"},
+    )
+
+    assert regenerated.status_code == 201
+    runtime = regenerated.json()
+    user_messages = [
+        event for event in runtime["timeline"] if event["type"] == "brain.runtime.user_message"
+    ]
+    assert [event["payload"]["message"] for event in user_messages] == ["你好"]
+    regeneration = next(
+        event
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.regeneration_requested"
+    )
+    assert regeneration["payload"]["client_message_id"] == "regenerated-turn"
+    assert regeneration["payload"]["source_event_id"] == user_messages[0]["id"]
+    assistant_message_ids = [
+        event["payload"]["message_id"]
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.message_done"
+    ]
+    assert len(assistant_message_ids) == 2
+    assert assistant_message_ids[-1].startswith("regenerated-turn:")
 
 
 @pytest.mark.asyncio
@@ -162,7 +464,7 @@ async def test_brain_message_sends_compact_parent_thread_history_to_main_agent(
     async def fake_chat(self, session, org_id, agent_code, messages):
         if agent_code == "00-decision":
             captured_messages.append(messages)
-            content = "我记得上一轮，我们继续。" if len(captured_messages) > 1 else "你好，我在。"
+            content = "I remember the previous turn." if len(captured_messages) > 1 else "Hello."
         else:
             content = _SCRIPT_JSON
         return CompletionResult(content, "deepseek-chat", 10, 20, 30), 0.0
@@ -201,15 +503,81 @@ async def test_brain_message_sends_compact_parent_thread_history_to_main_agent(
     second_turn = captured_messages[-1]
     serialized = json.dumps(second_turn, ensure_ascii=False)
     assert "你好" in serialized
-    assert "你好，我在。" in serialized
+    assert "Hello." in serialized
     assert "我们刚才说到哪里了？" in serialized
+
+
+@pytest.mark.asyncio
+async def test_brain_conversation_keeps_operations_identity_and_account_context(
+    client, admin, monkeypatch
+):
+    from app.llm.gateway import current_llm_call_context
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account_id = await _authorized_douyin_account(
+        client,
+        headers,
+        name="抖音开发测试账号",
+    )
+    captured_messages: list[dict] = []
+    captured_contexts = []
+
+    async def fake_chat(self, session, org_id, agent_code, messages):
+        if agent_code == "00-decision":
+            captured_messages.extend(messages)
+            captured_contexts.append(current_llm_call_context())
+            content = "我是你的新媒体运营主 Agent。"
+        else:
+            content = _SCRIPT_JSON
+        return CompletionResult(content, "deepseek-chat", 10, 20, 30), 0.0
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="conversation",
+            confidence=1,
+            reason="用户询问主 Agent 的能力。",
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify", fake_classify
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "你能干什么？",
+            "account_id": account_id,
+            "platform": "douyin",
+        },
+    )
+
+    assert response.status_code == 201
+    system_prompt = next(
+        message["content"] for message in captured_messages if message["role"] == "system"
+    )
+    assert system_prompt.startswith("# 同舟行主 Agent：自然对话")
+    assert "不是泛化生活陪聊助手" in system_prompt
+    assert "账号定位" in system_prompt
+    assert "内容策划" in system_prompt
+    assert "发布准备" in system_prompt
+    assert "运营复盘" in system_prompt
+    assert "账号 ID" in system_prompt
+    assert "抖音" in system_prompt
+    assert captured_contexts[0].prompt_id == "main-agent.conversation"
+    assert captured_contexts[0].task_id == response.json()["task"]["id"]
+    assert captured_contexts[0].scope["account_id"] == account_id
 
 
 @pytest.mark.asyncio
 async def test_brain_message_replans_after_each_expert_result(client, admin, monkeypatch):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    account_id = await _authorized_douyin_account(client, headers)
+    project_id, account_id = await _project_bound_douyin_account(client, headers)
     customer_service = (
         await client.get("/agents/08-customer-service/management", headers=headers)
     ).json()
@@ -272,6 +640,7 @@ async def test_brain_message_replans_after_each_expert_result(client, admin, mon
         headers=headers,
         json={
             "message": "分析当前账号定位并制定下周内容策略",
+            "project_id": project_id,
             "account_id": account_id,
             "platform": "douyin",
         },
@@ -305,7 +674,11 @@ async def test_brain_message_replans_after_each_expert_result(client, admin, mon
         and event["payload"]["agent_code"] == "02-content-director"
     )
     assert first_decision < positioning_started < positioning_done < next_step < content_started
-    assert {item["code"] for item in available_catalogs[0]} == {
+    assert {
+        item["code"]
+        for item in available_catalogs[0]
+        if item["kind"] == "expert"
+    } == {
         "01-positioning",
         "02-content-director",
         "03-art-director",
@@ -314,12 +687,330 @@ async def test_brain_message_replans_after_each_expert_result(client, admin, mon
         "06-operator",
         "07-advertiser",
     }
+    assert {
+        item["code"]
+        for item in available_catalogs[0]
+        if item["kind"] == "tool"
+    } == {
+        "account.data_context",
+        "account.metrics_summary",
+        "account.profile",
+    }
 
 
 @pytest.mark.asyncio
-async def test_brain_strategy_decision_is_selected_and_runtime_resumes(
-    client, admin, monkeypatch
+async def test_brain_runtime_executes_scoped_tool_and_observes_result(
+    client,
+    admin,
+    monkeypatch,
 ):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account_id = await _authorized_douyin_account(client, headers, "工具测试账号")
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.98,
+            reason="需要读取当前账号概况。",
+            requires_account_context=True,
+        )
+
+    steps = iter(
+        [
+            RuntimeNextStep(
+                action="call_tools",
+                tool_calls=[
+                    RuntimeToolCall(
+                        tool_code="account.profile",
+                        arguments={},
+                        purpose="读取当前账号公开概况",
+                        idempotency_key="account-profile-round-1",
+                    )
+                ],
+                rationale="先读取真实账号状态。",
+                handoff_message="我先读取当前账号的接入状态。",
+            ),
+            RuntimeNextStep(
+                action="finish",
+                rationale="账号事实已经足够回答。",
+                handoff_message="账号状态已经确认，我来汇总结论。",
+            ),
+        ]
+    )
+
+    async def fake_decide_next(*args, **kwargs):
+        return next(steps)
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "检查当前账号接入状态",
+            "account_id": account_id,
+            "platform": "douyin",
+        },
+    )
+
+    assert response.status_code == 201
+    runtime = response.json()
+    assert len(runtime["tool_calls"]) == 1
+    assert runtime["tool_calls"][0]["tool_code"] == "account.profile"
+    assert runtime["tool_calls"][0]["status"] == "success"
+    completed = next(
+        event
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.tool_completed"
+    )
+    assert completed["payload"]["tool_code"] == "account.profile"
+    assert completed["payload"]["result"]["account_id"] == account_id
+
+
+@pytest.mark.asyncio
+async def test_brain_runtime_respond_completes_turn_without_dispatch(client, admin, monkeypatch):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.95,
+            reason="当前问题可以由主 Agent 直接回答。",
+            requires_account_context=False,
+        )
+
+    async def fake_decide_next(*args, **kwargs):
+        return RuntimeNextStep(
+            action="respond",
+            rationale="无需专家或工具。",
+            handoff_message="这次不需要调用专家，我先直接回答你。",
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={"message": "现在先告诉我你的判断", "platform": "douyin"},
+    )
+
+    assert response.status_code == 201
+    runtime = response.json()
+    assert runtime["status"] == "completed"
+    assert runtime["invocations"] == []
+    assert runtime["tool_calls"] == []
+    assert any(
+        event["type"] == "brain.runtime.message_done"
+        and event["payload"]["content"] == "这次不需要调用专家，我先直接回答你。"
+        for event in runtime["timeline"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_brain_runtime_cannot_replace_required_expert_with_direct_response(
+    client,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    project_id, account_id = await _project_bound_douyin_account(client, headers)
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.98,
+            reason="Account positioning requires the positioning expert.",
+            suggested_expert_codes=["01-positioning"],
+            requires_account_context=True,
+        )
+
+    decisions = iter(
+        [
+            RuntimeNextStep(
+                action="respond",
+                rationale="Incorrectly attempted a direct answer.",
+                handoff_message="The main agent should not publish this analysis.",
+            ),
+            RuntimeNextStep(
+                action="finish",
+                rationale="The expert result is now available.",
+                handoff_message="The main agent may now summarize the expert result.",
+            ),
+        ]
+    )
+
+    async def fake_decide_next(*args, **kwargs):
+        return next(decisions)
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "Run an account positioning diagnosis.",
+            "project_id": project_id,
+            "account_id": account_id,
+            "platform": "douyin",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    runtime = response.json()
+    assert [row["agent_code"] for row in runtime["invocations"]] == ["01-positioning"]
+    effective_steps = [
+        event["payload"]["action"]
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.next_step"
+    ]
+    assert effective_steps == ["dispatch_experts", "finish"]
+    assert not any(
+        event["type"] == "brain.runtime.message_done"
+        and event["payload"].get("content") == "The main agent should not publish this analysis."
+        for event in runtime["timeline"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_brain_runtime_ask_user_reports_waiting_user(client, admin, monkeypatch):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.91,
+            reason="还缺少目标周期。",
+            requires_account_context=False,
+        )
+
+    async def fake_decide_next(*args, **kwargs):
+        return RuntimeNextStep(
+            action="ask_user",
+            rationale="缺少执行周期。",
+            handoff_message="你希望我分析最近 7 天、30 天，还是自定义周期？",
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={"message": "分析一下近期表现", "platform": "douyin"},
+    )
+
+    assert response.status_code == 201
+    runtime = response.json()
+    assert runtime["status"] == "waiting_user"
+    assert any(
+        event["type"] == "brain.runtime.clarification_requested"
+        for event in runtime["timeline"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_permission_still_obeys_registered_tool_policy(
+    client,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account_id = await _authorized_douyin_account(client, headers, "权限路由测试账号")
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.98,
+            reason="需要读取当前账号概况。",
+            requires_account_context=True,
+        )
+
+    steps = iter(
+        [
+            RuntimeNextStep(
+                action="request_permission",
+                tool_calls=[
+                    RuntimeToolCall(
+                        tool_code="account.profile",
+                        arguments={},
+                        purpose="读取当前账号公开概况",
+                        idempotency_key="permission-policy-account-profile",
+                    )
+                ],
+                rationale="先经过统一工具边界。",
+                handoff_message="我先检查这项工具是否需要你的确认。",
+            ),
+            RuntimeNextStep(
+                action="finish",
+                rationale="工具结果已经足够。",
+                handoff_message="账号状态已经确认。",
+            ),
+        ]
+    )
+
+    async def fake_decide_next(*args, **kwargs):
+        return next(steps)
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "检查当前账号状态",
+            "account_id": account_id,
+            "platform": "douyin",
+        },
+    )
+
+    assert response.status_code == 201
+    runtime = response.json()
+    assert runtime["status"] == "completed"
+    assert runtime["pending_permissions"] == []
+    assert runtime["tool_calls"][0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_brain_strategy_decision_is_selected_and_runtime_resumes(client, admin, monkeypatch):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     account_id = await _authorized_douyin_account(client, headers)
@@ -356,7 +1047,7 @@ async def test_brain_strategy_decision_is_selected_and_runtime_resumes(
                         DecisionChoice(
                             id="conflict",
                             title="冲突测评线",
-                            description="用对比和反转提升点击。",
+                            description="用对比和反转提升点击率。",
                             benefit="更容易获得初始播放",
                             tradeoff="需要更高素材投入",
                         ),
@@ -396,6 +1087,14 @@ async def test_brain_strategy_decision_is_selected_and_runtime_resumes(
     runtime = created.json()
     assert [row["id"] for row in runtime["pending_decisions"]] == ["content-direction-1"]
 
+    enqueued: list[int] = []
+
+    async def fake_enqueue(*, run_id: int):
+        enqueued.append(run_id)
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", True)
+    monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", fake_enqueue)
+
     selected = await client.post(
         f"/brain/tasks/{runtime['task']['id']}/decisions/content-direction-1/select",
         headers=headers,
@@ -405,6 +1104,8 @@ async def test_brain_strategy_decision_is_selected_and_runtime_resumes(
     assert selected.status_code == 200
     resumed = selected.json()
     assert resumed["pending_decisions"] == []
+    assert resumed["status"] == "running"
+    assert len(enqueued) == 1
     assert any(
         event["type"] == "brain.runtime.decision_selected"
         and event["payload"]["choice_id"] == "authority"
@@ -413,9 +1114,7 @@ async def test_brain_strategy_decision_is_selected_and_runtime_resumes(
 
 
 @pytest.mark.asyncio
-async def test_brain_strategy_decision_can_generate_a_new_option_set(
-    client, admin, monkeypatch
-):
+async def test_brain_strategy_decision_can_generate_a_new_option_set(client, admin, monkeypatch):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     account_id = await _authorized_douyin_account(client, headers)
@@ -451,7 +1150,7 @@ async def test_brain_strategy_decision_can_generate_a_new_option_set(
                     DecisionChoice(
                         id="conflict",
                         title="冲突测评线",
-                        description="用对比提升点击。",
+                        description="用对比提升点击率。",
                         benefit="更容易获得播放",
                         tradeoff="素材投入较高",
                     ),
@@ -571,9 +1270,12 @@ async def test_brain_task_lifecycle(client, admin):
         "compliance_precheck",
     }
     assert any(row["permission_mode"] == "auto" for row in tool_rows)
-    assert next(
-        row for row in tool_rows if row["tool_code"] == "brief_builder"
-    )["requires_human_confirmation"] is False
+    assert (
+        next(row for row in tool_rows if row["tool_code"] == "brief_builder")[
+            "requires_human_confirmation"
+        ]
+        is False
+    )
     assert any(row["requires_human_confirmation"] is True for row in tool_rows)
 
     pending_tool_approvals = await client.get(
@@ -583,9 +1285,7 @@ async def test_brain_task_lifecycle(client, admin):
     pending_tool_rows = pending_tool_approvals.json()
     assert any(row["task_id"] == task["id"] for row in pending_tool_rows)
     approval_id = next(
-        row["id"]
-        for row in pending_tool_rows
-        if row["tool_code"] == "compliance_precheck"
+        row["id"] for row in pending_tool_rows if row["tool_code"] == "compliance_precheck"
     )
 
     approved_tool = await client.post(
@@ -678,9 +1378,7 @@ async def test_brain_runtime_applies_expert_tool_permissions(client, admin):
 
     confirmed = await client.post(f"/brain/tasks/{task_id}/confirm", headers=headers)
     assert confirmed.status_code == 200
-    calls = (
-        await client.get(f"/brain/tasks/{task_id}/tool-calls", headers=headers)
-    ).json()
+    calls = (await client.get(f"/brain/tasks/{task_id}/tool-calls", headers=headers)).json()
     brief = next(row for row in calls if row["tool_code"] == "brief_builder")
     compliance = next(row for row in calls if row["tool_code"] == "compliance_precheck")
     assert brief["permission_mode"] == "auto"
@@ -694,9 +1392,7 @@ async def test_brain_rejects_workflow_when_main_agent_is_disabled(client, admin)
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     account_id = await _authorized_douyin_account(client, headers)
-    management = (
-        await client.get("/agents/00-decision/management", headers=headers)
-    ).json()
+    management = (await client.get("/agents/00-decision/management", headers=headers)).json()
     management["enabled"] = False
     disabled = await client.put(
         "/agents/00-decision/management",
@@ -847,8 +1543,16 @@ async def test_smart_runtime_resumes_from_permission_with_decision_in_parent_con
 ):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    account_id = await _authorized_douyin_account(client, headers)
+    project_id, account_id = await _project_bound_douyin_account(
+        client,
+        headers,
+        account_name="Permission resume account",
+        project_name="Permission resume project",
+    )
     observed_rounds: list[list[dict]] = []
+
+    async def controlled_publish_tool(_params, _context):
+        return {"prepared": True}
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
@@ -870,6 +1574,20 @@ async def test_smart_runtime_resumes_from_permission_with_decision_in_parent_con
                 rationale="需要先由账号运营专家生成受控发布准备结果。",
                 handoff_message="我先让账号运营专家整理发布准备项。",
             )
+        if not any(item.get("kind") == "tool_permission" for item in observations):
+            return RuntimeNextStep(
+                action="request_permission",
+                tool_calls=[
+                    RuntimeToolCall(
+                        tool_code="publish.prepare",
+                        arguments={},
+                        purpose="生成受控发布准备结果",
+                        idempotency_key="permission-resume-publish-1",
+                    )
+                ],
+                rationale="发布准备属于受控动作，需要用户确认。",
+                handoff_message="生成发布准备结果前，需要你确认。",
+            )
         return RuntimeNextStep(
             action="finish",
             expert_codes=[],
@@ -884,12 +1602,28 @@ async def test_smart_runtime_resumes_from_permission_with_decision_in_parent_con
         "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
         fake_decide_next,
     )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.build_runtime_tool_adapter",
+        lambda: ToolAdapter(
+            [
+                ToolSpec(
+                    name="publish.prepare",
+                    handler=controlled_publish_tool,
+                    params_model=EmptyParams,
+                    allowed_roles=frozenset({UserRole.ADMIN}),
+                    permission_mode="confirm",
+                    scope="account",
+                )
+            ]
+        ),
+    )
 
     created = await client.post(
         "/brain/messages",
         headers=headers,
         json={
             "message": "整理一份抖音发布包并进入人工确认",
+            "project_id": project_id,
             "account_id": account_id,
             "platform": "douyin",
         },

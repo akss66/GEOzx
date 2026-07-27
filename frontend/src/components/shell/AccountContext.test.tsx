@@ -20,6 +20,7 @@ const accounts: Account[] = [
     integration_status: "connected",
     auth_status: "authorized",
     data_sync_status: "pending",
+    avatar_url: "https://example.com/account-one.png",
     created_at: "2026-07-17T00:00:00Z",
   },
   {
@@ -83,5 +84,40 @@ describe("AccountContext", () => {
     );
 
     expect(screen.getByRole("button", { name: "当前账号" })).toHaveTextContent("选择抖音账号");
+  });
+
+  it("allows selecting an active account without customer or project assignments", () => {
+    const onChange = vi.fn();
+    render(
+      <AccountContext
+        accounts={[{ ...accounts[0], client_id: null, client_ids: [], project_ids: [] }]}
+        platform="douyin"
+        accountId={null}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "当前账号" }));
+    fireEvent.click(screen.getByRole("button", { name: /账号一/ }));
+
+    expect(onChange).toHaveBeenCalledWith(1);
+  });
+
+  it("uses the synchronized platform avatar in the account selector", () => {
+    render(
+      <AccountContext
+        accounts={accounts}
+        platform="douyin"
+        accountId={null}
+        onChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "当前账号" }));
+
+    expect(screen.getByRole("img", { name: "账号一" })).toHaveAttribute(
+      "src",
+      "https://example.com/account-one.png",
+    );
   });
 });

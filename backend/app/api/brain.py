@@ -1,14 +1,18 @@
 """运营大脑 API。"""
 
+import asyncio
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.core.approval_access import (
     require_task_approval_access,
     require_task_visibility,
@@ -24,6 +28,7 @@ from app.db import get_session
 from app.models import (
     Account,
     AccountGroup,
+    AgentRun,
     AgentToolCall,
     BrainTask,
     DeliverableAcceptance,
@@ -50,6 +55,7 @@ from app.orchestrator.brain_runtime import (
     runtime_graph,
     runtime_status,
 )
+from app.orchestrator.generation_control import generation_control
 from app.schemas.brain import (
     AcceptDeliverableRequest,
     AgentInvocationOut,
@@ -65,15 +71,68 @@ from app.schemas.brain import (
     DeliverableAcceptanceOut,
     DraftBrainTaskRequest,
     IntentDecision,
+    RegenerateBrainMessageRequest,
     RejudgeDeliverableRequest,
     RerunDeliverableRequest,
     RuntimeEventOut,
+    StopBrainGenerationOut,
+    StopBrainGenerationRequest,
 )
 from app.services.agent_management import quality_gate_labels, require_agent_enabled
+from app.services.agent_runs import (
+    abort_agent_runtime,
+    claim_agent_run,
+    complete_agent_run,
+    enqueue_agent_runtime,
+    fail_agent_run,
+    get_agent_run,
+    mark_agent_run_queued,
+    queue_agent_run_behind_task,
+    request_agent_run_cancel,
+    utc_now,
+)
+from app.services.publishing import sync_publish_jobs_after_approval
 
 router = APIRouter(prefix="/brain", tags=["brain"])
+log = logging.getLogger("dyflow.brain")
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+async def _queue_runtime_resume(
+    session: AsyncSession,
+    *,
+    user: CurrentUser,
+    task: BrainTask,
+    idempotency_key: str,
+    request_payload: dict,
+) -> AgentRun:
+    run, claimed = await claim_agent_run(
+        session,
+        org_id=user.org_id,
+        requested_by_id=user.id,
+        client_message_id=idempotency_key,
+        request_payload=request_payload,
+    )
+    if claimed:
+        await mark_agent_run_queued(
+            session,
+            run.id,
+            task_id=task.id,
+            request_payload=request_payload,
+        )
+        await _submit_durable_agent_run(run.id)
+    return run
+
+
+async def _submit_durable_agent_run(run_id: int) -> None:
+    try:
+        await enqueue_agent_runtime(run_id=run_id)
+    except Exception:  # noqa: BLE001 - the database run is the durable outbox
+        log.exception(
+            "AgentRun #%s is durable but could not be submitted; recovery will retry",
+            run_id,
+        )
 
 
 def _title(goal: str) -> str:
@@ -496,6 +555,114 @@ async def send_brain_message(
     user: CurrentUser,
     session: SessionDep,
 ) -> BrainRuntimeOut:
+    return await _send_brain_message(body, user, session)
+
+
+async def _send_brain_message(
+    body: BrainMessageRequest,
+    user: CurrentUser,
+    session: AsyncSession,
+    *,
+    regeneration_source_event_id: int | None = None,
+) -> BrainRuntimeOut:
+    client_message_id = body.client_message_id or uuid4().hex
+    body = body.model_copy(update={"client_message_id": client_message_id})
+    run, claimed = await claim_agent_run(
+        session,
+        org_id=user.org_id,
+        requested_by_id=user.id,
+        client_message_id=client_message_id,
+        request_payload={
+            "message": body.message,
+            "task_id": body.task_id,
+            "project_id": body.project_id,
+            "account_id": body.account_id,
+            "platform": body.platform.value,
+            "regeneration_source_event_id": regeneration_source_event_id,
+        },
+    )
+    if not claimed:
+        if run.task_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "agent_run_in_progress",
+                    "message": "This message is already being processed.",
+                    "client_message_id": client_message_id,
+                },
+            )
+        existing_task = await _load_task_for_user(session, run.task_id, user)
+        return await _runtime_response(session, existing_task)
+
+    run_id = run.id
+    if settings.agent_runtime_async_enabled and body.task_id is not None:
+        existing_task = await _load_task_for_user(session, body.task_id, user)
+        waiting_payload = {
+            "operation": "prepare_and_start",
+            "message": body.message,
+            "task_id": body.task_id,
+            "project_id": body.project_id,
+            "account_id": body.account_id,
+            "platform": body.platform.value,
+            "client_message_id": client_message_id,
+            "regeneration_source_event_id": regeneration_source_event_id,
+            "user_message_recorded": True,
+        }
+        queued_behind_predecessor = await queue_agent_run_behind_task(
+            session,
+            run_id,
+            task_id=body.task_id,
+            request_payload=waiting_payload,
+        )
+        if queued_behind_predecessor:
+            await runtime_graph.record_user_message(
+                session,
+                existing_task,
+                body.message,
+                client_message_id=client_message_id,
+            )
+            return await _runtime_response(session, existing_task)
+
+    run.status = "running"
+    run.phase = "request"
+    run.started_at = utc_now()
+    if not settings.agent_runtime_async_enabled:
+        run.attempt += 1
+    await session.commit()
+    try:
+        response = await _execute_brain_message(
+            body,
+            user,
+            session,
+            agent_run_id=run_id,
+            agent_run_attempt=run.attempt,
+            regeneration_source_event_id=regeneration_source_event_id,
+        )
+    except Exception as exc:
+        await fail_agent_run(session, run_id, exc)
+        raise
+
+    if not settings.agent_runtime_async_enabled:
+        await complete_agent_run(
+            session,
+            run_id,
+            task_id=response.task.id,
+            status=response.status,
+        )
+    return response
+
+
+async def _execute_brain_message(
+    body: BrainMessageRequest,
+    user: CurrentUser,
+    session: AsyncSession,
+    *,
+    agent_run_id: int,
+    agent_run_attempt: int,
+    regeneration_source_event_id: int | None = None,
+    force_inline: bool = False,
+    user_message_recorded: bool = False,
+) -> BrainRuntimeOut:
     task = (
         await _load_task_for_user(session, body.task_id, user)
         if body.task_id is not None
@@ -628,10 +795,160 @@ async def send_brain_message(
 
     await session.commit()
     task = await _load_task(session, task.id, user.org_id)
-    await runtime_graph.record_user_message(session, task, body.message)
-    await runtime_graph.start_smart(session, task, intent)
-    task = await _load_task(session, task.id, user.org_id)
+    if regeneration_source_event_id is None and not user_message_recorded:
+        await runtime_graph.record_user_message(
+            session,
+            task,
+            body.message,
+            client_message_id=body.client_message_id,
+        )
+    else:
+        await runtime_graph.record_regeneration_requested(
+            session,
+            task,
+            source_event_id=regeneration_source_event_id,
+            client_message_id=body.client_message_id or uuid4().hex,
+        )
+
+    if settings.agent_runtime_async_enabled and not force_inline:
+        task.current_focus = "Main Agent is queued for background execution"
+        await session.commit()
+        await mark_agent_run_queued(
+            session,
+            agent_run_id,
+            task_id=task.id,
+            request_payload={
+                "operation": "start",
+                "task_id": task.id,
+                "intent": intent.model_dump(mode="json"),
+                "client_message_id": body.client_message_id or uuid4().hex,
+            },
+        )
+        await _submit_durable_agent_run(agent_run_id)
+        task = await _load_task(session, task.id, user.org_id)
+        return await _runtime_response(session, task)
+
+    generation_org_id = user.org_id
+    generation_user_id = user.id
+    generation_task_id = task.id
+    try:
+        if body.client_message_id:
+            await generation_control.activate(
+                generation_org_id,
+                generation_user_id,
+                body.client_message_id,
+            )
+        await runtime_graph.start_smart(
+            session,
+            task,
+            intent,
+            client_message_id=body.client_message_id,
+            agent_run_id=agent_run_id,
+            agent_run_attempt=agent_run_attempt,
+        )
+    except asyncio.CancelledError:
+        if not body.client_message_id or not await generation_control.is_stop_requested(
+            generation_org_id,
+            generation_user_id,
+            body.client_message_id,
+        ):
+            raise
+        await session.rollback()
+        task = await _load_task(session, generation_task_id, generation_org_id)
+        await runtime_graph.record_generation_stopped(
+            session,
+            task,
+            client_message_id=body.client_message_id,
+        )
+    finally:
+        if body.client_message_id:
+            await generation_control.finish(
+                generation_org_id,
+                generation_user_id,
+                body.client_message_id,
+            )
+    task = await _load_task(session, generation_task_id, generation_org_id)
     return await _runtime_response(session, task)
+
+
+@router.post(
+    "/generations/{client_message_id}/stop",
+    response_model=StopBrainGenerationOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def stop_brain_generation(
+    client_message_id: str,
+    body: StopBrainGenerationRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> StopBrainGenerationOut:
+    if body.task_id is not None:
+        await _load_task_for_user(session, body.task_id, user)
+    run = await get_agent_run(
+        session,
+        org_id=user.org_id,
+        requested_by_id=user.id,
+        client_message_id=client_message_id,
+    )
+    if run is not None:
+        await request_agent_run_cancel(session, run.id)
+        if settings.agent_runtime_async_enabled:
+            await abort_agent_runtime(run.id)
+    await generation_control.request_stop(user.org_id, user.id, client_message_id)
+    return StopBrainGenerationOut(
+        client_message_id=client_message_id,
+        stop_requested=True,
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/regenerate",
+    response_model=BrainRuntimeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def regenerate_brain_message(
+    task_id: int,
+    body: RegenerateBrainMessageRequest,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BrainRuntimeOut:
+    task = await _load_task_for_user(session, task_id, user)
+    events = await runtime_events(session, task.id)
+    source_event = next(
+        (event for event in reversed(events) if event.type == "brain.runtime.user_message"),
+        None,
+    )
+    if source_event is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前对话没有可重新生成的用户消息",
+        )
+    source_payload = source_event.payload or {}
+    source_message = str(source_payload.get("content") or source_payload.get("message") or "")
+    if not source_message.strip():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="上一条用户消息为空，无法重新生成",
+        )
+
+    platforms = list(task.brief.platforms) if task.brief and task.brief.platforms else []
+    platform_value = platforms[0] if platforms else Platform.DOUYIN.value
+    platform = platform_value if isinstance(platform_value, Platform) else Platform(platform_value)
+    account_ids = list(task.brief.account_ids) if task.brief else []
+    client_message_id = body.client_message_id or uuid4().hex
+    return await _send_brain_message(
+        BrainMessageRequest(
+            message=source_message,
+            client_message_id=client_message_id,
+            task_id=task.id,
+            project_id=task.brief.project_id if task.brief else None,
+            account_id=account_ids[0] if account_ids else None,
+            platform=platform,
+        ),
+        user,
+        session,
+        regeneration_source_event_id=source_event.id,
+    )
 
 
 @router.get("/tasks", response_model=list[BrainTaskOut])
@@ -748,13 +1065,38 @@ async def select_brain_decision(
     choice = next((row for row in decision.choices if row.id == body.choice_id), None)
     if choice is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选方案不存在")
-    await runtime_graph.resume_after_decision(
-        session,
-        task,
-        decision_id=decision.id,
-        choice_id=choice.id,
-        choice_title=choice.title,
-    )
+    if settings.agent_runtime_async_enabled:
+        await runtime_graph.record_decision_selected(
+            session,
+            task,
+            decision_id=decision.id,
+            choice_id=choice.id,
+            choice_title=choice.title,
+        )
+        task.status = BrainTaskStatus.RUNNING
+        task.current_focus = "主 Agent 正在根据你的选择恢复执行"
+        await session.commit()
+        await _queue_runtime_resume(
+            session,
+            user=user,
+            task=task,
+            idempotency_key=f"decision:{task.id}:{decision.id}",
+            request_payload={
+                "operation": "resume_decision",
+                "task_id": task.id,
+                "decision_id": decision.id,
+                "choice_id": choice.id,
+                "choice_title": choice.title,
+            },
+        )
+    else:
+        await runtime_graph.resume_after_decision(
+            session,
+            task,
+            decision_id=decision.id,
+            choice_id=choice.id,
+            choice_title=choice.title,
+        )
     return await _runtime_response(session, await _load_task(session, task.id, user.org_id))
 
 
@@ -971,6 +1313,12 @@ async def approve_tool_call(
         await _sync_matrix_distribution_approval(
             session, user.org_id, next_meta, body.approved, body.comment
         )
+        await sync_publish_jobs_after_approval(
+            session,
+            org_id=user.org_id,
+            tool_call=tool_call,
+            approved=body.approved,
+        )
     await _audit_task_approval_decision(
         session,
         user=user,
@@ -983,7 +1331,33 @@ async def approve_tool_call(
     )
     await session.commit()
     await session.refresh(tool_call)
-    await runtime_graph.resume_after_permission(session, task, tool_call, body.approved)
+    remaining_permission = await session.scalar(
+        select(AgentToolCall.id).where(
+            AgentToolCall.task_id == task.id,
+            AgentToolCall.org_id == user.org_id,
+            AgentToolCall.requires_human_confirmation.is_(True),
+            AgentToolCall.status == "waiting_approval",
+        )
+    )
+    if settings.agent_runtime_async_enabled:
+        if remaining_permission is None:
+            task.status = BrainTaskStatus.RUNNING
+            task.current_focus = "主 Agent 正在恢复受控任务"
+            await session.commit()
+            await _queue_runtime_resume(
+                session,
+                user=user,
+                task=task,
+                idempotency_key=f"permission:{task.id}:{tool_call.id}",
+                request_payload={
+                    "operation": "resume_permission",
+                    "task_id": task.id,
+                    "tool_call_id": tool_call.id,
+                    "approved": body.approved,
+                },
+            )
+    else:
+        await runtime_graph.resume_after_permission(session, task, tool_call, body.approved)
     await session.refresh(tool_call)
     return AgentToolCallOut.model_validate(tool_call)
 

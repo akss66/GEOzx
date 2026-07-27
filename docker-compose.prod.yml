@@ -44,6 +44,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dyflow}
       REDIS_URL: redis://redis:6379/0
+      AGENT_RUNTIME_ASYNC_ENABLED: "true"
+      LANGGRAPH_CHECKPOINT_ENABLED: "false"
+      LANGGRAPH_STRICT_MSGPACK: "true"
     expose:
       - "8000"
     volumes:
@@ -70,6 +73,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dyflow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dyflow}
       REDIS_URL: redis://redis:6379/0
+      AGENT_RUNTIME_ASYNC_ENABLED: "true"
+      LANGGRAPH_CHECKPOINT_ENABLED: "true"
+      LANGGRAPH_STRICT_MSGPACK: "true"
     volumes:
       - objects:/data/objects
     depends_on:

@@ -1,6 +1,7 @@
 """05 剪辑专家（真实 LLMAgent）。
 
-system prompt: prompts/05-editing.md ｜ 输出: EditedVideoPayload ｜ 输入: 上游素材计划。
+system prompt: Prompt Registry `experts/05-editing/v1.md`
+输出: EditedVideoPayload ｜ 输入: 上游素材计划。
 """
 
 from app.agents.base import LLMAgent

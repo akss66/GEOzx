@@ -419,6 +419,12 @@ export default function Users() {
 
           <Input
             allowClear
+            type="search"
+            name="member_directory_query"
+            autoComplete="off"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-form-type="other"
             prefix={<SearchOutlined />}
             value={search}
             onChange={(event) => setSearch(event.target.value)}

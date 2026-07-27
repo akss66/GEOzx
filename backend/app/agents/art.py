@@ -1,6 +1,6 @@
 """03 美术指导提示词专家（真实 LLMAgent）。
 
-system prompt: prompts/03-art.md ｜ 输出: ArtPromptPayload ｜ 输入: 上游脚本。
+system prompt: Prompt Registry `experts/03-art/v1.md` ｜ 输出: ArtPromptPayload ｜ 输入: 上游脚本。
 """
 
 from app.agents.base import LLMAgent

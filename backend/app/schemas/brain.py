@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import (
     AgentCode,
@@ -27,10 +27,18 @@ RuntimeAction = Literal[
     "respond",
     "ask_user",
     "dispatch_experts",
+    "call_tools",
     "request_decision",
     "request_permission",
     "finish",
 ]
+
+
+class RuntimeToolCall(BaseModel):
+    tool_code: str = Field(min_length=1, max_length=120)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    purpose: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class IntentDecision(BaseModel):
@@ -67,6 +75,23 @@ class RuntimeNextStep(BaseModel):
     rationale: str = Field(min_length=1, max_length=800)
     handoff_message: str = Field(min_length=1, max_length=500)
     decision_request: DecisionRequest | None = None
+    tool_calls: list[RuntimeToolCall] = Field(default_factory=list, max_length=5)
+    purpose: str | None = Field(default=None, max_length=500)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "RuntimeNextStep":
+        if self.action == "dispatch_experts" and not self.expert_codes:
+            raise ValueError("dispatch_experts requires expert_codes")
+        if self.action == "call_tools" and not self.tool_calls:
+            raise ValueError("call_tools requires tool_calls")
+        if self.action == "request_permission" and not self.tool_calls:
+            raise ValueError("request_permission requires tool_calls")
+        if self.action == "request_decision" and self.decision_request is None:
+            raise ValueError("request_decision requires decision_request")
+        if self.action != "request_decision" and self.decision_request is not None:
+            raise ValueError("decision_request is only valid for request_decision")
+        return self
 
 
 class DraftBrainTaskRequest(BaseModel):
@@ -79,10 +104,24 @@ class DraftBrainTaskRequest(BaseModel):
 
 class BrainMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=120)
     task_id: int | None = None
     project_id: int | None = None
     account_id: int | None = None
     platform: Platform = Platform.DOUYIN
+
+
+class RegenerateBrainMessageRequest(BaseModel):
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class StopBrainGenerationRequest(BaseModel):
+    task_id: int | None = None
+
+
+class StopBrainGenerationOut(BaseModel):
+    client_message_id: str
+    stop_requested: bool
 
 
 class DecisionSelectionRequest(BaseModel):
@@ -165,6 +204,9 @@ class AgentInvocationOut(BaseModel):
 
     id: int
     task_id: int
+    run_id: int | None = None
+    step_key: str | None = None
+    attempt: int = 0
     agent_code: AgentCode
     agent_name: str
     status: AgentInvocationStatus

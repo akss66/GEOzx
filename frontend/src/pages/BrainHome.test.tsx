@@ -3,7 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App as AntApp } from "antd";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,9 @@ import {
   getBrainTaskRuntime,
   listBrainTasks,
   rejectDeliverableAcceptance,
+  regenerateBrainMessage,
   sendBrainMessage,
+  stopBrainGeneration,
 } from "../api/brain";
 import { getWorkspaceContext } from "../api/shell";
 import type {
@@ -281,6 +283,11 @@ const mocks = vi.hoisted(() => {
   const contextAccounts: Account[] = [account];
 
   return {
+    eventHandler: null as ((event: {
+      type: string;
+      payload?: unknown;
+    }) => void) | null,
+    streamOptions: null as { onReconnect?: () => void } | null,
     acceptance,
     account,
     invocation,
@@ -309,13 +316,22 @@ vi.mock("../api/brain", () => ({
   getBrainTaskRuntime: vi.fn(async () => mocks.runtime),
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
+  regenerateBrainMessage: vi.fn(async () => mocks.runtime),
   reviseBrainDecision: vi.fn(async () => mocks.runtime),
   selectBrainDecision: vi.fn(async () => mocks.runtime),
   sendBrainMessage: vi.fn(async () => mocks.runtime),
+  stopBrainGeneration: vi.fn(async () => ({
+    client_message_id: "pending-turn",
+    stop_requested: true,
+  })),
 }));
 
 vi.mock("../hooks/useEventStream", () => ({
-  useEventStream: vi.fn(() => ({ connected: true, last: null })),
+  useEventStream: vi.fn((handler, options) => {
+    mocks.eventHandler = handler;
+    mocks.streamOptions = options;
+    return { connected: true, connectionState: "connected", last: null };
+  }),
 }));
 
 vi.mock("../stores/currentWorkspace", async (importOriginal) => {
@@ -332,6 +348,8 @@ describe("BrainHome", () => {
     vi.clearAllMocks();
     localStorage.clear();
     mocks.workspace.accountId = 3;
+    mocks.eventHandler = null;
+    mocks.streamOptions = null;
     mocks.account.auth_status = "manual";
     mocks.contextAccounts.splice(0, mocks.contextAccounts.length, mocks.account);
   });
@@ -445,6 +463,21 @@ describe("BrainHome", () => {
     expect(screen.queryByRole("button", { name: /执行详情/ })).not.toBeInTheDocument();
   });
 
+  it("uses the Tongzhouxing brand mark for the main Agent identity", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    await screen.findByLabelText("运营大脑对话流");
+    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
+    const identities = screen.getAllByRole("img", { name: "主 Agent" });
+    expect(identities.length).toBeGreaterThan(0);
+    expect(identities[0].querySelector("img")).toHaveAttribute("src", "/logo.png");
+  });
+
   it("restores only the active task explicitly saved for the selected account", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_tasks",
@@ -504,6 +537,7 @@ describe("BrainHome", () => {
     await waitFor(() => {
       expect(vi.mocked(sendBrainMessage).mock.calls[0]?.[0]).toEqual({
         message: "帮我诊断这个账号，并生成下周内容计划",
+        client_message_id: expect.any(String),
         task_id: undefined,
         project_id: 2,
         account_id: 3,
@@ -525,6 +559,205 @@ describe("BrainHome", () => {
         mocks.acceptance,
       );
     });
+  });
+
+  it("shows the submitted turn and thinking state before the request completes", async () => {
+    let finishRequest: ((runtime: BrainRuntime) => void) | undefined;
+    vi.mocked(listBrainTasks).mockResolvedValueOnce([]);
+    vi.mocked(sendBrainMessage).mockImplementationOnce(
+      () => new Promise((resolve) => { finishRequest = resolve; }),
+    );
+
+    renderBrainHome();
+    const input = await screen.findByPlaceholderText(
+      "输入目标、补充要求、打断指令，或直接问一个问题。",
+    );
+    fireEvent.change(input, { target: { value: "分析这个账号最近的内容表现" } });
+    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+
+    expect(await screen.findByText("分析这个账号最近的内容表现")).toBeVisible();
+    expect(input).toHaveValue("");
+    expect(screen.getByText("正在思考...")).toBeVisible();
+    expect(finishRequest).toBeDefined();
+
+    await act(async () => finishRequest?.(mocks.runtime));
+  });
+
+  it("lets the user stop the exact in-flight generation", async () => {
+    vi.mocked(listBrainTasks).mockResolvedValueOnce([]);
+    vi.mocked(sendBrainMessage).mockImplementationOnce(() => new Promise(() => undefined));
+
+    renderBrainHome();
+    const input = await screen.findByPlaceholderText(
+      "输入目标、补充要求、打断指令，或直接问一个问题。",
+    );
+    fireEvent.change(input, { target: { value: "先生成三个内容方向" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给主 Agent" }));
+    await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
+    const request = vi.mocked(sendBrainMessage).mock.calls[0][0];
+
+    fireEvent.click(await screen.findByRole("button", { name: "停止生成" }));
+
+    await waitFor(() => expect(stopBrainGeneration).toHaveBeenCalledOnce());
+    expect(vi.mocked(stopBrainGeneration).mock.calls[0][0]).toEqual({
+      clientMessageId: request.client_message_id,
+      taskId: null,
+    });
+  });
+
+  it("regenerates the last main Agent turn without submitting a duplicate user message", async () => {
+    const completedRuntime: BrainRuntime = {
+      ...mocks.runtime,
+      status: "completed",
+      pending_permissions: [],
+      next_actions: [],
+    };
+    vi.mocked(getBrainTaskRuntime).mockResolvedValue(completedRuntime);
+    vi.mocked(regenerateBrainMessage).mockResolvedValue(completedRuntime);
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
+
+    await waitFor(() => expect(regenerateBrainMessage).toHaveBeenCalledOnce());
+    expect(vi.mocked(regenerateBrainMessage).mock.calls[0][0]).toEqual({
+      taskId: 12,
+      clientMessageId: expect.any(String),
+    });
+    expect(sendBrainMessage).not.toHaveBeenCalled();
+  });
+
+  it("refetches durable runtime state after the event socket reconnects", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+    renderBrainHome();
+    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
+    const callsBeforeReconnect = vi.mocked(getBrainTaskRuntime).mock.calls.length;
+
+    await act(async () => mocks.streamOptions?.onReconnect?.());
+
+    await waitFor(() => {
+      expect(vi.mocked(getBrainTaskRuntime).mock.calls.length).toBeGreaterThan(
+        callsBeforeReconnect,
+      );
+    });
+  });
+
+  it("shows matching token deltas before the message request has completed", async () => {
+    const streamingTask = {
+      ...mocks.taskWithRuntime,
+      id: 88,
+      title: "流式诊断任务",
+      thread_id: "brain-task-88",
+      brief: {
+        ...mocks.taskWithRuntime.brief,
+        goal: "流式分析当前账号",
+      },
+    } satisfies BrainTask;
+    const streamingRuntime: BrainRuntime = {
+      ...mocks.runtime,
+      task: streamingTask,
+      thread_id: "brain-task-88",
+      timeline: [
+        {
+          id: 880,
+          type: "brain.runtime.user_message",
+          payload: { message: "流式分析当前账号", content: "流式分析当前账号" },
+          created_at: "2026-07-01T00:00:00Z",
+        },
+        {
+          id: 881,
+          type: "brain.runtime.message_done",
+          payload: {
+            task_id: 88,
+            message_id: "previous-turn:00-decision:1",
+            agent_code: "00-decision",
+            agent_name: "主 Agent",
+            content: "这是上一轮已经完成的回复。",
+            model: "deepseek-chat",
+          },
+          created_at: "2026-07-01T00:00:01Z",
+        },
+      ],
+      invocations: [],
+      tool_calls: [],
+      acceptances: [],
+      pending_permissions: [],
+      pending_decisions: [],
+    };
+    let finishRequest: ((runtime: BrainRuntime) => void) | undefined;
+    vi.mocked(sendBrainMessage).mockImplementationOnce(
+      () => new Promise((resolve) => { finishRequest = resolve; }),
+    );
+    vi.mocked(listBrainTasks)
+      .mockResolvedValueOnce([streamingTask])
+      .mockResolvedValueOnce([streamingTask]);
+    vi.mocked(getBrainTaskRuntime).mockResolvedValue(streamingRuntime);
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 88 } }),
+    );
+
+    renderBrainHome();
+    expect(await screen.findByText("这是上一轮已经完成的回复。")).toBeInTheDocument();
+    const input = await screen.findByPlaceholderText(
+      "输入目标、补充要求、打断指令，或直接问一个问题。",
+    );
+    fireEvent.change(input, { target: { value: "继续流式分析" } });
+    fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
+
+    await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
+    const request = vi.mocked(sendBrainMessage).mock.calls[0]?.[0] as {
+      client_message_id?: string;
+    };
+    expect(request.client_message_id).toBeTruthy();
+
+    await act(async () => {
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_start",
+        payload: {
+          task_id: 88,
+          client_message_id: request.client_message_id,
+          message_id: `${request.client_message_id}:00-decision:1`,
+          agent_code: "00-decision",
+          agent_name: "主 Agent",
+          model: "deepseek-chat",
+        },
+      });
+    });
+
+    const thinkingMessage = await screen.findByText("正在思考...");
+    const pendingUserMessage = screen.getByText("继续流式分析");
+    expect(
+      pendingUserMessage.compareDocumentPosition(thinkingMessage)
+        & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await act(async () => {
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_delta",
+        payload: {
+          task_id: 88,
+          client_message_id: request.client_message_id,
+          message_id: `${request.client_message_id}:00-decision:1`,
+          agent_code: "00-decision",
+          agent_name: "主 Agent",
+          model: "deepseek-chat",
+          delta: "我正在逐字分析",
+        },
+      });
+    });
+
+    expect(await screen.findByText("我正在逐字分析")).toBeInTheDocument();
+    expect(finishRequest).toBeDefined();
+    await act(async () => finishRequest?.(streamingRuntime));
+    vi.mocked(getBrainTaskRuntime).mockResolvedValue(mocks.runtime);
   });
 
   it("sends artifact revision feedback through the rerun workflow", async () => {
@@ -601,12 +834,15 @@ describe("BrainHome", () => {
     fireEvent.click(screen.getByRole("button", { name: /发送给主 Agent/ }));
 
     const conversation = await screen.findByLabelText("运营大脑对话流");
-    expect(within(conversation).getByText("你好")).toBeInTheDocument();
+    const userMessage = within(conversation).getByRole("article", { name: "你的消息" });
+    expect(within(userMessage).getByText("你好")).toBeInTheDocument();
+    expect(within(userMessage).queryByText("你")).not.toBeInTheDocument();
     expect(conversation).toHaveTextContent("你好，我在。今天想先聊聊什么？");
     expect(conversation).not.toHaveTextContent("本轮专家协作已完成");
     expect(within(conversation).queryByText("账号定位专家")).not.toBeInTheDocument();
     expect(vi.mocked(sendBrainMessage).mock.calls[0]?.[0]).toEqual({
       message: "你好",
+      client_message_id: expect.any(String),
       task_id: undefined,
       project_id: 2,
       account_id: 3,
@@ -692,6 +928,7 @@ describe("BrainHome", () => {
 
     await waitFor(() => expect(vi.mocked(sendBrainMessage).mock.calls.at(-1)?.[0]).toEqual({
       message: "先补充三个更年轻化的选题",
+      client_message_id: expect.any(String),
       task_id: 12,
       project_id: 2,
       account_id: 3,

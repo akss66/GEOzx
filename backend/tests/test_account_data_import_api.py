@@ -309,6 +309,7 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
     assert row is not None
     assert row.status is ImportRowStatus.COMMITTED
     assert row.projected_target_ids
+    assert not any(item["kind"] == "projection_gap" for item in row.projected_target_ids)
 
     metric = await session.scalar(
         select(MetricSnapshot).where(MetricSnapshot.import_batch_id == batch_id)
@@ -317,6 +318,11 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
     assert metric.account_id == account.id
     assert metric.platform_content_record_id == candidate.id
     assert metric.source is MetricSource.DOUYIN
+    assert metric.completion_rate_5s == pytest.approx(0.375)
+    assert metric.bounce_rate_2s == pytest.approx(0.375)
+    assert metric.profile_visit_count == 3
+    assert candidate.content_format == "1min-\u89c6\u9891"
+    assert candidate.review_status == "\u516c\u5f00"
 
 
 @pytest.mark.asyncio
@@ -487,7 +493,11 @@ async def test_commit_projects_single_content_without_inventing_unmodeled_metric
     benchmark_snapshot = await session.scalar(
         select(BenchmarkSnapshot).where(BenchmarkSnapshot.import_batch_id == batch_id)
     )
-    assert metric_snapshot is None
+    assert metric_snapshot is not None
+    assert metric_snapshot.play == 444
+    assert metric_snapshot.completion_rate_5s == pytest.approx(0.1471)
+    assert metric_snapshot.bounce_rate_2s == pytest.approx(0.6353)
+    assert metric_snapshot.avg_watch_time_seconds == pytest.approx(2.8314)
     assert account_snapshot is None
     assert benchmark_snapshot is None
 
@@ -498,13 +508,7 @@ async def test_commit_projects_single_content_without_inventing_unmodeled_metric
         )
     )
     assert row is not None
-    gap = next(item for item in row.projected_target_ids if item["kind"] == "projection_gap")
-    assert gap["missing_fields"] == [
-        "play",
-        "completion_rate_5s",
-        "bounce_rate_2s",
-        "avg_watch_time_seconds",
-    ]
+    assert not any(item["kind"] == "projection_gap" for item in row.projected_target_ids)
 
     coverage = await client.get(
         f"/account-data/{account.id}/status",

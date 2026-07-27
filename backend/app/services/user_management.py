@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import hash_password
 from app.models import (
     Account,
+    AccountClient,
     AccountMembership,
     Client,
     ClientMembership,
@@ -118,17 +119,29 @@ async def get_access_catalog(session: AsyncSession, org_id: int) -> UserAccessCa
         )
     )
     project_rows = []
+    client_rows = []
     if accounts:
+        account_ids = [account.id for account in accounts]
         project_rows = (
             await session.execute(
                 select(ProjectAccount.account_id, ProjectAccount.project_id).where(
-                    ProjectAccount.account_id.in_([account.id for account in accounts])
+                    ProjectAccount.account_id.in_(account_ids)
+                )
+            )
+        ).all()
+        client_rows = (
+            await session.execute(
+                select(AccountClient.account_id, AccountClient.client_id).where(
+                    AccountClient.account_id.in_(account_ids)
                 )
             )
         ).all()
     project_ids_by_account: dict[int, set[int]] = {}
     for account_id, project_id in project_rows:
         project_ids_by_account.setdefault(account_id, set()).add(project_id)
+    client_ids_by_account: dict[int, set[int]] = {}
+    for account_id, client_id in client_rows:
+        client_ids_by_account.setdefault(account_id, set()).add(client_id)
     return UserAccessCatalogOut(
         clients=[
             ClientAccessCatalogItem(id=item.id, name=item.name, status=item.status)
@@ -147,6 +160,10 @@ async def get_access_catalog(session: AsyncSession, org_id: int) -> UserAccessCa
             AccountAccessCatalogItem(
                 id=item.id,
                 client_id=item.client_id,
+                client_ids=sorted(
+                    client_ids_by_account.get(item.id, set())
+                    | ({item.client_id} if item.client_id is not None else set())
+                ),
                 project_ids=sorted(
                     project_ids_by_account.get(item.id, set())
                     | ({item.project_id} if item.project_id is not None else set())

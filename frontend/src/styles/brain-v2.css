@@ -48,10 +48,6 @@
   align-items: center;
   justify-content: center;
   border-radius: 11px;
-  background: var(--tz-ink);
-  color: white;
-  font-size: 11px;
-  font-weight: 760;
 }
 
 .tz-brain-identity strong,
@@ -191,14 +187,21 @@
 
 .tz-brain-thread .dy-chat-message {
   gap: 14px;
+  animation: tz-message-arrive 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .tz-brain-thread .dy-chat-avatar {
   width: 36px;
   height: 36px;
   border-radius: 11px;
-  background: var(--tz-ink);
-  color: white;
+}
+
+.tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .dy-chat-avatar {
+  animation: tz-agent-thinking 1.45s ease-in-out infinite;
+}
+
+.tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .ant-typography {
+  color: var(--tz-ink-soft) !important;
 }
 
 .tz-brain-thread .dy-chat-bubble {
@@ -210,11 +213,24 @@
 }
 
 .tz-brain-thread .dy-chat-message-user .dy-chat-bubble {
-  max-width: min(680px, 86%);
-  padding: 12px 15px;
-  border-radius: 14px;
-  background: var(--tz-ink);
-  color: white;
+  position: relative;
+  width: fit-content;
+  min-width: 72px;
+  max-width: min(660px, 82%);
+  padding: 11px 16px 11px 15px;
+  border: 1px solid var(--tz-line);
+  border-right: 3px solid var(--tz-brand-red);
+  border-radius: 15px 15px 5px 15px;
+  background: color-mix(in srgb, var(--tz-brand-frame) 34%, var(--tz-surface));
+  color: var(--tz-ink);
+  box-shadow: 0 1px 2px rgba(23, 22, 20, 0.04);
+}
+
+.tz-brain-thread .dy-chat-message-user .ant-typography {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
 }
 
 .tz-brain-thread .dy-chat-message-agent[data-error="true"] .dy-chat-bubble {
@@ -251,9 +267,6 @@
   height: 44px;
   border: 1px solid var(--tz-line);
   border-radius: 13px;
-  background: var(--tz-brand-frame);
-  color: var(--tz-brand-red);
-  font-size: 11px;
 }
 
 .tz-brain-thread .dy-chat-expert-message[data-status="running"] .dy-chat-expert-mark,
@@ -756,6 +769,28 @@
   border-radius: var(--tz-radius-control);
 }
 
+.tz-brain-thread .dy-brain-composer-tools > .dy-brain-stop-button {
+  border-color: var(--tz-ink);
+  background: var(--tz-ink);
+}
+
+.tz-brain-regenerate-action {
+  display: flex;
+  justify-content: flex-start;
+  padding-left: 50px;
+}
+
+.tz-brain-regenerate-action .ant-btn {
+  padding-inline: 6px;
+  color: var(--tz-ink-soft);
+  font-size: 12px;
+}
+
+.tz-brain-regenerate-action .ant-btn:hover {
+  color: var(--tz-ink) !important;
+  background: transparent !important;
+}
+
 .tz-brain-thread .dy-brain-input .ant-input-data-count,
 .tz-brain-thread .dy-brain-composer-box .ant-input-data-count {
   display: none;
@@ -878,10 +913,22 @@
   .dy-chat-expert-mark,
   .tz-brain-handoff,
   .tz-brain-permission-mode,
-  .tz-brain-decision {
+  .tz-brain-decision,
+  .tz-brain-thread .dy-chat-message,
+  .tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .dy-chat-avatar {
     animation: none !important;
     transition: none !important;
   }
+}
+
+@keyframes tz-message-arrive {
+  from { opacity: 0.45; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes tz-agent-thinking {
+  0%, 100% { opacity: 0.72; box-shadow: 0 0 0 0 rgba(201, 22, 29, 0); }
+  50% { opacity: 1; box-shadow: 0 0 0 5px rgba(201, 22, 29, 0.09); }
 }
 
 @keyframes tz-expert-arrive {

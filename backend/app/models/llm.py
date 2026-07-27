@@ -6,7 +6,7 @@ from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models.base import BigIntPK
+from app.models.base import BigIntPK, JSONVariant
 
 
 class LLMCall(Base):
@@ -21,7 +21,20 @@ class LLMCall(Base):
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("brain_tasks.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    invocation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_invocations.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    trace_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
     agent_code: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    prompt_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_schema_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    scope: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    budget: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     model: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

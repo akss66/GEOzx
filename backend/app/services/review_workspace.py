@@ -539,6 +539,8 @@ async def build_review_workspace(
                 else current_view.latest_synced_at
             ),
             latest_confirmed_at=current_view.latest_confirmed_at,
+            days_since_observed=current_view.freshness.days_since_observed,
+            days_since_confirmed=current_view.freshness.days_since_confirmed,
             coverage=current_view.coverage,
             conflict_count=len(current_view.conflicts),
             source_summary=[
@@ -577,7 +579,7 @@ def _has_data(view: AccountDataView) -> bool:
 
 
 def _review_sources(view: AccountDataView) -> list[str]:
-    content_sources = sorted({row.source.value for row in view.evidence_rows})
-    if content_sources:
-        return content_sources
-    return sorted({item.source_kind for item in view.source_summary})
+    provenance_sources = sorted({item.source_kind for item in view.source_summary})
+    if provenance_sources:
+        return provenance_sources
+    return sorted({row.source.value for row in view.evidence_rows})

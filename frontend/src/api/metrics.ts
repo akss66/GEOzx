@@ -43,6 +43,9 @@ export interface PerformanceSnapshot {
   comment_rate: number;
   share_rate: number;
   follower_delta: number;
+  completion_rate_5s: number | null;
+  bounce_rate_2s: number | null;
+  profile_visit_count: number | null;
   created_at: string;
 }
 
@@ -90,9 +93,22 @@ export interface ReviewWorkspace {
   };
   data_status: {
     has_data: boolean;
-    sources: PerformanceSnapshot["source"][];
+    sources: Array<PerformanceSnapshot["source"] | "platform_export" | "screenshot_verified" | "manual_entry" | "official_api">;
     latest_stat_date: string | null;
     latest_synced_at: string | null;
+    latest_confirmed_at: string | null;
+    days_since_observed: number | null;
+    days_since_confirmed: number | null;
+    coverage: Record<string, "available" | "missing" | "ambiguous">;
+    conflict_count: number;
+    source_summary: Array<{
+      batch_id: number | null;
+      source_kind: string;
+      data_domains: string[];
+      confirmed_at: string | null;
+      period_start: string | null;
+      period_end: string | null;
+    }>;
     missing_reasons: string[];
   };
   goal: ReviewGoal;

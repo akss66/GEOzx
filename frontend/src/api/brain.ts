@@ -32,12 +32,37 @@ export async function getBrainTaskRuntime(taskId: number): Promise<BrainRuntime>
 
 export async function sendBrainMessage(input: {
   message: string;
+  client_message_id?: string;
   task_id?: number;
   project_id?: number | null;
   account_id?: number | null;
   platform?: "douyin";
 }): Promise<BrainRuntime> {
   const { data } = await api.post<BrainRuntime>("/brain/messages", input);
+  return data;
+}
+
+export async function stopBrainGeneration(input: {
+  clientMessageId: string;
+  taskId?: number | null;
+}): Promise<{ client_message_id: string; stop_requested: boolean }> {
+  const { data } = await api.post<{
+    client_message_id: string;
+    stop_requested: boolean;
+  }>(`/brain/generations/${encodeURIComponent(input.clientMessageId)}/stop`, {
+    task_id: input.taskId ?? null,
+  });
+  return data;
+}
+
+export async function regenerateBrainMessage(input: {
+  taskId: number;
+  clientMessageId: string;
+}): Promise<BrainRuntime> {
+  const { data } = await api.post<BrainRuntime>(
+    `/brain/tasks/${input.taskId}/regenerate`,
+    { client_message_id: input.clientMessageId },
+  );
   return data;
 }
 

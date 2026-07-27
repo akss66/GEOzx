@@ -10,8 +10,16 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import extract_json
-from app.llm.gateway import gateway, reset_stream_observer, set_stream_observer
+from app.llm.gateway import (
+    LLMCallContext,
+    bind_llm_call_context,
+    gateway,
+    reset_stream_observer,
+    set_stream_observer,
+)
 from app.models.enums import AgentCode
+from app.prompts import prompt_registry
+from app.prompts.manifest import LoadedPrompt
 from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeNextStep
 
 
@@ -62,12 +70,13 @@ class BrainIntelligence:
             )
 
         try:
-            result, _cost = await gateway.chat(
+            prompt = prompt_registry.load("main-agent.intent")
+            result, _cost = await _structured_chat(
                 session,
                 org_id,
-                AgentCode.DECISION.value,
+                prompt,
                 [
-                    {"role": "system", "content": _intent_system_prompt()},
+                    {"role": "system", "content": prompt.content},
                     {
                         "role": "user",
                         "content": (
@@ -106,36 +115,54 @@ class BrainIntelligence:
         round_index: int,
     ) -> RuntimeNextStep:
         capabilities = _sanitize_capabilities(available_experts)
-        allowed = [str(item["code"]) for item in capabilities]
+        allowed_experts = {
+            str(item["code"]) for item in capabilities if item.get("kind") == "expert"
+        }
+        allowed_tools = {
+            str(item["code"]) for item in capabilities if item.get("kind") == "tool"
+        }
         try:
-            token = set_stream_observer(None)
-            try:
-                result, _cost = await gateway.chat(
-                    session,
-                    org_id,
-                    AgentCode.DECISION.value,
-                    [
-                        {"role": "system", "content": _next_step_system_prompt(capabilities)},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"目标：{goal}\n"
-                                f"当前轮次：{round_index}\n"
-                                f"专家观察：{observations}"
-                            ),
-                        },
-                    ],
-                )
-            finally:
-                reset_stream_observer(token)
+            prompt = prompt_registry.render(
+                "main-agent.next-step",
+                variables={
+                    "capability_catalog": json.dumps(
+                        capabilities,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                },
+            )
+            result, _cost = await _structured_chat(
+                session,
+                org_id,
+                prompt,
+                [
+                    {"role": "system", "content": prompt.content},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"目标：{goal}\n"
+                            f"当前轮次：{round_index}\n"
+                            f"专家观察：{observations}"
+                        ),
+                    },
+                ],
+            )
             step = RuntimeNextStep.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:
             raise IntelligenceUnavailable("主 Agent 暂时无法决定可靠的下一步") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
             raise IntelligenceUnavailable("主 Agent 暂时不可用，请稍后重试") from exc
 
-        filtered = [code for code in step.expert_codes if code.value in allowed]
-        return step.model_copy(update={"expert_codes": filtered})
+        filtered_experts = [
+            code for code in step.expert_codes if code.value in allowed_experts
+        ]
+        filtered_tools = [
+            request for request in step.tool_calls if request.tool_code in allowed_tools
+        ]
+        return step.model_copy(
+            update={"expert_codes": filtered_experts, "tool_calls": filtered_tools}
+        )
 
     async def revise_decision(
         self,
@@ -150,12 +177,13 @@ class BrainIntelligence:
         """Regenerate a user-facing decision without falling back to fixed options."""
 
         try:
-            result, _cost = await gateway.chat(
+            prompt = prompt_registry.load("main-agent.decision-revision")
+            result, _cost = await _structured_chat(
                 session,
                 org_id,
-                AgentCode.DECISION.value,
+                prompt,
                 [
-                    {"role": "system", "content": _decision_revision_system_prompt()},
+                    {"role": "system", "content": prompt.content},
                     {
                         "role": "user",
                         "content": (
@@ -196,22 +224,31 @@ def _sanitize_intent_decision(decision: IntentDecision) -> IntentDecision:
     )
 
 
-def _intent_system_prompt() -> str:
-    return """你是同舟行的主 Agent 意图路由器。
-判断用户是在普通交流、需要补充信息、低风险分析、正式工作流，还是请求外部动作。
-
-只输出 JSON：
-{"intent":"workflow","confidence":0.9,"reason":"一句原因","missing_field":null,"clarifying_question":null,"suggested_expert_codes":["01-positioning"],"requires_account_context":true}
-
-可用专家 code：01-positioning、02-content-director、03-art-director、04-video-creator、
-05-editor、06-operator、07-advertiser、08-customer-service。
-
-规则：
-1. 问候、解释和简单问答使用 conversation，不调用专家。
-2. 缺少一个会改变执行方向的关键信息时使用 clarification，只问一个问题，不调用专家。
-3. 只有确有必要时才选择专家，不固定调用完整链路。
-4. 涉及账号数据、定位、内容表现、发布或复盘时 requires_account_context=true。
-5. 不得发明专家 code。"""
+async def _structured_chat(
+    session: AsyncSession | None,
+    org_id: int,
+    prompt: LoadedPrompt,
+    messages: list[dict],
+):
+    call_context = LLMCallContext(
+        prompt_id=prompt.spec.id,
+        prompt_version=prompt.spec.version,
+        prompt_hash=prompt.content_hash,
+        prompt_schema_version=prompt.spec.schema_version,
+        scope={"org_id": org_id},
+        response_format={"type": "json_object"},
+    )
+    token = set_stream_observer(None)
+    try:
+        with bind_llm_call_context(call_context):
+            return await gateway.chat(
+                session,
+                org_id,
+                AgentCode.DECISION.value,
+                messages,
+            )
+    finally:
+        reset_stream_observer(token)
 
 
 def _sanitize_capabilities(
@@ -220,44 +257,16 @@ def _sanitize_capabilities(
     capabilities: list[dict[str, Any]] = []
     for item in available:
         capability = {"kind": "expert", "code": item} if isinstance(item, str) else dict(item)
+        kind = str(capability.get("kind") or "expert")
         code = str(capability.get("code") or "")
-        if code not in _AVAILABLE_EXPERTS:
+        if kind == "expert" and code not in _AVAILABLE_EXPERTS:
             continue
+        if kind not in {"expert", "tool", "mcp_server", "mcp_tool"} or not code:
+            continue
+        capability["kind"] = kind
         capability["code"] = code
         capabilities.append(capability)
     return capabilities
-
-
-def _next_step_system_prompt(available_experts: list[dict[str, Any]]) -> str:
-    catalog = json.dumps(available_experts, ensure_ascii=False, default=str)
-    return f"""你是同舟行运营大脑的主 Agent。你已经收到一轮专家结论，现在决定唯一下一步。
-
-可选 action：respond、ask_user、dispatch_experts、request_decision、request_permission、finish。
-当前能力注册表：{catalog or '[]'}。
-
-只输出 JSON：
-{{"action":"finish","expert_codes":[],"rationale":"一句原因","handoff_message":"给用户看的自然语言过渡","decision_request":null}}
-
-规则：
-1. 先观察已有结论，足够回答时直接 finish。
-2. 只有新的专家能补足明确缺口时才 dispatch_experts，单轮最多 3 位。
-3. 存在 2-4 个合理且互斥的业务方向时使用 request_decision，并提供完整 decision_request。
-4. 不得重复调用已经完成且没有新输入的专家。
-5. 不输出思维链、模型名或技术日志。"""
-
-
-def _decision_revision_system_prompt() -> str:
-    return """你是同舟行运营大脑的主 Agent。
-用户正在修改一组业务方案，请根据原任务、原方案和修改意见重新生成可选择的方案。
-
-只输出 DecisionRequest JSON：
-{"id":"model-generated","title":"要用户决定的问题","summary":"为什么现在需要选择","choices":[{"id":"choice-a","title":"方案名称","description":"方案做法","benefit":"主要收益","tradeoff":"主要代价","recommended":true},{"id":"choice-b","title":"方案名称","description":"方案做法","benefit":"主要收益","tradeoff":"主要代价","recommended":false}],"allow_custom_input":true,"status":"pending"}
-
-规则：
-1. 提供 2-4 个互斥、可执行且差异明确的方案。
-2. 用户要求换一批时，不得原样重复旧方案。
-3. 最多标记一个推荐方案，推荐依据必须体现在 summary 或方案描述中。
-4. 不输出思维链、Markdown 或 JSON 以外的文字。"""
 
 
 brain_intelligence = BrainIntelligence()

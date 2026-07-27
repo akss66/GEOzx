@@ -17,6 +17,39 @@ const PREVIEW_RESET_CODES = new Set([
   "USER_DELETION_PREVIEW_USED",
 ]);
 
+const DELETION_COUNT_LABELS: Record<string, string> = {
+  users: "成员账号",
+  brain_tasks: "运营大脑任务",
+  content_items: "内容条目",
+  matrix_distribution_plans: "矩阵分发计划",
+  knowledge_entries: "知识库条目",
+  llm_calls: "模型调用记录",
+  task_briefs: "任务上下文",
+  orchestration_plans: "Agent 编排计划",
+  agent_invocations: "专家调用记录",
+  agent_tool_calls: "工具调用记录",
+  deliverable_acceptances: "交付物验收记录",
+  deliverables: "交付物",
+  agent_tasks: "专家任务",
+  gate_approvals: "人工审批记录",
+  compliance_checks: "合规检查记录",
+  material_assets: "素材资产",
+  optimization_suggestions: "优化建议",
+  metric_snapshots: "数据快照",
+  matrix_distribution_items: "矩阵分发子任务",
+  knowledge_citations: "知识引用",
+  knowledge_suggestions: "知识沉淀建议",
+  knowledge_reviews_redacted: "已脱敏知识审核记录",
+  client_memberships: "客户权限关系",
+  project_memberships: "项目权限关系",
+  account_memberships: "账号权限关系",
+  notifications: "通知",
+  admin_security_credentials: "管理员安全凭据",
+  data_import_batches_created_by_redacted: "已脱敏数据导入批次",
+  events: "审计事件",
+  cost_records: "成本记录",
+};
+
 export function PermanentDeletePanel({
   user,
   onDeleted,
@@ -25,14 +58,12 @@ export function PermanentDeletePanel({
   onDeleted: (userId: number) => void;
 }) {
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof previewUserDeletion>> | null>(null);
-  const [confirmEmail, setConfirmEmail] = useState("");
   const [secondaryPassword, setSecondaryPassword] = useState("");
   const [previewing, setPreviewing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: "neutral" | "error"; text: string } | null>(null);
 
   function clearSensitiveInputs() {
-    setConfirmEmail("");
     setSecondaryPassword("");
   }
 
@@ -46,8 +77,7 @@ export function PermanentDeletePanel({
     setFeedback(null);
     clearSensitiveInputs();
     try {
-      const nextPreview = await previewUserDeletion(user.id);
-      setPreview(nextPreview);
+      setPreview(await previewUserDeletion(user.id));
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -65,7 +95,6 @@ export function PermanentDeletePanel({
     try {
       await permanentlyDeleteUser(user.id, {
         preview_token: preview.preview_token,
-        target_email: confirmEmail,
         secondary_password: secondaryPassword,
       });
       clearSensitiveInputs();
@@ -91,7 +120,7 @@ export function PermanentDeletePanel({
       <header>
         <div>
           <h4>永久删除</h4>
-          <p>这是不可逆操作。删除前必须先获取影响预览，再核对目标邮箱和执行人二级密码。</p>
+          <p>这是不可逆操作。先查看完整影响范围，再输入当前管理员自己的二级密码确认。</p>
         </div>
         <div className="tz-delete-panel__actions">
           <Button danger type={preview ? "default" : "primary"} onClick={handlePreview} loading={previewing}>
@@ -123,7 +152,7 @@ export function PermanentDeletePanel({
           <div className="tz-delete-preview__counts">
             {Object.entries(preview.counts).map(([label, value]) => (
               <div key={label}>
-                <span>{label}</span>
+                <span>{DELETION_COUNT_LABELS[label] ?? "其他关联记录"}</span>
                 <strong>{value}</strong>
               </div>
             ))}
@@ -139,18 +168,13 @@ export function PermanentDeletePanel({
 
           <div className="tz-form-grid tz-form-grid--delete">
             <label className="tz-field">
-              <span>确认目标邮箱</span>
-              <Input
-                aria-label="确认目标邮箱"
-                value={confirmEmail}
-                onChange={(event) => setConfirmEmail(event.target.value)}
-              />
-            </label>
-
-            <label className="tz-field">
               <span>执行人二级密码</span>
               <Input.Password
                 aria-label="执行人二级密码"
+                name="admin_secondary_password_for_deletion"
+                autoComplete="off"
+                data-1p-ignore="true"
+                data-lpignore="true"
                 value={secondaryPassword}
                 onChange={(event) => setSecondaryPassword(event.target.value)}
               />
@@ -158,15 +182,13 @@ export function PermanentDeletePanel({
           </div>
 
           <div className="tz-delete-preview__actions">
-            <Button onClick={resetFlow}>
-              关闭删除流程
-            </Button>
+            <Button onClick={resetFlow}>关闭删除流程</Button>
             <Button
               danger
               type="primary"
               onClick={handleDelete}
               loading={deleting}
-              disabled={!preview.allowed || confirmEmail !== user.email || secondaryPassword.length === 0}
+              disabled={!preview.allowed || secondaryPassword.length === 0}
             >
               确认永久删除
             </Button>

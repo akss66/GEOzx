@@ -25,6 +25,7 @@ from app.models.brain import (
     TaskBrief,
 )
 from app.models.client import (
+    AccountClient,
     AccountMembership,
     Client,
     ClientMembership,
@@ -50,6 +51,7 @@ from app.models.memory import RuntimeMemory
 from app.models.metrics import AccountReviewGoal, MetricSnapshot
 from app.models.orchestration import AgentTask, Event, GateApproval
 from app.models.platform import PlatformAccountAuth, PlatformIntegration
+from app.models.publishing import PlatformPublishJob
 from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
@@ -68,6 +70,7 @@ __all__ = [
     "UserDeletionPreviewReservation",
     "Client",
     "ClientMembership",
+    "AccountClient",
     "ProjectMembership",
     "ProjectAccount",
     "AccountMembership",
@@ -105,4 +108,5 @@ __all__ = [
     "OptimizationSuggestion",
     "PlatformIntegration",
     "PlatformAccountAuth",
+    "PlatformPublishJob",
 ]

@@ -5,6 +5,7 @@ import type {
   ModelInfrastructureOverview,
   ModelProviderDeleteConflict,
   ModelProviderDetail,
+  ModelProviderModelCatalogConflict,
   ModelProvider,
   ModelProviderCode,
   ModelProviderDiscoveryResult,
@@ -29,6 +30,18 @@ export class ModelProviderDeleteConflictError extends Error {
     this.name = "ModelProviderDeleteConflictError";
     this.providerId = providerId;
     this.affectedAgents = affectedAgents;
+  }
+}
+
+export class ModelProviderModelCatalogConflictError extends Error {
+  affectedAgents: string[];
+  missingModels: string[];
+
+  constructor(payload: ModelProviderModelCatalogConflict) {
+    super("Model catalog update would invalidate existing agent routes.");
+    this.name = "ModelProviderModelCatalogConflictError";
+    this.affectedAgents = payload.affected_agents;
+    this.missingModels = payload.missing_models;
   }
 }
 
@@ -113,21 +126,35 @@ export async function verifyModelProvider(
 export async function discoverModelProviderModels(
   providerId: number,
 ): Promise<ModelProviderDiscoveryResult> {
-  const { data } = await api.post<ModelProviderDiscoveryResult>(
-    `/model-providers/${providerId}/discover-models`,
-  );
-  return data;
+  try {
+    const { data } = await api.post<ModelProviderDiscoveryResult>(
+      `/model-providers/${providerId}/discover-models`,
+    );
+    return data;
+  } catch (error) {
+    if (isModelProviderModelCatalogConflict(error)) {
+      throw new ModelProviderModelCatalogConflictError(error.response.data);
+    }
+    throw error;
+  }
 }
 
 export async function updateModelProviderModels(
   providerId: number,
   models: string[],
 ): Promise<ModelProviderDetail> {
-  const { data } = await api.put<ModelProviderDetail>(
-    `/model-providers/${providerId}/models`,
-    { models },
-  );
-  return data;
+  try {
+    const { data } = await api.put<ModelProviderDetail>(
+      `/model-providers/${providerId}/models`,
+      { models },
+    );
+    return data;
+  } catch (error) {
+    if (isModelProviderModelCatalogConflict(error)) {
+      throw new ModelProviderModelCatalogConflictError(error.response.data);
+    }
+    throw error;
+  }
 }
 
 export async function updateModelRoute(
@@ -189,5 +216,22 @@ function isModelProviderDeleteConflict(
     && typeof data === "object"
     && "affected_agents" in data
     && Array.isArray(data.affected_agents),
+  );
+}
+
+function isModelProviderModelCatalogConflict(
+  error: unknown,
+): error is {
+  response: {
+    status: 409;
+    data: ModelProviderModelCatalogConflict;
+  };
+} {
+  if (!isModelProviderDeleteConflict(error)) {
+    return false;
+  }
+  return (
+    "missing_models" in error.response.data
+    && Array.isArray(error.response.data.missing_models)
   );
 }

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.core.security import hash_password
 from app.models import (
     Account,
+    AccountClient,
     AccountMembership,
     Client,
     ClientMembership,
@@ -67,6 +68,8 @@ async def test_admin_reads_user_detail_and_access_catalog(client, session, admin
             ),
         ]
     )
+    await session.flush()
+    session.add(AccountClient(account_id=catalog_account.id, client_id=second_client.id))
     await session.commit()
     token = await _login(client, admin.email, "admin-pw-123")
 
@@ -102,6 +105,7 @@ async def test_admin_reads_user_detail_and_access_catalog(client, session, admin
         {
             "id": catalog_account.id,
             "client_id": first_client.id,
+            "client_ids": [first_client.id, second_client.id],
             "project_ids": [first_project.id],
             "nickname": "Catalog account",
             "platform": "douyin",

@@ -11,6 +11,7 @@ import {
   deleteAccount,
   getDouyinAccountCapabilities,
   listAccounts,
+  replaceAccountAssignments,
 } from "../api/workspace";
 import Accounts from "./Accounts";
 
@@ -32,20 +33,26 @@ vi.mock("../api/workspace", () => ({
   batchUpdateAccounts: vi.fn(),
   createAccount: vi.fn(),
   createAccountGroup: vi.fn(),
+  createClient: vi.fn(),
   createDouyinAuthorizeUrl: vi.fn(),
   createDouyinIncrementalAuthorizeUrl: vi.fn(),
   createDouyinScanAddUrl: vi.fn(),
   createDouyinTrialWhitelistUrl: vi.fn(),
+  createProject: vi.fn(),
   deleteAccount: vi.fn(),
   getAccountMatrix: vi.fn(async () => ({ platforms: [] })),
   getDouyinAccountCapabilities: vi.fn(),
   listAccountGroups: vi.fn(async () => []),
   listAccounts: vi.fn(async () => []),
+  listClients: vi.fn(async () => []),
   listPlatformIntegrations: vi.fn(async () => []),
   listProjects: vi.fn(async () => []),
+  replaceAccountAssignments: vi.fn(),
   syncDouyinAccountMetrics: vi.fn(),
   updateAccountIntegration: vi.fn(),
+  updateClient: vi.fn(),
   updatePlatformIntegration: vi.fn(),
+  updateProject: vi.fn(),
 }));
 
 vi.mock("../stores/auth", () => ({
@@ -213,6 +220,73 @@ describe("Accounts", () => {
     expect(workspaceMocks.setPlatform).toHaveBeenCalledWith("douyin");
     expect(workspaceMocks.setAccountId).toHaveBeenCalledWith(3);
     expect(workspaceMocks.navigate).toHaveBeenCalledWith("/accounts/3/data");
+  });
+
+  it("saves multiple customer and project bindings with explicit defaults", async () => {
+    const workspaceApi = await import("../api/workspace");
+    vi.mocked(workspaceApi.listClients).mockResolvedValueOnce([
+      { id: 10, name: "客户甲", status: "active" },
+      { id: 11, name: "客户乙", status: "active" },
+    ]);
+    vi.mocked(workspaceApi.listProjects).mockResolvedValueOnce([
+      { id: 20, client_id: 10, name: "项目甲", status: "active" },
+      { id: 21, client_id: 11, name: "项目乙", status: "active" },
+    ]);
+    vi.mocked(listAccounts).mockResolvedValueOnce([
+      {
+        id: 5,
+        nickname: "矩阵账号",
+        platform: "douyin",
+        client_id: 10,
+        client_ids: [10, 11],
+        project_id: 20,
+        project_ids: [20, 21],
+        group_id: null,
+        status: "active",
+        external_account_id: "douyin-5",
+        integration_status: "connected",
+        auth_status: "authorized",
+        data_sync_status: "healthy",
+        publish_capability: "prepare_only",
+        created_at: "2026-07-22T00:00:00Z",
+      },
+    ]);
+    vi.mocked(replaceAccountAssignments).mockResolvedValueOnce({
+      id: 5,
+      nickname: "矩阵账号",
+      platform: "douyin",
+      client_id: 10,
+      client_ids: [10, 11],
+      project_id: 20,
+      project_ids: [20, 21],
+      group_id: null,
+      status: "active",
+      external_account_id: "douyin-5",
+      integration_status: "connected",
+      auth_status: "authorized",
+      data_sync_status: "healthy",
+      publish_capability: "prepare_only",
+      created_at: "2026-07-22T00:00:00Z",
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("矩阵账号")).toBeInTheDocument();
+    const editAssignment = await screen.findByText("编辑归属");
+    fireEvent.click(editAssignment.closest("button")!);
+    expect(
+      await screen.findByRole("dialog", { name: "客户与项目归属 · 矩阵账号" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存归属" }));
+
+    await waitFor(() =>
+      expect(replaceAccountAssignments).toHaveBeenCalledWith(5, {
+        client_ids: [10, 11],
+        project_ids: [20, 21],
+        default_client_id: 10,
+        default_project_id: 20,
+      }),
+    );
   });
 });
 

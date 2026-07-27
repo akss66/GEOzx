@@ -31,7 +31,6 @@ const GOVERNANCE_ERROR_COPY: Record<UserGovernanceErrorCode, string> = {
   SECONDARY_PASSWORD_INVALID: "二级密码不正确，请重新输入。",
   SECONDARY_PASSWORD_LOCKED: "二级密码已被暂时锁定，请稍后再试。",
   SECONDARY_PASSWORD_NOT_CONFIGURED: "请先为当前登录管理员设置二级密码。",
-  USER_DELETION_EMAIL_MISMATCH: "确认邮箱必须与目标成员邮箱完全一致。",
   USER_DELETION_PREVIEW_EXPIRED: "删除预览已过期，请重新获取最新影响预览。",
   USER_DELETION_PREVIEW_INVALID: "当前删除预览不可用，请重新获取影响预览。",
   USER_DELETION_PREVIEW_STALE: "成员数据已变化，请重新获取最新影响预览。",
@@ -117,7 +116,12 @@ export function getAccessibleAccounts(detail: Pick<UserDetail, "has_global_acces
   const projectIds = new Set(projectMemberships.map((item) => item.project_id));
 
   return accounts.filter((account) => {
-    if (account.client_id != null && clientIds.has(account.client_id)) return true;
+    const accountClientIds = account.client_ids?.length
+      ? account.client_ids
+      : account.client_id == null
+        ? []
+        : [account.client_id];
+    if (accountClientIds.some((clientId) => clientIds.has(clientId))) return true;
     return (account.project_ids ?? []).some((projectId) => projectIds.has(projectId));
   });
 }

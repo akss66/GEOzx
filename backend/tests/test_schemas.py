@@ -11,6 +11,82 @@ from app.schemas.deliverable import (
     validate_payload,
 )
 
+_INVALID_BUSINESS_PAYLOADS = [
+    (
+        DeliverableType.POSITIONING_STRATEGY,
+        {
+            "account_persona": "定位",
+            "target_audience": "人群",
+            "differentiation": ["只有一条"],
+            "content_pillars": ["支柱一", "支柱二"],
+        },
+    ),
+    (
+        DeliverableType.VIDEO_SCRIPT,
+        {
+            "title": "标题",
+            "hook": "钩子",
+            "scenes": ["镜头一", "镜头二"],
+            "duration_seconds": 0,
+        },
+    ),
+    (
+        DeliverableType.ART_PROMPT,
+        {
+            "visual_style": "风格",
+            "prompts": ["只有一条"],
+            "aspect_ratio": "9:16",
+        },
+    ),
+    (
+        DeliverableType.VIDEO_ASSET,
+        {"tool": "planned", "clips": [], "resolution": ""},
+    ),
+    (
+        DeliverableType.EDITED_VIDEO,
+        {
+            "cut_plan": [],
+            "captions": ["字幕"],
+            "transitions": "硬切",
+            "deliverables": ["成片"],
+            "platform_variants": ["抖音版"],
+        },
+    ),
+    (
+        DeliverableType.REVIEW_REPORT,
+        {
+            "period": "近 7 天",
+            "summary": "结论",
+            "key_metrics": {},
+            "highlights": [],
+            "issues": ["问题"],
+            "optimization_suggestions": ["建议"],
+        },
+    ),
+    (
+        DeliverableType.AD_PLAN,
+        {
+            "objective": "验证",
+            "target_audience": "人群",
+            "budget_strategy": "小额测试",
+            "creative_directions": ["方向一", "方向二"],
+            "risk_controls": ["只有一条"],
+            "measurement": {"primary": "成本"},
+        },
+    ),
+    (
+        DeliverableType.CS_RECORD,
+        {
+            "period": "近 7 天",
+            "summary": "结论",
+            "common_questions": [],
+            "sentiment": {"overall": "中性"},
+            "response_guidelines": ["原则"],
+            "content_opportunities": ["机会"],
+        },
+    ),
+]
+
 
 def test_registry_dispatch() -> None:
     assert get_schema(DeliverableType.POSITIONING_STRATEGY) is PositioningStrategyPayload
@@ -67,3 +143,9 @@ def test_ad_plan_registered_and_validates() -> None:
 
     assert isinstance(payload, AdPlanPayload)
     assert payload.measurement["primary"] == "有效互动成本"
+
+
+@pytest.mark.parametrize(("deliverable_type", "payload"), _INVALID_BUSINESS_PAYLOADS)
+def test_expert_contracts_reject_business_invalid_payloads(deliverable_type, payload):
+    with pytest.raises(ValidationError):
+        validate_payload(deliverable_type, payload)

@@ -27,6 +27,10 @@ class Client(Base, TimestampMixin):
     org: Mapped["Org"] = relationship(back_populates="clients")  # noqa: F821
     projects: Mapped[list["Project"]] = relationship(back_populates="client")  # noqa: F821
     accounts: Mapped[list["Account"]] = relationship(back_populates="client")  # noqa: F821
+    linked_accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
+        secondary="account_clients",
+        overlaps="account,client,clients",
+    )
     memberships: Mapped[list["ClientMembership"]] = relationship(
         back_populates="client", cascade="all, delete-orphan"
     )
@@ -84,6 +88,28 @@ class ProjectAccount(Base, TimestampMixin):
 
     project: Mapped["Project"] = relationship(overlaps="accounts,projects")  # noqa: F821
     account: Mapped["Account"] = relationship(overlaps="accounts,projects")  # noqa: F821
+
+
+class AccountClient(Base, TimestampMixin):
+    """Account-to-client membership.
+
+    ``Account.client_id`` remains the default client for backwards compatibility,
+    while this table stores the complete set of client bindings.
+    """
+
+    __tablename__ = "account_clients"
+    __table_args__ = (UniqueConstraint("account_id", "client_id"),)
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+
+    account: Mapped["Account"] = relationship(overlaps="clients,linked_accounts")  # noqa: F821
+    client: Mapped["Client"] = relationship(overlaps="clients,linked_accounts")
 
 
 class AccountMembership(Base):

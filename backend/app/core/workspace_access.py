@@ -9,6 +9,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     Account,
+    AccountClient,
     AccountMembership,
     Client,
     ClientMembership,
@@ -87,7 +88,13 @@ async def accessible_account_ids(
         ClientMembership.user_id == user.id
     )
     accessible_projects = await accessible_project_ids(session, user)
-    clauses: list[ColumnElement[bool]] = [Account.client_id.in_(direct_client_ids)]
+    linked_client_accounts = select(AccountClient.account_id).where(
+        AccountClient.client_id.in_(direct_client_ids)
+    )
+    clauses: list[ColumnElement[bool]] = [
+        Account.client_id.in_(direct_client_ids),
+        Account.id.in_(linked_client_accounts),
+    ]
     if accessible_projects:
         linked_accounts = select(ProjectAccount.account_id).where(
             ProjectAccount.project_id.in_(accessible_projects)
@@ -101,7 +108,15 @@ async def accessible_account_ids(
 
     query = select(Account.id).where(Account.org_id == user.org_id, or_(*clauses))
     if client_id is not None:
-        query = query.where(Account.client_id == client_id)
+        selected_client_accounts = select(AccountClient.account_id).where(
+            AccountClient.client_id == client_id
+        )
+        query = query.where(
+            or_(
+                Account.client_id == client_id,
+                Account.id.in_(selected_client_accounts),
+            )
+        )
     if project_id is not None:
         linked_project_accounts = select(ProjectAccount.account_id).where(
             ProjectAccount.project_id == project_id
@@ -263,15 +278,22 @@ async def require_account_access(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
 
     memberships: list[WorkspaceRole] = []
+    client_ids = set(
+        await session.scalars(
+            select(AccountClient.client_id).where(AccountClient.account_id == account.id)
+        )
+    )
     if account.client_id is not None:
-        client_membership = await session.scalar(
-            select(ClientMembership).where(
-                ClientMembership.client_id == account.client_id,
-                ClientMembership.user_id == user.id,
+        client_ids.add(account.client_id)
+    if client_ids:
+        memberships.extend(
+            await session.scalars(
+                select(ClientMembership.role).where(
+                    ClientMembership.client_id.in_(client_ids),
+                    ClientMembership.user_id == user.id,
+                )
             )
         )
-        if client_membership is not None:
-            memberships.append(client_membership.role)
 
     project_ids = set(
         await session.scalars(

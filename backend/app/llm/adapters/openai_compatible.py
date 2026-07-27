@@ -124,6 +124,8 @@ def _request_options(options: dict[str, Any] | None) -> dict[str, Any]:
         payload["temperature"] = options["temperature"]
     if "max_tokens" in options:
         payload["max_tokens"] = options["max_tokens"]
+    if "response_format" in options:
+        payload["response_format"] = options["response_format"]
     return payload
 
 

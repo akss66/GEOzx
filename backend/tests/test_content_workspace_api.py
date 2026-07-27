@@ -226,7 +226,7 @@ async def test_deliverable_revision_creates_version_and_preserves_history(client
             "payload": {
                 "title": "第二版",
                 "hook": "新钩子",
-                "scenes": ["开场", "实测"],
+                "scenes": ["开场", "实测", "结论"],
                 "duration_seconds": 40,
                 "bgm_suggestion": "电子节奏",
             },

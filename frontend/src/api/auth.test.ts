@@ -134,6 +134,7 @@ describe("user management api", () => {
         {
           id: 31,
           client_id: 3,
+          client_ids: [3],
           project_ids: [8],
           nickname: "Main account",
           platform: "douyin",
@@ -219,7 +220,6 @@ describe("user management api", () => {
   it("never places destructive credentials in a query string", async () => {
     const input: PermanentDeleteUserInput = {
       preview_token: "preview-token-with-sufficient-length",
-      target_email: "member@test.com",
       secondary_password: "secondary-password-123",
     };
     const response: PermanentDeleteUserResponse = {

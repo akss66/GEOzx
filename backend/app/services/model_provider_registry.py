@@ -105,6 +105,15 @@ class ProviderDeleteConflictError(RuntimeError):
         self.affected_agents = affected_agents
 
 
+class ProviderModelCatalogConflictError(RuntimeError):
+    """Raised when a catalog update would invalidate existing Agent routes."""
+
+    def __init__(self, affected_agents: list[str], missing_models: list[str]):
+        super().__init__("model provider catalog is still referenced")
+        self.affected_agents = affected_agents
+        self.missing_models = missing_models
+
+
 class ProviderUpstreamError(RuntimeError):
     """Raised when verification or discovery cannot complete cleanly."""
 
@@ -478,6 +487,12 @@ async def discover_model_provider_models(
     provider = await _get_provider(session, org_id=org_id, provider_id=provider_id)
     try:
         remote_models = await _fetch_remote_models(provider)
+        await _ensure_catalog_keeps_referenced_models(
+            session,
+            org_id=org_id,
+            provider_id=provider.id,
+            models=remote_models,
+        )
         provider.models = remote_models
         provider.models_updated_at = datetime.now(UTC)
         provider.updated_by_id = user_id
@@ -532,6 +547,12 @@ async def put_model_provider_models(
 ) -> dict[str, Any]:
     provider = await _get_provider(session, org_id=org_id, provider_id=provider_id)
     normalized_models = list(models)
+    await _ensure_catalog_keeps_referenced_models(
+        session,
+        org_id=org_id,
+        provider_id=provider.id,
+        models=normalized_models,
+    )
     if normalized_models != list(provider.models or []):
         provider.models = normalized_models
         _reset_verification(provider)
@@ -674,6 +695,47 @@ async def _provider_route_references(
             if entry not in references[provider_id]:
                 references[provider_id].append(entry)
     return references
+
+
+async def _ensure_catalog_keeps_referenced_models(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    provider_id: int,
+    models: list[str],
+) -> None:
+    allowed_models = set(models)
+    rows = (
+        await session.scalars(
+            select(ModelConfig).where(
+                ModelConfig.org_id == org_id,
+                or_(
+                    ModelConfig.primary_provider_id == provider_id,
+                    ModelConfig.fallback_provider_id == provider_id,
+                ),
+            )
+        )
+    ).all()
+    affected_agents: list[str] = []
+    missing_models: set[str] = set()
+    for row in rows:
+        referenced_models: list[str] = []
+        if row.primary_provider_id == provider_id:
+            referenced_models.append(row.primary_model)
+        if row.fallback_provider_id == provider_id and row.fallback_model:
+            referenced_models.append(row.fallback_model)
+        invalid_models = [model for model in referenced_models if model not in allowed_models]
+        if not invalid_models:
+            continue
+        agent_name = AGENT_NAMES.get(row.agent_code, row.agent_code)
+        if agent_name not in affected_agents:
+            affected_agents.append(agent_name)
+        missing_models.update(invalid_models)
+    if affected_agents:
+        raise ProviderModelCatalogConflictError(
+            affected_agents,
+            sorted(missing_models),
+        )
 
 
 async def _next_sort_order(session: AsyncSession, *, org_id: int) -> int:

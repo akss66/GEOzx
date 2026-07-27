@@ -1,5 +1,45 @@
 # 当前执行清单
 
+> 更新时间：2026-07-21
+> 当前阶段：P10 生产级 Agent Runtime 与双层记忆已确认，正在按风险优先顺序实施。未经本地完整验收和用户批准，不部署生产。
+
+## P10: 生产级 Agent Runtime 与双层记忆
+
+- [x] 确认“运行时记忆 + 审核式策展知识”的双层记忆方案。
+- [x] 完成生产阻断项审计。
+- [x] 新增生产设计：`docs/superpowers/specs/2026-07-21-production-agent-runtime-design.md`。
+- [x] 新增架构决策：`docs/adr/0001-production-agent-runtime-and-double-memory.md`。
+- [x] 新增逐步实施计划：`docs/superpowers/plans/2026-07-21-production-agent-runtime.md`。
+- [x] Task 1：知识租户隔离、运行时 session 并发隔离、消息幂等。
+- [x] Task 2：AgentRun、数据库租约、ARQ 后台执行、重试与取消。
+- [x] Task 3：AsyncPostgresSaver、原生 interrupt 与进程恢复。
+- [x] Task 4：完整受控 ReAct 与统一 Tool/MCP 边界。
+- [x] Task 5：主 Agent / 八专家 Prompt Registry 与 Harness。
+- [x] Task 6：运行时记忆模型、压缩服务、上下文构建与审计事件已完成；同步自动压缩默认关闭，后台化执行待 Task 8/9 补齐。
+- [ ] Task 7：知识自动提取、去重、冲突检测、审核入库与检索。
+- [ ] Task 8：可观测性、失败恢复、安全和 runbook。
+- [ ] Task 9：前端队列、暂停、恢复、重试与断线投影。
+- [ ] Task 10：评测、全量回归、灰度部署和真实抖音账号验收。
+
+### 2026-07-22 P10 Task 5 复核验收记录
+
+- 复核另一模型提交的 Prompt Registry、八专家版本化 Prompt、结构化输出与 Agent Harness，保留总体架构，不以旧草稿 Prompt 作为运行时来源。
+- Prompt 缺失、hash 漂移、未知版本与 draft 状态均会阻断加载；主 Agent 与八专家调用记录 prompt id/version/hash/schema、scope、预算与 trace id。
+- 八类交付物统一使用严格 Pydantic 契约，拒绝未知字段、空核心字段和不足的业务列表；模型输出失败只允许一次有界修复。
+- 修复 Harness 失败事务回滚后调用 ID 失效的问题，确保失败专家调用仍持久化为 `FAILED` 账本，不留下伪运行中状态。
+- 修复测试中的旧专家代码、乱码文本和旧式权限门假设；权限恢复测试现按“主 Agent 请求受控工具 → 人工批准 → runtime 恢复”执行。
+- 实时 Redis 广播增加短超时，停止生成的持久化状态不再被不可用的实时通道阻塞。
+
+### 2026-07-22 P10 Task 6 技术验收记录
+
+- 新增 `RuntimeMemory` 持久化模型、迁移和 `RuntimeMemoryService`，按 `org_id + task_id/thread_id` 隔离线程工作记忆。
+- `build_runtime_context()` 已接入主 Agent 上下文：优先加载压缩记忆，再补最近未压缩原文事件，避免长会话简单截断关键决定。
+- 记忆压缩使用 Prompt Registry 的 `memory.compactor`，严格校验 JSON schema；失败时保留上一版记忆，不污染上下文。
+- 压缩输入只使用 allowlist 事件字段并递归脱敏 token、secret、password、api_key 等敏感键。
+- 记录 `brain.runtime.memory_compacted` 审计事件，保留来源事件、版本、prompt 版本和 hash，支持后续重建。
+- 为避免用户消息链路继续变卡，同步自动压缩开关 `AGENT_RUNTIME_MEMORY_AUTO_COMPACT_ENABLED` 默认关闭；后续改为 worker 后台触发。
+- 回归时确认专家执行必须显式绑定项目和账号；测试已改为项目绑定账号路径，不放松生产边界。
+
 > 更新时间：2026-07-17
 > 当前阶段：P2-P6 已完成本地技术验收；P7 专家团、知识库、使用成本、用户管理、专家管理与模型基础设施已完成全栈技术实现，等待桌面验收。移动端按用户决定暂缓。
 > 交付规则：高保真确认 → 前后端闭环 → localhost 验收 → 用户批准 → 线上部署。
@@ -349,3 +389,25 @@
 - 后端全量测试 `321` 项通过，Ruff 全量检查通过；前端 `53` 个测试文件、`201` 项测试通过，生产构建通过，ESLint `0` 错误并保留 `14` 条既有 warning。
 - 密钥日志 / 浏览器存储模式扫描无命中；项目使用 pnpm 锁文件，`pnpm audit --audit-level high` 返回 `0` 个已知漏洞。
 - 未使用真实一次性 API Key 执行外部连接、模型发现、流式调用与密钥轮换验收；这部分保留为部署前人工验收门。本轮不部署生产环境。
+
+## 2026-07-27 抖音官方 H5 投稿闭环技术验收
+
+- 历史账号数据继续通过表格或人工录入进入多源数据中心；新内容统一经过发布包、人工审批和抖音官方 H5 投稿链路，不把浏览器自动化作为生产主链路。
+- 已完成 `内容生产 -> PublishJob -> 人工审批 -> 服务端签名 Schema -> 二维码 / 移动端直接拉起 -> 抖音客户端确认 -> 官方回调 -> official_api 内容记录 -> 后续效果观察` 的前后端闭环。
+- 桌面端二维码和移动端直接拉起复用同一个短时官方 Schema；仅扫码不点击网页按钮时，官方回调也能从 `handoff_ready` 正确绑定发布任务。
+- 按抖音当前投稿要求同时校验 `h5.share`、`open.get.ticket` 和 `aweme.share`；账号矩阵的平台配置界面已补充 `aweme.share` 授权范围。
+- Schema、签名和 ticket 只在请求时短暂生成，不写入数据库或审计日志；数据库只保留安全的发布任务状态、share_id、item_id 和回调摘要。
+- `douyin_h5_publish_enabled`、`douyin_posting_task_enabled`、`douyin_direct_publish_enabled` 默认全部关闭；没有显式启用和人工审批时，不会发起平台投稿，更不会静默执行服务端直发。
+- 定向后端测试 `52` 项通过，相关 Ruff 检查通过；前端全量 `263` 项测试和生产构建通过。
+- 后端全量回归中发现的 4 项失败已完成根因修复：串行 AgentRun 会在前序完成后提升并入队；专家 API 测试改为覆盖真实 Kernel 决策边界；指标聚合测试不再依赖执行日期。
+- 最终后端全量回归为 `578 passed`，Ruff 全量检查通过；前端 `61` 个测试文件、`263` 项测试通过，ESLint `0` 错误、`13` 条既有 warning，生产构建通过。
+- 本轮未部署线上。
+
+## 2026-07-27 可回滚本地冻结基线
+
+- 本次冻结覆盖生产级 Agent Runtime、Prompt Registry 与 Harness、双层运行时记忆、账号多客户 / 多项目归属、多源账号数据中心、模型基础设施，以及抖音官方 H5 投稿任务闭环。
+- 后端全量测试 `578` 项通过，Ruff 全量检查通过；Alembic 代码 head 与本地数据库 current 均为 `20260727_0200`。
+- 前端 `61` 个测试文件、`263` 项测试通过；TypeScript 类型检查、ESLint 和 Vite 生产构建通过。ESLint 保留 `13` 条非阻断 warning。
+- 开发与生产 Compose 配置均可解析，`git diff --check` 通过。
+- 生产依赖审计没有 high / critical，保留 `3` 个 moderate；开发工具链传递依赖另有 `5` 个 high，冻结后单独升级 ESLint / Vite 工具链处理，避免与业务基线混改。
+- 本基线只创建本地提交与标签，不自动推送或部署生产环境。

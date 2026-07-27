@@ -24,7 +24,7 @@ _PAYLOADS = {
     "01-positioning": {
         "account_persona": "专业测评号",
         "target_audience": "25-35 岁科技爱好者",
-        "differentiation": ["真机长测"],
+        "differentiation": ["真机长测", "参数复核"],
         "content_pillars": ["新品", "横评"],
     },
     "02-content": {

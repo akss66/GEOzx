@@ -528,3 +528,55 @@
     grid-template-columns: minmax(130px, 0.7fr) repeat(3, minmax(160px, 1fr)) 58px;
   }
 }
+.workspace-structure {
+  display: grid;
+  gap: 16px;
+}
+
+.workspace-structure__create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.workspace-structure__create--project {
+  grid-template-columns: minmax(180px, 0.55fr) minmax(260px, 1fr) auto;
+}
+
+.workspace-structure__list {
+  display: grid;
+  border: 1px solid var(--dy-border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.workspace-structure__row {
+  min-height: 66px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  background: var(--dy-surface);
+}
+
+.workspace-structure__row + .workspace-structure__row {
+  border-top: 1px solid var(--dy-border);
+}
+
+.workspace-structure__identity {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.workspace-structure__identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-structure__identity span {
+  color: var(--dy-muted);
+  font-size: 12px;
+}

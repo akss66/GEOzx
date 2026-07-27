@@ -52,8 +52,8 @@ _POSITIONING = json.dumps(
     {
         "account_persona": "数码测评",
         "target_audience": "科技爱好者",
-        "differentiation": ["真机长测"],
-        "content_pillars": ["新品首发"],
+        "differentiation": ["真机长测", "参数复核"],
+        "content_pillars": ["新品首发", "长期体验"],
     }
 )
 

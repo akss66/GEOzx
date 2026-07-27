@@ -1,6 +1,6 @@
 """01 账号定位专家（真实 LLMAgent）。
 
-system prompt: prompts/01-positioning.md（草稿，待配置表校准）
+system prompt: Prompt Registry `experts/01-positioning/v1.md`
 输出: PositioningStrategyPayload（schemas/deliverable.py）
 """
 

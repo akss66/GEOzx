@@ -5,6 +5,7 @@ import {
   FileTextOutlined,
   HistoryOutlined,
   PlusOutlined,
+  RedoOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,7 +16,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -24,16 +25,23 @@ import {
   getBrainTaskRuntime,
   listBrainTasks,
   rejectDeliverableAcceptance,
+  regenerateBrainMessage,
   reviseBrainDecision,
   selectBrainDecision,
   sendBrainMessage,
+  stopBrainGeneration,
 } from "../api/brain";
 import { presentApiError } from "../api/errors";
 import { getWorkspaceContext } from "../api/shell";
+import { AgentAvatar } from "../components/agents/AgentAvatar";
 import { OperationalState } from "../components/ui";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import { DecisionRequest } from "../components/brain/DecisionRequest";
-import { useEventStream, type DyEvent } from "../hooks/useEventStream";
+import {
+  useEventStream,
+  type DyEvent,
+  type EventStreamConnectionState,
+} from "../hooks/useEventStream";
 import {
   clearActiveBrainTaskId,
   getActiveBrainTaskId,
@@ -60,7 +68,14 @@ interface LiveRuntimeMessage {
   agentName: string;
   model?: string;
   content: string;
-  status: "streaming" | "done" | "error";
+  status: "streaming" | "done" | "error" | "stopped";
+}
+
+interface PendingTurn {
+  clientMessageId: string;
+  content: string;
+  taskId: number | null;
+  showUser: boolean;
 }
 
 type ConversationItem =
@@ -83,8 +98,10 @@ export default function BrainHome() {
   const [localTasks, setLocalTasks] = useState<BrainTask[]>([]);
   const [activeRuntimeTaskId, setActiveRuntimeTaskId] = useState<number | null>(null);
   const [liveMessages, setLiveMessages] = useState<LiveRuntimeMessage[]>([]);
+  const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [approvalComment, setApprovalComment] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const pendingClientMessageId = useRef<string | null>(null);
   const { clientId, projectId, platform, accountId } = useCurrentWorkspace();
   const location = useLocation();
   const navigate = useNavigate();
@@ -110,13 +127,35 @@ export default function BrainHome() {
     enabled: Boolean(activeAccount),
   });
 
-  useEventStream((event) => {
+  const { connectionState } = useEventStream((event) => {
     if (!event.type.startsWith("brain.runtime.")) return;
+    const payload = asRuntimePayload(event.payload);
+    const eventClientMessageId = typeof payload?.client_message_id === "string"
+      ? payload.client_message_id
+      : null;
+    const eventTaskId = payload?.task_id == null ? null : Number(payload.task_id);
+    if (
+      eventTaskId != null
+      && Number.isFinite(eventTaskId)
+      && eventClientMessageId != null
+      && eventClientMessageId === pendingClientMessageId.current
+    ) {
+      setActiveRuntimeTaskId(eventTaskId);
+      setPendingTurn((current) => current?.clientMessageId === eventClientMessageId
+        ? { ...current, taskId: eventTaskId }
+        : current);
+      if (activeAccount) setActiveBrainTaskId(activeAccount.id, eventTaskId);
+    }
     ingestRuntimeEvent(event, setLiveMessages);
-    if (event.type !== "brain.runtime.message_delta") {
+    if (!["brain.runtime.message_start", "brain.runtime.message_delta"].includes(event.type)) {
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
       qc.invalidateQueries({ queryKey: ["brain-runtime"] });
     }
+  }, {
+    onReconnect: () => {
+      void qc.invalidateQueries({ queryKey: ["brain-tasks"] });
+      void qc.invalidateQueries({ queryKey: ["brain-runtime"] });
+    },
   });
 
   const effectiveAccount = activeAccount;
@@ -128,17 +167,67 @@ export default function BrainHome() {
   const messageMutation = useMutation({
     mutationFn: sendBrainMessage,
     onSuccess: (nextRuntime) => {
+      const completedClientMessageId = pendingClientMessageId.current;
       const task = nextRuntime.task;
       const taskAccountId = task.brief.account_ids[0] ?? effectiveAccount?.id;
       if (taskAccountId != null) setActiveBrainTaskId(taskAccountId, task.id);
       setLocalTasks((prev) => [task, ...prev.filter((item) => item.id !== task.id)]);
       setActiveRuntimeTaskId(task.id);
-      setGoal("");
       qc.setQueryData(["brain-runtime", task.id], nextRuntime);
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
+      if (nextRuntime.status === "stopped" && completedClientMessageId) {
+        setLiveMessages((prev) => prev.map((item) =>
+          item.id.startsWith(completedClientMessageId)
+            ? { ...item, status: "stopped" }
+            : item
+        ));
+      }
+      setPendingTurn(null);
+      pendingClientMessageId.current = null;
     },
+    onError: (error) => {
+      setPendingTurn((current) => {
+        if (current) setGoal((value) => value || current.content);
+        return null;
+      });
+      pendingClientMessageId.current = null;
+      message.error(presentApiError(error, "任务启动失败，请稍后重试。").message);
+    },
+  });
+
+  const regenerateMutation = useMutation({
+    mutationFn: regenerateBrainMessage,
+    onSuccess: (nextRuntime) => {
+      const completedClientMessageId = pendingClientMessageId.current;
+      const task = nextRuntime.task;
+      const taskAccountId = task.brief.account_ids[0] ?? effectiveAccount?.id;
+      if (taskAccountId != null) setActiveBrainTaskId(taskAccountId, task.id);
+      setLocalTasks((prev) => [task, ...prev.filter((item) => item.id !== task.id)]);
+      setActiveRuntimeTaskId(task.id);
+      qc.setQueryData(["brain-runtime", task.id], nextRuntime);
+      void qc.invalidateQueries({ queryKey: ["brain-tasks"] });
+      if (nextRuntime.status === "stopped" && completedClientMessageId) {
+        setLiveMessages((prev) => prev.map((item) =>
+          item.id.startsWith(completedClientMessageId)
+            ? { ...item, status: "stopped" }
+            : item
+        ));
+      }
+      setPendingTurn(null);
+      pendingClientMessageId.current = null;
+    },
+    onError: (error) => {
+      setPendingTurn(null);
+      pendingClientMessageId.current = null;
+      message.error(presentApiError(error, "重新生成失败，请稍后重试。").message);
+    },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: stopBrainGeneration,
+    onSuccess: () => message.info("正在停止本轮生成"),
     onError: (error) => message.error(
-      presentApiError(error, "任务启动失败，请稍后重试。").message,
+      presentApiError(error, "停止生成失败，请稍后重试。").message,
     ),
   });
 
@@ -243,14 +332,16 @@ export default function BrainHome() {
       ? null
       : workflowTasks.find((task) => task.id === activeRuntimeTaskId) ?? null;
   const runtimeQuery = useQuery({
-    queryKey: ["brain-runtime", activeTask?.id],
-    queryFn: () => getBrainTaskRuntime(activeTask!.id),
-    enabled: Boolean(activeTask?.id),
+    queryKey: ["brain-runtime", activeRuntimeTaskId],
+    queryFn: () => getBrainTaskRuntime(activeRuntimeTaskId!),
+    enabled: activeRuntimeTaskId != null,
   });
   const runtime =
-    activeTask && runtimeQuery.data?.task.id === activeTask.id ? runtimeQuery.data : null;
+    activeRuntimeTaskId != null && runtimeQuery.data?.task.id === activeRuntimeTaskId
+      ? runtimeQuery.data
+      : null;
   const visibleRuntime = runtime;
-  const visibleTask = activeTask;
+  const visibleTask = runtime?.task ?? activeTask;
   const pendingPermission = visibleRuntime?.pending_permissions[0] ?? null;
   const contextError = contextQuery.isError
     ? presentApiError(contextQuery.error, "运营上下文暂时不可用。")
@@ -261,8 +352,10 @@ export default function BrainHome() {
   const runtimeError = runtimeQuery.isError
     ? presentApiError(runtimeQuery.error, "当前任务运行时暂时不可用。")
     : null;
+  const isGenerating = messageMutation.isPending || regenerateMutation.isPending;
 
   const startWorkflow = () => {
+    if (isGenerating) return;
     const trimmed = goal.trim();
     if (!trimmed) {
       message.warning("先写下要交给主 Agent 的运营目标");
@@ -277,8 +370,18 @@ export default function BrainHome() {
       return;
     }
 
+    const clientMessageId = createClientMessageId();
+    pendingClientMessageId.current = clientMessageId;
+    setPendingTurn({
+      clientMessageId,
+      content: trimmed,
+      taskId: activeTask?.id ?? null,
+      showUser: true,
+    });
+    setGoal("");
     messageMutation.mutate({
       message: trimmed,
+      client_message_id: clientMessageId,
       task_id: activeTask?.id,
       project_id: projectId,
       account_id: effectiveAccount.id,
@@ -286,22 +389,52 @@ export default function BrainHome() {
     });
   };
 
+  const stopGeneration = () => {
+    if (!pendingTurn || stopMutation.isPending) return;
+    stopMutation.mutate({
+      clientMessageId: pendingTurn.clientMessageId,
+      taskId: pendingTurn.taskId,
+    });
+  };
+
+  const regenerateLastTurn = () => {
+    if (!visibleRuntime || isGenerating) return;
+    const sourceMessage = latestUserMessage(visibleRuntime);
+    if (!sourceMessage) {
+      message.warning("当前对话没有可重新生成的用户消息");
+      return;
+    }
+    const clientMessageId = createClientMessageId();
+    pendingClientMessageId.current = clientMessageId;
+    setPendingTurn({
+      clientMessageId,
+      content: sourceMessage,
+      taskId: visibleRuntime.task.id,
+      showUser: false,
+    });
+    regenerateMutation.mutate({
+      taskId: visibleRuntime.task.id,
+      clientMessageId,
+    });
+  };
+
   const resetConversation = () => {
     if (effectiveAccount) clearActiveBrainTaskId(effectiveAccount.id);
     setActiveRuntimeTaskId(null);
     setLiveMessages([]);
+    setPendingTurn(null);
     setApprovalComment("");
     setGoal("");
     setDetailsOpen(false);
   };
 
-  const hasConversation = Boolean(activeTask);
+  const hasConversation = Boolean(activeTask || pendingTurn);
 
   return (
     <div className={`tz-brain-page${hasConversation ? " has-conversation" : " is-empty"}`}>
       {hasConversation ? <header className="tz-brain-toolbar">
         <div className="tz-brain-identity">
-          <span className="tz-brain-wordmark" aria-hidden="true">MA</span>
+          <AgentAvatar code="00-decision" className="tz-brain-wordmark" />
           <div>
             <strong>运营大脑</strong>
             <span>主 Agent · 目标理解与专家编排</span>
@@ -356,7 +489,14 @@ export default function BrainHome() {
               <ConversationStream
                 runtime={visibleRuntime}
                 liveMessages={liveMessages.filter((item) => item.taskId === visibleRuntime.task.id)}
-                loading={runtimeQuery.isLoading || messageMutation.isPending}
+                pendingTurn={
+                  pendingTurn?.taskId == null || pendingTurn.taskId === visibleRuntime.task.id
+                    ? pendingTurn
+                    : null
+                }
+                loading={runtimeQuery.isLoading || isGenerating}
+                connectionState={connectionState}
+                regenerating={regenerateMutation.isPending}
                 selectingDecisionId={
                   selectDecisionMutation.isPending
                     ? selectDecisionMutation.variables?.decisionId ?? null
@@ -396,7 +536,10 @@ export default function BrainHome() {
                     requestNewOptions,
                   })
                 }
+                onRegenerate={regenerateLastTurn}
               />
+            ) : pendingTurn ? (
+              <PendingConversation turn={pendingTurn} />
             ) : (
               <ConversationEmpty account={effectiveAccount} loading={contextQuery.isLoading} />
             )}
@@ -406,11 +549,11 @@ export default function BrainHome() {
             value={goal}
             disabled={
               !accountReady
-              || messageMutation.isPending
+              || isGenerating
               || tasksQuery.isError
               || runtimeQuery.isError
             }
-            loading={messageMutation.isPending}
+            loading={isGenerating}
             pendingPermission={pendingPermission}
             approvalComment={approvalComment}
             approving={approveMutation.isPending}
@@ -421,6 +564,7 @@ export default function BrainHome() {
               approveMutation.mutate({ toolCallId, approved, comment })
             }
             onSubmit={startWorkflow}
+            onStop={stopGeneration}
           />
         </div>}
       </main>
@@ -493,7 +637,10 @@ function ConversationEmpty({
 function ConversationStream({
   runtime,
   liveMessages,
+  pendingTurn,
   loading,
+  connectionState,
+  regenerating,
   selectingDecisionId,
   revisingDecisionId,
   acceptingArtifactId,
@@ -502,10 +649,14 @@ function ConversationStream({
   onRerunArtifact,
   onSelectDecision,
   onReviseDecision,
+  onRegenerate,
 }: {
   runtime: BrainRuntime;
   liveMessages: LiveRuntimeMessage[];
+  pendingTurn: PendingTurn | null;
   loading: boolean;
+  connectionState: EventStreamConnectionState;
+  regenerating: boolean;
   selectingDecisionId: string | null;
   revisingDecisionId: string | null;
   acceptingArtifactId: number | null;
@@ -518,13 +669,19 @@ function ConversationStream({
     comment: string,
     requestNewOptions: boolean,
   ) => void;
+  onRegenerate: () => void;
 }) {
-  const items = conversationItems(runtime, liveMessages);
+  const items = conversationItems(runtime, liveMessages, pendingTurn);
+  const showRegenerate = ["completed", "stopped", "failed"].includes(runtime.status)
+    && runtime.pending_permissions.length === 0;
 
   return (
     <div className="dy-brain-message-stack">
       <div className="dy-runtime-header" data-status={runtime.status}>
         <span>{runtimeProgressCopy(runtime)}</span>
+        {connectionState === "reconnecting" && (
+          <Tag style={{ marginInlineEnd: 0 }}>正在恢复连接</Tag>
+        )}
         {loading && <Tag style={{ marginInlineEnd: 0 }}>生成中</Tag>}
       </div>
 
@@ -566,15 +723,38 @@ function ConversationStream({
           onRerun={(reason) => onRerunArtifact(acceptance, reason)}
         />
       ))}
+
+      {showRegenerate && (
+        <div className="tz-brain-regenerate-action">
+          <Button
+            type="text"
+            aria-label="重新生成"
+            icon={<RedoOutlined />}
+            loading={regenerating}
+            disabled={loading && !regenerating}
+            onClick={onRegenerate}
+          >
+            重新生成
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingConversation({ turn }: { turn: PendingTurn }) {
+  return (
+    <div className="dy-brain-message-stack" aria-live="polite">
+      {turn.showUser && <UserMessage content={turn.content} />}
+      <AgentMessage message={pendingAgentMessage(turn)} />
     </div>
   );
 }
 
 function UserMessage({ content }: { content: string }) {
   return (
-    <article className="dy-chat-message dy-chat-message-user">
+    <article className="dy-chat-message dy-chat-message-user" aria-label="你的消息">
       <div className="dy-chat-bubble">
-        <div className="dy-chat-meta">你</div>
         <Typography.Paragraph style={{ color: "inherit", margin: 0 }}>
           {cleanBrainCopy(content)}
         </Typography.Paragraph>
@@ -585,21 +765,31 @@ function UserMessage({ content }: { content: string }) {
 
 function AgentMessage({ message }: { message: LiveRuntimeMessage }) {
   const hasSystemError = message.status === "error" || isConfigurationError(message.content);
+  const isThinking = message.status === "streaming" && !message.content;
+  const isStopped = message.status === "stopped";
 
   return (
-    <article className="dy-chat-message dy-chat-message-agent" data-error={hasSystemError || undefined}>
-      <div className="dy-chat-avatar">{agentInitial(message.agentName)}</div>
+    <article
+      className="dy-chat-message dy-chat-message-agent"
+      data-error={hasSystemError || undefined}
+      data-thinking={isThinking || undefined}
+    >
+      <AgentAvatar code="00-decision" className="dy-chat-avatar" />
       <div className="dy-chat-bubble">
         <div className="dy-chat-title-line">
           <span>{hasSystemError ? "系统提示" : message.agentName}</span>
           <Tag style={{ marginInlineEnd: 0 }}>
-            {hasSystemError ? "需配置" : message.status === "streaming" ? "正在输出" : statusCopy(message.status)}
+            {hasSystemError
+              ? "需配置"
+              : message.status === "streaming"
+                ? isThinking ? "思考中" : "正在输出"
+                : statusCopy(message.status)}
           </Tag>
         </div>
         <Typography.Paragraph style={{ color: "inherit", margin: 0, whiteSpace: "pre-wrap" }}>
           {hasSystemError
-            ? "模型服务暂时不可用。请检查 DeepSeek API Key 或模型配置后重试。"
-            : formatAgentContent(message.content || "正在连接模型...")}
+            ? "模型服务暂时不可用。请检查供应商凭证或模型路由配置后重试。"
+            : formatAgentContent(message.content || (isStopped ? "已停止生成。" : "正在思考..."))}
         </Typography.Paragraph>
       </div>
     </article>
@@ -636,7 +826,11 @@ function ExpertMessage({
       data-status={invocation.status}
       aria-label={`专家：${invocation.agent_name}`}
     >
-      <div className="dy-chat-expert-mark">{agentInitial(invocation.agent_name)}</div>
+      <AgentAvatar
+        code={invocation.agent_code}
+        className="dy-chat-expert-mark"
+        label={invocation.agent_name}
+      />
       <div className="dy-chat-expert-body">
         <div className="dy-chat-expert-head">
           <div>
@@ -834,6 +1028,7 @@ function DispatchIcon({ status }: { status: OrchestrationPlanStep["status"] }) {
 function conversationItems(
   runtime: BrainRuntime,
   liveMessages: LiveRuntimeMessage[],
+  pendingTurn: PendingTurn | null = null,
 ): ConversationItem[] {
   const items: ConversationItem[] = [];
   const invocationsById = new Map(runtime.invocations.map((row) => [row.id, row]));
@@ -906,6 +1101,24 @@ function conversationItems(
     });
   });
 
+  let hasPendingAgent = false;
+  if (pendingTurn) {
+    const hasPendingUser = runtime.timeline.some((event) => {
+      if (event.type !== "brain.runtime.user_message") return false;
+      const payload = asRuntimePayload(event.payload);
+      return payload?.client_message_id === pendingTurn.clientMessageId;
+    });
+    hasPendingAgent = liveMessages.some((message) =>
+      message.id.startsWith(pendingTurn.clientMessageId));
+    if (pendingTurn.showUser && !hasPendingUser) {
+      items.push({
+        kind: "user",
+        id: `user-pending-${pendingTurn.clientMessageId}`,
+        content: pendingTurn.content,
+      });
+    }
+  }
+
   liveMessages.forEach((message) => {
     if (representedMessages.has(message.id)) return;
     items.push({
@@ -915,7 +1128,28 @@ function conversationItems(
     });
   });
 
+  if (pendingTurn) {
+    if (!hasPendingAgent) {
+      items.push({
+        kind: "agent",
+        id: `agent-pending-${pendingTurn.clientMessageId}`,
+        message: pendingAgentMessage(pendingTurn),
+      });
+    }
+  }
+
   return items;
+}
+
+function pendingAgentMessage(turn: PendingTurn): LiveRuntimeMessage {
+  return {
+    id: `${turn.clientMessageId}:pending`,
+    taskId: turn.taskId ?? -1,
+    agentCode: "00-decision",
+    agentName: "主 Agent",
+    content: "",
+    status: "streaming",
+  };
 }
 
 function expertLifecycleMessages(runtime: BrainRuntime) {
@@ -956,7 +1190,21 @@ function ingestRuntimeEvent(
   setLiveMessages: Dispatch<SetStateAction<LiveRuntimeMessage[]>>,
 ) {
   const payload = asRuntimePayload(event.payload);
-  if (!payload || payload.task_id == null || !payload.message_id) return;
+  if (!payload || payload.task_id == null) return;
+
+  if (event.type === "brain.runtime.generation_stopped") {
+    const taskId = Number(payload.task_id);
+    const clientMessageId = String(payload.client_message_id ?? "");
+    if (!clientMessageId) return;
+    setLiveMessages((prev) => prev.map((item) =>
+      item.taskId === taskId && item.id.startsWith(clientMessageId)
+        ? { ...item, status: "stopped" }
+        : item
+    ));
+    return;
+  }
+
+  if (!payload.message_id) return;
 
   const taskId = Number(payload.task_id);
   const id = String(payload.message_id);
@@ -1015,6 +1263,24 @@ function asRuntimePayload(payload: unknown): Record<string, unknown> | null {
   return typeof payload === "object" && payload != null
     ? (payload as Record<string, unknown>)
     : null;
+}
+
+function latestUserMessage(runtime: BrainRuntime) {
+  for (let index = runtime.timeline.length - 1; index >= 0; index -= 1) {
+    const event = runtime.timeline[index];
+    if (event.type !== "brain.runtime.user_message") continue;
+    const payload = asRuntimePayload(event.payload) ?? {};
+    const content = String(payload.content ?? payload.message ?? "").trim();
+    if (content) return content;
+  }
+  return cleanBrainCopy(runtime.task.brief.goal).trim();
+}
+
+function createClientMessageId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `brain-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function mergeTasks(localTasks: BrainTask[], serverTasks: BrainTask[]) {
@@ -1101,6 +1367,7 @@ function runtimeProgressCopy(runtime: BrainRuntime) {
     return `等待你确认：${toolCallHumanName(runtime.pending_permissions[0])}`;
   }
   if (runtime.status === "waiting_permission") return "等待人工确认";
+  if (runtime.status === "stopped") return "本轮生成已停止";
   if (runtime.status === "completed") {
     return runtime.invocations.length > 0
       ? "本轮专家协作已完成"
@@ -1172,6 +1439,7 @@ function runtimeStatusLabel(status: string) {
     running: "运行中",
     waiting_permission: "等待人工确认",
     completed: "已完成",
+    stopped: "已停止",
     failed: "失败",
     pending_acceptance: "待验收",
   };
@@ -1216,9 +1484,6 @@ function acceptanceStatusCopy(status: DeliverableAcceptance["status"]) {
 function statusCopy(status: LiveRuntimeMessage["status"]) {
   if (status === "done") return "完成";
   if (status === "error") return "失败";
+  if (status === "stopped") return "已停止";
   return "进行中";
-}
-
-function agentInitial(name: string) {
-  return name.includes("主") ? "主" : "专";
 }

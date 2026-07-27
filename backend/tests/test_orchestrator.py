@@ -7,7 +7,17 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from app.llm.adapters import CompletionResult
-from app.models import AgentTask, ContentItem, Deliverable, Event, GateApproval, Org, Project
+from app.models import (
+    AgentTask,
+    Client,
+    ContentItem,
+    Deliverable,
+    Event,
+    GateApproval,
+    KnowledgeEntry,
+    Org,
+    Project,
+)
 from app.models.enums import (
     AgentTaskStatus,
     ContentStage,
@@ -16,6 +26,7 @@ from app.models.enums import (
     DeliverableType,
     GateStatus,
     GateType,
+    KnowledgeCategory,
 )
 from app.orchestrator.engine import OrchestrationEngine
 
@@ -127,6 +138,70 @@ async def _pending_gate(session, ci_id) -> GateApproval:
             GateApproval.status == GateStatus.PENDING,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_knowledge_is_scoped_to_client_project_and_active_status(session) -> None:
+    org = Org(name="Knowledge scope org")
+    current_client = Client(org=org, name="Current client")
+    other_client = Client(org=org, name="Other client")
+    current_project = Project(org=org, client=current_client, name="Current project")
+    sibling_project = Project(org=org, client=current_client, name="Sibling project")
+    foreign_project = Project(org=org, client=other_client, name="Foreign project")
+    session.add_all(
+        [org, current_client, other_client, current_project, sibling_project, foreign_project]
+    )
+    await session.flush()
+
+    def entry(
+        title: str,
+        *,
+        client: Client,
+        project: Project | None,
+        status: str = "active",
+    ) -> KnowledgeEntry:
+        return KnowledgeEntry(
+            org_id=org.id,
+            client_id=client.id,
+            project_id=project.id if project is not None else None,
+            category=KnowledgeCategory.USER_PERSONA,
+            title=title,
+            content=title,
+            payload={},
+            source_type="manual",
+            source_label="test",
+            status=status,
+        )
+
+    session.add_all(
+        [
+            entry("client-global", client=current_client, project=None),
+            entry("current-project", client=current_client, project=current_project),
+            entry("sibling-project", client=current_client, project=sibling_project),
+            entry("foreign-client", client=other_client, project=foreign_project),
+            entry(
+                "archived-current-project",
+                client=current_client,
+                project=current_project,
+                status="archived",
+            ),
+        ]
+    )
+    await session.commit()
+
+    knowledge = await OrchestrationEngine()._knowledge(
+        session,
+        org_id=org.id,
+        client_id=current_client.id,
+        project_id=current_project.id,
+    )
+
+    titles = {
+        item["title"]
+        for category_items in knowledge.values()
+        for item in category_items
+    }
+    assert titles == {"client-global", "current-project"}
 
 
 @pytest.mark.asyncio

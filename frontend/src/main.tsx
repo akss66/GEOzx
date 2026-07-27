@@ -17,6 +17,7 @@ import "./styles/app-shell.css";
 import "./styles/brain-v2.css";
 import "./styles/accounts-v2.css";
 import "./styles/content-workspace.css";
+import "./styles/publishing.css";
 import "./styles/approval-workbench.css";
 import "./styles/review-dashboard.css";
 import "./styles/expert-studio.css";

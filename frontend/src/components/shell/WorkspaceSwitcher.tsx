@@ -1,4 +1,4 @@
-import { CheckOutlined, DownOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, CheckOutlined, DownOutlined } from "@ant-design/icons";
 import { useMemo, useState } from "react";
 
 import type { WorkspaceContext } from "../../api/shell";
@@ -48,7 +48,7 @@ export function WorkspaceSwitcher({
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="tz-workspace-monogram">舟</span>
+        <span className="tz-workspace-monogram"><ApartmentOutlined /></span>
         <span className="tz-workspace-copy">
           <strong>{currentClient?.name ?? "选择客户"}</strong>
           <small>{currentProject?.name ?? "尚未选择项目"}</small>

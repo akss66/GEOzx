@@ -19,7 +19,11 @@ async def test_runtime_capabilities_include_role_scoped_tools(session, admin) ->
         if item.get("kind") == "expert"
     }
 
-    assert tool_codes == {"account.metrics_summary", "account.profile"}
+    assert tool_codes == {
+        "account.data_context",
+        "account.metrics_summary",
+        "account.profile",
+    }
     assert "01-positioning" in expert_codes
 
 

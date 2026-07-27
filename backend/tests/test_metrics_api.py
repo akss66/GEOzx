@@ -150,7 +150,7 @@ async def test_overview_remains_legacy_metric_snapshot_aggregation_for_manual_an
     await session.commit()
 
     token = await _token(client, "admin@test.com", "admin-pw-123")
-    response = await client.get("/metrics/overview?days=7", headers=_auth(token))
+    response = await client.get("/metrics/overview?days=365", headers=_auth(token))
 
     assert response.status_code == 200
     assert response.json() == {

@@ -1,11 +1,16 @@
 import { api } from "./client";
 import type {
   Account,
+  AccountAssignmentsInput,
   AccountGroup,
   AccountMatrix,
+  Client,
+  ClientStatus,
   CreateAccountInput,
   DistributionAction,
+  DouyinAccountCapabilities,
   DouyinAuthorizeUrl,
+  DouyinCapabilityKey,
   DouyinDataSyncResult,
   DouyinJsSignature,
   DouyinScanAddInput,
@@ -31,6 +36,7 @@ export async function listProjects(): Promise<Project[]> {
 export async function createProject(input: {
   name: string;
   description?: string;
+  client_id?: number | null;
 }): Promise<Project> {
   const { data } = await api.post<Project>("/projects", input);
   return data;
@@ -46,6 +52,30 @@ export async function updateProject(
 
 export async function deleteProject(id: number): Promise<void> {
   await api.delete(`/projects/${id}`);
+}
+
+// —— 客户 ——
+
+export async function listClients(): Promise<Client[]> {
+  const { data } = await api.get<Client[]>("/clients");
+  return data;
+}
+
+export async function createClient(input: { name: string }): Promise<Client> {
+  const { data } = await api.post<Client>("/clients", input);
+  return data;
+}
+
+export async function updateClient(
+  id: number,
+  patch: { name?: string; status?: ClientStatus },
+): Promise<Client> {
+  const { data } = await api.patch<Client>(`/clients/${id}`, patch);
+  return data;
+}
+
+export async function archiveClient(id: number): Promise<void> {
+  await api.delete(`/clients/${id}`);
 }
 
 // —— 账号分组 ——
@@ -72,6 +102,19 @@ export async function listAccounts(filters?: { groupId?: number; projectId?: num
       ...(filters?.projectId != null ? { project_id: filters.projectId } : {}),
     },
   });
+  return data;
+}
+
+export async function getAccount(id: number): Promise<Account> {
+  const { data } = await api.get<Account>(`/accounts/${id}`);
+  return data;
+}
+
+export async function replaceAccountAssignments(
+  id: number,
+  input: AccountAssignmentsInput,
+): Promise<Account> {
+  const { data } = await api.put<Account>(`/accounts/${id}/assignments`, input);
   return data;
 }
 
@@ -102,6 +145,26 @@ export async function createDouyinAuthorizeUrl(accountId: number): Promise<Douyi
   const { data } = await api.post<DouyinAuthorizeUrl>(
     "/platform-integrations/douyin/oauth/authorize",
     { account_id: accountId },
+  );
+  return data;
+}
+
+export async function getDouyinAccountCapabilities(
+  accountId: number,
+): Promise<DouyinAccountCapabilities> {
+  const { data } = await api.get<DouyinAccountCapabilities>(
+    `/platform-integrations/douyin/accounts/${accountId}/capabilities`,
+  );
+  return data;
+}
+
+export async function createDouyinIncrementalAuthorizeUrl(
+  accountId: number,
+  capabilityKey: DouyinCapabilityKey,
+): Promise<DouyinAuthorizeUrl> {
+  const { data } = await api.post<DouyinAuthorizeUrl>(
+    "/platform-integrations/douyin/oauth/incremental-authorize",
+    { account_id: accountId, capability_key: capabilityKey },
   );
   return data;
 }

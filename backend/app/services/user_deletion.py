@@ -703,7 +703,6 @@ async def execute_permanent_deletion(
     actor: User,
     target_user_id: int,
     preview_token: str,
-    target_email: str,
     secondary_password: str,
 ) -> DeletionReceipt:
     claims = _decode_preview_token(preview_token)
@@ -737,12 +736,6 @@ async def execute_permanent_deletion(
             status.HTTP_409_CONFLICT,
             "USER_DELETION_PREVIEW_STALE",
             "Deletion target changed; create a new preview",
-        )
-    if target_email != target.email:
-        _business_error(
-            status.HTTP_409_CONFLICT,
-            "USER_DELETION_EMAIL_MISMATCH",
-            "Target email does not match",
         )
     impact = await build_deletion_impact(session, actor=actor, target=target)
     _raise_blocker(impact.blockers)

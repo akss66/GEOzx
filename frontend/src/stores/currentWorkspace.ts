@@ -48,6 +48,18 @@ export function resolveWorkspaceAccount(
   ) ?? null;
 }
 
+export function resolveAccountWorkspaceSelection(
+  account: Account,
+  current: WorkspaceSelection,
+): WorkspaceSelection {
+  return {
+    clientId: account.client_id ?? account.client_ids?.[0] ?? current.clientId,
+    projectId: account.project_id ?? account.project_ids?.[0] ?? current.projectId,
+    platform: account.platform,
+    accountId: account.id,
+  };
+}
+
 function readStoredWorkspace(): WorkspaceSelection {
   try {
     const raw = localStorage.getItem(WORKSPACE_KEY);
@@ -80,11 +92,11 @@ function updateSelection(
 export const useCurrentWorkspace = create<CurrentWorkspaceState>((set, get) => ({
   ...readStoredWorkspace(),
   setClientId: (clientId) => {
-    const next = { ...get(), clientId, projectId: null, accountId: null };
+    const next = { ...get(), clientId, projectId: null };
     updateSelection(set, next);
   },
   setProjectId: (projectId) => {
-    const next = { ...get(), projectId, accountId: null };
+    const next = { ...get(), projectId };
     updateSelection(set, next);
   },
   setPlatform: (platform) => {

@@ -241,7 +241,20 @@ async def test_approval_workspace_aggregates_real_scoped_items(client, admin, me
 
 
 @pytest.mark.asyncio
-async def test_only_reviewer_or_lead_can_decide_project_approval(client, admin, member, session):
+async def test_only_reviewer_or_lead_can_decide_project_approval(
+    client,
+    admin,
+    member,
+    session,
+    monkeypatch,
+):
+    async def fake_rerun_stage(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_adapter._engine.rerun_stage",
+        fake_rerun_stage,
+    )
     _, _, _, gate, tool, acceptance, membership = await _approval_data(admin, member, session)
     token = await _token(client, "user@test.com", "user-pw-123")
     membership.role = WorkspaceRole.EDITOR

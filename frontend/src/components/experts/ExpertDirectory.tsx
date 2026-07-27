@@ -1,16 +1,5 @@
 import type { AgentCode, AgentProfile } from "../../types";
-
-const MONOGRAM: Record<AgentCode, string> = {
-  "00-decision": "MA",
-  "01-positioning": "PX",
-  "02-content-director": "CD",
-  "03-art-director": "AD",
-  "04-video-creator": "VC",
-  "05-editor": "ED",
-  "06-operator": "OP",
-  "07-advertiser": "GR",
-  "08-customer-service": "CS",
-};
+import { AgentAvatar } from "../agents/AgentAvatar";
 
 export function ExpertDirectory({
   experts,
@@ -38,7 +27,11 @@ export function ExpertDirectory({
             onClick={() => onSelect(expert.code)}
           >
             <span className="expert-directory__index">{String(index + 1).padStart(2, "0")}</span>
-            <span className="expert-directory__monogram">{MONOGRAM[expert.code]}</span>
+            <AgentAvatar
+              code={expert.code}
+              className="expert-directory__monogram"
+              label={expert.name}
+            />
             <span className="expert-directory__copy">
               <strong>{expert.name}</strong>
               <small>{expert.one_liner}</small>
@@ -49,8 +42,4 @@ export function ExpertDirectory({
       </nav>
     </aside>
   );
-}
-
-export function expertMonogram(code: AgentCode) {
-  return MONOGRAM[code];
 }

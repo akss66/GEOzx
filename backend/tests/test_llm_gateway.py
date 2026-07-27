@@ -10,7 +10,13 @@ from app.config import settings
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.cost import compute_cost
-from app.llm.gateway import LLMError, LLMGateway, provider_for
+from app.llm.gateway import (
+    LLMCallContext,
+    LLMError,
+    LLMGateway,
+    bind_llm_call_context,
+    provider_for,
+)
 from app.models import IntegrationConfig, LLMCall, ModelConfig, ModelProvider, Org
 from app.services.model_provider_registry import replace_provider_key
 
@@ -21,11 +27,13 @@ class FakeAdapter:
     def __init__(self, fail_models: set[str] | None = None) -> None:
         self.fail_models = fail_models or set()
         self.calls: list[str] = []
+        self.options: list[dict] = []
 
     async def complete(
         self, model: str, messages: list[dict], options: dict | None = None
     ) -> CompletionResult:
         self.calls.append(model)
+        self.options.append(dict(options or {}))
         if model in self.fail_models:
             raise RuntimeError(f"boom {model}")
         return CompletionResult(
@@ -140,6 +148,39 @@ async def test_gateway_records_the_authenticated_request_actor(session, admin) -
     call = await session.scalar(select(LLMCall).where(LLMCall.org_id == admin.org_id))
     assert call is not None
     assert call.created_by_id == admin.id
+
+
+@pytest.mark.asyncio
+async def test_gateway_records_prompt_scope_budget_and_trace_metadata(session, admin) -> None:
+    adapter = FakeAdapter()
+    context = LLMCallContext(
+        task_id=41,
+        invocation_id=73,
+        trace_id="trace-abc",
+        prompt_id="expert.01-positioning",
+        prompt_version="1.0.0",
+        prompt_hash="a" * 64,
+        prompt_schema_version="positioning-strategy/v1",
+        scope={"org_id": admin.org_id, "project_id": 9, "account_id": 12},
+        budget={"max_tokens": 2048, "max_cost_usd": 0.2},
+        response_format={"type": "json_object"},
+    )
+
+    with bind_llm_call_context(context):
+        await _gw(adapter).chat(session, admin.org_id, "01-positioning", MSG)
+
+    call = await session.scalar(select(LLMCall).where(LLMCall.org_id == admin.org_id))
+    assert call is not None
+    assert call.task_id == 41
+    assert call.invocation_id == 73
+    assert call.trace_id == "trace-abc"
+    assert call.prompt_id == "expert.01-positioning"
+    assert call.prompt_version == "1.0.0"
+    assert call.prompt_hash == "a" * 64
+    assert call.prompt_schema_version == "positioning-strategy/v1"
+    assert call.scope == {"org_id": admin.org_id, "project_id": 9, "account_id": 12}
+    assert call.budget == {"max_tokens": 2048, "max_cost_usd": 0.2}
+    assert adapter.options[0]["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.asyncio

@@ -955,6 +955,7 @@ async def test_postgresql_mutation_queries_request_row_locks(monkeypatch):
 @pytest.mark.asyncio
 async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_batch(monkeypatch):
     captured: list[object] = []
+    committed_relationships: list[tuple[object, str, object]] = []
     stale_batch = DataImportBatch(
         org_id=1,
         account_id=2,
@@ -967,6 +968,21 @@ async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_bat
         id=3,
         status=ImportBatchStatus.COMMITTED,
         committed_at=datetime(2026, 7, 22, 9, 30),
+    )
+    authoritative_row = DataImportRow(
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        row_number=2,
+        status=ImportRowStatus.READY,
+    )
+    authoritative_conflict = DataConflict(
+        org_id=1,
+        account_id=2,
+        batch_id=3,
+        row_number=2,
+        field_name="manual_confirmation",
+        status=ConflictStatus.OPEN,
     )
 
     class _FakeBind:
@@ -985,12 +1001,22 @@ async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_bat
 
         async def scalars(self, statement):
             captured.append(statement)
+            compiled = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM data_import_rows" in compiled:
+                return [authoritative_row]
+            if "FROM data_conflicts" in compiled:
+                return [authoritative_conflict]
             return []
+
+    def _record_committed_value(instance, key, value):
+        committed_relationships.append((instance, key, value))
+        instance.__dict__[key] = value
 
     async def _fake_load_scoped_batch(*args, **kwargs):
         return stale_batch
 
     monkeypatch.setattr(data_import_service, "load_scoped_batch", _fake_load_scoped_batch)
+    monkeypatch.setattr(data_import_service, "set_committed_value", _record_committed_value)
     loaded = await data_import_service._load_mutation_batch(
         _FakeSession(),
         org_id=1,
@@ -1001,6 +1027,10 @@ async def test_postgresql_load_mutation_batch_refreshes_authoritative_locked_bat
     assert loaded is authoritative_batch
     assert loaded.status is ImportBatchStatus.COMMITTED
     assert loaded.committed_at == datetime(2026, 7, 22, 9, 30)
+    assert committed_relationships == [
+        (authoritative_batch, "rows", [authoritative_row]),
+        (authoritative_batch, "conflicts", [authoritative_conflict]),
+    ]
     batch_query = next(
         str(statement.compile(dialect=postgresql.dialect()))
         for statement in captured

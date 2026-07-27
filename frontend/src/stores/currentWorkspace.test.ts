@@ -52,7 +52,7 @@ describe("useCurrentWorkspace", () => {
     );
   });
 
-  it("clears project and account when the client changes", async () => {
+  it("clears the project but preserves the independent work account when the client changes", async () => {
     installLocalStorage();
     const { useCurrentWorkspace } = await import("./currentWorkspace");
 
@@ -68,7 +68,73 @@ describe("useCurrentWorkspace", () => {
       clientId: 9,
       projectId: null,
       platform: "douyin",
+      accountId: 3,
+    });
+  });
+
+  it("keeps the current client and project when opening an unbound account", async () => {
+    installLocalStorage();
+    const { resolveAccountWorkspaceSelection } = await import("./currentWorkspace");
+    const account = {
+      id: 3,
+      client_id: null,
+      client_ids: [],
+      project_id: null,
+      project_ids: [],
+      nickname: "未绑定账号",
+      platform: "douyin" as const,
+      group_id: null,
+      status: "active" as const,
+      external_account_id: "douyin-3",
+      integration_status: "connected" as const,
+      auth_status: "authorized" as const,
+      data_sync_status: "pending" as const,
+      created_at: "2026-07-23T00:00:00Z",
+    };
+
+    expect(resolveAccountWorkspaceSelection(account, {
+      clientId: 2,
+      projectId: 1,
+      platform: "douyin",
       accountId: null,
+    })).toEqual({
+      clientId: 2,
+      projectId: 1,
+      platform: "douyin",
+      accountId: 3,
+    });
+  });
+
+  it("uses an account's explicit default assignments when they exist", async () => {
+    installLocalStorage();
+    const { resolveAccountWorkspaceSelection } = await import("./currentWorkspace");
+    const account = {
+      id: 8,
+      client_id: 6,
+      client_ids: [4, 6],
+      project_id: 12,
+      project_ids: [10, 12],
+      nickname: "已归属账号",
+      platform: "douyin" as const,
+      group_id: null,
+      status: "active" as const,
+      external_account_id: "douyin-8",
+      integration_status: "connected" as const,
+      auth_status: "authorized" as const,
+      data_sync_status: "pending" as const,
+      created_at: "2026-07-23T00:00:00Z",
+    };
+
+    expect(resolveAccountWorkspaceSelection(account, {
+      clientId: 2,
+      projectId: 1,
+      platform: "douyin",
+      accountId: 3,
+    })).toEqual({
+      clientId: 6,
+      projectId: 12,
+      platform: "douyin",
+      accountId: 8,
     });
   });
 

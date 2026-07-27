@@ -36,6 +36,7 @@ from app.api import (
     orchestrator,
     platform_integrations,
     projects,
+    publishing,
     risks,
     search,
     users,
@@ -101,6 +102,7 @@ app.include_router(projects.router)
 app.include_router(accounts.router)
 app.include_router(account_data.router)
 app.include_router(platform_integrations.router)
+app.include_router(publishing.router)
 app.include_router(model_configs.router)
 app.include_router(model_configs.infrastructure_router)
 app.include_router(model_providers.router)

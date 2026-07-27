@@ -26,12 +26,15 @@ import {
 } from "../api/accountData";
 import { presentApiError } from "../api/errors";
 import { getBatchStatusLabel } from "../components/account-data/statusMeta";
-import { getWorkspaceContext } from "../api/shell";
+import { getAccount } from "../api/workspace";
 import { PlatformTag, OperationalState, PageHeader } from "../components/ui";
 import { FileImportFlow } from "../components/account-data/FileImportFlow";
 import { ImportBatchHistory } from "../components/account-data/ImportBatchHistory";
 import { ManualDataEntry } from "../components/account-data/ManualDataEntry";
-import { useCurrentWorkspace } from "../stores/currentWorkspace";
+import {
+  resolveAccountWorkspaceSelection,
+  useCurrentWorkspace,
+} from "../stores/currentWorkspace";
 import "../styles/account-data-center.css";
 
 type FlowFeedback = {
@@ -139,7 +142,11 @@ export default function AccountDataCenter() {
 }
 
 function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number }) {
-  const workspace = useCurrentWorkspace();
+  const workspaceClientId = useCurrentWorkspace((state) => state.clientId);
+  const workspaceProjectId = useCurrentWorkspace((state) => state.projectId);
+  const workspacePlatform = useCurrentWorkspace((state) => state.platform);
+  const workspaceAccountId = useCurrentWorkspace((state) => state.accountId);
+  const hydrateWorkspace = useCurrentWorkspace((state) => state.hydrate);
   const queryClient = useQueryClient();
   const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
   const [draftBatch, setDraftBatch] = useState<AccountDataImportBatch | null>(null);
@@ -155,21 +162,38 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     };
   }, []);
 
-  const contextQuery = useQuery({
-    queryKey: ["workspace-context", workspace.clientId, workspace.projectId],
-    queryFn: () => getWorkspaceContext(workspace.clientId, workspace.projectId),
+  const accountQuery = useQuery({
+    queryKey: ["account", routeAccountId],
+    queryFn: () => getAccount(routeAccountId),
+    retry: false,
   });
 
-  const account = useMemo(() => {
-    if (!Number.isFinite(routeAccountId) || !contextQuery.data) return null;
-    return contextQuery.data.accounts.find((item) => item.id === routeAccountId) ?? null;
-  }, [contextQuery.data, routeAccountId]);
+  const account = accountQuery.data ?? null;
 
   useEffect(() => {
     if (!account) return;
-    if (workspace.platform !== account.platform) workspace.setPlatform(account.platform);
-    if (workspace.accountId !== account.id) workspace.setAccountId(account.id);
-  }, [account, workspace]);
+    const next = resolveAccountWorkspaceSelection(account, {
+      clientId: workspaceClientId,
+      projectId: workspaceProjectId,
+      platform: workspacePlatform,
+      accountId: workspaceAccountId,
+    });
+    if (
+      workspaceClientId !== next.clientId
+      || workspaceProjectId !== next.projectId
+      || workspacePlatform !== next.platform
+      || workspaceAccountId !== next.accountId
+    ) {
+      hydrateWorkspace(next);
+    }
+  }, [
+    account,
+    hydrateWorkspace,
+    workspaceAccountId,
+    workspaceClientId,
+    workspacePlatform,
+    workspaceProjectId,
+  ]);
 
   const statusQuery = useQuery({
     enabled: Boolean(account),
@@ -393,7 +417,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     },
   });
 
-  if (contextQuery.isLoading) {
+  if (accountQuery.isLoading) {
     return (
       <div className="account-data-center account-data-center--loading" aria-label="账号数据中心加载中">
         <Skeleton active paragraph={{ rows: 2 }} />
@@ -405,16 +429,16 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     );
   }
 
-  if (contextQuery.isError) {
-    const failure = presentApiError(contextQuery.error, "当前账号上下文暂时不可用。");
+  if (accountQuery.isError) {
+    const failure = presentApiError(accountQuery.error, "当前账号暂时不可用。");
     return (
       <OperationalState
         kind="error"
-        title="账号上下文加载失败"
+        title="账号加载失败"
         description={failure.message}
         diagnostic={failure.diagnostic}
         actionLabel="重新加载"
-        onAction={() => void contextQuery.refetch()}
+        onAction={() => void accountQuery.refetch()}
       />
     );
   }
@@ -423,10 +447,8 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     return (
       <OperationalState
         kind="blocked"
-        title="找不到当前账号的数据中心"
-        description="系统不会自动切换到其他账号。"
-        actionLabel="返回后重试"
-        onAction={() => void contextQuery.refetch()}
+        title="找不到当前账号"
+        description="账号接口没有返回可用数据，请返回账号矩阵重新选择。"
       />
     );
   }

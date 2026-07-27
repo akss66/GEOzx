@@ -1,10 +1,17 @@
 import { CheckCircleFilled, ExclamationCircleFilled } from "@ant-design/icons";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App as AntApp, Button, Checkbox, Form, Input, Select, Switch } from "antd";
 import { useEffect, useMemo, useState } from "react";
 
 import { checkPublishReadiness } from "../../api/orchestrator";
+import {
+  createPublishJob,
+  listPublishJobs,
+} from "../../services/publishing";
+import { useCurrentWorkspace } from "../../stores/currentWorkspace";
 import type { ContentWorkspace, PublishReadiness } from "../../types";
+import type { PublishJob } from "../../types/publishing";
+import { PublishJobPanel } from "./PublishJobPanel";
 
 interface PublishForm {
   title: string;
@@ -50,9 +57,26 @@ function PublishPreparationForm({
   const qc = useQueryClient();
   const [form] = Form.useForm<PublishForm>();
   const [result, setResult] = useState<PublishReadiness | null>(null);
+  const clientId = useCurrentWorkspace((state) => state.clientId);
+  const projectId = useCurrentWorkspace((state) => state.projectId);
   const readyMaterials = useMemo(
     () => workspace.materials.filter((material) => material.status === "ready"),
     [workspace.materials],
+  );
+  const publishJobsKey = ["publish-jobs", account.id] as const;
+  const jobsQuery = useQuery({
+    queryKey: publishJobsKey,
+    queryFn: () => listPublishJobs({ accountId: account.id, limit: 50 }),
+    refetchInterval: (query) =>
+      shouldPollJobs(query.state.data as PublishJob[] | undefined) ? 5000 : false,
+  });
+  const activeJob = useMemo(
+    () => latestJobForContent(
+      jobsQuery.data ?? [],
+      workspace.content_item.id,
+      workspace.publish_tool_calls.map((toolCall) => toolCall.id),
+    ),
+    [jobsQuery.data, workspace.content_item.id, workspace.publish_tool_calls],
   );
 
   useEffect(() => {
@@ -69,6 +93,23 @@ function PublishPreparationForm({
     setResult(null);
   }, [form, workspace.content_item.id, workspace.content_item.title]);
 
+  const createJobMutation = useMutation({
+    mutationFn: (next: PublishReadiness) =>
+      createPublishJob({
+        account_id: account.id,
+        active_client_id: clientId,
+        active_project_id: projectId,
+        tool_call_id: next.tool_call.id,
+        idempotency_key: publishJobKey(workspace.content_item.id, next.tool_call.id),
+        publish_package: next.package,
+      }),
+    onSuccess: (job) => {
+      qc.setQueryData<PublishJob[]>(publishJobsKey, (current = []) =>
+        [job, ...current.filter((item) => item.id !== job.id)],
+      );
+    },
+  });
+
   const mutation = useMutation({
     mutationFn: (values: PublishForm) =>
       checkPublishReadiness(workspace.content_item.id, {
@@ -84,15 +125,29 @@ function PublishPreparationForm({
         visibility: values.visibility,
         allow_comment: values.allow_comment,
       }),
-    onSuccess: (next) => {
+    onSuccess: async (next) => {
       setResult(next);
       qc.invalidateQueries({ queryKey: ["content-workspace", workspace.content_item.id] });
       qc.invalidateQueries({ queryKey: ["pending-tool-call-approvals"] });
-      if (next.ready) message.success("发布包已生成，等待人工确认");
-      else message.warning("发布准备存在阻断项，请调整后重试");
+      if (!next.ready) {
+        message.warning("发布准备存在阻断项，请调整后重试");
+        return;
+      }
+      try {
+        await createJobMutation.mutateAsync(next);
+        message.success("发布任务已创建，等待人工确认");
+      } catch {
+        message.error("发布包已生成，但发布任务创建失败，请重试");
+      }
     },
     onError: () => message.error("发布准备检查失败"),
   });
+
+  const updateJob = (job: PublishJob) => {
+    qc.setQueryData<PublishJob[]>(publishJobsKey, (current = []) =>
+      [job, ...current.filter((item) => item.id !== job.id)],
+    );
+  };
 
   return (
     <div className="publish-preparation">
@@ -125,7 +180,13 @@ function PublishPreparationForm({
           <Select options={[{ label: "公开", value: "public" }, { label: "仅朋友", value: "friends" }, { label: "私密", value: "private" }]} />
         </Form.Item>
         <Form.Item name="allow_comment" label="允许评论" valuePropName="checked"><Switch /></Form.Item>
-        <Button type="primary" htmlType="submit" block loading={mutation.isPending} disabled={readyMaterials.length === 0}>
+        <Button
+          type="primary"
+          htmlType="submit"
+          block
+          loading={mutation.isPending || createJobMutation.isPending}
+          disabled={readyMaterials.length === 0}
+        >
           检查并生成发布包
         </Button>
       </Form>
@@ -144,8 +205,14 @@ function PublishPreparationForm({
               </div>
             ))}
           </div>
-          {result.ready ? <p>已进入人工审批，不会自动发布到抖音。</p> : null}
+          {result.ready ? <p>已进入人工审批。审批通过后可拉起抖音完成投稿。</p> : null}
         </section>
+      ) : null}
+
+      {activeJob ? (
+        <PublishJobPanel job={activeJob} onJobChange={updateJob} />
+      ) : jobsQuery.isError ? (
+        <p className="content-inline-warning">发布任务状态暂时无法读取，请稍后重试。</p>
       ) : null}
     </div>
   );
@@ -176,4 +243,30 @@ function findingCopy(code: string, fallback: string) {
     "schedule.ok": "计划发布时间有效。",
   };
   return labels[code] ?? fallback;
+}
+
+function publishJobKey(contentItemId: number, toolCallId: number) {
+  return `content:${contentItemId}:tool:${toolCallId}`;
+}
+
+function latestJobForContent(
+  jobs: PublishJob[],
+  contentItemId: number,
+  workspaceToolCallIds: number[],
+) {
+  const prefix = `content:${contentItemId}:tool:`;
+  const toolCallIds = new Set(workspaceToolCallIds);
+  return jobs
+    .filter((job) =>
+      job.idempotency_key.startsWith(prefix)
+      || (job.tool_call_id != null && toolCallIds.has(job.tool_call_id)),
+    )
+    .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0] ?? null;
+}
+
+function shouldPollJobs(jobs: PublishJob[] | undefined) {
+  return Boolean(jobs?.some((job) =>
+    ["task_created", "handoff_ready", "user_publishing", "waiting_bind", "bound", "observing"]
+      .includes(job.status),
+  ));
 }

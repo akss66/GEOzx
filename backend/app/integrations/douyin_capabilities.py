@@ -36,7 +36,7 @@ DOUYIN_CAPABILITIES: tuple[DouyinCapability, ...] = (
         key="h5_publish",
         label="H5 发布",
         description="由用户主动从网站应用唤起抖音并确认发布内容。",
-        app_scopes=("h5.share", "open.get.ticket"),
+        app_scopes=("h5.share", "open.get.ticket", "aweme.share"),
         user_scopes=(),
     ),
     DouyinCapability(

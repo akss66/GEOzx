@@ -75,8 +75,11 @@ def _read(value: Any, key: str, default: Any = None) -> Any:
 def _request_options(options: dict[str, Any] | None) -> dict[str, Any]:
     if not options:
         return {}
-    return {
+    result = {
         "temperature": options["temperature"],
         "max_tokens": options["max_tokens"],
         "timeout": options["timeout_seconds"],
     }
+    if "response_format" in options:
+        result["response_format"] = options["response_format"]
+    return result

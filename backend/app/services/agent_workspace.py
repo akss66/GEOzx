@@ -1,6 +1,5 @@
 """Project-scoped direct expert execution and handoff ledger."""
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -10,15 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.agents.advertising import AdvertisingAgent
-from app.agents.art import ArtAgent
-from app.agents.base import AgentContext, BaseAgent
-from app.agents.content import ContentAgent
-from app.agents.customer_service import CustomerServiceAgent
-from app.agents.editing import EditingAgent
-from app.agents.operation import OperationAgent
-from app.agents.positioning import PositioningAgent
-from app.agents.video import VideoAgent
+from app.agents.base import AgentContext
+from app.agents.registry import AGENT_SPECS, AgentSpec
 from app.core.approval_audit import add_approval_requested
 from app.core.workspace_access import require_account_access, require_project_access
 from app.models import (
@@ -42,15 +34,13 @@ from app.models.enums import (
     AgentCode,
     AgentInvocationStatus,
     BrainTaskStatus,
-    BrainTaskType,
-    ContentStage,
     ContentStatus,
     DeliverableAcceptanceStatus,
     DeliverableStatus,
-    DeliverableType,
     KnowledgeCategory,
     WorkspaceRole,
 )
+from app.orchestrator.agent_harness import AgentHarnessResult, agent_harness
 from app.services.agent_management import get_business_config, require_agent_enabled
 from app.services.knowledge_workspace import (
     knowledge_context,
@@ -63,96 +53,13 @@ class AgentExecutionError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class AgentSpec:
-    name: str
-    runner: type[BaseAgent]
-    deliverable_type: DeliverableType
-    deliverable_title: str
-    stage: ContentStage
-    task_type: BrainTaskType
-
-
-@dataclass(frozen=True)
-class AgentRunBundle:
-    task: BrainTask
-    invocation: AgentInvocation
-    deliverable: Deliverable
-    acceptance: DeliverableAcceptance
-    knowledge_sources: list[KnowledgeEntry]
+AgentRunBundle = AgentHarnessResult
 
 
 _OPERATING_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
 
-AGENT_SPECS: dict[AgentCode, AgentSpec] = {
-    AgentCode.POSITIONING: AgentSpec(
-        "账号定位专家",
-        PositioningAgent,
-        DeliverableType.POSITIONING_STRATEGY,
-        "账号定位方案",
-        ContentStage.POSITIONING,
-        BrainTaskType.ACCOUNT_DIAGNOSIS,
-    ),
-    AgentCode.CONTENT_DIRECTOR: AgentSpec(
-        "编导文案专家",
-        ContentAgent,
-        DeliverableType.VIDEO_SCRIPT,
-        "视频脚本",
-        ContentStage.CONTENT_DIRECTION,
-        BrainTaskType.CONTENT_CREATION,
-    ),
-    AgentCode.ART_DIRECTOR: AgentSpec(
-        "美术提示词专家",
-        ArtAgent,
-        DeliverableType.ART_PROMPT,
-        "视觉提示方案",
-        ContentStage.ART_DIRECTION,
-        BrainTaskType.CONTENT_CREATION,
-    ),
-    AgentCode.VIDEO_CREATOR: AgentSpec(
-        "视频创作专家",
-        VideoAgent,
-        DeliverableType.VIDEO_ASSET,
-        "视频素材方案",
-        ContentStage.VIDEO_CREATION,
-        BrainTaskType.CONTENT_CREATION,
-    ),
-    AgentCode.EDITOR: AgentSpec(
-        "剪辑专家",
-        EditingAgent,
-        DeliverableType.EDITED_VIDEO,
-        "剪辑成片方案",
-        ContentStage.EDITING,
-        BrainTaskType.CONTENT_CREATION,
-    ),
-    AgentCode.OPERATOR: AgentSpec(
-        "账号运营专家",
-        OperationAgent,
-        DeliverableType.REVIEW_REPORT,
-        "运营复盘报告",
-        ContentStage.OPERATION,
-        BrainTaskType.REVIEW_OPTIMIZATION,
-    ),
-    AgentCode.ADVERTISER: AgentSpec(
-        "投流专家",
-        AdvertisingAgent,
-        DeliverableType.AD_PLAN,
-        "投流方案",
-        ContentStage.ADVERTISING,
-        BrainTaskType.REVIEW_OPTIMIZATION,
-    ),
-    AgentCode.CUSTOMER_SERVICE: AgentSpec(
-        "客服反馈专家",
-        CustomerServiceAgent,
-        DeliverableType.CS_RECORD,
-        "用户反馈报告",
-        ContentStage.CUSTOMER_SERVICE,
-        BrainTaskType.REVIEW_OPTIMIZATION,
-    ),
-}
 
-
-async def create_direct_agent_run(
+async def _create_direct_agent_run_legacy(
     session: AsyncSession,
     *,
     user: User,
@@ -393,6 +300,101 @@ async def create_direct_agent_run(
         title=acceptance.title,
         body=f"{spec.name}已完成独立调用，请确认是否采用。",
     )
+    await session.commit()
+    return await load_agent_run(session, task.id, user.org_id)
+
+
+async def create_direct_agent_run(
+    session: AsyncSession,
+    *,
+    user: User,
+    code: AgentCode,
+    project_id: int,
+    account_id: int,
+    prompt: str,
+    source_task_id: int | None = None,
+) -> AgentRunBundle:
+    """Create a direct specialist task and execute it through the shared Harness."""
+
+    spec = _spec(code)
+    project, account = await _require_scope(
+        session,
+        user=user,
+        project_id=project_id,
+        account_id=account_id,
+        roles=_OPERATING_ROLES,
+    )
+    management = await get_business_config(
+        session,
+        user.org_id,
+        code,
+        responsibility=spec.name,
+    )
+    upstream: dict = {}
+    source_deliverable_id: int | None = None
+    if source_task_id is not None:
+        source = await _load_direct_task(session, source_task_id, user.org_id)
+        _assert_task_scope(source, project_id, account_id)
+        source_deliverable = await session.scalar(
+            select(Deliverable)
+            .where(Deliverable.content_item_id == source.content_item_id)
+            .order_by(Deliverable.id.desc())
+        )
+        if source_deliverable is not None:
+            source_deliverable_id = source_deliverable.id
+            upstream["previous_result"] = source_deliverable.payload
+
+    task = BrainTask(
+        org_id=user.org_id,
+        created_by_id=user.id,
+        title=f"直接调用 · {spec.name}",
+        type=spec.task_type,
+        status=BrainTaskStatus.RUNNING,
+        progress=20,
+        current_focus=f"{spec.name}正在处理",
+        risk_count=0,
+        runtime_mode="direct_agent",
+        thread_id=f"direct-agent-{uuid4().hex}",
+    )
+    task.brief = TaskBrief(
+        goal=prompt,
+        project_id=project.id,
+        project_name=project.name,
+        platforms=[account.platform.value],
+        account_ids=[account.id],
+        cycle="独立专家调用",
+        content_goal=f"由{spec.name}产出可审阅、可采用的正式成果。",
+        expected_outputs=[spec.deliverable_title],
+        confirmation_actions=["采用成果", "提出修改", "交回主 Agent"],
+    )
+    task.plan = OrchestrationPlan(
+        summary=f"独立调用{spec.name}，成果进入人工验收。",
+        steps=[_plan_step(code, spec, prompt, "running")],
+        quality_gates=[*management["quality_gates"], "人工采用成果"],
+        requires_human_confirmation=True,
+    )
+    session.add(task)
+    await session.commit()
+
+    await agent_harness.execute(
+        session,
+        user=user,
+        task=task,
+        code=code,
+        purpose=prompt,
+        evidence_refs=(
+            [f"deliverable:{source_deliverable_id}"]
+            if source_deliverable_id is not None
+            else []
+        ),
+        run_id=None,
+        step_key=f"direct:{code.value}",
+        upstream=upstream,
+    )
+    task.status = BrainTaskStatus.PENDING_ACCEPTANCE
+    task.progress = 90
+    task.current_focus = "专家成果等待人工采用"
+    task.plan.steps = [_plan_step(code, spec, prompt, "done")]
     await session.commit()
     return await load_agent_run(session, task.id, user.org_id)
 

@@ -15,8 +15,10 @@ import {
   rejudgeDeliverableAcceptance,
   rejectDeliverableAcceptance,
   reviseBrainDecision,
+  regenerateBrainMessage,
   selectBrainDecision,
   sendBrainMessage,
+  stopBrainGeneration,
 } from "./brain";
 import { api } from "./client";
 import type { AgentToolCall, BrainRuntime, BrainTask, DeliverableAcceptance } from "../types";
@@ -240,6 +242,32 @@ describe("brain api", () => {
       3,
       "/brain/tasks/12/decisions/direction-1/revise",
       { comment: "换一组更大胆的方向", request_new_options: true },
+    );
+  });
+
+  it("stops and regenerates a main Agent turn through dedicated runtime endpoints", async () => {
+    apiPost
+      .mockResolvedValueOnce({
+        data: { client_message_id: "turn-1", stop_requested: true },
+      })
+      .mockResolvedValueOnce({ data: runtime });
+
+    await expect(
+      stopBrainGeneration({ clientMessageId: "turn-1", taskId: 12 }),
+    ).resolves.toEqual({ client_message_id: "turn-1", stop_requested: true });
+    await expect(
+      regenerateBrainMessage({ taskId: 12, clientMessageId: "turn-2" }),
+    ).resolves.toEqual(runtime);
+
+    expect(apiPost).toHaveBeenNthCalledWith(
+      1,
+      "/brain/generations/turn-1/stop",
+      { task_id: 12 },
+    );
+    expect(apiPost).toHaveBeenNthCalledWith(
+      2,
+      "/brain/tasks/12/regenerate",
+      { client_message_id: "turn-2" },
     );
   });
 

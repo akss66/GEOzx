@@ -22,6 +22,7 @@ from app.schemas.configuration import (
 )
 from app.services.model_provider_registry import (
     ProviderDeleteConflictError,
+    ProviderModelCatalogConflictError,
     create_model_provider,
     delete_model_provider,
     delete_model_provider_credential,
@@ -168,14 +169,23 @@ async def post_provider_discover_models(
     admin: AdminUser,
     session: SessionDep,
 ) -> ModelProviderDiscoveryOut:
-    return ModelProviderDiscoveryOut.model_validate(
-        await discover_model_provider_models(
-            session,
-            org_id=admin.org_id,
-            user_id=admin.id,
-            provider_id=provider_id,
+    try:
+        return ModelProviderDiscoveryOut.model_validate(
+            await discover_model_provider_models(
+                session,
+                org_id=admin.org_id,
+                user_id=admin.id,
+                provider_id=provider_id,
+            )
         )
-    )
+    except ProviderModelCatalogConflictError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "affected_agents": exc.affected_agents,
+                "missing_models": exc.missing_models,
+            },
+        )
 
 
 @router.put("/{provider_id}/models", response_model=ModelProviderDetailOut)
@@ -185,15 +195,24 @@ async def put_provider_models(
     admin: AdminUser,
     session: SessionDep,
 ) -> ModelProviderDetailOut:
-    return ModelProviderDetailOut.model_validate(
-        await put_model_provider_models(
-            session,
-            org_id=admin.org_id,
-            user_id=admin.id,
-            provider_id=provider_id,
-            models=body.models,
+    try:
+        return ModelProviderDetailOut.model_validate(
+            await put_model_provider_models(
+                session,
+                org_id=admin.org_id,
+                user_id=admin.id,
+                provider_id=provider_id,
+                models=body.models,
+            )
         )
-    )
+    except ProviderModelCatalogConflictError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "affected_agents": exc.affected_agents,
+                "missing_models": exc.missing_models,
+            },
+        )
 
 
 @router.delete("/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -24,6 +24,9 @@ class IngestMetricRequest(BaseModel):
     comment_rate: float = 0.0
     share_rate: float = 0.0
     follower_delta: int = 0
+    completion_rate_5s: float | None = None
+    bounce_rate_2s: float | None = None
+    profile_visit_count: int | None = None
 
 
 class TrendPoint(BaseModel):
@@ -76,6 +79,9 @@ class PerformanceSnapshotOut(BaseModel):
     comment_rate: float
     share_rate: float
     follower_delta: int
+    completion_rate_5s: float | None = None
+    bounce_rate_2s: float | None = None
+    profile_visit_count: int | None = None
     created_at: datetime
 
 
@@ -135,6 +141,8 @@ class ReviewDataStatusOut(BaseModel):
     latest_stat_date: date | None = None
     latest_synced_at: datetime | None = None
     latest_confirmed_at: datetime | None = None
+    days_since_observed: int | None = None
+    days_since_confirmed: int | None = None
     coverage: dict[str, str] = Field(default_factory=dict)
     conflict_count: int = 0
     source_summary: list["ReviewSourceSummaryOut"] = Field(default_factory=list)

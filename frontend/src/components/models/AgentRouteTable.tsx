@@ -58,6 +58,10 @@ function routeChanged(route: ModelRoute, draft: RouteDraft): boolean {
   return JSON.stringify(routeToDraft(route)) !== JSON.stringify(draft);
 }
 
+function providerName(providers: ModelProviderDetail[], providerId: number | null): string {
+  return providers.find((provider) => provider.id === providerId)?.display_name ?? "未知供应商";
+}
+
 export default function AgentRouteTable({
   routes,
   providers,
@@ -103,6 +107,19 @@ export default function AgentRouteTable({
             {routes.map((route) => {
               const draft = drafts[route.agent_code] ?? routeToDraft(route);
               const dirty = routeChanged(route, draft);
+              const availableTargets = new Set(
+                options.flatMap((group) => group.options.map((option) => option.value)),
+              );
+              const primaryTarget = encodeTarget(
+                draft.primary_provider_id,
+                draft.primary_model,
+              );
+              const fallbackTarget = encodeTarget(
+                draft.fallback_provider_id,
+                draft.fallback_model,
+              );
+              const primaryInvalid = Boolean(primaryTarget) && !availableTargets.has(primaryTarget);
+              const fallbackInvalid = Boolean(fallbackTarget) && !availableTargets.has(fallbackTarget);
 
               return (
                 <tr key={route.agent_code}>
@@ -129,6 +146,11 @@ export default function AgentRouteTable({
                         }}
                       >
                         <option value="" disabled>选择主路由</option>
+                        {primaryInvalid ? (
+                          <option value={primaryTarget} disabled>
+                            {`当前配置已失效：${providerName(providers, draft.primary_provider_id)} · ${draft.primary_model}`}
+                          </option>
+                        ) : null}
                         {options.map((group) => (
                           <optgroup key={group.label} label={group.label}>
                             {group.options.map((option) => (
@@ -139,6 +161,9 @@ export default function AgentRouteTable({
                           </optgroup>
                         ))}
                       </select>
+                      {primaryInvalid ? (
+                        <small role="alert">当前主路由已失效，请重新选择并保存。</small>
+                      ) : null}
                     </label>
                   </td>
                   <td>
@@ -160,6 +185,11 @@ export default function AgentRouteTable({
                         }}
                       >
                         <option value="">不设置</option>
+                        {fallbackInvalid ? (
+                          <option value={fallbackTarget} disabled>
+                            {`当前配置已失效：${providerName(providers, draft.fallback_provider_id)} · ${draft.fallback_model}`}
+                          </option>
+                        ) : null}
                         {options.map((group) => (
                           <optgroup key={group.label} label={group.label}>
                             {group.options.map((option) => (
@@ -170,6 +200,9 @@ export default function AgentRouteTable({
                           </optgroup>
                         ))}
                       </select>
+                      {fallbackInvalid ? (
+                        <small role="alert">当前兜底路由已失效，请重新选择并保存。</small>
+                      ) : null}
                     </label>
                   </td>
                   <td>

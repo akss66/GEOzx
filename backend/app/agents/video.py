@@ -1,6 +1,7 @@
 """04 视频创作专家（真实 LLMAgent，只产生成计划）。
 
-system prompt: prompts/04-video.md ｜ 输出: VideoAssetPayload ｜ 输入: 上游美术提示词。
+system prompt: Prompt Registry `experts/04-video/v1.md`
+输出: VideoAssetPayload ｜ 输入: 上游美术提示词。
 真实出片由后台 arq 任务异步执行（agent.done → generate_video，见 E7 异步化）：
 此处仅产生成参数计划并标记 gen_status=queued，避免同步阻塞编排/触发 HTTP 超时。
 """

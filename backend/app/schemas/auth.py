@@ -86,7 +86,6 @@ class UserDeletionImpactOut(BaseModel):
 
 class PermanentDeleteUserRequest(BaseModel):
     preview_token: str = Field(min_length=20, max_length=2048)
-    target_email: EmailStr
     secondary_password: str = Field(min_length=8, max_length=128)
 
     @field_validator("secondary_password")
@@ -154,6 +153,7 @@ class ProjectAccessCatalogItem(BaseModel):
 class AccountAccessCatalogItem(BaseModel):
     id: int
     client_id: int | None
+    client_ids: list[int]
     project_ids: list[int]
     nickname: str
     platform: Platform

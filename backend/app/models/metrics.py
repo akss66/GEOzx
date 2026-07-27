@@ -97,6 +97,9 @@ class MetricSnapshot(Base, TimestampMixin):
     favorite_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cover_click_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_watch_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    completion_rate_5s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bounce_rate_2s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profile_visit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     org: Mapped["Org"] = relationship()  # noqa: F821
     import_batch: Mapped["DataImportBatch | None"] = relationship(  # noqa: F821

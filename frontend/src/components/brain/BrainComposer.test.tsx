@@ -35,6 +35,53 @@ const permission: AgentToolCall = {
 };
 
 describe("BrainComposer", () => {
+  it("submits with Enter but keeps Shift+Enter for a newline", () => {
+    const onSubmit = vi.fn();
+    render(
+      <BrainComposer
+        value="分析当前账号"
+        disabled={false}
+        loading={false}
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const input = screen.getByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", shiftKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("replaces the send action with a real stop action while generating", () => {
+    const onStop = vi.fn();
+    render(
+      <BrainComposer
+        value=""
+        disabled
+        loading
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={vi.fn()}
+        onStop={onStop}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "发送给主 Agent" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
   it("uses a business name instead of an internal tool name", () => {
     render(
       <BrainComposer

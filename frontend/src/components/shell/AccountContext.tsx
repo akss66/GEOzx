@@ -1,5 +1,5 @@
 import { CheckOutlined, DownOutlined } from "@ant-design/icons";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   listSelectableWorkspaceAccounts,
@@ -43,14 +43,14 @@ export function AccountContext({
         <section className="tz-account-panel" role="dialog" aria-label="切换当前账号">
           <header><strong>当前工作账号</strong><span>抖音</span></header>
           {availableAccounts.length === 0 ? (
-            <p>当前客户暂无可用抖音账号</p>
+            <p>暂无可用抖音账号，请先在账号矩阵接入账号</p>
           ) : availableAccounts.map((account) => (
             <button
               type="button"
               key={account.id}
               onClick={() => { onChange(account.id); setOpen(false); }}
             >
-              <span className="tz-account-avatar">{account.nickname.slice(0, 1)}</span>
+              <AccountAvatar account={account} />
               <span><strong>{account.nickname}</strong><small>{account.auth_status === "authorized" ? "已授权" : "待授权"}</small></span>
               {account.id === accountId ? <CheckOutlined /> : null}
             </button>
@@ -58,5 +58,27 @@ export function AccountContext({
         </section>
       ) : null}
     </div>
+  );
+}
+
+function AccountAvatar({ account }: { account: Account }) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [account.avatar_url]);
+
+  return (
+    <span className="tz-account-avatar">
+      {account.avatar_url && !failed ? (
+        <img
+          src={account.avatar_url}
+          alt={account.nickname}
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span aria-hidden="true">{account.nickname.slice(0, 1)}</span>
+      )}
+    </span>
   );
 }

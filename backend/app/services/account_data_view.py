@@ -37,6 +37,9 @@ CONTENT_METRICS = (
     "favorite_count",
     "cover_click_rate",
     "avg_watch_time_seconds",
+    "completion_rate_5s",
+    "bounce_rate_2s",
+    "profile_visit_count",
 )
 ACCOUNT_METRICS = (
     "play",
@@ -56,6 +59,9 @@ CONTENT_DIRECT_FIELDS = {
     "favorite_count": "favorite_count",
     "cover_click_rate": "cover_click_rate",
     "avg_watch_time_seconds": "avg_watch_time_seconds",
+    "completion_rate_5s": "completion_rate_5s",
+    "bounce_rate_2s": "bounce_rate_2s",
+    "profile_visit_count": "profile_visit_count",
 }
 CONTENT_DERIVED_FIELDS = {
     "like_rate": "like_count",
@@ -102,6 +108,8 @@ class ContentMetricSnapshotView:
     content_item_id: int | None
     platform_content_record_id: int | None
     has_stable_identity: bool
+    content_format: str | None
+    review_status: str | None
     metrics: dict[str, AccountDataMetric]
 
 
@@ -204,6 +212,7 @@ class AccountDataViewService:
         content_rows = list(
             await self.session.scalars(
                 select(MetricSnapshot)
+                .options(selectinload(MetricSnapshot.platform_content_record))
                 .where(
                     MetricSnapshot.org_id == account.org_id,
                     MetricSnapshot.account_id == account.id,
@@ -429,6 +438,16 @@ def _build_content_snapshots(
                 platform_content_record_id=row.platform_content_record_id,
                 has_stable_identity=(
                     row.platform_content_record_id is not None or row.content_item_id is not None
+                ),
+                content_format=(
+                    row.platform_content_record.content_format
+                    if row.platform_content_record is not None
+                    else None
+                ),
+                review_status=(
+                    row.platform_content_record.review_status
+                    if row.platform_content_record is not None
+                    else None
                 ),
                 metrics={metric: AccountDataMetric(metric=metric) for metric in CONTENT_METRICS},
             )
@@ -663,6 +682,7 @@ def _coerce_metric_value(metric_name: str, value) -> int | float | None:
         "comment_count",
         "share_count",
         "favorite_count",
+        "profile_visit_count",
     }:
         return int(value)
     return float(value)

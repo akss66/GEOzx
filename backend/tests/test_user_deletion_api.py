@@ -127,7 +127,6 @@ async def _preview(client, token: str, target: User) -> dict:
 async def _delete(client, token: str, target: User, preview_token: str, **overrides):
     body = {
         "preview_token": preview_token,
-        "target_email": target.email,
         "secondary_password": "delete-pass-123",
     }
     body.update(overrides)
@@ -160,7 +159,6 @@ async def test_member_cannot_use_protected_user_lifecycle_endpoints(
         headers=_auth(token),
         json={
             "preview_token": "x" * 32,
-            "target_email": target.email,
             "secondary_password": "delete-pass-123",
         },
     )
@@ -198,30 +196,6 @@ async def test_permanent_delete_rejects_stale_same_count_preview(
     assert _code(response) == "USER_DELETION_PREVIEW_STALE"
     assert await session.get(User, target.id) is not None
     assert await session.get(BrainTask, replacement.id) is not None
-
-
-@pytest.mark.asyncio
-async def test_permanent_delete_rejects_target_email_mismatch_without_password_attempt(
-    client, session, admin
-):
-    target = await _target(session, admin, "email")
-    token = await _login(client, admin.email, "admin-pw-123")
-    credential = await _ready_secondary_password(session, admin)
-    preview = await _preview(client, token, target)
-
-    response = await _delete(
-        client,
-        token,
-        target,
-        preview["preview_token"],
-        target_email="different@test.com",
-    )
-
-    assert response.status_code == 409
-    assert _code(response) == "USER_DELETION_EMAIL_MISMATCH"
-    await session.refresh(credential)
-    assert credential.failed_attempts == 0
-    assert await session.get(User, target.id) is not None
 
 
 @pytest.mark.asyncio
@@ -353,7 +327,6 @@ async def test_permanent_delete_rolls_back_every_change_on_transaction_failure(
     await session.commit()
     credential_id = credential.id
     preview = await _preview(client, token, target)
-    target_email = target.email
     real_delete_owned_records = user_deletion._delete_owned_records
 
     async def fail_after_first_write(deletion_session, impact):
@@ -389,7 +362,6 @@ async def test_permanent_delete_rolls_back_every_change_on_transaction_failure(
         headers=_auth(token),
         json={
             "preview_token": preview["preview_token"],
-            "target_email": target_email,
             "secondary_password": "delete-pass-123",
         },
     )
@@ -746,6 +718,7 @@ async def test_permanent_delete_keeps_account_owned_import_data_and_counts_redac
         source_kind=DataSourceKind.PLATFORM_EXPORT,
         status=ImportBatchStatus.PREVIEW_READY,
         template_code="douyin_work_list_v1",
+        content_sha256="0" * 64,
     )
     session.add(batch)
     await session.flush()
@@ -1034,7 +1007,6 @@ async def test_concurrent_deletes_atomically_reserve_one_preview(
             )
             body = {
                 "preview_token": preview_token,
-                "target_email": "concurrent-target@test.com",
                 "secondary_password": "delete-pass-123",
             }
 

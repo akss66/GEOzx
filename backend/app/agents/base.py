@@ -7,15 +7,20 @@
 """
 
 import json
-import re
 from abc import ABC, abstractmethod
+from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.prompts import load_prompt
-from app.llm.gateway import LLMGateway, gateway
+from app.llm.gateway import LLMCallContext, LLMGateway, bind_llm_call_context, gateway
 from app.models.enums import DeliverableType
+from app.orchestrator.agent_kernel import (
+    KernelAction,
+    SpecialistKernelDecision,
+)
+from app.prompts import prompt_registry
+from app.schemas.brain import RuntimeToolCall
 from app.schemas.deliverable import DeliverablePayload, validate_payload
 from app.services.agent_management import get_business_config
 
@@ -24,10 +29,16 @@ class AgentContext(BaseModel):
     """Agent 执行上下文：上游交付物、知识库切片、已采纳优化建议。"""
 
     content_item_id: int
+    task_id: int | None = None
+    invocation_id: int | None = None
+    trace_id: str | None = None
+    project_id: int | None = None
+    account_id: int | None = None
     request: str | None = None
-    upstream: dict[str, dict] = {}
-    knowledge: dict[str, list[dict]] = {}
-    optimization_suggestions: list[dict] = []
+    upstream: dict[str, dict] = Field(default_factory=dict)
+    knowledge: dict[str, list[dict]] = Field(default_factory=dict)
+    optimization_suggestions: list[dict] = Field(default_factory=list)
+    budget: dict = Field(default_factory=dict)
 
 
 class BaseAgent(ABC):
@@ -44,24 +55,15 @@ class BaseAgent(ABC):
         ...
 
 
-# 从模型输出中抽取 JSON：优先 ```json 围栏，其次首个 {...} 块，最后整体解析。
-_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-_BRACE_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
 def extract_json(text: str) -> dict:
-    """容错抽取 JSON 对象。失败抛 ValueError。"""
-    for pattern in (_FENCE_RE, _BRACE_RE):
-        m = pattern.search(text)
-        if m:
-            try:
-                return json.loads(m.group(1) if pattern is _FENCE_RE else m.group(0))
-            except json.JSONDecodeError:
-                continue
+    """Parse one complete JSON object without guessing embedded fragments."""
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
+        value = json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError) as exc:
         raise ValueError(f"模型输出无法解析为 JSON：{text[:200]}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("模型输出必须是唯一的 JSON 对象")
+    return value
 
 
 class LLMAgent(BaseAgent):
@@ -96,10 +98,223 @@ class LLMAgent(BaseAgent):
         parts.append("请严格按要求输出唯一的 JSON 对象，不要附加解释文字。")
         return "\n\n".join(parts)
 
+    async def kernel_decide(
+        self,
+        session: AsyncSession,
+        org_id: int | None,
+        ctx: AgentContext,
+        *,
+        available_tools: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+    ) -> SpecialistKernelDecision:
+        """Return one bounded specialist decision for the shared Agent Kernel."""
+        loaded_prompt = prompt_registry.load(f"expert.{self.prompt_name}")
+        system_prompt = await self._managed_system_prompt(
+            session,
+            org_id,
+            loaded_prompt.content,
+        )
+        protocol = {
+            "role": "bounded_specialist",
+            "allowed_actions": ["call_tools", "finish", "blocked"],
+            "rules": [
+                "Use only the tools listed in available_tools.",
+                "Never dispatch another expert.",
+                "Never ask or message the user directly.",
+                "Finish only when the typed deliverable is supported by available evidence.",
+                "Return exactly one JSON object and no surrounding prose.",
+            ],
+            "response_contract": {
+                "action": "call_tools | finish | blocked",
+                "rationale": "short internal execution rationale",
+                "tool_calls": [
+                    {
+                        "tool_code": "tool code from available_tools",
+                        "arguments": {},
+                        "purpose": "why this evidence is needed",
+                    }
+                ],
+                "deliverable": "the normal expert deliverable object when action=finish",
+                "blocked_reason": "required when action=blocked",
+            },
+        }
+        system_prompt = (
+            f"{system_prompt}\n\n[AGENT KERNEL PROTOCOL]\n"
+            f"{json.dumps(protocol, ensure_ascii=False, indent=2)}"
+        )
+        kernel_input = {
+            "available_tools": available_tools,
+            "tool_observations": observations,
+        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"{self.build_user_message(ctx)}\n\n"
+                    "[KERNEL INPUT]\n"
+                    f"{json.dumps(kernel_input, ensure_ascii=False, indent=2)}"
+                ),
+            },
+        ]
+
+        last_err: str | None = None
+        for _attempt in range(self.max_retries + 1):
+            if last_err is not None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Previous kernel decision was invalid: {last_err}\n"
+                            "Return one corrected JSON object."
+                        ),
+                    }
+                )
+            with bind_llm_call_context(self._call_context(ctx, org_id, loaded_prompt)):
+                result, _cost = await self._llm.chat(
+                    session,
+                    org_id,
+                    self.code,
+                    messages,
+                )
+            try:
+                data = extract_json(result.content)
+                return self._parse_kernel_decision(
+                    data,
+                    ctx=ctx,
+                    observation_count=len(observations),
+                )
+            except (KeyError, TypeError, ValueError, ValidationError) as exc:
+                last_err = str(exc)
+                messages.append({"role": "assistant", "content": result.content})
+
+        raise ValueError(
+            f"[{self.code}] kernel decision failed after "
+            f"{self.max_retries + 1} attempts: {last_err}"
+        )
+
+    def _parse_kernel_decision(
+        self,
+        data: dict[str, Any],
+        *,
+        ctx: AgentContext,
+        observation_count: int,
+    ) -> SpecialistKernelDecision:
+        # Compatibility: an old expert may still return its deliverable directly.
+        if "action" not in data:
+            return SpecialistKernelDecision(
+                action=KernelAction.FINISH,
+                rationale="Legacy direct deliverable.",
+                deliverable=validate_payload(self.output_type, data),
+            )
+
+        action = KernelAction(data["action"])
+        rationale = str(data.get("rationale") or "").strip()
+        if not rationale:
+            raise ValueError("kernel decision requires rationale")
+        if action == KernelAction.CALL_TOOLS:
+            raw_calls = data.get("tool_calls")
+            if not isinstance(raw_calls, list) or not raw_calls:
+                raise ValueError("call_tools requires at least one tool call")
+            calls = tuple(
+                RuntimeToolCall.model_validate(
+                    {
+                        "tool_code": raw["tool_code"],
+                        "arguments": raw.get("arguments") or {},
+                        "purpose": raw["purpose"],
+                        "idempotency_key": self._tool_idempotency_key(
+                            ctx,
+                            observation_count=observation_count,
+                            call_index=index,
+                            tool_code=str(raw["tool_code"]),
+                        ),
+                    }
+                )
+                for index, raw in enumerate(raw_calls)
+            )
+            return SpecialistKernelDecision(
+                action=action,
+                rationale=rationale,
+                tool_calls=calls,
+            )
+        if action == KernelAction.FINISH:
+            deliverable = data.get("deliverable")
+            if not isinstance(deliverable, dict):
+                raise ValueError("finish requires a deliverable object")
+            return SpecialistKernelDecision(
+                action=action,
+                rationale=rationale,
+                deliverable=validate_payload(self.output_type, deliverable),
+            )
+        if action == KernelAction.BLOCKED:
+            reason = str(data.get("blocked_reason") or rationale).strip()
+            return SpecialistKernelDecision(
+                action=action,
+                rationale=rationale,
+                blocked_reason=reason,
+            )
+        raise ValueError(f"unsupported specialist action: {action.value}")
+
+    def _tool_idempotency_key(
+        self,
+        ctx: AgentContext,
+        *,
+        observation_count: int,
+        call_index: int,
+        tool_code: str,
+    ) -> str:
+        invocation = ctx.invocation_id or ctx.task_id or ctx.content_item_id
+        safe_code = tool_code.replace(".", "-")[:48]
+        return (
+            f"expert:{invocation}:observation:{observation_count}:"
+            f"call:{call_index}:{safe_code}"
+        )[:160]
+
+    async def _managed_system_prompt(
+        self,
+        session: AsyncSession,
+        org_id: int | None,
+        base_prompt: str,
+    ) -> str:
+        system_prompt = base_prompt
+        if org_id is not None:
+            management = await get_business_config(session, org_id, self.code)
+            prompt_addition = management["system_prompt"].strip()
+            if prompt_addition:
+                system_prompt = (
+                    f"{system_prompt}\n\n[ORGANIZATION SPECIALIST INSTRUCTIONS]\n"
+                    f"{prompt_addition}"
+                )
+        return system_prompt
+
+    def _call_context(self, ctx: AgentContext, org_id: int | None, loaded_prompt):
+        scope = {
+            key: value
+            for key, value in {
+                "org_id": org_id,
+                "project_id": ctx.project_id,
+                "account_id": ctx.account_id,
+            }.items()
+            if value is not None
+        }
+        return LLMCallContext(
+            task_id=ctx.task_id,
+            invocation_id=ctx.invocation_id,
+            trace_id=ctx.trace_id,
+            prompt_id=loaded_prompt.spec.id,
+            prompt_version=loaded_prompt.spec.version,
+            prompt_hash=loaded_prompt.content_hash,
+            prompt_schema_version=loaded_prompt.spec.schema_version,
+            scope=scope,
+            budget=dict(ctx.budget),
+            response_format={"type": "json_object"},
+        )
+
     async def run(
         self, session: AsyncSession, org_id: int | None, ctx: AgentContext
     ) -> DeliverablePayload:
-        system_prompt = load_prompt(self.prompt_name)
+        loaded_prompt = prompt_registry.load(f"expert.{self.prompt_name}")
+        system_prompt = loaded_prompt.content
         if org_id is not None:
             management = await get_business_config(session, org_id, self.code)
             prompt_addition = management["system_prompt"].strip()
@@ -117,7 +332,34 @@ class LLMAgent(BaseAgent):
             if last_err is not None:
                 retry_msg = f"上次输出校验失败：{last_err}\n请修正后重新输出唯一 JSON 对象。"
                 messages.append({"role": "user", "content": retry_msg})
-            result, _cost = await self._llm.chat(session, org_id, self.code, messages)
+            scope = {
+                key: value
+                for key, value in {
+                    "org_id": org_id,
+                    "project_id": ctx.project_id,
+                    "account_id": ctx.account_id,
+                }.items()
+                if value is not None
+            }
+            call_context = LLMCallContext(
+                task_id=ctx.task_id,
+                invocation_id=ctx.invocation_id,
+                trace_id=ctx.trace_id,
+                prompt_id=loaded_prompt.spec.id,
+                prompt_version=loaded_prompt.spec.version,
+                prompt_hash=loaded_prompt.content_hash,
+                prompt_schema_version=loaded_prompt.spec.schema_version,
+                scope=scope,
+                budget=dict(ctx.budget),
+                response_format={"type": "json_object"},
+            )
+            with bind_llm_call_context(call_context):
+                result, _cost = await self._llm.chat(
+                    session,
+                    org_id,
+                    self.code,
+                    messages,
+                )
             try:
                 data = extract_json(result.content)
                 return validate_payload(self.output_type, data)

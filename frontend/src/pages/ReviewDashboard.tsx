@@ -16,7 +16,7 @@ import { App as AntApp, Button, Form, InputNumber, Modal, Segmented, Skeleton, T
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { sendOptimizationSuggestionToBrain } from "../api/feedback";
 import {
@@ -72,6 +72,9 @@ export default function ReviewDashboard() {
       setGoalOpen(false);
       message.success("周期目标已更新");
     },
+    onError: () => {
+      message.error("周期目标保存失败，请检查账号权限后重试");
+    },
   });
   const nextCycleMutation = useMutation({
     mutationFn: sendOptimizationSuggestionToBrain,
@@ -84,6 +87,7 @@ export default function ReviewDashboard() {
 
   const openGoal = () => {
     const goal = workspaceQuery.data?.goal;
+    goalForm.resetFields();
     goalForm.setFieldsValue({
       period_days: days,
       target_play: goal?.target_play ?? undefined,
@@ -98,6 +102,14 @@ export default function ReviewDashboard() {
 
   const saveGoal = async () => {
     const values = await goalForm.validateFields();
+    if (
+      values.target_play == null
+      && values.target_completion_rate == null
+      && values.target_follower_delta == null
+    ) {
+      message.warning("至少填写一项周期目标");
+      return;
+    }
     goalMutation.mutate({
       period_days: days,
       target_play: values.target_play || undefined,
@@ -326,6 +338,10 @@ function ReviewConclusion({
   onOpenGoal: () => void;
 }) {
   const goal = workspace.goal;
+  const isStale = (workspace.data_status.days_since_observed ?? 0) > 7;
+  const hasConflicts = workspace.data_status.conflict_count > 0;
+  const suppressConclusion = isStale || hasConflicts;
+  const goalConfigured = goal.status !== "not_configured";
   return (
     <section className="review-conclusion">
       <div className="review-conclusion-copy">
@@ -334,7 +350,23 @@ function ReviewConclusion({
           <strong>{workspace.account.nickname}</strong>
           <span>{formatPeriod(workspace)}</span>
         </div>
-        <h2>{workspace.conclusion}</h2>
+        <h2>
+          {suppressConclusion
+            ? "数据需要更新确认后，再形成新的运营结论"
+            : workspace.conclusion}
+        </h2>
+        {suppressConclusion ? (
+          <div className="review-quality-strip" aria-label="数据质量提醒">
+            <div>
+              {isStale ? <strong>数据已过期</strong> : null}
+              {hasConflicts ? (
+                <strong>{workspace.data_status.conflict_count} 项待处理冲突</strong>
+              ) : null}
+              <span>现有证据仍可查看，但暂不据此生成确定性建议。</span>
+            </div>
+            <Link to={`/accounts/${workspace.account.id}/data`}>更新数据</Link>
+          </div>
+        ) : null}
         <div className="review-source-line">
           <DatabaseOutlined />
           <span>{workspace.data_status.sources.map(metricSourceLabel).join("、")}</span>
@@ -342,21 +374,48 @@ function ReviewConclusion({
           <span>同步于 {formatDateTime(workspace.data_status.latest_synced_at)}</span>
         </div>
       </div>
-      <aside className="review-goal-summary" aria-label="目标完成度">
-        <header><span>目标完成度</span><Button type="text" icon={<EditOutlined />} onClick={onOpenGoal}>调整周期目标</Button></header>
-        <strong>{goal.achievement_percent != null ? `${goal.achievement_percent.toFixed(1)}%` : "待设置"}</strong>
-        <div className="review-progress-track" aria-hidden="true">
-          <span style={{ width: `${Math.min(goal.achievement_percent ?? 0, 100)}%` }} />
-        </div>
-        <p>{goal.summary}</p>
-        <div className="review-goal-components">
-          {goal.components.map((component) => (
-            <span key={component.metric}>
-              <small>{component.label}</small>
-              <b>{component.achievement_percent.toFixed(0)}%</b>
-            </span>
-          ))}
-        </div>
+      <aside
+        className="review-goal-summary"
+        data-configured={goalConfigured}
+        aria-label="目标完成度"
+      >
+        {goalConfigured ? (
+          <>
+            <header>
+              <span>目标完成度</span>
+              <Button type="text" icon={<EditOutlined />} onClick={onOpenGoal}>
+                调整目标
+              </Button>
+            </header>
+            <strong>
+              {goal.achievement_percent != null
+                ? `${goal.achievement_percent.toFixed(1)}%`
+                : "待积累数据"}
+            </strong>
+            <div className="review-progress-track" aria-hidden="true">
+              <span style={{ width: `${Math.min(goal.achievement_percent ?? 0, 100)}%` }} />
+            </div>
+            <p>{goal.summary}</p>
+            <div className="review-goal-components">
+              {goal.components.map((component) => (
+                <span key={component.metric}>
+                  <small>{component.label}</small>
+                  <b>{component.achievement_percent.toFixed(0)}%</b>
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="review-goal-empty">
+            <AimOutlined />
+            <span>运营周期目标</span>
+            <strong>为近 {workspace.period.days} 天设定衡量标准</strong>
+            <p>可设置播放量、平均完播率或净增粉丝，复盘会自动计算完成度。</p>
+            <Button type="primary" icon={<EditOutlined />} onClick={onOpenGoal}>
+              设置周期目标
+            </Button>
+          </div>
+        )}
       </aside>
     </section>
   );
@@ -566,6 +625,10 @@ function metricSourceLabel(source: ReviewWorkspace["data_status"]["sources"][num
     shipinhao: "视频号回流",
     manual: "人工录入",
     demo: "示例数据",
+    platform_export: "平台导出",
+    screenshot_verified: "截图核验",
+    manual_entry: "人工录入",
+    official_api: "官方接口",
   }[source];
 }
 

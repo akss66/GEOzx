@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
@@ -13,7 +13,7 @@ from app.core.workspace_access import (
     require_project_access,
 )
 from app.db import get_session
-from app.models import Account, Client, Project, ProjectAccount
+from app.models import Account, AccountClient, Client, Project, ProjectAccount
 from app.models.enums import ClientStatus
 from app.schemas.client import ClientOut
 from app.schemas.workspace import AccountOut, ProjectOut, account_out
@@ -47,57 +47,48 @@ async def get_workspace_context(
                 .order_by(Client.id)
             )
         ).all()
-    if not clients:
-        return WorkspaceContextOut(
-            clients=[], selected_client=None, projects=[], selected_project=None, accounts=[]
-        )
+    selected_client = None
+    projects: list[Project] = []
+    selected_project = None
+    if clients:
+        selected_client_id = client_id if client_id is not None else clients[0].id
+        selected_client = await require_client_access(session, user, selected_client_id)
+        if selected_client.status == ClientStatus.ACTIVE:
+            candidates = (
+                await session.scalars(
+                    select(Project)
+                    .where(Project.client_id == selected_client.id)
+                    .order_by(Project.id)
+                )
+            ).all()
+            for project in candidates:
+                try:
+                    await require_project_access(session, user, project.id)
+                except HTTPException as exc:
+                    if exc.status_code == status.HTTP_404_NOT_FOUND:
+                        continue
+                    raise
+                projects.append(project)
 
-    selected_client_id = client_id if client_id is not None else clients[0].id
-    selected_client = await require_client_access(session, user, selected_client_id)
-    if selected_client.status != ClientStatus.ACTIVE:
-        return WorkspaceContextOut(
-            clients=[ClientOut.model_validate(row) for row in clients],
-            selected_client=None,
-            projects=[],
-            selected_project=None,
-            accounts=[],
-        )
+            if project_id is not None:
+                selected_project = await require_project_access(session, user, project_id)
+                if selected_project.client_id != selected_client.id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="项目不存在",
+                    )
+        else:
+            selected_client = None
 
-    candidates = (
+    # Accounts are a first-class work context. Customer and project assignments
+    # enrich that context but never hide an otherwise accessible account.
+    accounts = (
         await session.scalars(
-            select(Project)
-            .where(Project.client_id == selected_client.id)
-            .order_by(Project.id)
+            select(Account)
+            .where(await accessible_account_clause(session, user))
+            .order_by(Account.id)
         )
     ).all()
-    projects: list[Project] = []
-    for project in candidates:
-        try:
-            await require_project_access(session, user, project.id)
-        except HTTPException as exc:
-            if exc.status_code == status.HTTP_404_NOT_FOUND:
-                continue
-            raise
-        projects.append(project)
-
-    selected_project = None
-    if project_id is not None:
-        selected_project = await require_project_access(session, user, project_id)
-        if selected_project.client_id != selected_client.id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
-
-    account_query = select(Account).where(
-        Account.client_id == selected_client.id,
-        await accessible_account_clause(session, user),
-    )
-    if selected_project is not None:
-        linked = select(ProjectAccount.account_id).where(
-            ProjectAccount.project_id == selected_project.id
-        )
-        account_query = account_query.where(
-            or_(Account.project_id == selected_project.id, Account.id.in_(linked))
-        )
-    accounts = (await session.scalars(account_query.order_by(Account.id))).all()
 
     project_rows = []
     if accounts:
@@ -110,14 +101,34 @@ async def get_workspace_context(
     for account_id_value, project_id_value in project_rows:
         project_ids_by_account.setdefault(account_id_value, []).append(project_id_value)
 
+    client_rows = []
+    if accounts:
+        client_rows = await session.execute(
+            select(AccountClient.account_id, AccountClient.client_id).where(
+                AccountClient.account_id.in_([account.id for account in accounts])
+            )
+        )
+    client_ids_by_account: dict[int, list[int]] = {}
+    for account_id_value, client_id_value in client_rows:
+        client_ids_by_account.setdefault(account_id_value, []).append(client_id_value)
+
     return WorkspaceContextOut(
         clients=[ClientOut.model_validate(row) for row in clients],
-        selected_client=ClientOut.model_validate(selected_client),
+        selected_client=(
+            ClientOut.model_validate(selected_client)
+            if selected_client is not None
+            else None
+        ),
         projects=[ProjectOut.model_validate(row) for row in projects],
         selected_project=(
             ProjectOut.model_validate(selected_project) if selected_project is not None else None
         ),
         accounts=[
-            account_out(account, project_ids_by_account.get(account.id)) for account in accounts
+            account_out(
+                account,
+                project_ids_by_account.get(account.id),
+                client_ids=client_ids_by_account.get(account.id),
+            )
+            for account in accounts
         ],
     )

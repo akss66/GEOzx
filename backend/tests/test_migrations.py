@@ -77,8 +77,39 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_account_data_projection_guards() -> None:
-    assert get_head_revision() == "20260722_0200"
+def test_migration_head_is_platform_content_source() -> None:
+    assert get_head_revision() == "20260727_0200"
+
+
+def test_platform_publish_jobs_migration_is_additive_and_reversible() -> None:
+    module = importlib.import_module(
+        "migrations.versions.20260727_0100_platform_publish_jobs"
+    )
+
+    assert module.down_revision == "20260723_0200"
+    upgrade_source = inspect.getsource(module.upgrade)
+    downgrade_source = inspect.getsource(module.downgrade)
+    assert '"platform_publish_jobs"' in upgrade_source
+    assert '"share_id"' in upgrade_source
+    assert '"posting_task_id"' in upgrade_source
+    assert '"platform_content_record_id"' in upgrade_source
+    assert "uq_platform_publish_jobs_org_idempotency" in upgrade_source
+    assert 'drop_table("platform_publish_jobs")' in downgrade_source
+
+
+def test_platform_content_source_migration_preserves_import_lineage() -> None:
+    module = importlib.import_module(
+        "migrations.versions.20260727_0200_platform_content_source"
+    )
+
+    assert module.down_revision == "20260727_0100"
+    upgrade_source = inspect.getsource(module.upgrade)
+    downgrade_source = inspect.getsource(module.downgrade)
+    assert '"source_kind"' in upgrade_source
+    assert '"source_metadata"' in upgrade_source
+    assert "data_import_batches.source_kind" in upgrade_source
+    assert 'drop_column("platform_content_records", "source_metadata")' in downgrade_source
+    assert 'drop_column("platform_content_records", "source_kind")' in downgrade_source
 
 
 def test_account_data_center_migration_is_linear_and_additive() -> None:

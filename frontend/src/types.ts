@@ -64,6 +64,7 @@ export interface UserDetailResponse extends User {
 export interface AccountAccessCatalogItem {
   id: number;
   client_id: number | null;
+  client_ids: number[];
   project_ids: number[];
   nickname: string;
   platform: Platform;
@@ -88,7 +89,8 @@ export type UserAccessCatalog = UserAccessCatalogBase & (
 export interface UserAccessCatalogResponse {
   clients?: UserAccessCatalogBase["clients"] | null;
   projects?: UserAccessCatalogBase["projects"] | null;
-  accounts?: Array<Omit<AccountAccessCatalogItem, "project_ids"> & {
+  accounts?: Array<Omit<AccountAccessCatalogItem, "client_ids" | "project_ids"> & {
+    client_ids?: number[] | null;
     project_ids?: number[] | null;
   }> | null;
 }
@@ -139,7 +141,6 @@ export interface UserDeletionPreview {
 
 export interface PermanentDeleteUserInput {
   preview_token: string;
-  target_email: string;
   secondary_password: string;
 }
 
@@ -156,7 +157,6 @@ export type UserGovernanceErrorCode =
   | "SECONDARY_PASSWORD_INVALID"
   | "SECONDARY_PASSWORD_LOCKED"
   | "SECONDARY_PASSWORD_NOT_CONFIGURED"
-  | "USER_DELETION_EMAIL_MISMATCH"
   | "USER_DELETION_PREVIEW_EXPIRED"
   | "USER_DELETION_PREVIEW_INVALID"
   | "USER_DELETION_PREVIEW_STALE"
@@ -699,6 +699,7 @@ export interface AccountCurrentTask {
 export interface Account {
   id: number;
   client_id?: number | null;
+  client_ids?: number[];
   nickname: string;
   platform: Platform;
   group_id: number | null;
@@ -725,6 +726,13 @@ export interface CreateAccountInput {
   group_id?: number | null;
   project_id?: number | null;
   external_account_id?: string | null;
+}
+
+export interface AccountAssignmentsInput {
+  client_ids: number[];
+  project_ids: number[];
+  default_client_id: number | null;
+  default_project_id: number | null;
 }
 
 export interface DouyinScanAddInput {
@@ -1358,6 +1366,10 @@ export interface ModelProviderDiscoveryResult {
 
 export interface ModelProviderDeleteConflict {
   affected_agents: string[];
+}
+
+export interface ModelProviderModelCatalogConflict extends ModelProviderDeleteConflict {
+  missing_models: string[];
 }
 
 // —— 共享知识库 ——

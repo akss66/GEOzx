@@ -10,7 +10,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import User
 from app.models.enums import AgentCode
+from app.orchestrator.runtime_tools import runtime_tool_capabilities
 from app.services.agent_management import available_tools, get_business_config
 
 _EXPERT_CODES = (
@@ -38,7 +40,7 @@ _EXPERT_META = {
 
 async def runtime_capabilities(
     session: AsyncSession,
-    org_id: int,
+    user: User,
 ) -> list[dict[str, Any]]:
     """Return enabled, organization-scoped capabilities for main-Agent routing."""
 
@@ -47,7 +49,7 @@ async def runtime_capabilities(
         name, default_description = _EXPERT_META[code]
         config = await get_business_config(
             session,
-            org_id,
+            user.org_id,
             code,
             responsibility=default_description,
         )
@@ -72,4 +74,5 @@ async def runtime_capabilities(
                 "delegation": "main_agent_only",
             }
         )
+    capabilities.extend(runtime_tool_capabilities(user))
     return capabilities

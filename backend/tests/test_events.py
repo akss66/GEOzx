@@ -1,5 +1,7 @@
 """事件总线测试：订阅/分发注册表 + 发布入队（mock arq pool，无需 Redis）。"""
 
+import json
+
 import pytest
 
 from app.core import events as ev
@@ -45,3 +47,42 @@ async def test_publish_event_enqueues(monkeypatch) -> None:
     assert job_arg["type"] == "unit.ping"
     assert job_arg["payload"] == {"m": "hi"}
     assert job_arg["content_item_id"] == 5
+
+
+@pytest.mark.asyncio
+async def test_realtime_events_reuse_the_shared_redis_client(monkeypatch) -> None:
+    published: list[tuple[str, str]] = []
+
+    class FakeRedis:
+        async def publish(self, channel: str, payload: str) -> None:
+            published.append((channel, payload))
+
+        async def aclose(self) -> None:
+            raise AssertionError("shared Redis client must not be closed for every token")
+
+    redis = FakeRedis()
+    monkeypatch.setattr(ev, "get_redis", lambda: redis, raising=False)
+
+    await ev.publish_realtime_event("brain.runtime.message_delta", {"delta": "你"})
+    await ev.publish_realtime_event("brain.runtime.message_delta", {"delta": "好"})
+
+    assert [channel for channel, _ in published] == [ev.EVENTS_CHANNEL, ev.EVENTS_CHANNEL]
+
+
+@pytest.mark.asyncio
+async def test_realtime_event_can_carry_the_persisted_event_id(monkeypatch) -> None:
+    published: list[str] = []
+
+    class FakeRedis:
+        async def publish(self, _channel: str, payload: str) -> None:
+            published.append(payload)
+
+    monkeypatch.setattr(ev, "get_redis", lambda: FakeRedis(), raising=False)
+
+    await ev.publish_realtime_event(
+        "brain.runtime.message_done",
+        {"task_id": 7},
+        event_id=41,
+    )
+
+    assert json.loads(published[0])["id"] == 41

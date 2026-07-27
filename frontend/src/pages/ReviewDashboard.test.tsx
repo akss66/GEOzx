@@ -50,6 +50,18 @@ const mocks = vi.hoisted(() => ({
       sources: ["douyin"],
       latest_stat_date: "2026-07-16",
       latest_synced_at: "2026-07-17T01:20:00Z",
+      latest_confirmed_at: "2026-07-17T01:20:00Z",
+      days_since_observed: 1,
+      days_since_confirmed: 1,
+      coverage: {
+        account_metrics: "missing",
+        content_metrics: "available",
+        content_identity: "available",
+        audience: "missing",
+        benchmarks: "missing",
+      },
+      conflict_count: 0,
+      source_summary: [],
       missing_reasons: [],
     },
     goal: {
@@ -228,11 +240,30 @@ describe("ReviewDashboard", () => {
     expect(screen.getByTestId("review-evidence-chart")).toBeInTheDocument();
   });
 
+  it("shows stale and conflicted data without presenting a fresh conclusion", async () => {
+    const originalConclusion = mocks.workspace.conclusion;
+    mocks.workspace.data_status.days_since_observed = 12;
+    mocks.workspace.data_status.conflict_count = 2;
+
+    renderReview();
+
+    expect(await screen.findByText("数据已过期")).toBeInTheDocument();
+    expect(screen.getByText("2 项待处理冲突")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "更新数据" })).toHaveAttribute(
+      "href",
+      "/accounts/3/data",
+    );
+    expect(screen.queryByText(originalConclusion)).not.toBeInTheDocument();
+
+    mocks.workspace.data_status.days_since_observed = 1;
+    mocks.workspace.data_status.conflict_count = 0;
+  });
+
   it("saves the selected period goal and can send a suggestion to the main agent", async () => {
     renderReview();
     await screen.findByText(mocks.workspace.conclusion);
 
-    fireEvent.click(screen.getByRole("button", { name: /调整周期目标/ }));
+    fireEvent.click(screen.getByRole("button", { name: /调整目标/ }));
     const playInput = await screen.findByLabelText("目标播放量");
     fireEvent.change(playInput, { target: { value: "12000" } });
     fireEvent.click(screen.getByRole("button", { name: "保存目标" }));
@@ -248,5 +279,27 @@ describe("ReviewDashboard", () => {
     await waitFor(() => {
       expect(vi.mocked(sendOptimizationSuggestionToBrain).mock.calls[0]?.[0]).toBe(12);
     });
+  });
+
+  it("shows an actionable goal state when the selected period has no target", async () => {
+    const originalGoal = { ...mocks.workspace.goal };
+    Object.assign(mocks.workspace.goal, {
+      id: null,
+      target_play: null,
+      target_completion_rate: null,
+      target_follower_delta: null,
+      status: "not_configured",
+      achievement_percent: null,
+      components: [],
+      summary: "尚未设置近 30 天运营目标",
+    });
+
+    try {
+      renderReview();
+      expect(await screen.findByText("为近 30 天设定衡量标准")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /设置周期目标/ })).toBeEnabled();
+    } finally {
+      Object.assign(mocks.workspace.goal, originalGoal);
+    }
   });
 });

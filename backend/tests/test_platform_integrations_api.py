@@ -199,6 +199,7 @@ async def test_douyin_capability_status_separates_app_permission_and_account_aut
                 "user_info",
                 "h5.share",
                 "open.get.ticket",
+                "aweme.share",
             ],
         },
     )

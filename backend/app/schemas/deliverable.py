@@ -13,7 +13,7 @@ from app.models.enums import DeliverableType
 class DeliverablePayload(BaseModel):
     """所有交付物 payload 的基类。禁止未知字段，确保结构严格。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 _REGISTRY: dict[DeliverableType, type[DeliverablePayload]] = {}
@@ -53,20 +53,20 @@ def validate_payload(dtype: DeliverableType, data: dict) -> DeliverablePayload:
 class PositioningStrategyPayload(DeliverablePayload):
     """01 账号定位专家：定位策略文档。"""
 
-    account_persona: str
-    target_audience: str
-    differentiation: list[str]
-    content_pillars: list[str]
+    account_persona: str = Field(min_length=1)
+    target_audience: str = Field(min_length=1)
+    differentiation: list[str] = Field(min_length=2)
+    content_pillars: list[str] = Field(min_length=2)
 
 
 @register(DeliverableType.VIDEO_SCRIPT)
 class VideoScriptPayload(DeliverablePayload):
     """02 编导文案专家：视频脚本。"""
 
-    title: str
-    hook: str
-    scenes: list[str]
-    duration_seconds: int
+    title: str = Field(min_length=1)
+    hook: str = Field(min_length=1)
+    scenes: list[str] = Field(min_length=3)
+    duration_seconds: int = Field(gt=0)
     bgm_suggestion: str | None = None
 
 
@@ -74,19 +74,19 @@ class VideoScriptPayload(DeliverablePayload):
 class ArtPromptPayload(DeliverablePayload):
     """03 美术指导专家：视觉风格 + 结构化 AI 提示词。"""
 
-    visual_style: str
-    prompts: list[str]
+    visual_style: str = Field(min_length=1)
+    prompts: list[str] = Field(min_length=2)
     negative_prompt: str | None = None
-    aspect_ratio: str = "9:16"
+    aspect_ratio: str = Field(default="9:16", min_length=1)
 
 
 @register(DeliverableType.VIDEO_ASSET)
 class VideoAssetPayload(DeliverablePayload):
     """04 视频创作专家：生成参数计划 + 真实出片结果（Ark Seedance，E7）。"""
 
-    tool: str
-    clips: list[dict]
-    resolution: str
+    tool: str = Field(min_length=1)
+    clips: list[dict] = Field(min_length=1)
+    resolution: str = Field(min_length=1)
     notes: str | None = None
     # E7 真实生成结果（Ark 异步出片）
     video_url: str | None = None
@@ -98,23 +98,23 @@ class VideoAssetPayload(DeliverablePayload):
 class EditedVideoPayload(DeliverablePayload):
     """05 剪辑专家：剪辑说明 + 成片交付清单。"""
 
-    cut_plan: list[str]
-    captions: list[str]
-    transitions: str
-    deliverables: list[str]
-    platform_variants: list[str]
+    cut_plan: list[str] = Field(min_length=1)
+    captions: list[str] = Field(min_length=1)
+    transitions: str = Field(min_length=1)
+    deliverables: list[str] = Field(min_length=1)
+    platform_variants: list[str] = Field(min_length=1)
 
 
 @register(DeliverableType.REVIEW_REPORT)
 class ReviewReportPayload(DeliverablePayload):
     """06 账号运营专家：复盘报告 + 优化建议。"""
 
-    period: str
-    summary: str
-    key_metrics: dict
-    highlights: list[str]
-    issues: list[str]
-    optimization_suggestions: list[str]
+    period: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    key_metrics: dict = Field(min_length=1)
+    highlights: list[str] = Field(min_length=1)
+    issues: list[str] = Field(min_length=1)
+    optimization_suggestions: list[str] = Field(min_length=1)
 
 
 @register(DeliverableType.TOPIC_PLAN)
@@ -133,19 +133,19 @@ class PublishCalendarPayload(DeliverablePayload):
 
 @register(DeliverableType.AD_PLAN)
 class AdPlanPayload(DeliverablePayload):
-    objective: str
-    target_audience: str
-    budget_strategy: str
-    creative_directions: list[str]
-    risk_controls: list[str]
-    measurement: dict
+    objective: str = Field(min_length=1)
+    target_audience: str = Field(min_length=1)
+    budget_strategy: str = Field(min_length=1)
+    creative_directions: list[str] = Field(min_length=2)
+    risk_controls: list[str] = Field(min_length=2)
+    measurement: dict = Field(min_length=1)
 
 
 @register(DeliverableType.CS_RECORD)
 class CustomerServiceRecordPayload(DeliverablePayload):
-    period: str
-    summary: str
-    common_questions: list[str]
-    sentiment: dict
-    response_guidelines: list[str]
-    content_opportunities: list[str]
+    period: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    common_questions: list[str] = Field(min_length=1)
+    sentiment: dict = Field(min_length=1)
+    response_guidelines: list[str] = Field(min_length=1)
+    content_opportunities: list[str] = Field(min_length=1)

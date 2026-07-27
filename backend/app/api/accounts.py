@@ -7,7 +7,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,8 +22,10 @@ from app.core.workspace_defaults import get_or_create_default_client
 from app.db import get_session
 from app.models import (
     Account,
+    AccountClient,
     AccountGroup,
     BrainTask,
+    Client,
     ContentItem,
     Event,
     PlatformAccountAuth,
@@ -50,6 +52,7 @@ from app.schemas.workspace import (
     CreateDistributionActionRequest,
     DistributionActionOut,
     PlatformMatrixSummaryOut,
+    ReplaceAccountAssignmentsRequest,
     UpdateAccountIntegrationRequest,
     UpdateAccountRequest,
     account_out,
@@ -146,6 +149,22 @@ async def _project_ids_by_account(
     result: dict[int, list[int]] = {}
     for account_id, project_id in rows:
         result.setdefault(account_id, []).append(project_id)
+    return result
+
+
+async def _client_ids_by_account(
+    session: AsyncSession, account_ids: list[int]
+) -> dict[int, list[int]]:
+    if not account_ids:
+        return {}
+    rows = await session.execute(
+        select(AccountClient.account_id, AccountClient.client_id).where(
+            AccountClient.account_id.in_(account_ids)
+        )
+    )
+    result: dict[int, list[int]] = {}
+    for account_id, client_id in rows:
+        result.setdefault(account_id, []).append(client_id)
     return result
 
 
@@ -250,8 +269,14 @@ async def _account_operational_context(
 
 async def _account_response(session: AsyncSession, account: Account) -> AccountOut:
     project_ids = await _project_ids_by_account(session, [account.id])
+    client_ids = await _client_ids_by_account(session, [account.id])
     operational = await _account_operational_context(session, [account], account.org_id)
-    return account_out(account, project_ids.get(account.id), operational.get(account.id))
+    return account_out(
+        account,
+        project_ids.get(account.id),
+        operational.get(account.id),
+        client_ids.get(account.id),
+    )
 
 
 async def _load_distribution_accounts(
@@ -337,9 +362,16 @@ async def list_accounts(
         q = q.where(or_(Account.project_id == project_id, Account.id.in_(linked_accounts)))
     rows = (await session.scalars(q)).all()
     project_ids = await _project_ids_by_account(session, [row.id for row in rows])
+    client_ids = await _client_ids_by_account(session, [row.id for row in rows])
     operational = await _account_operational_context(session, rows, user.org_id)
     return [
-        account_out(row, project_ids.get(row.id), operational.get(row.id)) for row in rows
+        account_out(
+            row,
+            project_ids.get(row.id),
+            operational.get(row.id),
+            client_ids.get(row.id),
+        )
+        for row in rows
     ]
 
 
@@ -377,6 +409,7 @@ async def get_account_matrix(
         q = q.where(or_(Account.project_id == project_id, Account.id.in_(linked_accounts)))
     accounts = (await session.scalars(q)).all()
     project_ids = await _project_ids_by_account(session, [row.id for row in accounts])
+    client_ids = await _client_ids_by_account(session, [row.id for row in accounts])
     operational = await _account_operational_context(session, accounts, user.org_id)
 
     accounts_by_group: dict[int | None, list[Account]] = {}
@@ -419,14 +452,24 @@ async def get_account_matrix(
                 name=group.name,
                 dimension=group.dimension,
                 accounts=[
-                    account_out(row, project_ids.get(row.id), operational.get(row.id))
+                    account_out(
+                        row,
+                        project_ids.get(row.id),
+                        operational.get(row.id),
+                        client_ids.get(row.id),
+                    )
                     for row in accounts_by_group.get(group.id, [])
                 ],
             )
             for group in groups
         ],
         ungrouped_accounts=[
-            account_out(row, project_ids.get(row.id), operational.get(row.id))
+            account_out(
+                row,
+                project_ids.get(row.id),
+                operational.get(row.id),
+                client_ids.get(row.id),
+            )
             for row in accounts_by_group.get(None, [])
         ],
         platforms=platform_rows,
@@ -446,7 +489,12 @@ async def create_account(
     )
     if body.project_id is not None:
         project = await session.get(Project, body.project_id)
-        if project is None or project.client_id != client.id:
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="项目不存在",
+            )
+        if project.client_id != client.id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="项目不属于当前客户",
@@ -462,6 +510,7 @@ async def create_account(
     )
     session.add(account)
     await session.flush()
+    session.add(AccountClient(client_id=client.id, account_id=account.id))
     if body.project_id is not None:
         session.add(ProjectAccount(project_id=body.project_id, account_id=account.id))
     await session.commit()
@@ -540,11 +589,115 @@ async def batch_update_accounts(
     await session.commit()
 
     project_ids = await _project_ids_by_account(session, account_ids)
+    client_ids = await _client_ids_by_account(session, account_ids)
     operational = await _account_operational_context(session, accounts, admin.org_id)
     return [
-        account_out(account, project_ids.get(account.id), operational.get(account.id))
+        account_out(
+            account,
+            project_ids.get(account.id),
+            operational.get(account.id),
+            client_ids.get(account.id),
+        )
         for account in accounts
     ]
+
+
+@router.get("/accounts/{account_id}", response_model=AccountOut)
+async def get_account(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> AccountOut:
+    account = await require_account_access(session, user, account_id)
+    return await _account_response(session, account)
+
+
+@router.put("/accounts/{account_id}/assignments", response_model=AccountOut)
+async def replace_account_assignments(
+    account_id: int,
+    body: ReplaceAccountAssignmentsRequest,
+    admin: AdminUser,
+    session: SessionDep,
+) -> AccountOut:
+    account = await _get_owned_account(session, account_id, admin.org_id)
+    clients: list[Client] = []
+    if body.client_ids:
+        clients = (
+            await session.scalars(
+                select(Client).where(
+                    Client.org_id == admin.org_id,
+                    Client.id.in_(body.client_ids),
+                )
+            )
+        ).all()
+        if len(clients) != len(body.client_ids):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="客户不存在")
+
+    projects: list[Project] = []
+    if body.project_ids:
+        projects = (
+            await session.scalars(
+                select(Project).where(
+                    Project.org_id == admin.org_id,
+                    Project.id.in_(body.project_ids),
+                )
+            )
+        ).all()
+        if len(projects) != len(body.project_ids):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
+
+    client_id_set = set(body.client_ids)
+    if any(project.client_id not in client_id_set for project in projects):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="所选项目必须属于已绑定客户",
+        )
+    if body.default_project_id is not None and body.default_client_id is not None:
+        default_project = next(
+            project for project in projects if project.id == body.default_project_id
+        )
+        if default_project.client_id != body.default_client_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="默认项目必须属于默认客户",
+            )
+
+    await session.execute(
+        delete(AccountClient).where(AccountClient.account_id == account.id)
+    )
+    await session.execute(
+        delete(ProjectAccount).where(ProjectAccount.account_id == account.id)
+    )
+    session.add_all(
+        [
+            AccountClient(account_id=account.id, client_id=client_id)
+            for client_id in body.client_ids
+        ]
+    )
+    session.add_all(
+        [
+            ProjectAccount(account_id=account.id, project_id=project_id)
+            for project_id in body.project_ids
+        ]
+    )
+    account.client_id = body.default_client_id
+    account.project_id = body.default_project_id
+    session.add(
+        Event(
+            type="account.assignments_replaced",
+            payload={
+                "account_id": account.id,
+                "client_ids": sorted(body.client_ids),
+                "project_ids": sorted(body.project_ids),
+                "default_client_id": body.default_client_id,
+                "default_project_id": body.default_project_id,
+                "updated_by": admin.id,
+            },
+        )
+    )
+    await session.commit()
+    await session.refresh(account)
+    return await _account_response(session, account)
 
 
 @router.patch("/accounts/{account_id}", response_model=AccountOut)

@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.llm.adapters import CompletionResult
+from app.llm.gateway import current_llm_call_context
 from app.orchestrator.brain_intelligence import (
     BrainIntelligence,
     IntelligenceUnavailable,
@@ -40,7 +41,11 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
         "requires_account_context": True,
     }
 
-    async def fake_chat(*args, **kwargs):
+    captured: dict = {}
+
+    async def fake_chat(_self, _session, _org_id, _agent_code, messages):
+        captured["system"] = messages[0]["content"]
+        captured["context"] = current_llm_call_context()
         return CompletionResult(json.dumps(payload), "test-model", 4, 8, 12), 0.0
 
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
@@ -50,6 +55,10 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
     assert decision.intent == "clarification"
     assert decision.clarifying_question == "你这次最想优先改善播放、互动，还是转化？"
     assert decision.suggested_expert_codes == []
+    assert captured["system"].startswith("# 同舟行主 Agent：意图路由")
+    assert captured["context"].prompt_id == "main-agent.intent"
+    assert captured["context"].prompt_schema_version == "intent-decision/v1"
+    assert captured["context"].response_format == {"type": "json_object"}
 
 
 @pytest.mark.asyncio
@@ -95,3 +104,54 @@ async def test_next_step_can_finish_after_observing_an_expert(monkeypatch):
     assert step.action == "finish"
     assert step.expert_codes == []
     assert step.handoff_message == "定位已经明确，我来为你汇总结论。"
+
+
+@pytest.mark.asyncio
+async def test_next_step_can_request_scoped_tool_calls(monkeypatch):
+    system_prompts: list[str] = []
+    payload = {
+        "action": "call_tools",
+        "expert_codes": [],
+        "tool_calls": [
+            {
+                "tool_code": "account.metrics_summary",
+                "arguments": {"days": 30},
+                "purpose": "读取当前账号近 30 天真实表现",
+                "idempotency_key": "metrics-round-1",
+            }
+        ],
+        "rationale": "需要先读取真实数据再判断",
+        "handoff_message": "我先读取当前账号的近期数据。",
+        "decision_request": None,
+        "purpose": "补齐表现证据",
+        "evidence_refs": ["selected-account"],
+    }
+
+    async def fake_chat(_self, _session, _org_id, _agent_code, messages):
+        system_prompts.append(messages[0]["content"])
+        return CompletionResult(json.dumps(payload), "test-model", 4, 8, 12), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+
+    step = await BrainIntelligence().decide_next(
+        None,
+        1,
+        "复盘当前账号",
+        [],
+        [
+            {
+                "kind": "tool",
+                "code": "account.metrics_summary",
+                "description": "读取当前账号指标",
+            }
+        ],
+        1,
+    )
+
+    assert step.action == "call_tools"
+    assert step.tool_calls[0].tool_code == "account.metrics_summary"
+    assert step.tool_calls[0].arguments == {"days": 30}
+    assert "call_tools" in system_prompts[0]
+    assert "idempotency_key" in system_prompts[0]
+    assert system_prompts[0].startswith("# 同舟行主 Agent：受控 ReAct 下一步")
+    assert "account.metrics_summary" in system_prompts[0]

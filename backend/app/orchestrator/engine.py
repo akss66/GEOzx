@@ -24,7 +24,6 @@ from app.models import (
     ContentItem,
     Deliverable,
     GateApproval,
-    KnowledgeEntry,
     OptimizationSuggestion,
     Project,
 )
@@ -40,6 +39,7 @@ from app.models.enums import (
 )
 from app.orchestrator.gates import is_forced
 from app.orchestrator.pipeline import PIPELINE, AgentStep, GateStep
+from app.services.knowledge_workspace import knowledge_context, list_agent_knowledge
 
 EmitFn = Callable[..., Awaitable[None]]
 
@@ -267,11 +267,17 @@ class OrchestrationEngine:
         ci.status = ContentStatus.IN_PROGRESS
         await session.flush()
 
-        org_id = await self._org_id(session, ci)
+        project = await session.get(Project, ci.project_id)
+        org_id = project.org_id if project is not None else None
         ctx = AgentContext(
             content_item_id=ci.id,
             upstream=await self._upstream(session, ci.id),
-            knowledge=await self._knowledge(session, org_id),
+            knowledge=await self._knowledge(
+                session,
+                org_id=org_id,
+                client_id=project.client_id if project is not None else None,
+                project_id=project.id if project is not None else None,
+            ),
             optimization_suggestions=await self._accepted_suggestions(session, org_id, step.stage),
         )
         try:
@@ -397,27 +403,28 @@ class OrchestrationEngine:
         project = await session.get(Project, ci.project_id)
         return project.org_id if project else None
 
-    async def _knowledge(self, session: AsyncSession, org_id: int | None) -> dict[str, list[dict]]:
+    async def _knowledge(
+        self,
+        session: AsyncSession,
+        *,
+        org_id: int | None,
+        client_id: int | None,
+        project_id: int | None,
+    ) -> dict[str, list[dict]]:
         """加载 org 的知识库切片，按 category 分组注入 Agent 上下文。
 
         每类取最近若干条（标题+payload+tags），供 Agent 参考爆款结构/画像/提示词/话术。
         """
-        if org_id is None:
+        if org_id is None or client_id is None or project_id is None:
             return {}
-        rows = (
-            await session.scalars(
-                select(KnowledgeEntry)
-                .where(KnowledgeEntry.org_id == org_id)
-                .order_by(KnowledgeEntry.id.desc())
-                .limit(_KNOWLEDGE_LIMIT)
-            )
-        ).all()
-        grouped: dict[str, list[dict]] = {}
-        for k in rows:
-            grouped.setdefault(k.category.value, []).append(
-                {"title": k.title, "payload": k.payload, "tags": k.tags}
-            )
-        return grouped
+        rows = await list_agent_knowledge(
+            session,
+            org_id=org_id,
+            client_id=client_id,
+            project_id=project_id,
+            limit=_KNOWLEDGE_LIMIT,
+        )
+        return knowledge_context(rows)
 
     async def _accepted_suggestions(
         self, session: AsyncSession, org_id: int | None, stage: ContentStage

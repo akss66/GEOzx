@@ -118,6 +118,7 @@ async def upload_import(
             filename=file.filename or "upload.xlsx",
             content=content,
         )
+        await session.commit()
     except ParseFailure as exc:
         raise _bad_request(str(exc), status_code=status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
     except ValueError as exc:
@@ -153,6 +154,7 @@ async def create_manual_data_preview(
             screenshot_filename=screenshot.filename if screenshot is not None else None,
             screenshot_content=screenshot_content,
         )
+        await session.commit()
     except ValidationError as exc:
         raise _bad_request(
             "Manual data fields are invalid",

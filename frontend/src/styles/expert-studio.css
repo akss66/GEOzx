@@ -29,7 +29,7 @@
 .expert-directory nav button.is-active i { background: var(--tz-brand-red); }
 .expert-directory__index { color: var(--tz-faint); font-size: 10px; }
 .expert-directory__monogram,
-.expert-identity { display: grid; place-items: center; background: var(--tz-ink); color: white; font-weight: 780; }
+.expert-identity { display: grid; place-items: center; font-weight: 780; }
 .expert-directory__monogram { width: 34px; height: 34px; border-radius: 10px; font-size: 10px; }
 .expert-directory__copy { display: grid; min-width: 0; gap: 3px; }
 .expert-directory__copy strong { font-size: 13px; }
@@ -66,8 +66,8 @@
 
 .expert-scope-gate,
 .expert-empty { max-width: 640px; margin: 12vh auto 0; }
-.expert-scope-gate > span,
-.expert-empty > span { display: block; color: var(--tz-brand-red); font-size: 42px; font-weight: 780; }
+.expert-scope-gate > span { display: block; color: var(--tz-brand-red); font-size: 42px; font-weight: 780; }
+.expert-empty > .tz-agent-avatar { width: 58px; height: 58px; border-radius: 18px; font-size: 24px; }
 .expert-scope-gate h3,
 .expert-empty h3 { margin: 18px 0 10px; font-size: 26px; }
 .expert-scope-gate p,

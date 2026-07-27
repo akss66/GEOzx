@@ -225,6 +225,19 @@ class PlatformContentRecord(Base, TimestampMixin):
     platform: Mapped[Platform] = mapped_column(
         pg_enum(Platform, "platform"), index=True, nullable=False
     )
+    source_kind: Mapped[DataSourceKind] = mapped_column(
+        pg_enum(DataSourceKind, "data_source_kind"),
+        default=DataSourceKind.PLATFORM_EXPORT,
+        server_default=DataSourceKind.PLATFORM_EXPORT.value,
+        index=True,
+        nullable=False,
+    )
+    source_metadata: Mapped[dict] = mapped_column(
+        JSONVariant,
+        default=dict,
+        server_default=text("'{}'"),
+        nullable=False,
+    )
     canonical_import_batch_id: Mapped[int | None] = mapped_column(
         BigIntPK, index=True, nullable=True
     )
@@ -234,6 +247,8 @@ class PlatformContentRecord(Base, TimestampMixin):
     canonical_share_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     title: Mapped[str | None] = mapped_column(String(300), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    content_format: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    review_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
     identity_confidence: Mapped[ContentIdentityConfidence] = mapped_column(
         pg_enum(ContentIdentityConfidence, "content_identity_confidence"),
         default=ContentIdentityConfidence.UNRESOLVED,

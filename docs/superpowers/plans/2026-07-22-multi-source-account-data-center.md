@@ -555,7 +555,7 @@ git commit -m "feat: add account data center workspace"
 - Produces: `POST /account-data/{account_id}/manual-previews` with optional screenshot plus structured candidates.
 - Reuses: durable staging, confirmation, commit, provenance, and revoke from Tasks 4–5.
 
-- [ ] **Step 1: Write screenshot confirmation and manual form tests**
+- [x] **Step 1: Write screenshot confirmation and manual form tests**
 
 ```python
 async def test_screenshot_candidates_cannot_commit_before_confirmation(client, token, account, png):
@@ -567,7 +567,7 @@ async def test_screenshot_candidates_cannot_commit_before_confirmation(client, t
     assert response.status_code == 409
 ```
 
-- [ ] **Step 2: Run tests and confirm failure**
+- [x] **Step 2: Run tests and confirm failure**
 
 Run: `cd backend && python -m pytest tests/test_manual_account_data_api.py -q`
 
@@ -575,11 +575,11 @@ Run: `cd frontend && npm.cmd test -- src/components/account-data/ManualDataEntry
 
 Expected: both fail because manual preview is not implemented.
 
-- [ ] **Step 3: Implement evidence-first manual entry**
+- [x] **Step 3: Implement evidence-first manual entry**
 
 Provide forms for account diagnosis/benchmark, audience dimensions, and account-period totals. A screenshot is displayed beside editable fields. Without a configured vision extractor, fields start blank; the user fills and confirms them. Store source as `screenshot_verified` when an image is attached and `manual_entry` otherwise.
 
-- [ ] **Step 4: Verify manual and screenshot paths**
+- [x] **Step 4: Verify manual and screenshot paths**
 
 Run: `cd backend && python -m pytest tests/test_manual_account_data_api.py tests/test_account_data_permissions.py -q`
 
@@ -609,7 +609,7 @@ git commit -m "feat: add verified manual account data entry"
 - Produces: `account.data_context` tool response with selected metrics, periods, source, freshness, coverage, conflicts, and evidence references.
 - Preserves: existing `account.metrics_summary` name as a compatibility alias for one release.
 
-- [ ] **Step 1: Write Agent evidence and review-state tests**
+- [x] **Step 1: Write Agent evidence and review-state tests**
 
 ```python
 async def test_account_data_context_exposes_freshness_and_evidence(runtime_context):
@@ -628,7 +628,7 @@ it("shows stale and conflicted data without rendering fake conclusions", () => {
 });
 ```
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 Run: `cd backend && python -m pytest tests/test_runtime_tools.py -q`
 
@@ -636,15 +636,15 @@ Run: `cd frontend && npm.cmd test -- src/pages/ReviewDashboard.test.tsx`
 
 Expected: FAIL on missing quality metadata.
 
-- [ ] **Step 3: Replace raw Agent queries with the unified service**
+- [x] **Step 3: Replace raw Agent queries with the unified service**
 
 The tool must never infer missing metrics as zero. Include `period_start`, `period_end`, `observed_at`, `confirmed_at`, `source`, `coverage`, `conflict_count`, and evidence references. Keep account and organization IDs server-controlled.
 
-- [ ] **Step 4: Update review source presentation**
+- [x] **Step 4: Update review source presentation**
 
 The review header shows data sources and cutoff time. Missing domains show explicit readiness rows. Stale/conflicted states keep valid evidence visible but suppress unsupported conclusions. “更新数据” routes to the selected account data center.
 
-- [ ] **Step 5: Verify runtime and review**
+- [x] **Step 5: Verify runtime and review**
 
 Run: `cd backend && python -m pytest tests/test_runtime_tools.py tests/test_review_workspace_api.py -q`
 

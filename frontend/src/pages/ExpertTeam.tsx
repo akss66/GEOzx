@@ -14,8 +14,9 @@ import {
 import { approveDeliverableAcceptance } from "../api/brain";
 import { presentApiError } from "../api/errors";
 import { getWorkspaceContext } from "../api/shell";
+import { AgentAvatar } from "../components/agents/AgentAvatar";
 import { ExpertArtifact, artifactToText } from "../components/experts/ExpertArtifact";
-import { ExpertDirectory, expertMonogram } from "../components/experts/ExpertDirectory";
+import { ExpertDirectory } from "../components/experts/ExpertDirectory";
 import { OperationalState } from "../components/ui";
 import {
   resolveWorkspaceAccount,
@@ -222,7 +223,7 @@ export default function ExpertTeam() {
 function ExpertHeader({ expert, context }: { expert: AgentProfile; context: string }) {
   return (
     <header className="expert-workspace__header">
-      <span className="expert-identity">{expertMonogram(expert.code)}</span>
+      <AgentAvatar code={expert.code} className="expert-identity" label={expert.name} />
       <div><span>独立调用</span><h2>{expert.name}</h2><p>{expert.one_liner}</p></div>
       <aside><strong>当前工作范围</strong><span>{context}</span><small>抖音 · 独立调用</small></aside>
     </header>
@@ -255,7 +256,7 @@ export function describeExpertScope(projectName: string | null, accountName: str
 function ExpertEmpty({ expert, onPick }: { expert: AgentProfile; onPick: (value: string) => void }) {
   return (
     <div className="expert-empty">
-      <span>{expertMonogram(expert.code)}</span><h3>把一个明确问题交给{expert.name}</h3>
+      <AgentAvatar code={expert.code} label={expert.name} /><h3>把一个明确问题交给{expert.name}</h3>
       <p>专家会独立完成分析并生成正式成果；采用前不会改写现有业务数据。</p>
       <div>{expert.typical_tasks.slice(0, 3).map((task) => <button key={task} type="button" onClick={() => onPick(task)}>{task}</button>)}</div>
     </div>

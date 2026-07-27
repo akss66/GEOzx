@@ -42,8 +42,10 @@ import { useNavigate } from "react-router-dom";
 
 import {
   batchUpdateAccounts,
+  createClient,
   createAccount,
   createAccountGroup,
+  createProject,
   createDouyinAuthorizeUrl,
   createDouyinIncrementalAuthorizeUrl,
   createDouyinScanAddUrl,
@@ -53,11 +55,15 @@ import {
   getDouyinAccountCapabilities,
   listAccountGroups,
   listAccounts,
+  listClients,
   listPlatformIntegrations,
   listProjects,
+  replaceAccountAssignments,
   syncDouyinAccountMetrics,
   updateAccountIntegration,
+  updateClient,
   updatePlatformIntegration,
+  updateProject,
 } from "../api/workspace";
 import { presentApiError } from "../api/errors";
 import { OperationalState, PageHeader, Panel } from "../components/ui";
@@ -66,6 +72,7 @@ import {
   AccountProjectsView,
   AccountSummaryStrip,
 } from "../components/accounts/AccountViews";
+import WorkspaceStructureManager from "../components/accounts/WorkspaceStructureManager";
 import { getAccountActionMode } from "../components/accounts/accountActionMode";
 import { useAuth } from "../stores/auth";
 import {
@@ -78,9 +85,11 @@ import { PLATFORM_COLORS } from "../theme/tokens";
 import "../styles/accounts-v2.css";
 import type {
   Account,
+  AccountAssignmentsInput,
   AccountGroup,
   AccountStatus,
   AuthStatus,
+  Client,
   DataSyncStatus,
   DouyinCapability,
   DouyinCapabilityKey,
@@ -200,6 +209,8 @@ interface PlatformIntegrationFormValues {
   note?: string;
 }
 
+type AccountAssignmentFormValues = AccountAssignmentsInput;
+
 interface MatrixProjectSection {
   id: number | null;
   name: string;
@@ -269,15 +280,23 @@ export default function Accounts() {
   const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
   const [capabilityAccount, setCapabilityAccount] = useState<Account | null>(null);
   const [platformBoardOpen, setPlatformBoardOpen] = useState(false);
+  const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
+  const [assignmentTarget, setAssignmentTarget] = useState<Account | null>(null);
   const [integrationPlatform, setIntegrationPlatform] = useState<Platform | null>(null);
   const [whitelistUrl, setWhitelistUrl] = useState<string | null>(null);
   const [form] = Form.useForm<AccountFormValues>();
   const [integrationForm] = Form.useForm<PlatformIntegrationFormValues>();
+  const [assignmentForm] = Form.useForm<AccountAssignmentFormValues>();
   const accountModalPlatform = Form.useWatch("platform", form);
+  const assignmentClientIds =
+    Form.useWatch("client_ids", assignmentForm) ?? [];
+  const assignmentProjectIds =
+    Form.useWatch("project_ids", assignmentForm) ?? [];
   const douyinAddMode = Form.useWatch("douyin_add_mode", form) ?? "scan";
   const isDouyin = accountModalPlatform === "douyin";
   const isDouyinScanAdd = isDouyin && douyinAddMode === "scan";
 
+  const clientsQuery = useQuery({ queryKey: ["clients"], queryFn: listClients });
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
   const groupsQuery = useQuery({ queryKey: ["account-groups"], queryFn: listAccountGroups });
   const accountsQuery = useQuery({
@@ -300,11 +319,6 @@ export default function Accounts() {
     retry: false,
   });
 
-  const groupName = useMemo(() => {
-    const map = new Map<number, string>();
-    (groupsQuery.data ?? []).forEach((g) => map.set(g.id, g.name));
-    return map;
-  }, [groupsQuery.data]);
   const groupById = useMemo(() => {
     const map = new Map<number, GroupDimension>();
     (groupsQuery.data ?? []).forEach((g) => map.set(g.id, g.dimension));
@@ -315,6 +329,11 @@ export default function Accounts() {
     (projectsQuery.data ?? []).forEach((project) => map.set(project.id, project.name));
     return map;
   }, [projectsQuery.data]);
+  const clientName = useMemo(() => {
+    const map = new Map<number, string>();
+    (clientsQuery.data ?? []).forEach((client) => map.set(client.id, client.name));
+    return map;
+  }, [clientsQuery.data]);
 
   const rows = useMemo(() => {
     const all = accountsQuery.data ?? [];
@@ -362,6 +381,26 @@ export default function Accounts() {
       douyin_add_mode: initialPlatform === "douyin" ? "scan" : undefined,
     });
     setModalOpen(true);
+  };
+
+  const openAssignmentModal = (account: Account) => {
+    const clientIds = account.client_ids?.length
+      ? account.client_ids
+      : account.client_id != null
+        ? [account.client_id]
+        : [];
+    const projectIds = account.project_ids?.length
+      ? account.project_ids
+      : account.project_id != null
+        ? [account.project_id]
+        : [];
+    assignmentForm.setFieldsValue({
+      client_ids: clientIds,
+      project_ids: projectIds,
+      default_client_id: account.client_id ?? clientIds[0],
+      default_project_id: account.project_id ?? projectIds[0] ?? null,
+    });
+    setAssignmentTarget(account);
   };
 
   const selectWorkspaceAccount = (accountId: number) => {
@@ -470,6 +509,78 @@ export default function Accounts() {
       qc.invalidateQueries({ queryKey: ["account-matrix"] });
     },
     onError: () => message.error("批量更新失败，请检查账号与项目归属"),
+  });
+
+  const refreshWorkspaceStructure = () => {
+    void Promise.all([
+      qc.invalidateQueries({ queryKey: ["clients"] }),
+      qc.invalidateQueries({ queryKey: ["projects"] }),
+      qc.invalidateQueries({ queryKey: ["accounts"] }),
+      qc.invalidateQueries({ queryKey: ["shell-accounts"] }),
+      qc.invalidateQueries({ queryKey: ["account-matrix"] }),
+      qc.invalidateQueries({ queryKey: ["workspace-context"] }),
+    ]);
+  };
+
+  const createClientMutation = useMutation({
+    mutationFn: createClient,
+    onSuccess: () => {
+      message.success("客户已创建");
+      refreshWorkspaceStructure();
+    },
+    onError: (error) => message.error(presentApiError(error, "客户创建失败").message),
+  });
+
+  const updateClientMutation = useMutation({
+    mutationFn: ({ id, patch }: { id: number; patch: { name?: string; status?: Client["status"] } }) =>
+      updateClient(id, patch),
+    onSuccess: () => {
+      message.success("客户已更新");
+      refreshWorkspaceStructure();
+    },
+    onError: (error) => message.error(presentApiError(error, "客户更新失败").message),
+  });
+
+  const createProjectMutation = useMutation({
+    mutationFn: createProject,
+    onSuccess: () => {
+      message.success("项目已创建");
+      refreshWorkspaceStructure();
+    },
+    onError: (error) => message.error(presentApiError(error, "项目创建失败").message),
+  });
+
+  const updateProjectMutation = useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: number;
+      patch: { name?: string; description?: string; status?: Project["status"] };
+    }) => updateProject(id, patch),
+    onSuccess: () => {
+      message.success("项目已更新");
+      refreshWorkspaceStructure();
+    },
+    onError: (error) => message.error(presentApiError(error, "项目更新失败").message),
+  });
+
+  const assignmentMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      input,
+    }: {
+      accountId: number;
+      input: AccountAssignmentsInput;
+    }) => replaceAccountAssignments(accountId, input),
+    onSuccess: (account) => {
+      message.success(`已更新 ${account.nickname} 的客户与项目归属`);
+      setAssignmentTarget(null);
+      assignmentForm.resetFields();
+      refreshWorkspaceStructure();
+    },
+    onError: (error) =>
+      message.error(presentApiError(error, "账号归属保存失败，请核对客户与项目关系").message),
   });
 
   const platformIntegrationMutation = useMutation({
@@ -593,17 +704,43 @@ export default function Accounts() {
     },
     {
       title: "归属",
-      width: 180,
-      render: (_, account) => (
-        <div style={{ display: "grid", gap: 5 }}>
-          <span style={{ fontSize: 12.5, color: "var(--dy-text)" }}>
-            {account.project_id == null ? "未绑定项目" : projectName.get(account.project_id) ?? `项目 #${account.project_id}`}
-          </span>
-          <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>
-            {account.group_id == null ? "未分组" : groupName.get(account.group_id) ?? `分组 #${account.group_id}`}
-          </span>
-        </div>
-      ),
+      width: 220,
+      render: (_, account) => {
+        const clientIds = account.client_ids?.length
+          ? account.client_ids
+          : account.client_id != null
+            ? [account.client_id]
+            : [];
+        const projectIds = account.project_ids?.length
+          ? account.project_ids
+          : account.project_id != null
+            ? [account.project_id]
+            : [];
+        return (
+          <div style={{ display: "grid", gap: 5, justifyItems: "start" }}>
+            <span style={{ fontSize: 12.5, color: "var(--dy-text)" }}>
+              {clientIds.length
+                ? clientIds.map((id) => clientName.get(id) ?? `客户 #${id}`).join("、")
+                : "未绑定客户"}
+            </span>
+            <span style={{ fontSize: 12, color: "var(--dy-faint)" }}>
+              {projectIds.length
+                ? projectIds.map((id) => projectName.get(id) ?? `项目 #${id}`).join("、")
+                : "未绑定项目"}
+            </span>
+            {isAdmin ? (
+              <Button
+                type="link"
+                size="small"
+                style={{ height: "auto", padding: 0 }}
+                onClick={() => openAssignmentModal(account)}
+              >
+                编辑归属
+              </Button>
+            ) : null}
+          </div>
+        );
+      },
     },
     {
       title: "定位 / 当前任务",
@@ -694,11 +831,13 @@ export default function Accounts() {
   const loading =
     accountsQuery.isLoading ||
     matrixQuery.isLoading ||
+    clientsQuery.isLoading ||
     groupsQuery.isLoading ||
     projectsQuery.isLoading;
   const failedQuery = [
     accountsQuery,
     matrixQuery,
+    clientsQuery,
     groupsQuery,
     projectsQuery,
   ].find((query) => query.isError);
@@ -725,6 +864,7 @@ export default function Accounts() {
             void Promise.all([
               accountsQuery.refetch(),
               matrixQuery.refetch(),
+              clientsQuery.refetch(),
               groupsQuery.refetch(),
               projectsQuery.refetch(),
             ]);
@@ -743,6 +883,9 @@ export default function Accounts() {
           <Space>
             {isAdmin && (
               <>
+                <Button icon={<ApartmentOutlined />} onClick={() => setWorkspaceManagerOpen(true)}>
+                  客户与项目
+                </Button>
                 <Button icon={<SettingOutlined />} onClick={() => setPlatformBoardOpen(true)}>
                   平台接入
                 </Button>
@@ -983,6 +1126,147 @@ export default function Accounts() {
       </Modal>
 
       <Modal
+        title="客户与项目"
+        open={workspaceManagerOpen}
+        onCancel={() => setWorkspaceManagerOpen(false)}
+        footer={null}
+        width={900}
+        destroyOnHidden
+      >
+        <WorkspaceStructureManager
+          clients={clientsQuery.data ?? []}
+          projects={projectsQuery.data ?? []}
+          pending={
+            createClientMutation.isPending ||
+            updateClientMutation.isPending ||
+            createProjectMutation.isPending ||
+            updateProjectMutation.isPending
+          }
+          onCreateClient={(name) => createClientMutation.mutate({ name })}
+          onUpdateClient={(id, patch) => updateClientMutation.mutate({ id, patch })}
+          onCreateProject={(input) => createProjectMutation.mutate(input)}
+          onUpdateProject={(id, patch) => updateProjectMutation.mutate({ id, patch })}
+        />
+      </Modal>
+
+      <Modal
+        title={assignmentTarget ? `客户与项目归属 · ${assignmentTarget.nickname}` : "客户与项目归属"}
+        open={assignmentTarget != null}
+        onCancel={() => {
+          setAssignmentTarget(null);
+          assignmentForm.resetFields();
+        }}
+        onOk={() => assignmentForm.submit()}
+        confirmLoading={assignmentMutation.isPending}
+        okText="保存归属"
+        width={720}
+        destroyOnHidden
+      >
+        <Form
+          form={assignmentForm}
+          layout="vertical"
+          requiredMark={false}
+          onValuesChange={(changed) => {
+            if (!("client_ids" in changed)) return;
+            const selectedClientIds = (changed.client_ids ?? []) as number[];
+            const allowedProjectIds = new Set(
+              (projectsQuery.data ?? [])
+                .filter(
+                  (project) =>
+                    project.client_id != null && selectedClientIds.includes(project.client_id),
+                )
+                .map((project) => project.id),
+            );
+            const nextProjectIds = (
+              assignmentForm.getFieldValue("project_ids") ?? []
+            ).filter((id: number) => allowedProjectIds.has(id));
+            const currentDefaultClient = assignmentForm.getFieldValue("default_client_id");
+            const currentDefaultProject = assignmentForm.getFieldValue("default_project_id");
+            assignmentForm.setFieldsValue({
+              project_ids: nextProjectIds,
+              default_client_id: selectedClientIds.includes(currentDefaultClient)
+                ? currentDefaultClient
+                : selectedClientIds[0] ?? null,
+              default_project_id: nextProjectIds.includes(currentDefaultProject)
+                ? currentDefaultProject
+                : nextProjectIds[0] ?? null,
+            });
+          }}
+          onFinish={(value) => {
+            if (!assignmentTarget) return;
+            assignmentMutation.mutate({
+              accountId: assignmentTarget.id,
+              input: {
+                client_ids: value.client_ids,
+                project_ids: value.project_ids ?? [],
+                default_client_id: value.default_client_id ?? null,
+                default_project_id: value.default_project_id ?? null,
+              },
+            });
+          }}
+        >
+          <Form.Item
+            name="client_ids"
+            label="关联客户"
+            extra="可选。账号可以不绑定归属直接工作，也可以关联多个客户并设置一个默认客户。"
+          >
+            <Select
+              mode="multiple"
+              optionFilterProp="label"
+              placeholder="选择一个或多个客户"
+              options={(clientsQuery.data ?? [])
+                .filter((client) => client.status === "active")
+                .map((client) => ({ label: client.name, value: client.id }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="default_client_id"
+            label="默认客户"
+          >
+            <Select
+              allowClear
+              disabled={assignmentClientIds.length === 0}
+              placeholder={assignmentClientIds.length ? "选择默认客户" : "未绑定客户"}
+              options={(clientsQuery.data ?? [])
+                .filter((client) => assignmentClientIds.includes(client.id))
+                .map((client) => ({ label: client.name, value: client.id }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="project_ids"
+            label="关联项目"
+            extra="只显示属于已选客户的项目；账号可以参与多个项目。"
+          >
+            <Select
+              mode="multiple"
+              optionFilterProp="label"
+              placeholder="选择一个或多个项目"
+              options={(projectsQuery.data ?? [])
+                .filter(
+                  (project) =>
+                    project.status !== "archived" &&
+                    project.client_id != null &&
+                    assignmentClientIds.includes(project.client_id),
+                )
+                .map((project) => ({
+                  label: `${project.name} · ${clientName.get(project.client_id!) ?? "客户"}`,
+                  value: project.id,
+                }))}
+            />
+          </Form.Item>
+          <Form.Item name="default_project_id" label="默认项目">
+            <Select
+              allowClear
+              placeholder="未选择时仅使用默认客户上下文"
+              options={(projectsQuery.data ?? [])
+                .filter((project) => assignmentProjectIds.includes(project.id))
+                .map((project) => ({ label: project.name, value: project.id }))}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
         title="平台接入"
         open={platformBoardOpen}
         onCancel={() => setPlatformBoardOpen(false)}
@@ -1184,6 +1468,7 @@ export default function Accounts() {
                 { label: "user_info", value: "user_info" },
                 { label: "h5.share", value: "h5.share" },
                 { label: "open.get.ticket", value: "open.get.ticket" },
+                { label: "aweme.share", value: "aweme.share" },
                 { label: "task.posting.create", value: "task.posting.create" },
                 { label: "posting.behavior", value: "posting.behavior" },
                 { label: "task.posting.user_verification", value: "task.posting.user_verification" },

@@ -10,6 +10,7 @@ web OAuth, JS SDK access, and JS SDK signature generation:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import time
@@ -27,17 +28,34 @@ DOUYIN_ACCESS_TOKEN_URL = "https://open.douyin.com/oauth/access_token/"
 DOUYIN_REFRESH_TOKEN_URL = "https://open.douyin.com/oauth/refresh_token/"
 DOUYIN_CLIENT_TOKEN_URL = "https://open.douyin.com/oauth/client_token/"
 DOUYIN_JSB_TICKET_URL = "https://open.douyin.com/js/getticket/"
+DOUYIN_OPEN_TICKET_URL = "https://open.douyin.com/open/getticket/"
+DOUYIN_SHARE_ID_URL = "https://open.douyin.com/share-id/"
+DOUYIN_H5_SHARE_SCHEMA = "snssdk1128://openplatform/share"
 DOUYIN_USER_INFO_URL = "https://open.douyin.com/oauth/userinfo/"
 DOUYIN_VIDEO_LIST_URL = "https://open.douyin.com/video/list"
 DOUYIN_VIDEO_DATA_URL = "https://open.douyin.com/video/data"
 DEFAULT_DOUYIN_SECRET_REF = "vault://dyflow/douyin/client-secret"
 
 _ticket_cache: dict[tuple[int, str], CachedSecret] = {}
+_open_ticket_cache: dict[tuple[int, str], CachedSecret] = {}
 _client_token_cache: dict[tuple[int, str], CachedSecret] = {}
 
 
 class DouyinIntegrationError(RuntimeError):
     """Base error for Douyin platform integration failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str | int | None = None,
+        log_id: str | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = str(error_code) if error_code is not None else None
+        self.log_id = log_id
+        self.retryable = retryable
 
 
 class SecretNotConfiguredError(DouyinIntegrationError):
@@ -88,6 +106,80 @@ def create_js_signature(*, ticket: str, url: str) -> dict[str, Any]:
         "url": normalized_url,
         "signature": hashlib.md5(plain.encode("utf-8")).hexdigest(),
     }
+
+
+def create_douyin_h5_signature(
+    *,
+    nonce_str: str,
+    ticket: str,
+    timestamp: str,
+) -> str:
+    """Create the server-side MD5 signature required by the H5 share schema."""
+    if not nonce_str or not ticket or not timestamp:
+        raise DouyinIntegrationError("H5 signature fields must not be empty")
+    plain = f"nonce_str={nonce_str}&ticket={ticket}&timestamp={timestamp}"
+    return hashlib.md5(plain.encode("utf-8")).hexdigest()
+
+
+def build_douyin_h5_publish_schema(
+    *,
+    client_key: str,
+    ticket: str,
+    share_id: str,
+    video_path: str | None = None,
+    image_path: str | None = None,
+    title: str = "",
+    topics: list[str] | None = None,
+    visibility: str = "public",
+    allow_download: bool = True,
+    direct_to_publish: bool = True,
+    nonce_str: str | None = None,
+    timestamp: str | None = None,
+) -> str:
+    """Build a signed, user-initiated Douyin H5 publishing schema."""
+    media_count = sum(bool(path) for path in (video_path, image_path))
+    if media_count != 1:
+        raise DouyinIntegrationError("exactly one media path is required")
+    if image_path and direct_to_publish:
+        raise DouyinIntegrationError("direct publish only supports video")
+    visibility_map = {"public": 0, "private": 1, "friends": 2}
+    if visibility not in visibility_map:
+        raise DouyinIntegrationError(f"unsupported visibility: {visibility}")
+    if not client_key or not share_id:
+        raise DouyinIntegrationError("client_key and share_id are required")
+
+    schema_nonce = nonce_str or secrets.token_hex(16)
+    schema_timestamp = str(timestamp or int(time.time()))
+    params: dict[str, Any] = {
+        "share_type": "h5",
+        "client_key": client_key,
+        "nonce_str": schema_nonce,
+        "timestamp": schema_timestamp,
+        "signature": create_douyin_h5_signature(
+            nonce_str=schema_nonce,
+            ticket=ticket,
+            timestamp=schema_timestamp,
+        ),
+        "state": share_id,
+        "share_to_type": 0,
+        "private_status": visibility_map[visibility],
+        "download_type": 1 if allow_download else 2,
+    }
+    if video_path:
+        params["video_path"] = video_path
+        if direct_to_publish:
+            params["share_to_publish"] = 1
+    else:
+        params["image_path"] = image_path
+    if title:
+        params["title"] = title
+    if topics:
+        params["hashtag_list"] = json.dumps(
+            [topic for topic in topics if topic],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return f"{DOUYIN_H5_SHARE_SCHEMA}?{urlencode(params)}"
 
 
 def resolve_secret_ref(secret_ref: str | None, *, platform: Platform) -> str:
@@ -251,6 +343,88 @@ async def get_douyin_jsb_ticket(*, integration, client_secret: str) -> str:
     return ticket
 
 
+async def fetch_douyin_open_ticket(
+    *,
+    client_token: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """Fetch an H5 publishing open ticket using the official header contract."""
+    return await _get_douyin_data_with_headers(
+        DOUYIN_OPEN_TICKET_URL,
+        headers={"access-token": client_token},
+        required_field="ticket",
+        client=client,
+    )
+
+
+async def get_douyin_open_ticket(
+    *,
+    org_id: int,
+    client_key: str,
+    client_secret: str,
+) -> str:
+    """Return a globally cached open ticket for H5 publishing."""
+    cache_key = (org_id, client_key)
+    cached = _open_ticket_cache.get(cache_key)
+    if cached and cached.is_valid():
+        return cached.value
+    client_token = await get_douyin_client_token(
+        org_id=org_id,
+        client_key=client_key,
+        client_secret=client_secret,
+    )
+    data = await fetch_douyin_open_ticket(client_token=client_token)
+    ticket = str(data["ticket"])
+    expires_in = int(data.get("expires_in") or 7200)
+    _open_ticket_cache[cache_key] = CachedSecret(
+        value=ticket,
+        expires_at=datetime.now(UTC) + timedelta(seconds=max(expires_in - 60, 60)),
+    )
+    return ticket
+
+
+async def create_douyin_share_id(
+    *,
+    client_token: str,
+    default_hashtag: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, str]:
+    """Create the one-hour share identity used for callback correlation."""
+    params: dict[str, Any] = {"need_callback": "true"}
+    if default_hashtag:
+        params["default_hashtag"] = default_hashtag
+    try:
+        if client is not None:
+            response = await client.post(
+                DOUYIN_SHARE_ID_URL,
+                params=params,
+                headers={
+                    "access-token": client_token,
+                    "content-type": "application/json",
+                },
+            )
+        else:
+            async with httpx.AsyncClient(timeout=10) as owned_client:
+                response = await owned_client.post(
+                    DOUYIN_SHARE_ID_URL,
+                    params=params,
+                    headers={
+                        "access-token": client_token,
+                        "content-type": "application/json",
+                    },
+                )
+    except httpx.RequestError as exc:
+        raise DouyinIntegrationError(
+            f"Douyin OpenAPI request failed: {exc}",
+            retryable=True,
+        ) from exc
+    data, extra = _extract_response_payload(response, "share_id")
+    return {
+        "share_id": str(data["share_id"]),
+        "log_id": str(extra.get("logid") or extra.get("log_id") or ""),
+    }
+
+
 async def fetch_douyin_user_info(
     *,
     access_token: str,
@@ -374,6 +548,27 @@ async def _get_douyin_data(
         raise DouyinIntegrationError(f"Douyin OpenAPI request failed: {exc}") from exc
 
 
+async def _get_douyin_data_with_headers(
+    url: str,
+    *,
+    headers: dict[str, str],
+    required_field: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    try:
+        if client is not None:
+            resp = await client.get(url, headers=headers)
+            return _extract_response_data(resp, required_field)
+        async with httpx.AsyncClient(timeout=10) as owned_client:
+            resp = await owned_client.get(url, headers=headers)
+            return _extract_response_data(resp, required_field)
+    except httpx.RequestError as exc:
+        raise DouyinIntegrationError(
+            f"Douyin OpenAPI request failed: {exc}",
+            retryable=True,
+        ) from exc
+
+
 async def _post_douyin_data(
     url: str,
     *,
@@ -412,13 +607,27 @@ async def _post_form_douyin_data(
 
 
 def _extract_response_data(resp: httpx.Response, required_field: str) -> dict[str, Any]:
+    data, _extra = _extract_response_payload(resp, required_field)
+    return data
+
+
+def _extract_response_payload(
+    resp: httpx.Response,
+    required_field: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if resp.status_code != 200:
-        raise DouyinIntegrationError(f"Douyin OpenAPI request failed: status={resp.status_code}")
+        raise DouyinIntegrationError(
+            f"Douyin OpenAPI request failed: status={resp.status_code}",
+            error_code=f"http_{resp.status_code}",
+            retryable=resp.status_code >= 500,
+        )
     try:
         payload = resp.json()
     except ValueError as exc:
         raise DouyinIntegrationError("Douyin OpenAPI returned invalid JSON") from exc
-    return _extract_douyin_data(payload, required_field)
+    extra = payload.get("extra") if isinstance(payload, dict) else None
+    safe_extra = extra if isinstance(extra, dict) else {}
+    return _extract_douyin_data(payload, required_field), safe_extra
 
 
 def _as_int(value: object) -> int:
@@ -455,7 +664,15 @@ def _extract_douyin_data(payload: dict[str, Any], required_field: str) -> dict[s
         or data.get("code")
     )
     if error_code not in (None, 0, "0"):
-        raise DouyinIntegrationError(str(data.get("description") or data.get("message") or data))
+        extra = payload.get("extra") if isinstance(payload, dict) else None
+        safe_extra = extra if isinstance(extra, dict) else {}
+        code = str(error_code)
+        raise DouyinIntegrationError(
+            str(data.get("description") or data.get("message") or "Douyin OpenAPI error"),
+            error_code=code,
+            log_id=str(safe_extra.get("logid") or safe_extra.get("log_id") or "") or None,
+            retryable=code in {"28001005", "28001006"},
+        )
     if required_field not in data:
         raise DouyinIntegrationError(f"Douyin response missing {required_field}")
     return data

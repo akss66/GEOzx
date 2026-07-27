@@ -473,13 +473,19 @@ body {
 
 .review-section,
 .review-readiness,
-.review-goal-summary,
 .review-change-row,
 .review-attribution-row,
 .review-suggestion-row {
   border-color: var(--tz-line-subtle) !important;
   border-radius: 10px !important;
   background: #fff !important;
+  box-shadow: none !important;
+}
+
+.review-goal-summary {
+  border-color: rgba(23, 22, 20, 0.88) !important;
+  background: var(--tz-ink) !important;
+  color: #fff;
   box-shadow: none !important;
 }
 

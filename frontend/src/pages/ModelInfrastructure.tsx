@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   ModelProviderDeleteConflictError,
+  ModelProviderModelCatalogConflictError,
   createModelProvider,
   deleteModelProvider,
   discoverModelProviderModels,
@@ -320,7 +321,15 @@ export default function ModelInfrastructure() {
         message.success("模型目录已刷新。");
       }
     },
-    onError: () => message.error("自动发现模型失败，请保留现有模型目录后重试。"),
+    onError: (error) => {
+      if (error instanceof ModelProviderModelCatalogConflictError) {
+        message.error(
+          `模型目录未更新：${error.affectedAgents.join("、")} 仍在使用 ${error.missingModels.join("、")}。`,
+        );
+        return;
+      }
+      message.error("自动发现模型失败，请保留现有模型目录后重试。");
+    },
   });
 
   const saveModelsMutation = useMutation({
@@ -331,7 +340,15 @@ export default function ModelInfrastructure() {
       await invalidateProviderQueries(queryClient, provider.id);
       message.success("模型目录已保存。");
     },
-    onError: () => message.error("保存模型目录失败，请稍后再试。"),
+    onError: (error) => {
+      if (error instanceof ModelProviderModelCatalogConflictError) {
+        message.error(
+          `模型目录未保存：${error.affectedAgents.join("、")} 仍在使用 ${error.missingModels.join("、")}。`,
+        );
+        return;
+      }
+      message.error("保存模型目录失败，请稍后再试。");
+    },
   });
 
   const deleteProviderMutation = useMutation({

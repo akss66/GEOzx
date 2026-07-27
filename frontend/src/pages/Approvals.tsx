@@ -30,6 +30,7 @@ import {
   relativeApprovalTime,
   type ApprovalFilter,
 } from "../components/approvals/approvalPresentation";
+import { PublishExecutionQueue } from "../components/approvals/PublishExecutionQueue";
 import {
   deliverableLabel,
   deliverableSections,
@@ -131,6 +132,7 @@ export default function Approvals() {
       qc.invalidateQueries({ queryKey: ["approval-workspace"] });
       qc.invalidateQueries({ queryKey: ["content-items"] });
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
+      qc.invalidateQueries({ queryKey: ["publish-jobs"] });
       message.success(variables.approved ? "审批已通过，已进入下一项" : "修改意见已提交");
     },
     onError: (error) => message.error(errorMessage(error)),
@@ -185,6 +187,7 @@ export default function Approvals() {
           onReject={() => decide(false)}
         />
       </section>
+      <PublishExecutionQueue accountId={accountId} />
     </div>
   );
 }

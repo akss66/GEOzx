@@ -8,40 +8,93 @@ are stored as `Event` rows.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.core.events import publish_realtime_event
-from app.llm.gateway import gateway, reset_stream_observer, set_stream_observer
-from app.models import AgentInvocation, AgentToolCall, BrainTask, Event
+from app.llm.gateway import (
+    LLMCallContext,
+    bind_llm_call_context,
+    gateway,
+    reset_stream_observer,
+    set_stream_observer,
+)
+from app.models import Account, AgentInvocation, AgentToolCall, BrainTask, Event, User
 from app.models.enums import AgentCode, BrainTaskStatus
-from app.orchestrator.brain_adapter import run_brain_task_pipeline, run_brain_task_steps
+from app.orchestrator.agent_harness import agent_harness
+from app.orchestrator.agent_kernel import AgentKernelPolicyError, main_kernel_policy
+from app.orchestrator.brain_adapter import run_brain_task_pipeline
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
 from app.orchestrator.capability_registry import runtime_capabilities
-from app.schemas.brain import DecisionRequest, IntentDecision
+from app.orchestrator.main_kernel import MainKernelActionExecutor, MainKernelRoute
+from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLimits
+from app.orchestrator.runtime_tools import build_runtime_tool_adapter
+from app.orchestrator.tool_executor import DurableToolExecutor
+from app.prompts import prompt_registry
+from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeToolCall
+from app.services.runtime_memory import runtime_memory_service
 
 
 class BrainRuntimeState(TypedDict, total=False):
     task_id: int
+    agent_run_id: int
+    agent_run_attempt: int
     thread_id: str
     status: str
     pending_permissions: list[int]
     round_index: int
+    required_expert_codes: list[str]
     selected_experts: list[str]
+    selected_tool_calls: list[dict[str, Any]]
     observations: list[dict[str, Any]]
     pending_decision_id: str
+    runtime_started_at: str
+    expert_dispatch_history: list[dict[str, Any]]
+    tool_call_count: int
+    token_count: int
+    cost_usd: float
+    selected_expert_purpose: str
+    selected_expert_evidence_refs: list[str]
+    termination_reason: str
+    kernel_route: str
+
+
+_runtime_session: ContextVar[AsyncSession | None] = ContextVar(
+    "brain_runtime_session",
+    default=None,
+)
+
+
+@contextmanager
+def bind_runtime_session(session: AsyncSession) -> Iterator[None]:
+    """Bind one database session to the current async execution context."""
+
+    token = _runtime_session.set(session)
+    try:
+        yield
+    finally:
+        _runtime_session.reset(token)
 
 
 @dataclass
 class _StreamObserverState:
+    run_id: str = field(default_factory=lambda: uuid4().hex)
     counters: dict[str, int] = field(default_factory=dict)
     current: dict[str, str] = field(default_factory=dict)
+    contents: dict[str, str] = field(default_factory=dict)
+    models: dict[str, str] = field(default_factory=dict)
 
     def message_id_for(self, agent_code: str) -> str:
         existing = self.current.get(agent_code)
@@ -49,35 +102,67 @@ class _StreamObserverState:
             return existing
         next_index = self.counters.get(agent_code, 0) + 1
         self.counters[agent_code] = next_index
-        message_id = f"{agent_code}:{next_index}"
+        message_id = f"{self.run_id}:{agent_code}:{next_index}"
         self.current[agent_code] = message_id
+        self.contents.setdefault(agent_code, "")
         return message_id
+
+    def append(self, agent_code: str, delta: str) -> None:
+        self.contents[agent_code] = f"{self.contents.get(agent_code, '')}{delta}"
+
+    def active_messages(self) -> list[tuple[str, str, str, str]]:
+        return [
+            (
+                agent_code,
+                message_id,
+                self.contents.get(agent_code, ""),
+                self.models.get(agent_code, ""),
+            )
+            for agent_code, message_id in self.current.items()
+        ]
 
     def finish(self, agent_code: str) -> None:
         self.current.pop(agent_code, None)
+        self.contents.pop(agent_code, None)
+        self.models.pop(agent_code, None)
 
 
 class BrainRuntimeGraph:
     """LangGraph wrapper that exposes a brain task as a resumable agent runtime."""
 
-    def __init__(self) -> None:
+    def __init__(self, checkpointer: Any | None = None) -> None:
+        self._compile_graphs(checkpointer)
+
+    async def configure_checkpointer(self, checkpointer: Any | None) -> None:
+        """Atomically rebuild compiled graphs around one worker-owned saver."""
+
+        self._compile_graphs(checkpointer)
+
+    @staticmethod
+    def graph_config(thread_id: str) -> dict[str, dict[str, str]]:
+        return {"configurable": {"thread_id": thread_id}}
+
+    def _compile_graphs(self, checkpointer: Any | None) -> None:
+        self._native_interrupts = checkpointer is not None
         graph = StateGraph(BrainRuntimeState)
         graph.add_node("load_context", self._load_context)
         graph.add_node("plan_execution", self._plan_execution)
         graph.add_node("dispatch_experts", self._dispatch_experts)
+        graph.add_node("collect_permissions", self._collect_permissions)
         graph.add_node("permission_gate", self._permission_gate)
         graph.add_node("summarize", self._summarize)
         graph.add_edge(START, "load_context")
         graph.add_edge("load_context", "plan_execution")
         graph.add_edge("plan_execution", "dispatch_experts")
-        graph.add_edge("dispatch_experts", "permission_gate")
+        graph.add_edge("dispatch_experts", "collect_permissions")
+        graph.add_edge("collect_permissions", "permission_gate")
         graph.add_conditional_edges(
             "permission_gate",
             self._route_after_permission_gate,
             {"waiting": END, "continue": "summarize"},
         )
         graph.add_edge("summarize", END)
-        self._graph = graph.compile()
+        self._graph = graph.compile(checkpointer=checkpointer)
 
         resume_graph = StateGraph(BrainRuntimeState)
         resume_graph.add_node("permission_gate", self._permission_gate)
@@ -89,17 +174,21 @@ class BrainRuntimeGraph:
             {"waiting": END, "continue": "summarize"},
         )
         resume_graph.add_edge("summarize", END)
-        self._resume_graph = resume_graph.compile()
+        self._resume_graph = resume_graph.compile(checkpointer=checkpointer)
 
         smart_graph = StateGraph(BrainRuntimeState)
         smart_graph.add_node("dispatch_round", self._dispatch_round)
+        smart_graph.add_node("execute_tools", self._execute_tools)
         smart_graph.add_node("observe_round", self._observe_round)
+        smart_graph.add_node("collect_permissions", self._collect_permissions)
         smart_graph.add_node("smart_permission_gate", self._smart_permission_gate)
         smart_graph.add_node("decide_next", self._decide_next)
+        smart_graph.add_node("decision_gate", self._decision_gate)
         smart_graph.add_node("smart_summarize", self._smart_summarize)
         smart_graph.add_edge(START, "decide_next")
         smart_graph.add_edge("dispatch_round", "observe_round")
-        smart_graph.add_edge("observe_round", "smart_permission_gate")
+        smart_graph.add_edge("observe_round", "collect_permissions")
+        smart_graph.add_edge("collect_permissions", "smart_permission_gate")
         smart_graph.add_conditional_edges(
             "smart_permission_gate",
             self._route_after_smart_permission,
@@ -108,22 +197,48 @@ class BrainRuntimeGraph:
         smart_graph.add_conditional_edges(
             "decide_next",
             self._route_after_smart_decision,
-            {"dispatch": "dispatch_round", "waiting": END, "finish": "smart_summarize"},
+            {
+                "dispatch": "dispatch_round",
+                "tools": "execute_tools",
+                "decision": "decision_gate",
+                "waiting": END,
+                "finish": "smart_summarize",
+            },
+        )
+        smart_graph.add_edge("execute_tools", "collect_permissions")
+        smart_graph.add_conditional_edges(
+            "decision_gate",
+            self._route_after_decision_gate,
+            {"continue": "decide_next", "waiting": END},
         )
         smart_graph.add_edge("smart_summarize", END)
-        self._smart_graph = smart_graph.compile()
+        self._smart_graph = smart_graph.compile(checkpointer=checkpointer)
 
         smart_resume_graph = StateGraph(BrainRuntimeState)
         smart_resume_graph.add_node("decide_next", self._decide_next)
         smart_resume_graph.add_node("dispatch_round", self._dispatch_round)
+        smart_resume_graph.add_node("execute_tools", self._execute_tools)
         smart_resume_graph.add_node("observe_round", self._observe_round)
         smart_resume_graph.add_node("smart_permission_gate", self._smart_permission_gate)
+        smart_resume_graph.add_node("decision_gate", self._decision_gate)
         smart_resume_graph.add_node("smart_summarize", self._smart_summarize)
         smart_resume_graph.add_edge(START, "decide_next")
         smart_resume_graph.add_conditional_edges(
             "decide_next",
             self._route_after_smart_decision,
-            {"dispatch": "dispatch_round", "waiting": END, "finish": "smart_summarize"},
+            {
+                "dispatch": "dispatch_round",
+                "tools": "execute_tools",
+                "decision": "decision_gate",
+                "waiting": END,
+                "finish": "smart_summarize",
+            },
+        )
+        smart_resume_graph.add_edge("execute_tools", "smart_permission_gate")
+        smart_resume_graph.add_conditional_edges(
+            "decision_gate",
+            self._route_after_decision_gate,
+            {"continue": "decide_next", "waiting": END},
         )
         smart_resume_graph.add_edge("dispatch_round", "observe_round")
         smart_resume_graph.add_edge("observe_round", "smart_permission_gate")
@@ -133,13 +248,17 @@ class BrainRuntimeGraph:
             {"waiting": END, "continue": "decide_next"},
         )
         smart_resume_graph.add_edge("smart_summarize", END)
-        self._smart_resume_graph = smart_resume_graph.compile()
+        self._smart_resume_graph = smart_resume_graph.compile(checkpointer=checkpointer)
 
     async def start_smart(
         self,
         session: AsyncSession,
         task: BrainTask,
         intent: IntentDecision,
+        *,
+        client_message_id: str | None = None,
+        agent_run_id: int | None = None,
+        agent_run_attempt: int = 0,
     ) -> BrainTask:
         """Start one server-classified conversation or dynamic expert workflow."""
 
@@ -152,21 +271,38 @@ class BrainRuntimeGraph:
             session,
             task,
             "brain.runtime.started",
-            {"message": "主 Agent 已接收你的消息。"},
+            {
+                "message": "主 Agent 已接收你的消息。",
+                "client_message_id": client_message_id,
+            },
         )
         await self._record_event(
             session,
             task,
             "brain.runtime.intent_classified",
-            {"intent": intent.model_dump(mode="json")},
+            {
+                "intent": intent.model_dump(mode="json"),
+                "client_message_id": client_message_id,
+            },
         )
 
-        _session_from_state._active_session = session
-        observer_state = _StreamObserverState()
-        token = set_stream_observer(self._stream_observer(session, task, observer_state))
+        runtime_session_token = _runtime_session.set(session)
+        observer_state = _StreamObserverState(run_id=client_message_id or uuid4().hex)
+        token = set_stream_observer(
+            self._stream_observer(
+                session,
+                task,
+                observer_state,
+                client_message_id=client_message_id,
+            )
+        )
         try:
             if intent.intent == "conversation":
-                await self._stream_conversation_turn(session, task)
+                await self._stream_conversation_turn(
+                    session,
+                    task,
+                    client_message_id=client_message_id,
+                )
                 task.status = BrainTaskStatus.COMPLETED
                 task.progress = 100
                 task.current_focus = "主 Agent 已完成回复，未调用专家"
@@ -182,12 +318,16 @@ class BrainRuntimeGraph:
                     task,
                     "brain.runtime.message_done",
                     {
-                        "message_id": "00-decision:1",
+                        "message_id": _runtime_message_id(
+                            client_message_id,
+                            AgentCode.DECISION.value,
+                        ),
                         "agent_code": AgentCode.DECISION.value,
                         "agent_name": "主 Agent",
                         "model": "system",
                         "message": question,
                         "content": question,
+                        "client_message_id": client_message_id,
                     },
                 )
                 await self._record_event(
@@ -202,15 +342,27 @@ class BrainRuntimeGraph:
             await self._smart_graph.ainvoke(
                 {
                     "task_id": task.id,
+                    "agent_run_id": agent_run_id,
+                    "agent_run_attempt": agent_run_attempt,
                     "thread_id": task.thread_id,
                     "round_index": 1,
+                    "required_expert_codes": [
+                        code.value for code in intent.suggested_expert_codes
+                    ],
                     "selected_experts": [],
+                    "selected_tool_calls": [],
                     "observations": [],
-                }
+                    "runtime_started_at": datetime.now(UTC).isoformat(),
+                    "expert_dispatch_history": [],
+                    "tool_call_count": 0,
+                    "token_count": 0,
+                    "cost_usd": 0.0,
+                },
+                config=self.graph_config(task.thread_id),
             )
         finally:
             reset_stream_observer(token)
-            _session_from_state._active_session = None
+            _runtime_session.reset(runtime_session_token)
         await session.refresh(task)
         return task
 
@@ -227,16 +379,19 @@ class BrainRuntimeGraph:
             {"message": "主 Agent 已接收目标，开始建立运行时上下文。"},
         )
 
-        _session_from_state._active_session = session
+        runtime_session_token = _runtime_session.set(session)
         observer_state = _StreamObserverState()
         observer = self._stream_observer(session, task, observer_state)
         token = set_stream_observer(observer)
         try:
             await self._stream_main_agent_turn(session, task)
-            await self._graph.ainvoke({"task_id": task.id, "thread_id": task.thread_id})
+            await self._graph.ainvoke(
+                {"task_id": task.id, "thread_id": task.thread_id},
+                config=self.graph_config(task.thread_id),
+            )
         finally:
             reset_stream_observer(token)
-            _session_from_state._active_session = None
+            _runtime_session.reset(runtime_session_token)
         await session.refresh(task)
         return task
 
@@ -252,7 +407,7 @@ class BrainRuntimeGraph:
             task,
             "brain.runtime.message_done",
             {
-                "message_id": "00-decision:1",
+                "message_id": _runtime_message_id(None, AgentCode.DECISION.value),
                 "agent_code": "00-decision",
                 "agent_name": "主 Agent",
                 "model": "system",
@@ -269,6 +424,9 @@ class BrainRuntimeGraph:
         task: BrainTask,
         tool_call: AgentToolCall,
         approved: bool,
+        *,
+        agent_run_id: int | None = None,
+        agent_run_attempt: int = 0,
     ) -> BrainTask:
         if task.runtime_mode != "langgraph":
             return task
@@ -292,32 +450,50 @@ class BrainRuntimeGraph:
             return task
 
         events = await runtime_events(session, task.id)
-        is_smart_runtime = any(
-            event.type == "brain.runtime.intent_classified" for event in events
-        )
-        _session_from_state._active_session = session
+        is_smart_runtime = any(event.type == "brain.runtime.intent_classified" for event in events)
+        runtime_session_token = _runtime_session.set(session)
         observer_state = _StreamObserverState()
         observer = self._stream_observer(session, task, observer_state)
         token = set_stream_observer(observer)
         try:
-            if is_smart_runtime:
+            if self._native_interrupts:
+                target_graph = self._smart_graph if is_smart_runtime else self._graph
+                await target_graph.ainvoke(
+                    Command(
+                        update={
+                            "agent_run_id": agent_run_id,
+                            "agent_run_attempt": agent_run_attempt,
+                        },
+                        resume={
+                            "kind": "permission",
+                            "tool_call_id": tool_call.id,
+                            "approved": approved,
+                        }
+                    ),
+                    config=self.graph_config(task.thread_id),
+                )
+            elif is_smart_runtime:
                 observations = await _runtime_observations(session, task.id)
                 await self._smart_resume_graph.ainvoke(
                     {
                         "task_id": task.id,
+                        "agent_run_id": agent_run_id,
+                        "agent_run_attempt": agent_run_attempt,
                         "thread_id": task.thread_id,
                         "round_index": _next_round_index(events),
                         "selected_experts": [],
                         "observations": observations,
-                    }
+                    },
+                    config=self.graph_config(task.thread_id),
                 )
             else:
                 await self._resume_graph.ainvoke(
-                    {"task_id": task.id, "thread_id": task.thread_id}
+                    {"task_id": task.id, "thread_id": task.thread_id},
+                    config=self.graph_config(task.thread_id),
                 )
         finally:
             reset_stream_observer(token)
-            _session_from_state._active_session = None
+            _runtime_session.reset(runtime_session_token)
         await session.refresh(task)
         return task
 
@@ -330,13 +506,59 @@ class BrainRuntimeGraph:
         session: AsyncSession,
         task: BrainTask,
         message: str,
+        *,
+        client_message_id: str | None = None,
     ) -> None:
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         await self._record_event(
             session,
             task,
             "brain.runtime.user_message",
-            {"message": message, "content": message},
+            {
+                "message": message,
+                "content": message,
+                "client_message_id": client_message_id,
+            },
+        )
+
+    async def record_regeneration_requested(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        source_event_id: int,
+        client_message_id: str,
+    ) -> None:
+        await self._record_event(
+            session,
+            task,
+            "brain.runtime.regeneration_requested",
+            {
+                "message": "主 Agent 正在重新生成这一轮回答。",
+                "source_event_id": source_event_id,
+                "client_message_id": client_message_id,
+            },
+        )
+
+    async def record_generation_stopped(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        client_message_id: str,
+    ) -> None:
+        task.status = BrainTaskStatus.COMPLETED
+        task.progress = 100
+        task.current_focus = "本轮生成已停止，可以重新生成或继续输入"
+        await session.commit()
+        await self._record_event(
+            session,
+            task,
+            "brain.runtime.generation_stopped",
+            {
+                "message": "已停止生成。",
+                "client_message_id": client_message_id,
+            },
         )
 
     async def resume_after_decision(
@@ -347,7 +569,79 @@ class BrainRuntimeGraph:
         decision_id: str,
         choice_id: str,
         choice_title: str,
+        record_selection: bool = True,
+        agent_run_id: int | None = None,
+        agent_run_attempt: int = 0,
     ) -> BrainTask:
+        if record_selection:
+            await self.record_decision_selected(
+                session,
+                task,
+                decision_id=decision_id,
+                choice_id=choice_id,
+                choice_title=choice_title,
+            )
+        task.current_focus = "主 Agent 正在根据你的选择继续"
+        await session.commit()
+
+        runtime_session_token = _runtime_session.set(session)
+        observer_state = _StreamObserverState()
+        token = set_stream_observer(self._stream_observer(session, task, observer_state))
+        try:
+            thread_id = task.thread_id or self.thread_id_for(task.id)
+            if self._native_interrupts:
+                await self._smart_graph.ainvoke(
+                    Command(
+                        update={
+                            "agent_run_id": agent_run_id,
+                            "agent_run_attempt": agent_run_attempt,
+                        },
+                        resume={
+                            "kind": "decision",
+                            "decision_id": decision_id,
+                            "choice_id": choice_id,
+                            "choice_title": choice_title,
+                        }
+                    ),
+                    config=self.graph_config(thread_id),
+                )
+            else:
+                observations = await _runtime_observations(session, task.id)
+                observations.append(
+                    {
+                        "kind": "user_decision",
+                        "decision_id": decision_id,
+                        "choice_id": choice_id,
+                        "summary": choice_title,
+                    }
+                )
+                await self._smart_resume_graph.ainvoke(
+                    {
+                        "task_id": task.id,
+                        "agent_run_id": agent_run_id,
+                        "agent_run_attempt": agent_run_attempt,
+                        "thread_id": thread_id,
+                        "round_index": max(1, len(observations)),
+                        "selected_experts": [],
+                        "observations": observations,
+                    },
+                    config=self.graph_config(thread_id),
+                )
+        finally:
+            reset_stream_observer(token)
+            _runtime_session.reset(runtime_session_token)
+        await session.refresh(task)
+        return task
+
+    async def record_decision_selected(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        decision_id: str,
+        choice_id: str,
+        choice_title: str,
+    ) -> None:
         await self._record_event(
             session,
             task,
@@ -359,36 +653,6 @@ class BrainRuntimeGraph:
                 "choice_title": choice_title,
             },
         )
-        observations = await _runtime_observations(session, task.id)
-        observations.append(
-            {
-                "kind": "user_decision",
-                "decision_id": decision_id,
-                "choice_id": choice_id,
-                "summary": choice_title,
-            }
-        )
-        task.current_focus = "主 Agent 正在根据你的选择继续"
-        await session.commit()
-
-        _session_from_state._active_session = session
-        observer_state = _StreamObserverState()
-        token = set_stream_observer(self._stream_observer(session, task, observer_state))
-        try:
-            await self._smart_resume_graph.ainvoke(
-                {
-                    "task_id": task.id,
-                    "thread_id": task.thread_id or self.thread_id_for(task.id),
-                    "round_index": max(1, len(observations)),
-                    "selected_experts": [],
-                    "observations": observations,
-                }
-            )
-        finally:
-            reset_stream_observer(token)
-            _session_from_state._active_session = None
-        await session.refresh(task)
-        return task
 
     async def revise_decision(
         self,
@@ -520,9 +784,20 @@ class BrainRuntimeGraph:
         return {**state, "status": "experts_dispatched"}
 
     async def _dispatch_round(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
+            if task.created_by_id is None:
+                raise RuntimeError("brain task has no authenticated creator")
+            user = await session.get(User, task.created_by_id)
+            if user is None or user.org_id != task.org_id:
+                raise PermissionError("brain task creator is unavailable")
             selected = state.get("selected_experts", [])[:3]
+            round_index = state.get("round_index", 1)
+            purpose = state.get("selected_expert_purpose") or (
+                task.brief.goal if task.brief else task.title
+            )
+            evidence_refs = list(state.get("selected_expert_evidence_refs", []))
             for code in selected:
                 await self._record_event(
                     session,
@@ -532,13 +807,25 @@ class BrainRuntimeGraph:
                         "message": f"{_agent_display_name(code)}开始处理。",
                         "agent_code": code,
                         "agent_name": _agent_display_name(code),
-                        "round_index": state.get("round_index", 1),
+                        "round_index": round_index,
                     },
                 )
-            await run_brain_task_steps(session, task, selected)
+                agent_code = AgentCode(code)
+                await agent_harness.execute(
+                    session,
+                    user=user,
+                    task=task,
+                    code=agent_code,
+                    purpose=purpose,
+                    evidence_refs=evidence_refs,
+                    run_id=state.get("agent_run_id"),
+                    step_key=f"round-{round_index}:{agent_code.value}",
+                    attempt=state.get("agent_run_attempt", 0),
+                )
         return {**state, "status": "round_dispatched"}
 
     async def _observe_round(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
             selected = set(state.get("selected_experts", []))
@@ -549,11 +836,7 @@ class BrainRuntimeGraph:
                     .order_by(AgentInvocation.id)
                 )
             ).all()
-            current = [
-                row
-                for row in rows
-                if _agent_code_value(row.agent_code) in selected
-            ]
+            current = [row for row in rows if _agent_code_value(row.agent_code) in selected]
             observations = list(state.get("observations", []))
             for invocation in current:
                 code = _agent_code_value(invocation.agent_code)
@@ -580,12 +863,74 @@ class BrainRuntimeGraph:
                 )
         return {**state, "status": "round_observed", "observations": observations}
 
-    async def _smart_permission_gate(self, state: BrainRuntimeState) -> BrainRuntimeState:
+    async def _execute_tools(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            if task.created_by_id is None:
+                raise RuntimeError("brain task has no authenticated creator")
+            user = await session.get(User, task.created_by_id)
+            if user is None or user.org_id != task.org_id:
+                raise PermissionError("brain task creator is unavailable")
+
+            account_ids = list(task.brief.account_ids if task.brief else [])
+            account_id = int(account_ids[0]) if len(account_ids) == 1 else None
+            project_id = task.brief.project_id if task.brief else None
+            executor = DurableToolExecutor(build_runtime_tool_adapter())
+            observations = list(state.get("observations", []))
+
+            for payload in state.get("selected_tool_calls", [])[:5]:
+                request = RuntimeToolCall.model_validate(payload)
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.tool_started",
+                    {
+                        "message": f"主 Agent 正在调用 {request.tool_code}。",
+                        "tool_code": request.tool_code,
+                        "purpose": request.purpose,
+                    },
+                )
+                outcome = await executor.execute(
+                    task=task,
+                    user=user,
+                    request=request,
+                    project_id=project_id,
+                    account_id=account_id,
+                )
+                if outcome.status == "waiting_approval":
+                    continue
+                observation = {
+                    "kind": "tool_result",
+                    "tool_call_id": outcome.tool_call.id,
+                    "tool_code": request.tool_code,
+                    "summary": outcome.tool_call.output_summary,
+                    "result": outcome.result or {},
+                }
+                observations.append(observation)
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.tool_completed",
+                    {
+                        "message": f"{request.tool_code} 已完成。",
+                        **observation,
+                    },
+                )
+        return {
+            **state,
+            "status": "tools_executed",
+            "selected_tool_calls": [],
+            "observations": observations,
+        }
+
+    async def _collect_permissions(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
             pending = await _pending_permissions(session, task.id, task.org_id)
             if pending:
-                task.current_focus = "等待你确认下一步动作"
+                task.current_focus = "等待你确认质量门与下一步动作"
                 await self._record_event(
                     session,
                     task,
@@ -597,24 +942,45 @@ class BrainRuntimeGraph:
                 )
                 return {
                     **state,
-                    "status": "waiting_permission",
+                    "status": "permissions_collected",
                     "pending_permissions": [row.id for row in pending],
                 }
-        return {**state, "status": "ready_to_decide", "pending_permissions": []}
+        return {**state, "status": "permissions_collected", "pending_permissions": []}
+
+    async def _smart_permission_gate(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        return await self._run_permission_gate(state, ready_status="ready_to_decide")
 
     async def _decide_next(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
-            if state.get("round_index", 1) >= 6:
+            budget_guard = _runtime_budget_guard()
+            action_executor = _main_action_executor(budget_guard)
+            budget_reason = budget_guard.exhaustion_reason(state)
+            if budget_reason is not None:
                 await self._record_event(
                     session,
                     task,
-                    "brain.runtime.round_limit",
-                    {"message": "本轮已达到执行上限，我先汇总已有结论。"},
+                    "brain.runtime.budget_exhausted",
+                    {
+                        "message": "本轮已达到安全执行预算，我先汇总已有结论。",
+                        "reason": budget_reason,
+                    },
                 )
-                return {**state, "status": "finish"}
+                return {
+                    **state,
+                    "status": "finish",
+                    "kernel_route": MainKernelRoute.FINISH.value,
+                    "termination_reason": budget_reason,
+                }
 
-            capabilities = await runtime_capabilities(session, task.org_id)
+            if task.created_by_id is None:
+                raise RuntimeError("brain task has no authenticated creator")
+            user = await session.get(User, task.created_by_id)
+            if user is None or user.org_id != task.org_id:
+                raise PermissionError("brain task creator is unavailable")
+            capabilities = await runtime_capabilities(session, user)
             try:
                 step = await brain_intelligence.decide_next(
                     session,
@@ -636,7 +1002,70 @@ class BrainRuntimeGraph:
                         "error": str(exc),
                     },
                 )
-                return {**state, "status": "finish"}
+                return {
+                    **state,
+                    "status": "finish",
+                    "kernel_route": MainKernelRoute.FINISH.value,
+                }
+
+            required_expert_codes = _required_expert_codes(state, task)
+            successful_expert_codes = _successful_expert_codes(
+                state.get("observations", [])
+            )
+            available_expert_codes = {
+                str(item["code"])
+                for item in capabilities
+                if item.get("kind") == "expert"
+            }
+            if (
+                step.action in {"respond", "finish"}
+                and required_expert_codes
+                and not successful_expert_codes.intersection(required_expert_codes)
+            ):
+                pending_expert_codes = [
+                    code
+                    for code in required_expert_codes
+                    if code in available_expert_codes
+                ][:3]
+                if pending_expert_codes:
+                    step = step.model_copy(
+                        update={
+                            "action": "dispatch_experts",
+                            "expert_codes": [
+                                AgentCode(code) for code in pending_expert_codes
+                            ],
+                            "rationale": (
+                                "专业任务必须先取得对应专家的有效结论，"
+                                "主 Agent 才能汇总或结束本轮。"
+                            ),
+                            "handoff_message": (
+                                "我先把这项专业任务交给对应专家处理，"
+                                "完成后再为你汇总结论。"
+                            ),
+                            "purpose": step.purpose or step.rationale,
+                            "evidence_refs": list(step.evidence_refs) or ["intent-routing"],
+                        }
+                    )
+
+            try:
+                transition = action_executor.prepare(step)
+            except (AgentKernelPolicyError, ValueError) as exc:
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.policy_denied",
+                    {
+                        "message": "主 Agent 请求的下一步不符合运行时权限策略。",
+                        "action": step.action,
+                        "reason": str(exc),
+                    },
+                )
+                return {
+                    **state,
+                    "status": "finish",
+                    "kernel_route": MainKernelRoute.FINISH.value,
+                    "termination_reason": "kernel_policy_denied",
+                }
 
             await self._record_event(
                 session,
@@ -645,6 +1074,7 @@ class BrainRuntimeGraph:
                 {
                     "action": step.action,
                     "expert_codes": [code.value for code in step.expert_codes],
+                    "tool_codes": [call.tool_code for call in step.tool_calls],
                     "rationale": step.rationale,
                     "message": step.handoff_message,
                     "round_index": state.get("round_index", 1),
@@ -652,15 +1082,23 @@ class BrainRuntimeGraph:
             )
 
             if step.action == "dispatch_experts":
-                allowed_codes = {str(item["code"]) for item in capabilities}
-                completed = {
-                    str(item.get("agent_code")) for item in state.get("observations", [])
+                allowed_codes = {
+                    str(item["code"])
+                    for item in capabilities
+                    if item.get("kind") == "expert"
                 }
-                selected = [
+                requested = [
                     code.value
                     for code in step.expert_codes
-                    if code.value in allowed_codes and code.value not in completed
+                    if code.value in allowed_codes
                 ]
+                authorization = budget_guard.authorize_experts(
+                    state,
+                    requested,
+                    purpose=step.purpose or step.rationale,
+                    evidence_refs=step.evidence_refs,
+                )
+                selected = authorization.allowed_codes
                 if selected:
                     await self._record_event(
                         session,
@@ -672,11 +1110,92 @@ class BrainRuntimeGraph:
                         },
                     )
                     return {
-                        **state,
-                        "status": "dispatch",
+                        **authorization.state,
+                        "status": transition.status,
+                        "kernel_route": transition.route.value,
                         "selected_experts": selected,
+                        "selected_expert_purpose": step.purpose or step.rationale,
+                        "selected_expert_evidence_refs": step.evidence_refs,
                         "round_index": state.get("round_index", 1) + 1,
                     }
+                if authorization.blocked_reason is not None:
+                    await self._record_event(
+                        session,
+                        task,
+                        "brain.runtime.loop_blocked",
+                        {
+                            "message": "检测到重复调度或专家预算已耗尽，我先汇总已有结论。",
+                            "reason": authorization.blocked_reason,
+                            "expert_codes": requested,
+                        },
+                    )
+                    return {
+                        **authorization.state,
+                        "status": "finish",
+                        "kernel_route": MainKernelRoute.FINISH.value,
+                        "termination_reason": authorization.blocked_reason,
+                    }
+
+            if step.action in {"call_tools", "request_permission"} and step.tool_calls:
+                authorization = budget_guard.authorize_tools(state, len(step.tool_calls))
+                if authorization.allowed_count == 0:
+                    await self._record_event(
+                        session,
+                        task,
+                        "brain.runtime.budget_exhausted",
+                        {
+                            "message": "工具调用已达到本轮安全预算，我先汇总已有结论。",
+                            "reason": authorization.blocked_reason,
+                        },
+                    )
+                    return {
+                        **authorization.state,
+                        "status": "finish",
+                        "kernel_route": MainKernelRoute.FINISH.value,
+                        "termination_reason": authorization.blocked_reason or "tool_blocked",
+                    }
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.handoff",
+                    {
+                        "message": step.handoff_message,
+                        "tool_codes": [call.tool_code for call in step.tool_calls],
+                    },
+                )
+                return {
+                    **authorization.state,
+                    "status": transition.status,
+                    "kernel_route": transition.route.value,
+                    "selected_tool_calls": [
+                        call.model_dump(mode="json") for call in step.tool_calls
+                    ],
+                    "round_index": state.get("round_index", 1) + 1,
+                }
+
+            if step.action == "respond":
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.message_done",
+                    {
+                        "message_id": _runtime_message_id(None, AgentCode.DECISION.value),
+                        "agent_code": AgentCode.DECISION.value,
+                        "agent_name": "主 Agent",
+                        "model": "runtime-decision",
+                        "message": step.handoff_message,
+                        "content": step.handoff_message,
+                    },
+                )
+                task.status = BrainTaskStatus.COMPLETED
+                task.progress = 100
+                task.current_focus = "等待你的下一条消息"
+                await session.commit()
+                return {
+                    **state,
+                    "status": transition.status,
+                    "kernel_route": transition.route.value,
+                }
 
             if step.action == "request_decision" and step.decision_request is not None:
                 decision = step.decision_request.model_copy(update={"status": "pending"})
@@ -686,11 +1205,13 @@ class BrainRuntimeGraph:
                     "brain.runtime.decision_requested",
                     {"message": step.handoff_message, "decision": decision.model_dump(mode="json")},
                 )
+                task.status = BrainTaskStatus.PENDING_CONFIRMATION
                 task.current_focus = "等待你选择一个推进方案"
                 await session.commit()
                 return {
                     **state,
-                    "status": "waiting_decision",
+                    "status": transition.status,
+                    "kernel_route": transition.route.value,
                     "pending_decision_id": decision.id,
                 }
 
@@ -701,17 +1222,33 @@ class BrainRuntimeGraph:
                     "brain.runtime.clarification_requested",
                     {"message": step.handoff_message},
                 )
+                task.status = BrainTaskStatus.PENDING_CONFIRMATION
                 task.current_focus = "等待你补充信息"
                 await session.commit()
-                return {**state, "status": "waiting_user"}
+                return {
+                    **state,
+                    "status": transition.status,
+                    "kernel_route": transition.route.value,
+                }
 
-        return {**state, "status": "finish"}
+        return {
+            **state,
+            "status": "finish",
+            "kernel_route": MainKernelRoute.FINISH.value,
+        }
 
     async def _smart_summarize(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
             await self._stream_summary_turn(session, task, state.get("observations", []))
-            task.current_focus = "本轮专家工作已完成，等待你查看结果"
+            if task.status == BrainTaskStatus.PENDING_ACCEPTANCE:
+                task.progress = max(task.progress, 90)
+                task.current_focus = "本轮专家工作已完成，等待你验收结果"
+            else:
+                task.status = BrainTaskStatus.COMPLETED
+                task.progress = 100
+                task.current_focus = "本轮工作已完成，等待你查看结果"
             await self._record_event(
                 session,
                 task,
@@ -726,33 +1263,109 @@ class BrainRuntimeGraph:
 
     @staticmethod
     def _route_after_smart_decision(state: BrainRuntimeState) -> str:
+        kernel_route = state.get("kernel_route")
+        if kernel_route in {route.value for route in MainKernelRoute}:
+            return str(kernel_route)
         if state.get("status") == "dispatch":
             return "dispatch"
-        if state.get("status") in {"waiting_decision", "waiting_user"}:
+        if state.get("status") == "tools":
+            return "tools"
+        if state.get("status") == "waiting_decision":
+            return "decision"
+        if state.get("status") == "waiting_user":
             return "waiting"
         return "finish"
 
-    async def _permission_gate(self, state: BrainRuntimeState) -> BrainRuntimeState:
+    async def _decision_gate(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        await self._check_main_turn_boundary(state)
+        if state.get("status") != "waiting_decision" or not self._native_interrupts:
+            return state
+        result = interrupt(
+            {
+                "kind": "decision",
+                "decision_id": state.get("pending_decision_id", ""),
+            }
+        )
+        if not isinstance(result, dict) or result.get("kind") != "decision":
+            raise ValueError("Invalid decision resume payload")
+        expected_id = str(state.get("pending_decision_id") or "")
+        if str(result.get("decision_id") or "") != expected_id:
+            raise ValueError("Decision resume payload does not match the pending decision")
+        observations = list(state.get("observations", []))
+        observations.append(
+            {
+                "kind": "user_decision",
+                "decision_id": expected_id,
+                "choice_id": str(result.get("choice_id") or ""),
+                "summary": str(result.get("choice_title") or ""),
+            }
+        )
+        return {
+            **state,
+            "status": "ready_to_decide",
+            "pending_decision_id": "",
+            "observations": observations,
+        }
+
+    async def _check_main_turn_boundary(self, state: BrainRuntimeState) -> None:
+        if not state.get("agent_run_id"):
+            return
         async with _session_from_state(state) as session:
-            task = await _load_task(session, state["task_id"])
-            pending = await _pending_permissions(session, task.id, task.org_id)
-            if pending:
-                task.current_focus = "等待质量门与 Agent 工具调用人工确认"
-                await self._record_event(
-                    session,
-                    task,
-                    "brain.runtime.permission_request",
-                    {
-                        "message": "主 Agent 已暂停，等待人工确认高风险工具调用。",
-                        "tool_call_ids": [row.id for row in pending],
-                    },
+            await _main_action_executor().check_turn_boundary(session, state)
+
+    @staticmethod
+    def _route_after_decision_gate(state: BrainRuntimeState) -> str:
+        return "waiting" if state.get("status") == "waiting_decision" else "continue"
+
+    async def _permission_gate(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        return await self._run_permission_gate(state, ready_status="ready_to_summarize")
+
+    async def _run_permission_gate(
+        self,
+        state: BrainRuntimeState,
+        *,
+        ready_status: str,
+    ) -> BrainRuntimeState:
+        pending_ids = list(state.get("pending_permissions", []))
+        if not pending_ids:
+            return {**state, "status": ready_status, "pending_permissions": []}
+        if not self._native_interrupts:
+            return {**state, "status": "waiting_permission"}
+
+        result = interrupt({"kind": "permission", "tool_call_ids": pending_ids})
+        if not isinstance(result, dict) or result.get("kind") != "permission":
+            raise ValueError("Invalid permission resume payload")
+
+        async with _session_from_state(state) as session:
+            rows = (
+                await session.scalars(
+                    select(AgentToolCall)
+                    .where(
+                        AgentToolCall.id.in_(pending_ids),
+                        AgentToolCall.task_id == state["task_id"],
+                    )
+                    .order_by(AgentToolCall.id)
                 )
-                return {
-                    **state,
-                    "status": "waiting_permission",
-                    "pending_permissions": [row.id for row in pending],
+            ).all()
+            if any(row.status == "waiting_approval" for row in rows):
+                raise RuntimeError("Cannot resume while tool approvals are still pending")
+            observations = list(state.get("observations", []))
+            observations.extend(
+                {
+                    "kind": "permission_decision",
+                    "tool_call_id": row.id,
+                    "tool_code": row.tool_code,
+                    "approved": row.status == "success",
+                    "summary": row.output_summary,
                 }
-        return {**state, "status": "ready_to_summarize", "pending_permissions": []}
+                for row in rows
+            )
+        return {
+            **state,
+            "status": ready_status,
+            "pending_permissions": [],
+            "observations": observations,
+        }
 
     async def _summarize(self, state: BrainRuntimeState) -> BrainRuntimeState:
         async with _session_from_state(state) as session:
@@ -796,17 +1409,8 @@ class BrainRuntimeGraph:
         if task.brief is None:
             return
         history = await _parent_thread_messages(session, task, task.brief.goal)
+        operating_context = await _main_agent_operating_context(session, task)
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是同舟行AI新媒体运营平台的主 Agent。"
-                    "用户希望像 Claude Code 一样在对话里完成运营工作流。"
-                    "请先用自然语言确认你理解了用户目标，并说明你会根据需要动态选择专家或工具。"
-                    "此时尚未完成调度决策，不要承诺具体专家名单或固定执行顺序。"
-                    "不要输出 JSON，不要使用 Brief 这个词。"
-                ),
-            },
             *history,
             {
                 "role": "user",
@@ -817,7 +1421,13 @@ class BrainRuntimeGraph:
                 ),
             },
         ]
-        await gateway.chat(session, task.org_id, "00-decision", messages)
+        await _chat_main_agent(
+            session,
+            task,
+            "main-agent.acknowledgement",
+            operating_context,
+            messages,
+        )
 
     async def _stream_summary_turn(
         self,
@@ -828,19 +1438,13 @@ class BrainRuntimeGraph:
         if task.brief is None or not observations:
             return
         history = await _parent_thread_messages(session, task, "")
-        await gateway.chat(
+        operating_context = await _main_agent_operating_context(session, task)
+        await _chat_main_agent(
             session,
-            task.org_id,
-            AgentCode.DECISION.value,
+            task,
+            "main-agent.summary",
+            operating_context,
             [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是同舟行的主 Agent。根据专家的压缩结论向用户完成本轮汇总。"
-                        "先给核心结论，再给不超过三条下一步建议。"
-                        "不要输出 JSON、内部 action、专家 code、模型名或技术日志。"
-                    ),
-                },
                 *history,
                 {
                     "role": "user",
@@ -849,40 +1453,54 @@ class BrainRuntimeGraph:
             ],
         )
 
-    async def _stream_conversation_turn(self, session: AsyncSession, task: BrainTask) -> None:
+    async def _stream_conversation_turn(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        client_message_id: str | None = None,
+    ) -> None:
         if task.brief is None:
             return
         history = await _parent_thread_messages(session, task, task.brief.goal)
-        result, _cost = await gateway.chat(
+        operating_context = await _main_agent_operating_context(session, task)
+        completed_event_ids_before = {
+            event.id
+            for event in await runtime_events(session, task.id)
+            if event.type == "brain.runtime.message_done"
+        }
+        result, _cost = await _chat_main_agent(
             session,
-            task.org_id,
-            AgentCode.DECISION.value,
+            task,
+            "main-agent.conversation",
+            operating_context,
             [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是同舟行的主 Agent。自然、简洁地回应用户当前消息。"
-                        "普通交流不得虚构专家调用、任务进度或已经读取的数据。"
-                        "不要输出 JSON、模型名或技术说明。"
-                    ),
-                },
                 *history,
                 {"role": "user", "content": task.brief.goal},
             ],
         )
         events = await runtime_events(session, task.id)
-        if not any(event.type == "brain.runtime.message_done" for event in events):
+        completed_this_turn = any(
+            event.type == "brain.runtime.message_done"
+            and event.id not in completed_event_ids_before
+            for event in events
+        )
+        if not completed_this_turn:
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.message_done",
                 {
-                    "message_id": "00-decision:1",
+                    "message_id": _runtime_message_id(
+                        client_message_id,
+                        AgentCode.DECISION.value,
+                    ),
                     "agent_code": AgentCode.DECISION.value,
                     "agent_name": "主 Agent",
                     "model": result.model,
                     "message": result.content,
                     "content": result.content,
+                    "client_message_id": client_message_id,
                 },
             )
 
@@ -891,12 +1509,16 @@ class BrainRuntimeGraph:
         session: AsyncSession,
         task: BrainTask,
         observer_state: _StreamObserverState,
+        *,
+        client_message_id: str | None = None,
     ):
         async def observer(event: dict[str, Any]) -> None:
             agent_code = str(event.get("agent_code") or "00-decision")
             phase = str(event.get("phase") or "")
             model = str(event.get("model") or "")
             message_id = observer_state.message_id_for(agent_code)
+            if model:
+                observer_state.models[agent_code] = model
             agent_name = _agent_display_name(agent_code)
             base_payload = {
                 "task_id": task.id,
@@ -905,6 +1527,7 @@ class BrainRuntimeGraph:
                 "agent_code": agent_code,
                 "agent_name": agent_name,
                 "model": model,
+                "client_message_id": client_message_id,
             }
             if phase == "start":
                 await publish_realtime_event(
@@ -914,9 +1537,11 @@ class BrainRuntimeGraph:
                     project_id=task.brief.project_id if task.brief else None,
                 )
             elif phase == "delta":
+                delta = str(event.get("delta") or "")
+                observer_state.append(agent_code, delta)
                 await publish_realtime_event(
                     "brain.runtime.message_delta",
-                    {**base_payload, "delta": str(event.get("delta") or "")},
+                    {**base_payload, "delta": delta},
                     content_item_id=task.content_item_id,
                     project_id=task.brief.project_id if task.brief else None,
                 )
@@ -953,21 +1578,30 @@ class BrainRuntimeGraph:
             "task_id": task.id,
             "thread_id": task.thread_id or self.thread_id_for(task.id),
         }
-        session.add(
-            Event(
-                type=event_type,
-                content_item_id=task.content_item_id,
-                project_id=task.brief.project_id if task.brief else None,
-                payload=event_payload,
-            )
+        event_row = Event(
+            type=event_type,
+            content_item_id=task.content_item_id,
+            project_id=task.brief.project_id if task.brief else None,
+            payload=event_payload,
         )
+        session.add(event_row)
         await session.commit()
+        await session.refresh(event_row)
         await publish_realtime_event(
             event_type,
             event_payload,
             content_item_id=task.content_item_id,
             project_id=task.brief.project_id if task.brief else None,
+            event_id=event_row.id,
         )
+        if (
+            event_type == "brain.runtime.message_done"
+            and settings.agent_runtime_memory_auto_compact_enabled
+        ):
+            try:
+                await runtime_memory_service.maybe_compact(session, task)
+            except Exception:
+                pass
 
 
 runtime_graph = BrainRuntimeGraph()
@@ -995,9 +1629,48 @@ async def runtime_events(session: AsyncSession, task_id: int) -> list[Event]:
 async def runtime_status(session: AsyncSession, task: BrainTask) -> str:
     if task.runtime_mode != "langgraph":
         return "legacy"
+    events = await runtime_events(session, task.id)
+    latest_started_id = max(
+        (event.id for event in events if event.type == "brain.runtime.started"),
+        default=0,
+    )
+    latest_stopped_id = max(
+        (event.id for event in events if event.type == "brain.runtime.generation_stopped"),
+        default=0,
+    )
+    if latest_stopped_id > latest_started_id:
+        return "stopped"
+    latest_waiting_user_id = max(
+        (
+            event.id
+            for event in events
+            if event.type == "brain.runtime.clarification_requested"
+        ),
+        default=0,
+    )
+    latest_waiting_decision_id = max(
+        (
+            event.id
+            for event in events
+            if event.type == "brain.runtime.decision_requested"
+        ),
+        default=0,
+    )
+    latest_decision_selected_id = max(
+        (
+            event.id
+            for event in events
+            if event.type == "brain.runtime.decision_selected"
+        ),
+        default=0,
+    )
     pending = await _pending_permissions(session, task.id, task.org_id)
     if pending:
         return "waiting_permission"
+    if latest_waiting_decision_id > max(latest_started_id, latest_decision_selected_id):
+        return "waiting_decision"
+    if latest_waiting_user_id > latest_started_id:
+        return "waiting_user"
     if task.status == BrainTaskStatus.FAILED:
         return "failed"
     if task.status == BrainTaskStatus.COMPLETED:
@@ -1055,9 +1728,7 @@ async def _runtime_observations(
     ]
     tool_calls = (
         await session.scalars(
-            select(AgentToolCall)
-            .where(AgentToolCall.task_id == task_id)
-            .order_by(AgentToolCall.id)
+            select(AgentToolCall).where(AgentToolCall.task_id == task_id).order_by(AgentToolCall.id)
         )
     ).all()
     for tool_call in tool_calls:
@@ -1101,79 +1772,95 @@ async def _parent_thread_messages(
     the current message with its full account and platform context.
     """
 
-    events = await runtime_events(session, task.id)
-    latest_user_event_id = next(
-        (
-            event.id
-            for event in reversed(events)
-            if event.type == "brain.runtime.user_message"
-            and str((event.payload or {}).get("message") or "").strip()
-            == current_message.strip()
-        ),
-        None,
+    return await runtime_memory_service.build_runtime_context(
+        session,
+        task,
+        current_message=current_message,
+        budget_chars=settings.agent_runtime_context_char_budget,
     )
-    invocations = (
-        await session.scalars(
-            select(AgentInvocation)
-            .where(AgentInvocation.task_id == task.id)
-            .order_by(AgentInvocation.id)
-        )
-    ).all()
-    invocations_by_id = {row.id: row for row in invocations}
-    transcript: list[dict[str, str]] = []
 
-    for event in events:
-        payload = event.payload or {}
-        if event.type == "brain.runtime.user_message":
-            if event.id == latest_user_event_id:
-                continue
-            content = str(payload.get("message") or payload.get("content") or "").strip()
-            if content:
-                transcript.append({"role": "user", "content": content})
-            continue
 
-        if event.type == "brain.runtime.message_done":
-            agent_code = str(payload.get("agent_code") or AgentCode.DECISION.value)
-            if agent_code != AgentCode.DECISION.value:
-                continue
-            content = str(payload.get("content") or payload.get("message") or "").strip()
-            if content:
-                transcript.append({"role": "assistant", "content": content})
-            continue
+async def _main_agent_operating_context(
+    session: AsyncSession,
+    task: BrainTask,
+) -> str:
+    if task.brief is None:
+        return "当前未绑定平台、账号或项目。"
 
-        if event.type == "brain.runtime.subagent_completed":
-            invocation_id = payload.get("invocation_id")
-            invocation = (
-                invocations_by_id.get(invocation_id)
-                if isinstance(invocation_id, int)
-                else None
+    platform_names = [
+        _platform_display_name(platform) for platform in task.brief.platforms if platform
+    ]
+    account_ids = [int(account_id) for account_id in task.brief.account_ids]
+    account_rows = (
+        (
+            await session.scalars(
+                select(Account)
+                .where(Account.org_id == task.org_id, Account.id.in_(account_ids))
+                .order_by(Account.id)
             )
-            if invocation and invocation.output_summary:
-                transcript.append(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            f"专家摘要（{invocation.agent_name}）："
-                            f"{_compact_context_text(invocation.output_summary)}"
-                        ),
-                    }
-                )
-            continue
+        ).all()
+        if account_ids
+        else []
+    )
+    accounts = "、".join(
+        f"{account.nickname}（{_platform_display_name(account.platform.value)}，"
+        f"账号 ID {account.id}）"
+        for account in account_rows
+    )
+    parts = [f"当前平台：{'、'.join(platform_names) or '未指定'}"]
+    parts.append(f"当前账号：{accounts or '未选择账号'}")
+    parts.append(f"当前项目：{task.brief.project_name or '未选择项目'}")
+    return "；".join(parts) + "。"
 
-        if event.type == "brain.runtime.decision_selected":
-            choice = str(payload.get("choice_title") or "").strip()
-            if choice:
-                transcript.append({"role": "user", "content": f"已选择方案：{choice}"})
-            continue
 
-        if event.type == "brain.runtime.resumed":
-            result = "允许" if payload.get("approved") else "驳回"
-            transcript.append({"role": "user", "content": f"工具权限决定：{result}"})
+async def _chat_main_agent(
+    session: AsyncSession,
+    task: BrainTask,
+    prompt_id: str,
+    operating_context: str,
+    messages: list[dict],
+):
+    prompt = prompt_registry.render(
+        prompt_id,
+        variables={"operating_context": operating_context},
+    )
+    account_ids = list(task.brief.account_ids if task.brief else [])
+    scope: dict[str, Any] = {"org_id": task.org_id}
+    if task.brief is not None and task.brief.project_id is not None:
+        scope["project_id"] = task.brief.project_id
+    if len(account_ids) == 1:
+        scope["account_id"] = int(account_ids[0])
+    elif account_ids:
+        scope["account_ids"] = [int(item) for item in account_ids]
+    context = LLMCallContext(
+        task_id=task.id,
+        trace_id=task.thread_id,
+        prompt_id=prompt.spec.id,
+        prompt_version=prompt.spec.version,
+        prompt_hash=prompt.content_hash,
+        prompt_schema_version=prompt.spec.schema_version,
+        scope=scope,
+        budget={
+            "max_tokens": settings.agent_runtime_max_tokens,
+            "max_cost_usd": settings.agent_runtime_max_cost_usd,
+        },
+    )
+    with bind_llm_call_context(context):
+        return await gateway.chat(
+            session,
+            task.org_id,
+            AgentCode.DECISION.value,
+            [{"role": "system", "content": prompt.content}, *messages],
+        )
 
-    compact = transcript[-12:]
-    while sum(len(item["content"]) for item in compact) > 6000 and len(compact) > 1:
-        compact.pop(0)
-    return compact
+
+def _platform_display_name(platform: str) -> str:
+    return {
+        "douyin": "抖音",
+        "xiaohongshu": "小红书",
+        "shipinhao": "视频号",
+        "tencent": "视频号",
+    }.get(platform, platform)
 
 
 def _compact_context_text(value: str, limit: int = 1200) -> str:
@@ -1196,6 +1883,37 @@ async def _load_task(session: AsyncSession, task_id: int) -> BrainTask:
     return task
 
 
+def _required_expert_codes(
+    state: BrainRuntimeState,
+    task: BrainTask,
+) -> list[str]:
+    required = [
+        code
+        for code in state.get("required_expert_codes", [])
+        if code != AgentCode.DECISION.value
+    ]
+    if required or task.plan is None:
+        return list(dict.fromkeys(required))
+    return list(
+        dict.fromkeys(
+            str(step.get("agent_code"))
+            for step in task.plan.steps
+            if step.get("agent_code")
+            and str(step.get("agent_code")) != AgentCode.DECISION.value
+        )
+    )
+
+
+def _successful_expert_codes(observations: list[dict[str, Any]]) -> set[str]:
+    successful_statuses = {"done", "success", "completed"}
+    return {
+        str(observation.get("agent_code"))
+        for observation in observations
+        if str(observation.get("status") or "").lower() in successful_statuses
+        and str(observation.get("summary") or "").strip()
+    }
+
+
 def _agent_display_name(agent_code: str) -> str:
     names = {
         "00-decision": "主 Agent",
@@ -1211,19 +1929,49 @@ def _agent_display_name(agent_code: str) -> str:
     return names.get(agent_code, agent_code)
 
 
+def _runtime_message_id(client_message_id: str | None, agent_code: str) -> str:
+    run_id = client_message_id or uuid4().hex
+    return f"{run_id}:{agent_code}:1"
+
+
 def _agent_code_value(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _runtime_budget_guard() -> RuntimeBudgetGuard:
+    return RuntimeBudgetGuard(
+        RuntimeBudgetLimits(
+            max_rounds=settings.agent_runtime_max_rounds,
+            max_expert_calls=settings.agent_runtime_max_expert_calls,
+            max_expert_calls_per_code=settings.agent_runtime_max_expert_calls_per_code,
+            max_tool_calls=settings.agent_runtime_max_tool_calls,
+            max_tokens=settings.agent_runtime_max_tokens,
+            max_cost_usd=settings.agent_runtime_max_cost_usd,
+            max_elapsed_seconds=settings.agent_runtime_max_elapsed_seconds,
+        )
+    )
+
+
+def _main_action_executor(
+    budget_guard: RuntimeBudgetGuard | None = None,
+) -> MainKernelActionExecutor:
+    guard = budget_guard or _runtime_budget_guard()
+    return MainKernelActionExecutor(
+        main_kernel_policy(
+            max_rounds=guard.limits.max_rounds,
+            max_tool_calls=guard.limits.max_tool_calls,
+        )
+    )
 
 
 class _session_from_state:
     """Bind the active AsyncSession to LangGraph nodes during one invocation."""
 
-    _active_session: AsyncSession | None = None
-
     def __init__(self, _state: BrainRuntimeState) -> None:
-        if self._active_session is None:
+        active_session = _runtime_session.get()
+        if active_session is None:
             raise RuntimeError("BrainRuntimeGraph active session is not bound")
-        self.session = self._active_session
+        self.session = active_session
 
     async def __aenter__(self) -> AsyncSession:
         return self.session

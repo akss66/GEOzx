@@ -8,6 +8,7 @@ from app.core.auth import AdminUser, CurrentUser
 from app.core.workspace_access import accessible_client_ids
 from app.db import get_session
 from app.models import Client
+from app.models.enums import ClientStatus
 from app.schemas.client import ClientOut, CreateClientRequest, UpdateClientRequest
 
 router = APIRouter(prefix="/clients", tags=["clients"])
@@ -34,6 +35,19 @@ async def create_client(
     await session.commit()
     await session.refresh(client)
     return ClientOut.model_validate(client)
+
+
+@router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def archive_client(
+    client_id: int,
+    admin: AdminUser,
+    session: SessionDep,
+) -> None:
+    client = await session.get(Client, client_id)
+    if client is None or client.org_id != admin.org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="客户不存在")
+    client.status = ClientStatus.ARCHIVED
+    await session.commit()
 
 
 @router.patch("/{client_id}", response_model=ClientOut)

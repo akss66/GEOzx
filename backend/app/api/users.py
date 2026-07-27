@@ -218,7 +218,6 @@ async def permanently_delete_user(
         actor=admin,
         target_user_id=user_id,
         preview_token=body.preview_token,
-        target_email=str(body.target_email),
         secondary_password=body.secondary_password,
     )
     return PermanentDeleteUserOut(

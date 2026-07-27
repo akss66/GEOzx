@@ -21,6 +21,7 @@ from app.models.enums import (
     Platform,
     WorkspaceRole,
 )
+from app.orchestrator.agent_kernel import KernelAction, SpecialistKernelDecision
 from app.schemas.deliverable import PositioningStrategyPayload
 
 
@@ -31,6 +32,21 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _patch_positioning_kernel(monkeypatch, fake_run) -> None:
+    async def fake_kernel_decide(self, session, org_id, ctx, **kwargs):
+        payload = await fake_run(self, session, org_id, ctx)
+        return SpecialistKernelDecision(
+            action=KernelAction.FINISH,
+            rationale="Test fixture has enough scoped evidence.",
+            deliverable=payload,
+        )
+
+    monkeypatch.setattr(
+        "app.agents.positioning.PositioningAgent.kernel_decide",
+        fake_kernel_decide,
+    )
 
 
 @pytest.mark.asyncio
@@ -265,7 +281,8 @@ async def test_expert_prompt_addition_is_applied_to_real_agent_runtime(
                 CompletionResult(
                     content=(
                         '{"account_persona":"真实体验官","target_audience":"理性消费者",'
-                        '"differentiation":["真实"],"content_pillars":["实测"]}'
+                        '"differentiation":["真实","透明"],'
+                        '"content_pillars":["实测","选购建议"]}'
                     ),
                     model="test-model",
                     prompt_tokens=10,
@@ -359,7 +376,7 @@ async def test_direct_agent_run_creates_real_artifact_and_pending_acceptance(
             content_pillars=["产品实测", "选购建议"],
         )
 
-    monkeypatch.setattr("app.agents.positioning.PositioningAgent.run", fake_run)
+    _patch_positioning_kernel(monkeypatch, fake_run)
     token = await _token(client, "admin@test.com", "admin-pw-123")
     response = await client.post(
         "/agents/01-positioning/invoke",
@@ -473,11 +490,11 @@ async def test_direct_agent_handoff_returns_audited_main_agent_draft(
         return PositioningStrategyPayload(
             account_persona="真实数码体验官",
             target_audience="理性数码消费者",
-            differentiation=["真实体验"],
-            content_pillars=["实测"],
+            differentiation=["真实体验", "长期跟踪"],
+            content_pillars=["实测", "选购建议"],
         )
 
-    monkeypatch.setattr("app.agents.positioning.PositioningAgent.run", fake_run)
+    _patch_positioning_kernel(monkeypatch, fake_run)
     token = await _token(client, "admin@test.com", "admin-pw-123")
     created = await client.post(
         "/agents/01-positioning/invoke",

@@ -33,6 +33,10 @@ from app.integrations.douyin import (
     resolve_douyin_account_token_ref,
     resolve_secret_ref,
 )
+from app.integrations.douyin_capabilities import (
+    DOUYIN_CAPABILITY_BY_KEY,
+    diagnose_douyin_capabilities,
+)
 from app.models import (
     Account,
     AccountGroup,
@@ -43,9 +47,11 @@ from app.models import (
 )
 from app.models.enums import Platform
 from app.schemas.platform import (
+    DouyinAccountCapabilitiesOut,
     DouyinAuthorizeOut,
     DouyinAuthorizeRequest,
     DouyinDataSyncOut,
+    DouyinIncrementalAuthorizeRequest,
     DouyinJsSignatureOut,
     DouyinJsSignatureRequest,
     DouyinOAuthCallbackOut,
@@ -458,7 +464,9 @@ async def create_douyin_oauth_authorize_url(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="redirect_uri is required",
         )
-    scopes = integration.scopes or DEFAULT_DOUYIN_SCOPES
+    # Initial account binding requests only identity. Additional capabilities
+    # use the explicit incremental authorization endpoint below.
+    scopes = DEFAULT_DOUYIN_SCOPES
     state = _create_oauth_state(org_id=admin.org_id, account_id=account.id)
     return DouyinAuthorizeOut(
         platform=Platform.DOUYIN,
@@ -494,7 +502,7 @@ async def create_douyin_scan_add_authorize_url(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="redirect_uri is required",
         )
-    scopes = integration.scopes or DEFAULT_DOUYIN_SCOPES
+    scopes = DEFAULT_DOUYIN_SCOPES
     state = _create_oauth_state(
         org_id=admin.org_id,
         account_id=None,
@@ -502,6 +510,105 @@ async def create_douyin_scan_add_authorize_url(
         nickname=body.nickname,
         group_id=body.group_id,
         project_id=body.project_id,
+        initiated_by=admin.id,
+    )
+    return DouyinAuthorizeOut(
+        platform=Platform.DOUYIN,
+        client_key=integration.client_key or "",
+        redirect_uri=redirect_uri,
+        scopes=scopes,
+        state=state,
+        authorization_url=build_douyin_authorization_url(
+            client_key=integration.client_key or "",
+            redirect_uri=redirect_uri,
+            scopes=scopes,
+            state=state,
+        ),
+    )
+
+
+@router.get(
+    "/platform-integrations/douyin/accounts/{account_id}/capabilities",
+    response_model=DouyinAccountCapabilitiesOut,
+)
+async def get_douyin_account_capabilities(
+    account_id: int,
+    admin: AdminUser,
+    session: SessionDep,
+) -> DouyinAccountCapabilitiesOut:
+    await _get_owned_douyin_account(session, account_id, admin.org_id)
+    integration = await _get_integration_or_404(session, admin.org_id, Platform.DOUYIN)
+    auth = await _get_douyin_account_auth_or_conflict(session, account_id, admin.org_id)
+    capabilities = diagnose_douyin_capabilities(
+        app_scopes=integration.scopes or [],
+        account_scopes=auth.scopes or [],
+    )
+    next_recommended = next(
+        (str(item["key"]) for item in capabilities if item["status"] != "ready"),
+        None,
+    )
+    return DouyinAccountCapabilitiesOut(
+        account_id=account_id,
+        configured_app_scopes=integration.scopes or [],
+        granted_account_scopes=auth.scopes or [],
+        capabilities=capabilities,
+        next_recommended=next_recommended,
+    )
+
+
+@router.post(
+    "/platform-integrations/douyin/oauth/incremental-authorize",
+    response_model=DouyinAuthorizeOut,
+)
+async def create_douyin_incremental_authorize_url(
+    body: DouyinIncrementalAuthorizeRequest,
+    admin: AdminUser,
+    session: SessionDep,
+) -> DouyinAuthorizeOut:
+    account = await _get_owned_douyin_account(session, body.account_id, admin.org_id)
+    integration = await _get_integration_or_404(session, admin.org_id, Platform.DOUYIN)
+    _require_douyin_app(integration)
+    auth = await _get_douyin_account_auth_or_conflict(
+        session, account.id, admin.org_id
+    )
+    capability = DOUYIN_CAPABILITY_BY_KEY[body.capability_key]
+    configured = set(integration.scopes or [])
+    missing_app = [scope for scope in capability.app_scopes if scope not in configured]
+    if missing_app:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "请先在抖音开放平台申请并登记该能力",
+                "capability_key": capability.key,
+                "missing_app_scopes": missing_app,
+            },
+        )
+    granted = set(auth.scopes or [])
+    scopes = [scope for scope in capability.user_scopes if scope not in granted]
+    if not scopes:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "该能力不需要补充账号授权或已经完成授权",
+                "capability_key": capability.key,
+                "missing_app_scopes": [],
+            },
+        )
+    if len(scopes) > 3:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Douyin incremental authorization cannot request more than 3 scopes",
+        )
+    redirect_uri = integration.redirect_uri
+    if not redirect_uri:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="redirect_uri is required",
+        )
+    state = _create_oauth_state(
+        org_id=admin.org_id,
+        account_id=account.id,
+        flow="incremental",
         initiated_by=admin.id,
     )
     return DouyinAuthorizeOut(
@@ -842,7 +949,8 @@ async def _upsert_platform_account_auth(
     row.union_id = str(union_id) if union_id else None
     row.auth_status = "authorized"
     row.data_sync_status = "pending"
-    row.scopes = scopes
+    row.scopes = sorted(set(row.scopes or []) | set(scopes))
+    _apply_authorized_account_meta(account, row.scopes)
     try:
         row.access_token_encrypted = encrypt_credential(access_token)
         row.refresh_token_encrypted = (

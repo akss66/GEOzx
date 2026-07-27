@@ -129,6 +129,42 @@
   font-size: 12.5px;
 }
 
+.review-quality-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 20px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--dy-warning) 42%, var(--dy-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--dy-warning) 7%, var(--dy-surface));
+}
+
+.review-quality-strip > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.review-quality-strip strong {
+  color: var(--dy-text);
+  font-size: 13px;
+}
+
+.review-quality-strip span {
+  color: var(--dy-muted);
+  font-size: 12.5px;
+}
+
+.review-quality-strip a {
+  flex: 0 0 auto;
+  color: var(--dy-accent);
+  font-size: 13px;
+  font-weight: 650;
+}
+
 .review-source-line span + span::before {
   margin-right: 9px;
   color: var(--dy-border-strong);
@@ -138,9 +174,10 @@
 .review-goal-summary {
   align-self: stretch;
   padding: 20px 22px;
+  border: 1px solid color-mix(in srgb, var(--dy-text) 14%, transparent);
   border-radius: 14px;
-  background: var(--dy-ink);
-  color: white;
+  background: var(--dy-text);
+  color: var(--dy-surface);
 }
 
 .review-goal-summary header {
@@ -197,6 +234,53 @@
 
 .review-goal-components small {
   color: rgba(255, 255, 255, 0.56);
+}
+
+.review-goal-empty {
+  display: flex;
+  min-height: 100%;
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.review-goal-empty > .anticon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  margin-bottom: 20px;
+  border-radius: 10px;
+  background: var(--dy-accent);
+  color: #fff;
+  font-size: 17px;
+}
+
+.review-goal-empty > span {
+  color: rgba(255, 255, 255, 0.64);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.review-goal-empty > strong {
+  max-width: 240px;
+  margin-top: 7px;
+  color: #fff;
+  font-size: 21px;
+  line-height: 1.28;
+}
+
+.review-goal-empty > p {
+  margin: 12px 0 20px;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.review-goal-empty .ant-btn-primary {
+  border-color: #fff !important;
+  background: #fff !important;
+  color: var(--dy-text) !important;
 }
 
 .review-section,

@@ -4,15 +4,16 @@
 落 Event 表 + 跑订阅处理器 + 经 Redis pub/sub 广播给 WebSocket 订阅者。
 """
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import redis.asyncio as aioredis
 from arq import create_pool
 from arq.connections import RedisSettings
 
 from app.config import settings
+from app.db import get_redis
 
 # WebSocket 广播用的 Redis pub/sub 频道
 EVENTS_CHANNEL = "dyflow:events"
@@ -84,6 +85,8 @@ async def publish_realtime_event(
     payload: dict[str, Any] | None = None,
     content_item_id: int | None = None,
     project_id: int | None = None,
+    *,
+    event_id: int | None = None,
 ) -> None:
     """Broadcast an ephemeral event directly to WebSocket subscribers.
 
@@ -92,18 +95,22 @@ async def publish_realtime_event(
     explicit Event inserts.
     """
     event = {
+        "id": event_id,
         "type": event_type,
         "payload": payload,
         "content_item_id": content_item_id,
         "project_id": project_id,
     }
     await dispatch(event_type, event)
-    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    redis = get_redis()
     try:
-        await redis.publish(EVENTS_CHANNEL, json.dumps(event, ensure_ascii=False))
-    except Exception:
+        async with asyncio.timeout(0.5):
+            await redis.publish(EVENTS_CHANNEL, json.dumps(event, ensure_ascii=False))
+    except (TimeoutError, OSError):
         # Realtime token streaming is best-effort; durable checkpoints are
         # recorded separately and must not fail because Redis is unavailable.
         return
-    finally:
-        await redis.aclose()
+    except Exception:
+        # Redis client failures vary by transport and platform. This boundary
+        # must never hold up the user-facing response path.
+        return

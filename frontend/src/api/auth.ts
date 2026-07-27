@@ -93,6 +93,11 @@ export async function getUserAccessCatalog(): Promise<UserAccessCatalog> {
     account_catalog_status: "available",
     accounts: data.accounts.map((account) => ({
       ...account,
+      client_ids: Array.isArray(account.client_ids)
+        ? account.client_ids
+        : account.client_id == null
+          ? []
+          : [account.client_id],
       project_ids: Array.isArray(account.project_ids) ? account.project_ids : [],
     })),
   };

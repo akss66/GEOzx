@@ -192,7 +192,7 @@ async def test_review_workspace_builds_account_scoped_narrative_and_goal_progres
     assert response.status_code == 200
     body = response.json()
     assert body["data_status"]["has_data"] is True
-    assert body["data_status"]["sources"] == ["douyin"]
+    assert body["data_status"]["sources"] == ["official_api"]
     assert body["totals"]["play"] == 2000
     assert body["totals"]["avg_completion_rate"] == 0.4
     assert body["totals"]["follower_delta"] == 20
@@ -378,6 +378,8 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
     assert "当前周期仅有账号级趋势数据，作品归因尚未补齐" in body["data_status"]["missing_reasons"]
     assert body["data_status"]["latest_synced_at"].startswith("2026-07-21T07:45:00")
     assert body["data_status"]["latest_confirmed_at"] is not None
+    assert body["data_status"]["days_since_observed"] == 0
+    assert body["data_status"]["days_since_confirmed"] == 0
     assert body["data_status"]["source_summary"][0]["source_kind"] == "platform_export"
     assert body["data_status"]["source_summary"][0]["data_domains"] == ["account_metrics"]
     assert body["totals"]["play"] == 81
@@ -391,6 +393,55 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
     assert body["engagement"][-1]["like_rate"] is None
     assert body["attributions"] == []
     assert body["evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_review_workspace_reports_import_provenance_for_content_metrics(
+    client, admin, session
+):
+    project, account = await _review_account(session, admin, nickname="Imported content")
+    content = ContentItem(project_id=project.id, account_id=account.id, title="Imported work")
+    session.add(content)
+    await session.flush()
+    batch = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_work_list_v1",
+        content_sha256="8" * 64,
+        period_start=date.today(),
+        period_end=date.today(),
+        committed_at=datetime.now(UTC),
+    )
+    session.add(batch)
+    await session.flush()
+    session.add(
+        MetricSnapshot(
+            org_id=admin.org_id,
+            content_item_id=content.id,
+            account_id=account.id,
+            import_batch_id=batch.id,
+            source=MetricSource.DOUYIN,
+            stat_date=date.today(),
+            title=content.title,
+            play=81,
+        )
+    )
+    await session.commit()
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    response = await client.get(
+        "/metrics/review-workspace",
+        headers=_auth(token),
+        params={"account_id": account.id, "days": 7},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_status"]["sources"] == ["platform_export"]
+    assert body["data_status"]["source_summary"][0]["source_kind"] == "platform_export"
 
 
 @pytest.mark.asyncio

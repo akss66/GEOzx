@@ -114,6 +114,7 @@ class AccountOut(BaseModel):
 
     id: int
     client_id: int | None
+    client_ids: list[int] = Field(default_factory=list)
     nickname: str
     platform: Platform
     group_id: int | None
@@ -159,10 +160,14 @@ def account_out(
     account,
     project_ids: list[int] | None = None,
     operational: dict | None = None,
+    client_ids: list[int] | None = None,
 ) -> AccountOut:
     data = {
         "id": account.id,
         "client_id": account.client_id,
+        "client_ids": sorted(
+            client_ids or ([] if account.client_id is None else [account.client_id])
+        ),
         "nickname": account.nickname,
         "platform": account.platform,
         "group_id": account.group_id,
@@ -179,6 +184,36 @@ def account_out(
         **(operational or {}),
     }
     return AccountOut.model_validate(data)
+
+
+class ReplaceAccountAssignmentsRequest(BaseModel):
+    client_ids: list[int] = Field(default_factory=list, max_length=100)
+    project_ids: list[int] = Field(default_factory=list, max_length=200)
+    default_client_id: int | None = None
+    default_project_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_defaults(self):
+        if len(set(self.client_ids)) != len(self.client_ids):
+            raise ValueError("客户列表不能包含重复项")
+        if len(set(self.project_ids)) != len(self.project_ids):
+            raise ValueError("项目列表不能包含重复项")
+        if self.default_client_id is not None and self.default_client_id not in self.client_ids:
+            raise ValueError("默认客户必须包含在客户列表中")
+        if self.client_ids and self.default_client_id is None:
+            raise ValueError("绑定客户后必须指定默认客户")
+        if not self.client_ids and self.project_ids:
+            raise ValueError("未绑定客户时不能绑定项目")
+        if not self.client_ids and (
+            self.default_client_id is not None or self.default_project_id is not None
+        ):
+            raise ValueError("未绑定客户时不能设置默认归属")
+        if (
+            self.default_project_id is not None
+            and self.default_project_id not in self.project_ids
+        ):
+            raise ValueError("默认项目必须包含在项目列表中")
+        return self
 
 
 class CreateDistributionActionRequest(BaseModel):

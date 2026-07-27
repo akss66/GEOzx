@@ -221,6 +221,13 @@ async def test_cross_org_provider_access_returns_org_scoped_404(
 async def test_environment_deepseek_endpoint_is_immutable_and_fallback_requires_trusted_template(
     client, session, admin, encryption_key, monkeypatch
 ):
+    async def accept_public_url(url: str) -> str:
+        return url.rstrip("/")
+
+    monkeypatch.setattr(
+        "app.services.model_provider_registry.validate_public_https_url",
+        accept_public_url,
+    )
     monkeypatch.setattr(settings, "deepseek_api_key", "server-managed-key")
     provider = await _provider(
         session,
@@ -418,6 +425,40 @@ async def test_put_models_and_delete_provider_conflict_reports_affected_agent_na
         payload = json.dumps(event.payload)
         assert "api_key" not in payload
         assert "encrypted_api_key" not in payload
+
+
+@pytest.mark.asyncio
+async def test_put_models_rejects_removing_models_still_used_by_agent_routes(
+    client, session, admin
+):
+    provider = await _provider(session, org_id=admin.org_id)
+    provider.models = ["gpt-4.1-mini", "gpt-4.1"]
+    provider.verification_status = "verified"
+    session.add(
+        ModelConfig(
+            org_id=admin.org_id,
+            agent_code="01-positioning",
+            primary_provider_id=provider.id,
+            primary_model="gpt-4.1-mini",
+        )
+    )
+    await session.commit()
+
+    headers = _auth(await _token(client, "admin@test.com", "admin-pw-123"))
+    response = await client.put(
+        f"/model-providers/{provider.id}/models",
+        headers=headers,
+        json={"models": ["gpt-4.1"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "affected_agents": ["账号定位专家"],
+        "missing_models": ["gpt-4.1-mini"],
+    }
+    await session.refresh(provider)
+    assert provider.models == ["gpt-4.1-mini", "gpt-4.1"]
+    assert provider.verification_status == "verified"
 
 
 @pytest.mark.asyncio

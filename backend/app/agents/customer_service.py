@@ -1,4 +1,4 @@
-"""08 客服反馈专家。"""
+"""08 客服反馈专家，使用 Prompt Registry `experts/08-customer-service/v1.md`。"""
 
 from app.agents.base import LLMAgent
 from app.models.enums import DeliverableType

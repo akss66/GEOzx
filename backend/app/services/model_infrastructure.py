@@ -75,6 +75,10 @@ class ModelTarget:
     model: str
 
 
+class ModelRouteConfigurationError(RuntimeError):
+    """A deterministic route/provider configuration error that retries cannot fix."""
+
+
 def provider_code_for_model(model: str) -> str:
     return "litellm" if model.startswith("litellm:") else "deepseek"
 
@@ -185,7 +189,9 @@ def _provider_api_key(provider: ModelProvider) -> str | None:
         try:
             return decrypt_provider_key(provider.encrypted_api_key)
         except CredentialEncryptionError as exc:
-            raise RuntimeError("model provider credential could not be decrypted") from exc
+            raise ModelRouteConfigurationError(
+                "model provider credential could not be decrypted"
+            ) from exc
     return _environment_provider_key(provider)
 
 
@@ -196,7 +202,9 @@ async def provider_runtime_for_target(
     model: str,
 ) -> dict[str, str | None]:
     if org_id is None:
-        raise RuntimeError("model provider routes require an organization")
+        raise ModelRouteConfigurationError(
+            "model provider routes require an organization"
+        )
     provider = await session.scalar(
         select(ModelProvider).where(
             ModelProvider.org_id == org_id,
@@ -204,18 +212,30 @@ async def provider_runtime_for_target(
         )
     )
     if provider is None:
-        raise RuntimeError("model provider is not available for this organization")
+        raise ModelRouteConfigurationError(
+            "model provider is not available for this organization"
+        )
     if not provider.enabled:
-        raise RuntimeError(f"model provider {provider.code} is disabled")
+        raise ModelRouteConfigurationError(
+            f"model provider {provider.code} is disabled"
+        )
     if provider.verification_status != "verified":
-        raise RuntimeError(f"model provider {provider.code} is not verified")
+        raise ModelRouteConfigurationError(
+            f"model provider {provider.code} is not verified"
+        )
     models = list(provider.models or [])
     if model not in models:
-        raise RuntimeError(f"model {model} is not available for provider {provider.code}")
+        raise ModelRouteConfigurationError(
+            f"model {model} is not available for provider {provider.code}"
+        )
     if provider.protocol != "openai_compatible":
-        raise RuntimeError(f"model provider {provider.code} uses an unsupported protocol")
+        raise ModelRouteConfigurationError(
+            f"model provider {provider.code} uses an unsupported protocol"
+        )
     if not provider.base_url:
-        raise RuntimeError(f"model provider {provider.code} has no endpoint configured")
+        raise ModelRouteConfigurationError(
+            f"model provider {provider.code} has no endpoint configured"
+        )
     return {
         "provider_code": provider.code,
         "api_key": _provider_api_key(provider),

@@ -3,6 +3,7 @@ import {
   EditOutlined,
   SafetyCertificateOutlined,
   SendOutlined,
+  StopOutlined,
 } from "@ant-design/icons";
 import { Button, Input } from "antd";
 import { useEffect, useState } from "react";
@@ -21,6 +22,7 @@ export function BrainComposer({
   onApprovalCommentChange,
   onApprovePermission,
   onSubmit,
+  onStop,
 }: {
   value: string;
   disabled: boolean;
@@ -33,6 +35,7 @@ export function BrainComposer({
   onApprovalCommentChange: (value: string) => void;
   onApprovePermission: (toolCallId: number, approved: boolean, comment?: string) => void;
   onSubmit: () => void;
+  onStop?: () => void;
 }) {
   const [editingRequirement, setEditingRequirement] = useState(false);
 
@@ -112,8 +115,14 @@ export function BrainComposer({
               showCount
               placeholder="输入目标、补充要求、打断指令，或直接问一个问题。"
               className="dy-brain-input"
-              onPressEnter={(event) => {
-                if (event.shiftKey) return;
+              onKeyDown={(event) => {
+                if (
+                  event.key !== "Enter"
+                  || event.shiftKey
+                  || event.nativeEvent.isComposing
+                  || disabled
+                  || loading
+                ) return;
                 event.preventDefault();
                 onSubmit();
               }}
@@ -126,15 +135,25 @@ export function BrainComposer({
                   </button>
                 ))}
               </div>
-              <Button
-                type="primary"
-                size="large"
-                aria-label="发送给主 Agent"
-                icon={<SendOutlined />}
-                loading={loading}
-                disabled={disabled}
-                onClick={onSubmit}
-              />
+              {loading && onStop ? (
+                <Button
+                  type="primary"
+                  size="large"
+                  aria-label="停止生成"
+                  className="dy-brain-stop-button"
+                  icon={<StopOutlined />}
+                  onClick={onStop}
+                />
+              ) : (
+                <Button
+                  type="primary"
+                  size="large"
+                  aria-label="发送给主 Agent"
+                  icon={<SendOutlined />}
+                  disabled={disabled}
+                  onClick={onSubmit}
+                />
+              )}
             </div>
           </>
         )}

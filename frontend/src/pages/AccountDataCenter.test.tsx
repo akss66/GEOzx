@@ -33,6 +33,7 @@ import {
   uploadAccountDataImport,
 } from "../api/accountData";
 import { getWorkspaceContext } from "../api/shell";
+import { getAccount } from "../api/workspace";
 import AccountDataCenter from "./AccountDataCenter";
 
 const workspaceMocks = vi.hoisted(() => ({
@@ -42,6 +43,7 @@ const workspaceMocks = vi.hoisted(() => ({
   accountId: 7 as number | null,
   setPlatform: vi.fn(),
   setAccountId: vi.fn(),
+  hydrate: vi.fn(),
 }));
 
 vi.mock("../api/accountData", () => ({
@@ -61,19 +63,30 @@ vi.mock("../api/shell", () => ({
   getWorkspaceContext: vi.fn(),
 }));
 
-vi.mock("../stores/currentWorkspace", () => ({
-  useCurrentWorkspace: vi.fn((selector?: (state: typeof workspaceMocks) => unknown) =>
-    typeof selector === "function" ? selector(workspaceMocks) : workspaceMocks,
-  ),
+vi.mock("../api/workspace", () => ({
+  getAccount: vi.fn(),
 }));
+
+vi.mock("../stores/currentWorkspace", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../stores/currentWorkspace")>();
+  return {
+    ...actual,
+    useCurrentWorkspace: vi.fn((selector?: (state: typeof workspaceMocks) => unknown) =>
+      typeof selector === "function" ? selector(workspaceMocks) : workspaceMocks,
+    ),
+  };
+});
 
 function buildAccount(id = 42) {
   return {
     id,
     nickname: "数码菌",
     platform: "douyin" as const,
+    client_id: 1,
+    client_ids: [1],
     group_id: null,
     project_id: 11,
+    project_ids: [11],
     status: "active" as const,
     external_account_id: "douyin-42",
     integration_status: "connected" as const,
@@ -254,6 +267,7 @@ function renderMountedRouteSwitcher(
 describe("AccountDataCenter", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(getAccount).mockResolvedValue(buildAccount());
     Object.defineProperty(window, "matchMedia", {
       writable: true,
       value: vi.fn(() => ({
@@ -270,6 +284,9 @@ describe("AccountDataCenter", () => {
   afterEach(cleanup);
 
   it("shows an explicit account error instead of silently falling back", async () => {
+    vi.mocked(getAccount).mockRejectedValueOnce({
+      response: { status: 404, data: { detail: "account not found" } },
+    });
     vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
       clients: [],
       selected_client: null,
@@ -280,10 +297,33 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
-    expect(await screen.findByText("找不到当前账号的数据中心")).toBeInTheDocument();
-    expect(screen.getByText("系统不会自动切换到其他账号。")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(getAccountDataStatus).not.toHaveBeenCalled();
-    expect(workspaceMocks.setAccountId).not.toHaveBeenCalledWith(7);
+    expect(workspaceMocks.hydrate).not.toHaveBeenCalled();
+  });
+
+  it("opens an unbound account without clearing the current client and project", async () => {
+    vi.mocked(getAccount).mockResolvedValueOnce({
+      ...buildAccount(),
+      client_id: null,
+      client_ids: [],
+      project_id: null,
+      project_ids: [],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [] });
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(workspaceMocks.hydrate).toHaveBeenCalledWith({
+        clientId: 1,
+        projectId: 11,
+        platform: "douyin",
+        accountId: 42,
+      }),
+    );
+    expect(await screen.findByText("账号数据中心")).toBeInTheDocument();
   });
 
   it("shows a recoverable unknown-template error inline", async () => {
@@ -820,6 +860,7 @@ describe("AccountDataCenter", () => {
       selected_project: null,
       accounts: [buildAccount(2), buildAccount(99)],
     });
+    vi.mocked(getAccount).mockImplementation(async (accountId) => buildAccount(accountId));
     vi.mocked(getAccountDataStatus).mockImplementation(async (accountId) =>
       buildStatus({
         account_id: accountId,

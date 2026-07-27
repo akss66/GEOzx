@@ -253,6 +253,17 @@ vi.mock("../api/modelInfrastructure", () => ({
       this.affectedAgents = affectedAgents;
     }
   },
+  ModelProviderModelCatalogConflictError: class ModelProviderModelCatalogConflictError extends Error {
+    affectedAgents: unknown[];
+    missingModels: string[];
+
+    constructor(payload: { affected_agents: unknown[]; missing_models: string[] }) {
+      super("Model catalog update would invalidate existing agent routes.");
+      this.name = "ModelProviderModelCatalogConflictError";
+      this.affectedAgents = payload.affected_agents;
+      this.missingModels = payload.missing_models;
+    }
+  },
   getModelInfrastructure: vi.fn(async () => buildOverview()),
   getModelProviderTemplates: vi.fn(async () => clone(templates)),
   listModelProviders: vi.fn(async () => clone(providerStore)),
@@ -584,6 +595,38 @@ describe("ModelInfrastructure", () => {
         expect.objectContaining({
           primary_provider_id: 3,
           primary_model: "manual-alpha",
+        }),
+      );
+    });
+  });
+
+  it("exposes a stored route whose model was removed from the provider catalog", async () => {
+    routeStore[1] = {
+      ...routeStore[1],
+      primary_model: "removed-model",
+    };
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "专家路由" }));
+    const primaryTarget = await screen.findByLabelText("定位专家主路由");
+
+    expect(primaryTarget).toHaveValue("1::removed-model");
+    expect(
+      screen.getByRole("option", {
+        name: "当前配置已失效：DeepSeek · removed-model",
+      }),
+    ).toBeDisabled();
+    expect(screen.getByText("当前主路由已失效，请重新选择并保存。")).toBeInTheDocument();
+
+    fireEvent.change(primaryTarget, { target: { value: "1::deepseek-chat" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存路由设置" })[1]);
+
+    await waitFor(() => {
+      expect(updateModelRoute).toHaveBeenCalledWith(
+        "01-positioning",
+        expect.objectContaining({
+          primary_provider_id: 1,
+          primary_model: "deepseek-chat",
         }),
       );
     });

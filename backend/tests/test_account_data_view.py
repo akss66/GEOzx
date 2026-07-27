@@ -359,6 +359,9 @@ async def test_same_title_same_day_rows_without_stable_identity_stay_separate(
                 play=100,
                 exposure=200,
                 completion_rate=0.2,
+                completion_rate_5s=0.15,
+                bounce_rate_2s=0.62,
+                profile_visit_count=8,
                 like_rate=0.05,
                 comment_rate=0.01,
                 share_rate=0.01,
@@ -386,6 +389,12 @@ async def test_same_title_same_day_rows_without_stable_identity_stay_separate(
 
     assert len(view.content_snapshots) == 2
     assert sorted(item.metrics["play"].value for item in view.content_snapshots) == [100, 300]
+    first_snapshot = next(
+        item for item in view.content_snapshots if item.metrics["play"].value == 100
+    )
+    assert first_snapshot.metrics["completion_rate_5s"].value == pytest.approx(0.15)
+    assert first_snapshot.metrics["bounce_rate_2s"].value == pytest.approx(0.62)
+    assert first_snapshot.metrics["profile_visit_count"].value == 8
     assert view.coverage["content_identity"] == "ambiguous"
 
 

@@ -82,6 +82,7 @@ const accessCatalog: UserAccessCatalog = {
     {
       id: 101,
       client_id: 10,
+      client_ids: [10],
       project_ids: [20],
       nickname: "数码品牌主号",
       platform: "douyin",
@@ -90,6 +91,7 @@ const accessCatalog: UserAccessCatalog = {
     {
       id: 102,
       client_id: 11,
+      client_ids: [11],
       project_ids: [21],
       nickname: "生活方式副号",
       platform: "xiaohongshu",
@@ -572,9 +574,9 @@ describe("Users", () => {
   it("sets the current admin secondary password and resets the selected member password", async () => {
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
     fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
-    await screen.findByText("当前登录管理员的二级密码");
+    await screen.findByText("当前管理员的二级密码");
+    expect(screen.queryByLabelText("新的登录密码")).not.toBeInTheDocument();
 
     setInputValue("当前登录密码", "admin-pw-123");
     setInputValue("新的二级密码", "secondary-pass-123");
@@ -585,6 +587,10 @@ describe("Users", () => {
       secondary_password: "secondary-pass-123",
     }));
 
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    expect(await screen.findByLabelText("新的登录密码")).toBeInTheDocument();
+    expect(screen.queryByText("当前管理员的二级密码")).not.toBeInTheDocument();
+
     setInputValue("新的登录密码", "reset-pass-123");
     fireEvent.click(screen.getByRole("button", { name: "重置该成员登录密码" }));
 
@@ -593,12 +599,36 @@ describe("Users", () => {
     }));
   });
 
-  it("explains an invalid current password when setting the secondary password", async () => {
+  it("keeps the member directory query isolated from security password fields", async () => {
     renderPage();
+
+    const search = screen.getByRole("searchbox", { name: "搜索成员" });
+    expect(search).toHaveAttribute("name", "member_directory_query");
+    expect(search).toHaveAttribute("autocomplete", "off");
+    expect(search).toHaveAttribute("data-1p-ignore", "true");
+    expect(search).toHaveAttribute("data-lpignore", "true");
 
     fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
     fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
-    await screen.findByText("当前登录管理员的二级密码");
+
+    expect(screen.getByLabelText("新的登录密码")).toHaveAttribute(
+      "autocomplete",
+      "new-password",
+    );
+    expect(screen.queryByLabelText("当前登录密码")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
+
+    expect(search).toHaveValue("");
+    expect(screen.getByRole("button", { name: /运营同事/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /停用成员/ })).toBeInTheDocument();
+  });
+
+  it("explains an invalid current password when setting the secondary password", async () => {
+    renderPage();
+
+    fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
+    await screen.findByText("当前管理员的二级密码");
 
     vi.mocked(setSecondaryPassword).mockRejectedValueOnce({
       response: {
@@ -627,6 +657,9 @@ describe("Users", () => {
     fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
     fireEvent.click(await screen.findByRole("button", { name: "获取删除预览" }));
     await screen.findByText("不可逆影响预览");
+    expect(screen.getByText("成员账号")).toBeInTheDocument();
+    expect(screen.getByText("运营大脑任务")).toBeInTheDocument();
+    expect(screen.queryByText("brain_tasks")).not.toBeInTheDocument();
 
     vi.mocked(permanentlyDeleteUser).mockRejectedValueOnce({
       response: {
@@ -640,7 +673,6 @@ describe("Users", () => {
       },
     });
 
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     setInputValue("执行人二级密码", "wrong-delete-password");
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除" }));
 
@@ -648,7 +680,6 @@ describe("Users", () => {
     expect(screen.getByText("不可逆影响预览")).toBeInTheDocument();
     expect(previewUserDeletion).toHaveBeenCalledTimes(1);
 
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     setInputValue("执行人二级密码", "delete-pass-123");
     const retryDeleteButton = screen.getByRole("button", { name: /确认永久删除/ });
     fireEvent.click(retryDeleteButton);
@@ -667,7 +698,6 @@ describe("Users", () => {
     fireEvent.click(screen.getByRole("button", { name: "获取删除预览" }));
     await screen.findByText("不可逆影响预览");
 
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     setInputValue("执行人二级密码", "delete-pass-123");
 
     vi.mocked(permanentlyDeleteUser).mockRejectedValueOnce({
@@ -685,7 +715,6 @@ describe("Users", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除" }));
 
     expect(await screen.findByText("成员数据已变化，请重新获取最新影响预览。")).toBeInTheDocument();
-    expect(screen.queryByLabelText("确认目标邮箱")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("执行人二级密码")).not.toBeInTheDocument();
 
     const queryKeys = JSON.stringify(queryClient.getQueryCache().getAll().map((entry) => entry.queryKey));
@@ -705,13 +734,11 @@ describe("Users", () => {
     fireEvent.click(await screen.findByRole("button", { name: "获取删除预览" }));
     await screen.findByText("不可逆影响预览");
 
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     setInputValue("执行人二级密码", "delete-pass-123");
     fireEvent.click(screen.getByRole("button", { name: "关闭删除流程" }));
 
     fireEvent.click(await screen.findByRole("button", { name: /获取删除预览/ }));
     await screen.findByText("不可逆影响预览");
-    expect(screen.getByLabelText("确认目标邮箱")).toHaveValue("");
     expect(screen.getByLabelText("执行人二级密码")).toHaveValue("");
   });
 
@@ -723,13 +750,11 @@ describe("Users", () => {
     fireEvent.click(await screen.findByRole("button", { name: "获取删除预览" }));
     await screen.findByText("不可逆影响预览");
 
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     setInputValue("执行人二级密码", "delete-pass-123");
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除" }));
 
     await waitFor(() => expect(permanentlyDeleteUser).toHaveBeenCalledWith(2, {
       preview_token: "preview-2-1",
-      target_email: "ops@tzx.ai",
       secondary_password: "delete-pass-123",
     }));
 
@@ -743,16 +768,20 @@ describe("Users", () => {
   it("isolates security drafts and deletion previews when the selected member changes", async () => {
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
     fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
-    await screen.findByText("当前登录管理员的二级密码");
+    await screen.findByText("当前管理员的二级密码");
 
-    setInputValue("新的登录密码", "member-a-login-password");
     setInputValue("当前登录密码", "actor-current-password");
     setInputValue("新的二级密码", "actor-secondary-password");
+
+    fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
+    expect(await screen.findByLabelText("新的登录密码")).toHaveValue("");
+    expect(screen.queryByLabelText("当前登录密码")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("新的二级密码")).not.toBeInTheDocument();
+
+    setInputValue("新的登录密码", "member-a-login-password");
     fireEvent.click(screen.getByRole("button", { name: "获取删除预览" }));
     await screen.findByText("不可逆影响预览");
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     setInputValue("执行人二级密码", "member-a-delete-password");
 
     fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
@@ -761,10 +790,7 @@ describe("Users", () => {
       screen.getByRole("button", { name: /停用成员/ }),
     ).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByLabelText("新的登录密码")).toHaveValue("");
-    expect(screen.getByLabelText("当前登录密码")).toHaveValue("");
-    expect(screen.getByLabelText("新的二级密码")).toHaveValue("");
     expect(screen.queryByText("不可逆影响预览")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("确认目标邮箱")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("执行人二级密码")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "获取删除预览" })).toBeInTheDocument();
   });
@@ -870,7 +896,7 @@ describe("Users", () => {
     expect(screen.queryByText("invalid email")).not.toBeInTheDocument();
   });
 
-  it("enables permanent deletion only after exact email and secondary password confirmation", async () => {
+  it("enables permanent deletion only after the current administrator enters a secondary password", async () => {
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
@@ -880,10 +906,7 @@ describe("Users", () => {
 
     const deleteButton = screen.getByRole("button", { name: "确认永久删除" });
     expect(deleteButton).toBeDisabled();
-    setInputValue("确认目标邮箱", "OPS@tzx.ai");
     setInputValue("执行人二级密码", "delete-pass-123");
-    expect(deleteButton).toBeDisabled();
-    setInputValue("确认目标邮箱", "ops@tzx.ai");
     expect(deleteButton).toBeEnabled();
   });
 });

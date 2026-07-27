@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +19,7 @@ from app.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from app.llm.cost import compute_cost
 from app.models import LLMCall
 from app.services.model_infrastructure import (
+    ModelRouteConfigurationError,
     ModelTarget,
     provider_runtime,
     provider_runtime_for_target,
@@ -29,6 +32,41 @@ _stream_observer: ContextVar[StreamObserver | None] = ContextVar(
     "llm_stream_observer",
     default=None,
 )
+
+
+@dataclass(frozen=True)
+class LLMCallContext:
+    """Safe per-call metadata and provider request hints."""
+
+    task_id: int | None = None
+    invocation_id: int | None = None
+    trace_id: str | None = None
+    prompt_id: str | None = None
+    prompt_version: str | None = None
+    prompt_hash: str | None = None
+    prompt_schema_version: str | None = None
+    scope: dict[str, Any] = field(default_factory=dict)
+    budget: dict[str, Any] = field(default_factory=dict)
+    response_format: dict[str, str] | None = None
+
+
+_call_context: ContextVar[LLMCallContext | None] = ContextVar(
+    "llm_call_context",
+    default=None,
+)
+
+
+@contextmanager
+def bind_llm_call_context(context: LLMCallContext):
+    token = _call_context.set(context)
+    try:
+        yield context
+    finally:
+        _call_context.reset(token)
+
+
+def current_llm_call_context() -> LLMCallContext | None:
+    return _call_context.get()
 
 
 def set_stream_observer(observer: StreamObserver | None) -> Token[StreamObserver | None]:
@@ -92,6 +130,7 @@ class LLMGateway:
         self, session: AsyncSession, org_id: int | None, agent_code: str
     ) -> tuple[str, str | None, dict[str, Any]]:
         primary, fallback, options = await resolve_route_targets(session, org_id, agent_code)
+        options = _effective_options(options)
         return primary.model, fallback.model if fallback is not None else None, options
 
     async def chat(
@@ -106,6 +145,7 @@ class LLMGateway:
             return await self.chat_stream(session, org_id, agent_code, messages, observer)
 
         primary, fallback, options = await resolve_route_targets(session, org_id, agent_code)
+        options = _effective_options(options)
         candidates = [candidate for candidate in (primary, fallback) if candidate is not None]
 
         last_exc: Exception | None = None
@@ -142,7 +182,11 @@ class LLMGateway:
                     "error",
                     safe_error,
                 )
-                last_exc = RuntimeError(safe_error)
+                last_exc = (
+                    exc
+                    if isinstance(exc, ModelRouteConfigurationError)
+                    else RuntimeError(safe_error)
+                )
 
         raise LLMError(
             f"all candidate models failed: {[item.model for item in candidates]}"
@@ -234,7 +278,11 @@ class LLMGateway:
                         "error": safe_error,
                     }
                 )
-                last_exc = RuntimeError(safe_error)
+                last_exc = (
+                    exc
+                    if isinstance(exc, ModelRouteConfigurationError)
+                    else RuntimeError(safe_error)
+                )
 
         raise LLMError(
             f"all candidate models failed: {[item.model for item in candidates]}"
@@ -252,11 +300,23 @@ class LLMGateway:
         status: str,
         error: str | None,
     ) -> None:
+        call_context = _call_context.get()
         session.add(
             LLMCall(
                 org_id=org_id,
                 created_by_id=get_acting_user_id(),
+                task_id=call_context.task_id if call_context else None,
+                invocation_id=call_context.invocation_id if call_context else None,
+                trace_id=call_context.trace_id if call_context else None,
                 agent_code=agent_code,
+                prompt_id=call_context.prompt_id if call_context else None,
+                prompt_version=call_context.prompt_version if call_context else None,
+                prompt_hash=call_context.prompt_hash if call_context else None,
+                prompt_schema_version=(
+                    call_context.prompt_schema_version if call_context else None
+                ),
+                scope=dict(call_context.scope) if call_context else {},
+                budget=dict(call_context.budget) if call_context else {},
                 provider=target.provider_code,
                 model=target.model,
                 prompt_tokens=result.prompt_tokens if result else 0,
@@ -269,6 +329,14 @@ class LLMGateway:
             )
         )
         await session.commit()
+
+
+def _effective_options(options: dict[str, Any]) -> dict[str, Any]:
+    effective = dict(options)
+    call_context = _call_context.get()
+    if call_context is not None and call_context.response_format is not None:
+        effective["response_format"] = dict(call_context.response_format)
+    return effective
 
 
 def _rough_token_count(text: str) -> int:
