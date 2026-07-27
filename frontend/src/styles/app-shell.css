@@ -109,14 +109,16 @@
   overflow: hidden;
 }
 
-.tz-agent-avatar.is-main-agent {
-  border: 1px solid color-mix(in srgb, var(--tz-brand-red) 18%, var(--tz-line));
-  background: color-mix(in srgb, var(--tz-brand-frame) 78%, white);
+.tz-agent-avatar.is-main-agent,
+.dy-agent-master-avatar.tz-agent-avatar.is-main-agent {
+  border: 0;
+  background: transparent;
 }
 
 .tz-agent-avatar.is-main-agent img {
-  width: 72%;
-  height: 72%;
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 
