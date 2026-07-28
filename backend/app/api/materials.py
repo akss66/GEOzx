@@ -4,14 +4,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import storage
 from app.core.auth import CurrentUser
-from app.core.workspace_access import accessible_project_ids, require_project_access
+from app.core.workspace_access import (
+    accessible_account_clause,
+    accessible_project_ids,
+    require_content_scope,
+)
 from app.db import get_session
-from app.models import ContentItem, MaterialAsset
+from app.models import Account, ContentItem, MaterialAsset
 from app.models.enums import MaterialStatus, UserRole
 from app.schemas.material import MaterialAssetOut
 
@@ -50,7 +54,12 @@ async def _material_for_user(
     content_item = await session.get(ContentItem, asset.content_item_id)
     if content_item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="素材不存在")
-    await require_project_access(session, user, content_item.project_id)
+    await require_content_scope(
+        session,
+        user,
+        project_id=content_item.project_id,
+        account_id=content_item.account_id,
+    )
     return asset
 
 
@@ -61,20 +70,34 @@ async def list_materials(
     content_item_id: Annotated[int | None, Query()] = None,
 ) -> list[MaterialAssetOut]:
     query = select(MaterialAsset).where(MaterialAsset.org_id == user.org_id)
-    if user.role != UserRole.ADMIN:
-        project_ids = await accessible_project_ids(session, user)
-        if not project_ids:
-            return []
-        query = query.join(
-            ContentItem,
-            MaterialAsset.content_item_id == ContentItem.id,
-        ).where(ContentItem.project_id.in_(project_ids))
     if content_item_id is not None:
         content_item = await session.get(ContentItem, content_item_id)
         if content_item is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
-        await require_project_access(session, user, content_item.project_id)
+        await require_content_scope(
+            session,
+            user,
+            project_id=content_item.project_id,
+            account_id=content_item.account_id,
+        )
         query = query.where(MaterialAsset.content_item_id == content_item_id)
+    elif user.role != UserRole.ADMIN:
+        project_ids = await accessible_project_ids(session, user)
+        visible_accounts = select(Account.id).where(
+            await accessible_account_clause(session, user)
+        )
+        query = query.join(
+            ContentItem,
+            MaterialAsset.content_item_id == ContentItem.id,
+        ).where(
+            or_(
+                ContentItem.project_id.in_(project_ids) if project_ids else false(),
+                and_(
+                    ContentItem.project_id.is_(None),
+                    ContentItem.account_id.in_(visible_accounts),
+                ),
+            )
+        )
     rows = (await session.scalars(query.order_by(MaterialAsset.id.desc()))).all()
     return [_material_out(asset) for asset in rows]
 

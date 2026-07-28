@@ -19,7 +19,7 @@ from app.models import (
     ProjectMembership,
     User,
 )
-from app.models.enums import UserRole, WorkspaceRole
+from app.models.enums import AccountStatus, UserRole, WorkspaceRole
 
 
 async def accessible_client_ids(session: AsyncSession, user: User) -> set[int]:
@@ -168,11 +168,25 @@ async def require_content_scope(
     session: AsyncSession,
     user: User,
     *,
-    project_id: int,
+    project_id: int | None,
     account_id: int | None,
     roles: Collection[WorkspaceRole] | None = None,
-) -> tuple[Project, Account | None]:
-    """Require project visibility, account visibility, then the requested role."""
+) -> tuple[Project | None, Account | None]:
+    """Require the resource's project scope or its explicitly bound active account."""
+    if project_id is None:
+        if account_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="内容缺少账号绑定",
+            )
+        account = await require_account_access(session, user, account_id, roles=roles)
+        if account.status != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前账号已停用",
+            )
+        return None, account
+
     project = await require_project_access(session, user, project_id)
     account = (
         await require_account_access(session, user, account_id)

@@ -115,6 +115,17 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
     )
 
     with engine.begin() as connection:
+        def assert_project_foreign_key_is_preserved() -> None:
+            foreign_key = next(
+                item
+                for item in sa.inspect(connection).get_foreign_keys("content_items")
+                if item["constrained_columns"] == ["project_id"]
+            )
+            assert foreign_key["referred_table"] == "projects"
+            assert foreign_key["referred_columns"] == ["id"]
+            if "ondelete" in foreign_key["options"]:
+                assert foreign_key["options"]["ondelete"] == "CASCADE"
+
         metadata.create_all(connection)
         connection.execute(projects.insert(), [{"id": 1}])
         connection.execute(accounts.insert(), [{"id": 1}])
@@ -131,6 +142,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
             for column in sa.inspect(connection).get_columns("content_items")
         }
         assert columns["project_id"]["nullable"] is True
+        assert_project_foreign_key_is_preserved()
 
         connection.execute(
             sa.text(
@@ -151,6 +163,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
             for column in sa.inspect(connection).get_columns("content_items")
         }
         assert columns["project_id"]["nullable"] is False
+        assert_project_foreign_key_is_preserved()
         assert connection.execute(
             sa.text("SELECT project_id, account_id, title FROM content_items WHERE id = 1")
         ).one() == (1, 1, "legacy content")
@@ -161,6 +174,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
             for column in sa.inspect(connection).get_columns("content_items")
         }
         assert columns["project_id"]["nullable"] is True
+        assert_project_foreign_key_is_preserved()
 
 
 def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) -> None:

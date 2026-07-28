@@ -1,7 +1,17 @@
 import pytest
 
-from app.models import ContentItem, MaterialAsset, Org, Project, ProjectMembership
-from app.models.enums import MaterialStatus, WorkspaceRole
+from app.models import (
+    Account,
+    AccountMembership,
+    Client,
+    ClientMembership,
+    ContentItem,
+    MaterialAsset,
+    Org,
+    Project,
+    ProjectMembership,
+)
+from app.models.enums import AccountStatus, MaterialStatus, Platform, WorkspaceRole
 
 
 async def _token(client, email: str, password: str) -> str:
@@ -107,3 +117,124 @@ async def test_material_access_follows_project_membership(client, admin, member,
     assert hidden_meta.status_code == 404
     assert hidden_file.status_code == 404
     assert anonymous_file.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_account_scoped_content_detail_and_material_access_require_its_account(
+    client, admin, member, session
+):
+    workspace = Client(org_id=admin.org_id, name="Account-scoped workspace")
+    visible_account = Account(
+        org_id=admin.org_id,
+        client=workspace,
+        platform=Platform.DOUYIN,
+        nickname="Visible account",
+        status=AccountStatus.ACTIVE,
+    )
+    hidden_account = Account(
+        org_id=admin.org_id,
+        client=workspace,
+        platform=Platform.DOUYIN,
+        nickname="Hidden account",
+    )
+    member.account_scope_mode = "selected"
+    session.add_all(
+        [
+            workspace,
+            visible_account,
+            hidden_account,
+            ClientMembership(
+                client=workspace,
+                user=member,
+                role=WorkspaceRole.OPERATOR,
+            ),
+            AccountMembership(user=member, account=visible_account),
+        ]
+    )
+    await session.flush()
+
+    visible_content = ContentItem(
+        account_id=visible_account.id,
+        project_id=None,
+        title="Visible account diagnostic",
+    )
+    hidden_content = ContentItem(
+        account_id=hidden_account.id,
+        project_id=None,
+        title="Hidden account diagnostic",
+    )
+    session.add_all([visible_content, hidden_content])
+    await session.flush()
+    visible_material = MaterialAsset(
+        org_id=admin.org_id,
+        content_item_id=visible_content.id,
+        kind="image",
+        status=MaterialStatus.READY,
+        local_path="outputs/visible-account.png",
+    )
+    hidden_material = MaterialAsset(
+        org_id=admin.org_id,
+        content_item_id=hidden_content.id,
+        kind="image",
+        status=MaterialStatus.READY,
+        local_path="outputs/hidden-account.png",
+    )
+    session.add_all([visible_material, hidden_material])
+    await session.commit()
+    token = await _token(client, "user@test.com", "user-pw-123")
+    headers = _auth(token)
+
+    visible_detail = await client.get(f"/content-items/{visible_content.id}", headers=headers)
+    visible_listing = await client.get(
+        f"/materials?content_item_id={visible_content.id}", headers=headers
+    )
+    visible_all_listing = await client.get("/materials", headers=headers)
+    visible_material_response = await client.get(
+        f"/materials/{visible_material.id}", headers=headers
+    )
+    hidden_detail = await client.get(f"/content-items/{hidden_content.id}", headers=headers)
+    hidden_listing = await client.get(
+        f"/materials?content_item_id={hidden_content.id}", headers=headers
+    )
+    hidden_material_response = await client.get(f"/materials/{hidden_material.id}", headers=headers)
+
+    assert visible_detail.status_code == 200
+    assert visible_listing.status_code == 200
+    assert [row["id"] for row in visible_listing.json()] == [visible_material.id]
+    assert [row["id"] for row in visible_all_listing.json()] == [visible_material.id]
+    assert visible_material_response.status_code == 200
+    assert hidden_detail.status_code == 404
+    assert hidden_listing.status_code == 404
+    assert hidden_material_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_account_scoped_content_rejects_inactive_or_unbound_accounts(client, admin, session):
+    inactive_account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Inactive account",
+        status=AccountStatus.INACTIVE,
+    )
+    session.add(inactive_account)
+    await session.flush()
+    inactive_content = ContentItem(
+        account_id=inactive_account.id,
+        project_id=None,
+        title="Inactive account diagnostic",
+    )
+    unbound_content = ContentItem(
+        account_id=None,
+        project_id=None,
+        title="Invalid unbound diagnostic",
+    )
+    session.add_all([inactive_content, unbound_content])
+    await session.commit()
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+
+    inactive_response = await client.get(f"/content-items/{inactive_content.id}", headers=headers)
+    unbound_response = await client.get(f"/content-items/{unbound_content.id}", headers=headers)
+
+    assert inactive_response.status_code == 409
+    assert unbound_response.status_code == 404

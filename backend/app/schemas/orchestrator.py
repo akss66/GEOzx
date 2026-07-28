@@ -97,7 +97,7 @@ class ContentItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    project_id: int
+    project_id: int | None
     account_id: int | None
     title: str
     current_stage: ContentStage
