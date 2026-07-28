@@ -78,8 +78,200 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_account_scoped_content() -> None:
-    assert get_head_revision() == "20260728_0175"
+def test_migration_head_is_versioned_skill_runs() -> None:
+    assert get_head_revision() == "20260728_0200"
+
+
+def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260728_0200_skill_runs"
+    )
+    assert migration.down_revision == "20260728_0175"
+
+    engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    metadata = sa.MetaData()
+    orgs = sa.Table("orgs", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    conversation_threads = sa.Table(
+        "conversation_threads",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),
+    )
+    conversation_turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("thread_id", sa.Integer, nullable=False),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint(
+            "id",
+            "thread_id",
+            "org_id",
+            name="uq_conversation_turn_id_thread_org",
+        ),
+    )
+    brain_tasks = sa.Table(
+        "brain_tasks",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    agent_runs = sa.Table(
+        "agent_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    agent_invocations = sa.Table(
+        "agent_invocations",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(length=40), nullable=False),
+    )
+    agent_tool_calls = sa.Table(
+        "agent_tool_calls",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(length=40), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(orgs.insert(), [{"id": 1}])
+        connection.execute(
+            conversation_threads.insert(),
+            [{"id": 10, "org_id": 1}],
+        )
+        connection.execute(
+            conversation_turns.insert(),
+            [{"id": 20, "thread_id": 10, "org_id": 1}],
+        )
+        connection.execute(brain_tasks.insert(), [{"id": 30}])
+        connection.execute(agent_runs.insert(), [{"id": 40}])
+        connection.execute(
+            agent_invocations.insert(),
+            [{"id": 50, "status": "done"}],
+        )
+        connection.execute(
+            agent_tool_calls.insert(),
+            [{"id": 60, "status": "success"}],
+        )
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("skill_runs") is True
+        skill_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("skill_runs")
+        }
+        assert {
+            "org_id",
+            "thread_id",
+            "turn_id",
+            "run_id",
+            "task_id",
+            "idempotency_key",
+            "skill_code",
+            "skill_version",
+            "status",
+            "input_snapshot",
+            "output_snapshot",
+            "quality_score",
+            "error_code",
+        } <= skill_columns.keys()
+        assert skill_columns["task_id"]["nullable"] is True
+        skill_uniques = {
+            item["name"]: tuple(item["column_names"])
+            for item in inspector.get_unique_constraints("skill_runs")
+        }
+        assert skill_uniques["uq_skill_runs_run_idempotency"] == (
+            "run_id",
+            "idempotency_key",
+        )
+        invocation_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("agent_invocations")
+        }
+        tool_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("agent_tool_calls")
+        }
+        for columns in (invocation_columns, tool_columns):
+            assert columns["skill_run_id"]["nullable"] is True
+            assert columns["thread_id"]["nullable"] is True
+            assert columns["turn_id"]["nullable"] is True
+        assert connection.execute(
+            sa.text(
+                "SELECT status, skill_run_id, thread_id, turn_id "
+                "FROM agent_invocations WHERE id = 50"
+            )
+        ).one() == ("done", None, None, None)
+        assert connection.execute(
+            sa.text(
+                "SELECT status, skill_run_id, thread_id, turn_id "
+                "FROM agent_tool_calls WHERE id = 60"
+            )
+        ).one() == ("success", None, None, None)
+
+        connection.execute(
+            sa.text(
+                "INSERT INTO skill_runs "
+                "(id, org_id, thread_id, turn_id, run_id, task_id, "
+                "idempotency_key, skill_code, skill_version, status, "
+                "input_snapshot, output_snapshot) "
+                "VALUES (70, 1, 10, 20, 40, NULL, 'run-40-diagnosis', "
+                "'account.diagnosis', '1.0.0', 'completed', '{}', '{}')"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "UPDATE agent_invocations "
+                "SET skill_run_id = 70, thread_id = 10, turn_id = 20 "
+                "WHERE id = 50"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "UPDATE agent_tool_calls "
+                "SET skill_run_id = 70, thread_id = 10, turn_id = 20 "
+                "WHERE id = 60"
+            )
+        )
+
+        migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("skill_runs") is False
+        assert inspector.has_table("agent_invocations") is True
+        assert inspector.has_table("agent_tool_calls") is True
+        assert {"skill_run_id", "thread_id", "turn_id"}.isdisjoint(
+            column["name"]
+            for column in inspector.get_columns("agent_invocations")
+        )
+        assert {"skill_run_id", "thread_id", "turn_id"}.isdisjoint(
+            column["name"]
+            for column in inspector.get_columns("agent_tool_calls")
+        )
+        assert connection.execute(
+            sa.text("SELECT status FROM agent_invocations WHERE id = 50")
+        ).scalar_one() == "done"
+        assert connection.execute(
+            sa.text("SELECT status FROM agent_tool_calls WHERE id = 60")
+        ).scalar_one() == "success"
+
+        migration.upgrade()
+        assert sa.inspect(connection).has_table("skill_runs") is True
+        assert connection.execute(
+            sa.text(
+                "SELECT status, skill_run_id, thread_id, turn_id "
+                "FROM agent_invocations WHERE id = 50"
+            )
+        ).one() == ("done", None, None, None)
 
 
 def test_runtime_event_idempotency_migration_is_reversible(monkeypatch) -> None:

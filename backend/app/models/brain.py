@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         ReflectionRecord,
         StrategyPlan,
     )
+    from app.models.skill_runtime import SkillRun
 
 
 class BrainTask(Base, TimestampMixin):
@@ -111,6 +112,7 @@ class BrainTask(Base, TimestampMixin):
     experience_memories: Mapped[list["ExperienceMemory"]] = relationship(
         back_populates="task"
     )
+    skill_runs: Mapped[list["SkillRun"]] = relationship(back_populates="task")
 
 
 class TaskBrief(Base, TimestampMixin):
@@ -185,6 +187,19 @@ class AgentInvocation(Base, TimestampMixin):
     run_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     step_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     attempt: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
@@ -210,6 +225,10 @@ class AgentInvocation(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     task: Mapped[BrainTask] = relationship(back_populates="invocations")
+    skill_run: Mapped["SkillRun | None"] = relationship(
+        back_populates="invocations",
+        foreign_keys=[skill_run_id],
+    )
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(
         back_populates="invocation", cascade="all, delete-orphan"
     )
@@ -239,6 +258,19 @@ class AgentToolCall(Base, TimestampMixin):
     invocation_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_invocations.id", ondelete="CASCADE"), index=True, nullable=True
     )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     module: Mapped[str] = mapped_column(String(64), default="brain", index=True, nullable=False)
     agent_code: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     tool_code: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
@@ -260,6 +292,10 @@ class AgentToolCall(Base, TimestampMixin):
 
     task: Mapped[BrainTask] = relationship(back_populates="tool_calls")
     invocation: Mapped[AgentInvocation | None] = relationship(back_populates="tool_calls")
+    skill_run: Mapped["SkillRun | None"] = relationship(
+        back_populates="tool_calls",
+        foreign_keys=[skill_run_id],
+    )
 
 
 class DeliverableAcceptance(Base, TimestampMixin):
