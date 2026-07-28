@@ -13,6 +13,8 @@
 - Preserve existing `BrainTask`, `/brain/tasks/*`, AgentKernel, LangGraph, ARQ, permission gates, audit ledgers, and real platform integrations during migration.
 - Every new user message owns one `ConversationTurn` and one idempotent `AgentRun`.
 - `account_id` is required for a formal account-operations thread; `client_id` and `project_id` remain optional.
+- One ConversationThread belongs to exactly one account for its full lifetime. Switching accounts always creates or selects another Thread; it never mutates the current Thread's account.
+- Conversation history, SkillRuns, tasks, artifacts, approvals, observations, and reflections must be authorized and projected by both `org_id` and `account_id`. Cross-account ownership links and account-agnostic task-history fallbacks are forbidden.
 - Ordinary conversation and deterministic data queries must not create an `OperationTask` or enter the full strategy graph.
 - Every formal artifact must retain `thread_id`, `turn_id`, `run_id`, optional `skill_run_id`, and optional `task_id`.
 - Specialists remain isolated and cannot dispatch specialists or bypass Tool permissions.
@@ -57,6 +59,10 @@ Incorrect side effects: Strategy record and repeated main-Agent replies
 These defects are release-blocking. The production simulation must be added as
 a regression fixture and pass before the Main Agent V2 feature flag can be
 enabled.
+
+Account isolation is an additional release invariant owned by Tasks 1, 7, 8,
+11, 15, 17, and 20: two accounts in the same organization must never see,
+reuse, mutate, or inherit each other's conversation Turns or artifacts.
 
 ## File and Responsibility Map
 
@@ -2398,6 +2404,8 @@ git commit -m "chore: guard main agent v2 rollout"
 - [ ] A main-Agent acknowledgement contains no specialist-owned diagnosis, and no specialist progress is shown without a persisted AgentInvocation.
 - [ ] Retrying a transient failure does not duplicate a main-Agent reply, runtime event, Tool result, or specialist lifecycle event.
 - [ ] Every formal artifact stays under its source Turn and appears in the account Artifact Center with the same ID.
+- [ ] Two accounts in the same organization have isolated Threads, Turns, SkillRuns, tasks, artifacts, approvals, observations, and reflections; switching accounts never rebinds an existing Thread.
+- [ ] Cross-account IDs return a safe not-found/forbidden result and never fall back to task-wide history from another account.
 - [ ] Artifact cards show conclusions, data, problems, suggestions, and explicit next actions.
 - [ ] Specialist names are visible by default; evidence and quality are expandable; technical logs are a deeper view.
 - [ ] Publishing, deletion, paid promotion, and authorization changes require approval.
@@ -2434,6 +2442,7 @@ Parallel work is safe only after shared contracts are committed:
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Existing uncommitted foundation diverges from this plan | High | Tasks 1 and 2 begin by running focused tests and commit only the owned files |
+| Conversation or artifact history leaks between accounts in one organization | Critical | Bind each Thread permanently to one account, authorize every projection by org + account, reject cross-account links, and run a two-account end-to-end isolation regression |
 | Projectless authorized accounts are rejected before specialist execution | Critical | Make ContentItem project-optional, keep account mandatory, and regression-test the exact account-only Harness path |
 | Business conflicts are retried and amplify side effects | Critical | Classify 4xx conflicts as terminal, synchronize Run/Task failure, and use semantic idempotency keys for all visible writes |
 | Main Agent or UI claims expert work that never occurred | Critical | Require a completed AgentInvocation for formal conclusions and a real invocation ID for every specialist lifecycle event |
