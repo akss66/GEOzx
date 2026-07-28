@@ -92,6 +92,11 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
     assert migration.down_revision == "20260728_0100"
 
     engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
     metadata = sa.MetaData()
     projects = sa.Table("projects", metadata, sa.Column("id", sa.Integer, primary_key=True))
     accounts = sa.Table("accounts", metadata, sa.Column("id", sa.Integer, primary_key=True))
@@ -126,6 +131,23 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
             if "ondelete" in foreign_key["options"]:
                 assert foreign_key["options"]["ondelete"] == "CASCADE"
 
+        def assert_project_delete_cascades(project_id: int, content_id: int) -> None:
+            connection.execute(projects.insert(), [{"id": project_id}])
+            connection.execute(
+                content_items.insert(),
+                [
+                    {
+                        "id": content_id,
+                        "project_id": project_id,
+                        "title": f"content for project {project_id}",
+                    }
+                ],
+            )
+            connection.execute(projects.delete().where(projects.c.id == project_id))
+            assert connection.execute(
+                sa.select(content_items.c.id).where(content_items.c.id == content_id)
+            ).scalar_one_or_none() is None
+
         metadata.create_all(connection)
         connection.execute(projects.insert(), [{"id": 1}])
         connection.execute(accounts.insert(), [{"id": 1}])
@@ -143,6 +165,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
         }
         assert columns["project_id"]["nullable"] is True
         assert_project_foreign_key_is_preserved()
+        assert_project_delete_cascades(project_id=10, content_id=10)
 
         connection.execute(
             sa.text(
@@ -164,6 +187,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
         }
         assert columns["project_id"]["nullable"] is False
         assert_project_foreign_key_is_preserved()
+        assert_project_delete_cascades(project_id=20, content_id=20)
         assert connection.execute(
             sa.text("SELECT project_id, account_id, title FROM content_items WHERE id = 1")
         ).one() == (1, 1, "legacy content")
@@ -175,6 +199,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
         }
         assert columns["project_id"]["nullable"] is True
         assert_project_foreign_key_is_preserved()
+        assert_project_delete_cascades(project_id=30, content_id=30)
 
 
 def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) -> None:
