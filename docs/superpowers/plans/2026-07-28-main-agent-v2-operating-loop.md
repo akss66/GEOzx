@@ -22,6 +22,42 @@
 - Do not deploy production as part of this plan.
 - The current worktree already contains an in-progress, uncommitted Thread/Turn foundation. Tasks 1 and 2 own those exact files; do not reset or recreate that work.
 
+## Confirmed Production Simulation Baseline
+
+The following behavior was reproduced against the real online runtime on
+2026-07-28. It is not a model-provider or model-configuration failure.
+
+```text
+Account: TOTALCARE建筑玻璃贴膜
+Account ID: 3
+Request: 读取已有数据并调用账号定位专家，只返回诊断，不生成策略
+Intent: workflow, confidence 0.95
+AgentRun: #38
+Successful tools: account.profile, account.data_context
+Expert invocations: 0
+Worker attempts: 3, then dead_letter
+Terminal error: Agent execution requires one explicit project and account
+Incorrect side effects: Strategy record and repeated main-Agent replies
+```
+
+| Priority | Confirmed defect | Plan owner |
+| --- | --- | --- |
+| P0 | An authorized account without a project cannot call a specialist | Task P0.1 and Task P0.2 |
+| P0 | HTTP 409 business conflict is retried three times | Task P0.3 |
+| P0 | Main Agent emits a professional diagnosis before a specialist runs | Task P0.5 |
+| P0 | Diagnosis enters the fixed situation/strategy graph despite an explicit no-strategy request | Task P0.6 |
+| P0 | UI reports specialist activity although no AgentInvocation exists | Task P0.7 |
+| P0 | AgentRun reaches dead_letter while BrainTask remains running at 0% | Task P0.3 |
+| P1 | Successful Tool evidence is discarded before specialist execution | Task P0.2 |
+| P1 | Retry writes duplicate main-Agent messages and runtime events | Task P0.4 |
+| P1 | analysis/workflow/action classification is too coarse | Tasks 4, 5, and P0.6 |
+| P1 | User-facing failure does not explain the missing project/account condition | Tasks P0.3 and P0.7 |
+| P1 | Task-wide history can contaminate the current turn | Tasks 1, 2, 7, 15, and 16 |
+
+These defects are release-blocking. The production simulation must be added as
+a regression fixture and pass before the Main Agent V2 feature flag can be
+enabled.
+
 ## File and Responsibility Map
 
 ```text
@@ -560,6 +596,610 @@ git commit -m "feat: route main agent turns by execution mode"
 - [ ] Greeting, query, Skill, task, and action route tests pass.
 - [ ] Explicit “＋” Skill requests cannot be reclassified by the model.
 - [ ] Legacy `IntentDecision` callers still pass their existing tests.
+
+---
+
+## Phase P0: Close Confirmed Production Failures
+
+This phase is a release gate derived from AgentRun `#38`. It must pass before
+SkillRun, Artifact Center, or composer work is allowed to hide the legacy
+failure behind new UI.
+
+### Task P0.1: Allow account-scoped content without a project
+
+**Files:**
+- Modify: `backend/app/models/content.py`
+- Create: `backend/migrations/versions/20260728_0150_account_scoped_content.py`
+- Create: `backend/tests/test_account_scoped_content.py`
+- Modify: `backend/tests/test_migrations.py`
+
+**Interfaces:**
+- Produces: nullable `ContentItem.project_id`.
+- Preserves: account linkage, Deliverable versioning, and project-scoped rows.
+- Migration dependency: `down_revision = "20260728_0100"`.
+
+- [ ] **Step 1: Write the failing account-only content test**
+
+```python
+@pytest.mark.asyncio
+async def test_content_item_can_belong_to_account_without_project(
+    session, admin
+):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="TOTALCARE建筑玻璃贴膜",
+        status=AccountStatus.ACTIVE,
+    )
+    session.add(account)
+    await session.flush()
+    item = ContentItem(
+        project_id=None,
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="账号诊断",
+        current_stage=ContentStage.POSITIONING,
+        status=ContentStatus.IN_PROGRESS,
+    )
+    session.add(item)
+    await session.commit()
+    assert item.project_id is None
+    assert item.account_id == account.id
+```
+
+- [ ] **Step 2: Run the model test**
+
+Run: `cd backend && uv run pytest tests/test_account_scoped_content.py -v`
+
+Expected before the model change: FAIL because `project_id` is not nullable.
+
+- [ ] **Step 3: Make the relationship optional and add the reversible migration**
+
+```python
+project_id: Mapped[int | None] = mapped_column(
+    ForeignKey("projects.id", ondelete="CASCADE"),
+    index=True,
+    nullable=True,
+)
+project: Mapped["Project | None"] = relationship(back_populates="content_items")
+```
+
+The migration changes only nullability. Its downgrade must first assert that no
+account-only ContentItems remain; if rows exist, downgrade raises a clear
+runtime error instead of silently deleting them.
+
+- [ ] **Step 4: Verify migration and existing content paths**
+
+Run: `cd backend && uv run pytest tests/test_account_scoped_content.py tests/test_migrations.py tests/test_orchestrator.py -q`
+
+Expected: PASS for account-only creation, project-scoped creation, upgrade, and safe downgrade.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/models/content.py backend/migrations/versions/20260728_0150_account_scoped_content.py backend/tests/test_account_scoped_content.py backend/tests/test_migrations.py
+git commit -m "fix: allow account-scoped diagnostic content"
+```
+
+### Task P0.2: Let the Expert Harness run with one account and an optional project
+
+**Files:**
+- Modify: `backend/app/orchestrator/agent_harness.py`
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `backend/tests/test_agent_harness.py`
+- Modify: `backend/tests/test_brain_react_loop.py`
+
+**Interfaces:**
+- Changes: `_task_scope(task) -> tuple[int | None, int]`.
+- Changes: `_require_scope(..., project_id: int | None) -> tuple[Project | None, Account]`.
+- Guarantees: successful `account.profile` and `account.data_context` results are present in the specialist input packet.
+
+- [ ] **Step 1: Reproduce the exact online scope failure**
+
+```python
+@pytest.mark.asyncio
+async def test_positioning_expert_runs_for_authorized_account_without_project(
+    session, admin, active_account, brain_task, monkeypatch
+):
+    brain_task.brief.project_id = None
+    brain_task.brief.account_ids = [active_account.id]
+    result = await AgentHarness().execute(
+        session,
+        task=brain_task,
+        user=admin,
+        code=AgentCode.POSITIONING,
+        purpose="只返回账号定位诊断，不生成策略",
+        evidence_refs=["tool:account.profile", "tool:account.data_context"],
+        run_id=38,
+        step_key="positioning-diagnosis",
+        upstream={
+            "tool_results": {
+                "account.profile": {"nickname": "TOTALCARE建筑玻璃贴膜"},
+                "account.data_context": {"content_snapshot_count": 3},
+            }
+        },
+    )
+    assert result.invocation.status == AgentInvocationStatus.DONE
+    assert result.invocation.input_summary
+    assert result.deliverable.content_item.project_id is None
+```
+
+- [ ] **Step 2: Run the focused Harness test**
+
+Run: `cd backend && uv run pytest tests/test_agent_harness.py -k without_project -v`
+
+Expected before the fix: FAIL with HTTP 409 and
+`Agent execution requires one explicit project and account`.
+
+- [ ] **Step 3: Make project validation conditional**
+
+The Harness must:
+
+1. require exactly one accessible, active account;
+2. validate project access and ProjectAccount linkage only when `project_id` is present;
+3. create an account-scoped ContentItem when `project_id` is absent;
+4. set event and approval `project_id` to `None`;
+5. skip project knowledge lookup when no project exists;
+6. keep the successful Tool results in `AgentContext.upstream`.
+
+Use:
+
+```python
+project_id, account_id = self._task_scope(task)
+project, account = await self._require_scope(
+    session,
+    user=user,
+    project_id=project_id,
+    account_id=account_id,
+)
+content_item = await self._ensure_content_item(
+    session,
+    task=task,
+    user=user,
+    project_id=project.id if project else None,
+    account_id=account.id,
+    spec=spec,
+)
+```
+
+- [ ] **Step 4: Verify account-only, project-scoped, and cross-account security**
+
+Run: `cd backend && uv run pytest tests/test_agent_harness.py tests/test_brain_react_loop.py -q`
+
+Expected: account-only and project-scoped specialists run; unauthorized accounts,
+inactive accounts, and mismatched explicit projects still fail once without
+starting an invocation.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/orchestrator/agent_harness.py backend/app/orchestrator/brain_runtime.py backend/tests/test_agent_harness.py backend/tests/test_brain_react_loop.py
+git commit -m "fix: support projectless account specialists"
+```
+
+### Task P0.3: Classify business conflicts as terminal and close task state
+
+**Files:**
+- Create: `backend/app/core/runtime_failures.py`
+- Modify: `backend/app/services/agent_runs.py`
+- Modify: `backend/app/worker.py`
+- Modify: `backend/tests/test_agent_runs.py`
+- Create: `backend/tests/test_worker.py`
+
+**Interfaces:**
+- Produces: `FailureDisposition` and `classify_runtime_failure(exc)`.
+- Changes: `release_agent_run_failure(..., disposition)`.
+- Guarantees: HTTP 4xx business conflicts except 408/429 are terminal and are never retried.
+
+- [ ] **Step 1: Write retry classification and terminal-state tests**
+
+```python
+def test_http_409_is_terminal():
+    exc = HTTPException(status_code=409, detail="account scope conflict")
+    assert classify_runtime_failure(exc) == FailureDisposition.TERMINAL
+
+
+def test_timeout_is_retryable():
+    assert classify_runtime_failure(TimeoutError()) == FailureDisposition.RETRYABLE
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_failure_closes_run_and_task(
+    session, agent_run, brain_task
+):
+    await finalize_agent_run_failure(
+        session,
+        run=agent_run,
+        task=brain_task,
+        error_code="ACCOUNT_SCOPE_CONFLICT",
+        user_message="当前账号范围不满足专家执行条件。",
+    )
+    assert agent_run.status == "failed"
+    assert brain_task.status == BrainTaskStatus.FAILED
+    assert brain_task.progress == 0
+    assert brain_task.current_focus == "当前账号范围不满足专家执行条件。"
+```
+
+- [ ] **Step 2: Run failure-policy tests**
+
+Run: `cd backend && uv run pytest tests/test_agent_runs.py tests/test_worker.py -k "409 or terminal or retryable" -v`
+
+Expected before the fix: FAIL because every exception is retried until max attempts.
+
+- [ ] **Step 3: Implement explicit failure taxonomy**
+
+```python
+class FailureDisposition(StrEnum):
+    RETRYABLE = "retryable"
+    TERMINAL = "terminal"
+
+
+def classify_runtime_failure(exc: BaseException) -> FailureDisposition:
+    http_error = find_exception(exc, HTTPException)
+    if http_error is not None:
+        if http_error.status_code in {408, 429} or http_error.status_code >= 500:
+            return FailureDisposition.RETRYABLE
+        return FailureDisposition.TERMINAL
+    if find_exception(exc, (TimeoutError, ConnectionError)) is not None:
+        return FailureDisposition.RETRYABLE
+    return FailureDisposition.TERMINAL
+```
+
+On terminal failure:
+
+- set AgentRun to `failed`, not `retry_wait` or `dead_letter`;
+- clear lease and retry timestamps;
+- set BrainTask to `failed`;
+- persist one `brain.runtime.failed` event containing stable error code, safe
+  user message, and recovery action;
+- do not raise ARQ `Retry`.
+
+- [ ] **Step 4: Verify the AgentRun #38 behavior**
+
+Run: `cd backend && uv run pytest tests/test_worker.py -k business_conflict -v`
+
+Expected: one worker attempt, one failure event, AgentRun `failed`, BrainTask
+`failed`, and no dead-letter transition.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/core/runtime_failures.py backend/app/services/agent_runs.py backend/app/worker.py backend/tests/test_agent_runs.py backend/tests/test_worker.py
+git commit -m "fix: stop retrying terminal agent conflicts"
+```
+
+### Task P0.4: Make main-Agent messages and events idempotent across retries
+
+**Files:**
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `backend/app/core/events.py`
+- Modify: `backend/app/worker.py`
+- Modify: `backend/tests/test_brain_react_loop.py`
+- Modify: `backend/tests/test_worker.py`
+
+**Interfaces:**
+- Produces: `record_runtime_event_once` keyed by
+  `(run_id, client_message_id, event_type, semantic_key)`.
+- Guarantees: retrying a transient failure does not duplicate user messages,
+  acknowledgements, expert lifecycle events, or completed Tool results.
+
+- [ ] **Step 1: Write the duplicate-retry regression**
+
+```python
+@pytest.mark.asyncio
+async def test_retry_does_not_duplicate_main_agent_reply_or_events(
+    session, transient_run, brain_task
+):
+    await execute_attempt(transient_run.id, fail_after_ack=True)
+    await execute_attempt(transient_run.id, fail_after_ack=False)
+    events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.payload["run_id"].as_integer() == transient_run.id
+            )
+        )
+    )
+    assert count_type(events, "brain.runtime.user_message") == 1
+    assert count_type(events, "brain.runtime.message_done") == 1
+    assert count_type(events, "brain.runtime.tool_completed") == 1
+```
+
+- [ ] **Step 2: Run the idempotency tests**
+
+Run: `cd backend && uv run pytest tests/test_worker.py tests/test_brain_react_loop.py -k idempotent -v`
+
+Expected before the fix: FAIL with duplicate message and lifecycle events.
+
+- [ ] **Step 3: Add stable semantic event keys**
+
+Message IDs must not include AgentRun attempt. Before streaming or recording a
+message, load an existing `message_done` event with the same run,
+`client_message_id`, and agent code. If found, reuse its content and do not emit
+start/delta/done again.
+
+Tool retries continue using the existing Tool idempotency key. Expert lifecycle
+events use `invocation_id`, never an optimistic expert code alone.
+
+- [ ] **Step 4: Verify transient retry and terminal failure paths**
+
+Run: `cd backend && uv run pytest tests/test_worker.py tests/test_brain_react_loop.py tests/test_agent_runs.py -q`
+
+Expected: transient failure retries once without duplicated visible content;
+terminal conflict does not retry.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/orchestrator/brain_runtime.py backend/app/core/events.py backend/app/worker.py backend/tests/test_brain_react_loop.py backend/tests/test_worker.py
+git commit -m "fix: make agent retry events idempotent"
+```
+
+### Task P0.5: Prevent the main Agent from producing specialist conclusions
+
+**Files:**
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `backend/tests/test_brain_react_loop.py`
+- Modify: `backend/tests/test_brain_api.py`
+
+**Interfaces:**
+- Changes: the pre-execution main-Agent message is an acknowledgement only.
+- Invariant: a formal diagnosis requires at least one completed
+  AgentInvocation belonging to the responsible specialist.
+
+- [ ] **Step 1: Write the authority-boundary test**
+
+```python
+@pytest.mark.asyncio
+async def test_main_agent_does_not_diagnose_before_specialist_runs(
+    session, brain_task
+):
+    await runtime_graph.stream_pre_execution_acknowledgement(
+        session,
+        brain_task,
+        client_message_id="authority-1",
+    )
+    messages = await runtime_messages(session, brain_task.id)
+    assert len(messages) == 1
+    assert "已收到你的账号诊断需求" in messages[0]
+    assert "完播率下降" not in messages[0]
+    assert "账号定位存在问题" not in messages[0]
+```
+
+- [ ] **Step 2: Run the authority test**
+
+Run: `cd backend && uv run pytest tests/test_brain_react_loop.py -k does_not_diagnose -v`
+
+Expected before the fix: FAIL when the acknowledgement model uses operating
+data to produce its own diagnosis.
+
+- [ ] **Step 3: Replace model-generated pre-execution conclusions with bounded copy**
+
+The acknowledgement may state:
+
+```text
+已收到你的账号诊断需求。我会先核对数据和执行条件；只有专家实际完成分析后，才会向你交付诊断结论。
+```
+
+It may not mention metric causes, account positioning, content conclusions, or
+recommendations. `_stream_summary_turn` must require completed expert
+observations for every expert-owned formal result. When no expert completed,
+return a blocked/error message instead of a professional conclusion.
+
+- [ ] **Step 4: Verify conversation and formal-result boundaries**
+
+Run: `cd backend && uv run pytest tests/test_brain_react_loop.py tests/test_brain_api.py -q`
+
+Expected: normal questions still receive direct answers; formal diagnosis
+content first appears only after a completed specialist invocation.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/orchestrator/brain_runtime.py backend/tests/test_brain_react_loop.py backend/tests/test_brain_api.py
+git commit -m "fix: enforce main agent authority boundary"
+```
+
+### Task P0.6: Route diagnosis around the strategy graph
+
+**Files:**
+- Modify: `backend/app/api/brain.py`
+- Modify: `backend/app/worker.py`
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `backend/tests/test_brain_api.py`
+- Modify: `backend/tests/test_ai_coo_runtime.py`
+
+**Interfaces:**
+- Consumes: `TurnRouteDecision` from Tasks 4 and 5.
+- Produces: `BrainRuntimeGraph.start_routed(..., route_decision)`.
+- Invariant: `QUERY` and diagnostic `SKILL` routes never call
+  `situation_awareness`, `strategy_planning`, or `task_planning`.
+
+- [ ] **Step 1: Encode the exact online request as a regression**
+
+```python
+@pytest.mark.asyncio
+async def test_positioning_diagnosis_does_not_create_strategy(
+    client, session, headers, account_without_project, monkeypatch
+):
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": (
+                "读取已有数据并调用账号定位专家，只返回诊断，不生成30天策略"
+            ),
+            "client_message_id": "production-simulation-run-38",
+            "account_id": account_without_project.id,
+        },
+    )
+    assert response.status_code == 201
+    runtime = response.json()
+    assert runtime["strategy"] is None
+    assert len(runtime["invocations"]) == 1
+    assert runtime["invocations"][0]["agent_code"] == "01-positioning"
+    assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
+```
+
+- [ ] **Step 2: Run the regression**
+
+Run: `cd backend && uv run pytest tests/test_brain_api.py -k positioning_diagnosis_does_not_create_strategy -v`
+
+Expected before the fix: FAIL because workflow enters the full AI COO graph and
+creates StrategyPlan before specialist execution.
+
+- [ ] **Step 3: Persist and execute the route decision**
+
+`/brain/messages` stores `route_decision` in the AgentRun request payload.
+Worker validates it with `TurnRouteDecision` and calls:
+
+```python
+await runtime_graph.start_routed(
+    session,
+    task,
+    route_decision=route_decision,
+    client_message_id=client_message_id,
+    agent_run_id=run.id,
+    agent_run_attempt=run.attempt,
+)
+```
+
+Route graph:
+
+```text
+ANSWER -> direct conversation
+CLARIFY -> one clarification
+QUERY -> deterministic Tool query -> data card
+SKILL diagnosis -> context -> selected specialist -> critic -> summary
+TASK/ACTION -> situation -> strategy -> task planning -> execution/approval
+```
+
+Only `TASK` and `ACTION` may create StrategyPlan.
+
+- [ ] **Step 4: Verify all route graph boundaries**
+
+Run: `cd backend && uv run pytest tests/test_brain_api.py tests/test_ai_coo_runtime.py tests/test_brain_react_loop.py -q`
+
+Expected: diagnosis produces no StrategyPlan; explicit strategy still does;
+high-risk action still reaches approval.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/api/brain.py backend/app/worker.py backend/app/orchestrator/brain_runtime.py backend/tests/test_brain_api.py backend/tests/test_ai_coo_runtime.py
+git commit -m "fix: separate diagnosis from strategy execution"
+```
+
+### Task P0.7: Show only real specialist progress and actionable failures
+
+**Files:**
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `frontend/src/pages/BrainHome.tsx`
+- Modify: `backend/tests/test_brain_react_loop.py`
+- Modify: `frontend/src/pages/BrainHome.test.tsx`
+
+**Interfaces:**
+- Invariant: specialist UI requires a persisted AgentInvocation or an event with
+  a real `invocation_id`.
+- Produces: actionable failure copy from `brain.runtime.failed`.
+
+- [ ] **Step 1: Write truthful-progress tests**
+
+```tsx
+it("does not show a specialist when no invocation exists", async () => {
+  render(
+    <BrainHome
+      initialRuntime={historicalProjectScopeFailure({
+        invocations: [],
+        userMessage: "当前账号未绑定项目",
+      })}
+    />,
+  );
+  expect(await screen.findByText("当前账号未绑定项目")).toBeInTheDocument();
+  expect(screen.queryByText("账号定位专家正在分析")).not.toBeInTheDocument();
+});
+```
+
+`historicalProjectScopeFailure` is a test fixture for a persisted legacy
+`brain.runtime.failed` event. This test verifies historical truthfulness; it
+does not reintroduce a project requirement into the V2 execution path.
+
+Backend assertion:
+
+```python
+assert all(
+    event.payload.get("invocation_id")
+    for event in events
+    if event.type in {
+        "brain.runtime.subagent_started",
+        "brain.runtime.subagent_completed",
+    }
+)
+```
+
+- [ ] **Step 2: Run backend and frontend regressions**
+
+Run: `cd backend && uv run pytest tests/test_brain_react_loop.py -k invocation_id -v`
+
+Run: `cd frontend && pnpm test -- src/pages/BrainHome.test.tsx -t "does not show a specialist"`
+
+Expected before the fix: backend emits optimistic specialist events and the UI
+shows a specialist that never started.
+
+- [ ] **Step 3: Derive progress from durable facts**
+
+- Emit `subagent_started` only after AgentInvocation is flushed.
+- Emit `subagent_completed` only for `DONE` invocation rows.
+- Emit `subagent_failed` for a persisted failed invocation.
+- Frontend ignores specialist lifecycle events without `invocation_id`.
+- Render `brain.runtime.failed.payload.user_message` and
+  `recovery_action` as the primary failure state.
+
+For the historical project-scope failure, the safe copy is:
+
+```text
+当前账号未绑定项目，旧版专家链路无法继续。本次未生成诊断或策略。
+你可以绑定项目后重试；Main Agent V2 的账号级专家链路启用后将不再要求项目。
+```
+
+After Task P0.2 is enabled, this specific error no longer occurs for an active,
+authorized account; the copy remains valid for legacy history.
+
+- [ ] **Step 4: Verify the complete AgentRun #38 simulation**
+
+Run: `cd backend && uv run pytest tests/test_brain_react_loop.py tests/test_worker.py -q`
+
+Run: `cd frontend && pnpm test -- src/pages/BrainHome.test.tsx`
+
+Expected:
+
+- two successful Tool calls;
+- one real positioning AgentInvocation;
+- no StrategyPlan;
+- one main-Agent acknowledgement;
+- one specialist result;
+- no retry or dead letter;
+- final Task and Run status agree;
+- no optimistic expert UI.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/orchestrator/brain_runtime.py frontend/src/pages/BrainHome.tsx backend/tests/test_brain_react_loop.py frontend/src/pages/BrainHome.test.tsx
+git commit -m "fix: show truthful agent progress and failures"
+```
+
+### Checkpoint P0: Production simulation closure
+
+- [ ] Re-run the exact TOTALCARE account ID 3 request in a controlled local or staging environment.
+- [ ] Account-only specialist execution succeeds without creating an implicit project.
+- [ ] Tool evidence reaches the positioning specialist.
+- [ ] AgentInvocation count is exactly one.
+- [ ] StrategyPlan count is zero.
+- [ ] Worker attempt count is one.
+- [ ] AgentRun and BrainTask end in matching terminal states.
+- [ ] User sees one acknowledgement, one expert result, and no duplicate content.
+- [ ] Frontend never reports an expert without a durable invocation.
+- [ ] The production feature flag remains disabled until this checkpoint and Checkpoint 4 pass.
 
 ---
 
@@ -1753,6 +2393,10 @@ git commit -m "chore: guard main agent v2 rollout"
 - [ ] The “＋” launcher exposes business capabilities and starts one-click account inspection.
 - [ ] Account inspection uses real account data, named specialists, a quality gate, and evidence.
 - [ ] Ordinary questions never generate or reuse a 30-day strategy.
+- [ ] The exact AgentRun #38 regression succeeds for an authorized account with no project: two Tool results reach one real specialist invocation and no StrategyPlan is created.
+- [ ] HTTP 409 business conflicts execute once, never enter retry/dead-letter, and leave AgentRun and BrainTask in matching terminal states.
+- [ ] A main-Agent acknowledgement contains no specialist-owned diagnosis, and no specialist progress is shown without a persisted AgentInvocation.
+- [ ] Retrying a transient failure does not duplicate a main-Agent reply, runtime event, Tool result, or specialist lifecycle event.
 - [ ] Every formal artifact stays under its source Turn and appears in the account Artifact Center with the same ID.
 - [ ] Artifact cards show conclusions, data, problems, suggestions, and explicit next actions.
 - [ ] Specialist names are visible by default; evidence and quality are expandable; technical logs are a deeper view.
@@ -1768,6 +2412,7 @@ git commit -m "chore: guard main agent v2 rollout"
 Tasks 1-2: Thread/Turn foundation
     -> Task 3: Skill Registry
     -> Tasks 4-5: routing contract and LLM integration
+    -> Tasks P0.1-P0.7: production failure closure
     -> Tasks 6-7: SkillRun and provenance
     -> Tasks 8-10: conversation API and execution
     -> Tasks 11-13: artifacts and account inspection
@@ -1778,6 +2423,7 @@ Tasks 1-2: Thread/Turn foundation
 
 Parallel work is safe only after shared contracts are committed:
 
+- Tasks P0.1-P0.7 are a sequential release gate where scope, retry, routing, and UI truthfulness share runtime invariants; complete Checkpoint P0 before feature work resumes.
 - After Task 13, backend regression work and frontend API/type work may proceed in parallel.
 - After Task 14, TurnStream, ArtifactCard, and CapabilityLauncher components may be developed in parallel if each owns separate files.
 - BrainHome integration tasks remain sequential because they share one large page component.
@@ -1788,6 +2434,9 @@ Parallel work is safe only after shared contracts are committed:
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Existing uncommitted foundation diverges from this plan | High | Tasks 1 and 2 begin by running focused tests and commit only the owned files |
+| Projectless authorized accounts are rejected before specialist execution | Critical | Make ContentItem project-optional, keep account mandatory, and regression-test the exact account-only Harness path |
+| Business conflicts are retried and amplify side effects | Critical | Classify 4xx conflicts as terminal, synchronize Run/Task failure, and use semantic idempotency keys for all visible writes |
+| Main Agent or UI claims expert work that never occurred | Critical | Require a completed AgentInvocation for formal conclusions and a real invocation ID for every specialist lifecycle event |
 | BrainTask compatibility path continues leaking task-wide artifacts | High | Turn projection becomes the default only after cross-intent tests pass; legacy projection stays isolated |
 | Query intent still enters the strategy graph | High | Route contract has explicit `QUERY` mode and a no-BrainTask regression test |
 | Skill definitions become another Prompt catalog | High | Skill Registry uses typed code contracts, frozen versions, permissions, and output schemas |
