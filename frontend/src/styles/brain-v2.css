@@ -716,6 +716,19 @@
   font-weight: 650;
 }
 
+.tz-artifact-card__revision-version {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--tz-border, #e8e8e8);
+}
+
+.tz-artifact-card__revision-version > p {
+  margin: 0 0 8px;
+  color: var(--tz-text-secondary, #666);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .tz-artifact-card__actions {
   flex-wrap: wrap;
 }

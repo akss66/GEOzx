@@ -358,7 +358,13 @@ const mocks = vi.hoisted(() => {
     version: 1,
     status: "ready_for_review",
     summary: "账号具备增长基础。",
-    sections: [{ key: "core_conclusion", title: "核心结论", content: "优先收敛内容主题。" }],
+    sections: [
+      { key: "period", title: "复盘周期", content: "2026-07-01 至 2026-07-21" },
+      { key: "key_metrics", title: "关键数据", content: { engagement_rate: "4.8%" } },
+      { key: "highlights", title: "亮点", content: ["完播率提升"] },
+      { key: "issues", title: "主要问题", content: ["选题分散"] },
+      { key: "optimization_suggestions", title: "优化建议", content: ["收敛内容主题"] },
+    ],
     evidence_refs: [],
     quality: null,
     created_at: "2026-07-28T00:00:00Z",
@@ -537,10 +543,106 @@ describe("BrainHome", () => {
       target: { value: "请补充下周选题。" },
     });
     fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
-    await waitFor(() => expect(reviseArtifact).toHaveBeenCalledWith(expect.objectContaining({
+    await waitFor(() => expect(reviseArtifact).toHaveBeenCalledWith({
       artifactId: 5001,
+      payload: {
+        title: "账号体检报告",
+        period: "2026-07-01 至 2026-07-21",
+        summary: "账号具备增长基础。",
+        key_metrics: { engagement_rate: "4.8%" },
+        highlights: ["完播率提升"],
+        issues: ["选题分散"],
+        optimization_suggestions: ["收敛内容主题"],
+      },
       note: "请补充下周选题。",
-    })));
+    }));
+  });
+
+  it("prefills the next step only after the exact Artifact adoption succeeds", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    let resolveAcceptance: ((value: Artifact) => void) | undefined;
+    vi.mocked(acceptArtifact).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAcceptance = resolve;
+    }));
+
+    renderBrainHome();
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    fireEvent.click(screen.getByRole("button", { name: "采用并创建下一步" }));
+
+    expect(screen.getByRole("textbox", { name: "运营大脑消息" })).toHaveValue("");
+    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(5001));
+    await act(async () => {
+      resolveAcceptance?.({ ...mocks.artifact, status: "accepted" });
+    });
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "运营大脑消息" }))
+      .toHaveValue("已采用《账号体检报告》（成果 #5001）。请基于该报告提出下一步执行建议。"));
+  });
+
+  it("leaves the next-step draft unchanged when Artifact adoption fails", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(acceptArtifact).mockRejectedValueOnce(new Error("network"));
+
+    renderBrainHome();
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    const composer = screen.getByRole("textbox", { name: "运营大脑消息" });
+    fireEvent.change(composer, { target: { value: "保留的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "采用并创建下一步" }));
+
+    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(5001));
+    expect(composer).toHaveValue("保留的草稿");
+  });
+
+  it("uses the same safe business title when an adopted Artifact prefills the next step", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(acceptArtifact).mockResolvedValueOnce({
+      ...mocks.artifact,
+      title: "raw prompt: secret-token",
+      status: "accepted",
+    });
+
+    renderBrainHome();
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    fireEvent.click(screen.getByRole("button", { name: "采用并创建下一步" }));
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "运营大脑消息" }))
+      .toHaveValue("已采用《正式成果》（成果 #5001）。请基于该报告提出下一步执行建议。"));
+  });
+
+  it("keeps the source V1 visible beside the exact V2 returned by Artifact revision", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(reviseArtifact).mockResolvedValueOnce({
+      ...mocks.artifact,
+      id: 5002,
+      title: "账号体检报告（修订版）",
+      version: 2,
+      status: "ready_for_review",
+      summary: "已补充转化数据。",
+    });
+
+    renderBrainHome();
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), {
+      target: { value: "请补充转化数据。" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
+
+    expect(await screen.findByRole("article", { name: "Artifact: 账号体检报告（修订版）" })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "Artifact: 账号体检报告" })).toBeInTheDocument();
+    expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
   });
 
   it("keeps an active V2 Thread exclusive while it loads instead of falling back to legacy Artifacts", async () => {

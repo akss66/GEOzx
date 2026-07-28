@@ -22,6 +22,24 @@ const BUSINESS_TITLES: Record<string, string> = {
   optimization_suggestions: "优化建议",
   recommendations: "优化建议",
   participating_experts: "调用专家",
+  highlights: "关键亮点",
+  critic: "质量审核",
+};
+
+const NESTED_BUSINESS_TITLES: Record<string, string> = {
+  engagement_rate: "互动率",
+  completion_rate: "完播率",
+  conversion_rate: "转化率",
+  views: "播放量",
+  likes: "点赞量",
+  comments: "评论量",
+  shares: "分享量",
+  followers: "粉丝数",
+  new_followers: "新增粉丝",
+  follower_growth: "粉丝增长",
+  revenue: "营收",
+  cost: "成本",
+  roi: "投入产出比",
 };
 
 const PRIMARY_KEYS = [
@@ -35,6 +53,7 @@ const PRIMARY_KEYS = [
   "optimization_suggestions",
   "recommendations",
   "participating_experts",
+  "critic",
 ];
 
 export function ArtifactCard({
@@ -56,18 +75,20 @@ export function ArtifactCard({
   const evidence = artifact.evidence_refs.filter((item) => isSafeText(item.kind) && isSafeText(item.label));
   const canAct = ["draft", "ready_for_review"].includes(artifact.status);
   const revisionInProgress = revisionPending || artifact.status === "revision_requested";
+  const title = businessArtifactTitle(artifact);
+  const summary = businessText(artifact.summary, "成果内容已完成安全核验。");
 
   return (
-    <article className="tz-artifact-card" aria-label={`Artifact: ${artifact.title}`}>
+    <article className="tz-artifact-card" aria-label={`Artifact: ${title}`}>
       <header className="tz-artifact-card__header">
         <div>
           <span className="tz-artifact-card__eyebrow">正式成果 · <strong>V{artifact.version}</strong></span>
-          <h3>{artifact.title}</h3>
+          <h3>{title}</h3>
         </div>
         <Tag color={statusColor(artifact.status)}>{statusCopy(artifact.status)}</Tag>
       </header>
 
-      <p className="tz-artifact-card__summary">{safeText(artifact.summary)}</p>
+      <p className="tz-artifact-card__summary">{summary}</p>
 
       <div className="tz-artifact-card__sections">
         {primarySections.map((section) => <BusinessSection key={section.key} section={section} />)}
@@ -146,33 +167,47 @@ export function ArtifactCard({
 function BusinessSection({ section }: { section: ArtifactSection }) {
   return (
     <section className="tz-artifact-card__section">
-      <h4>{BUSINESS_TITLES[section.key] ?? safeTitle(section.title)}</h4>
-      <div>{renderContent(section.content)}</div>
+      <h4>{BUSINESS_TITLES[section.key] ?? businessText(section.title, "业务信息")}</h4>
+      <div>{section.key === "critic" ? "质量审核已完成，详细依据请查看生成依据。" : renderContent(section.content)}</div>
     </section>
   );
 }
 
 function renderContent(content: ArtifactSection["content"]) {
-  if (typeof content === "string") return safeText(content);
+  if (typeof content === "string") return isSafeText(content) ? safeText(content) : "—";
   if (Array.isArray(content)) {
-    const items = content.map((item) => renderUnknown(item)).filter(Boolean);
+    const items = content.map((item) => renderBusinessValue(item)).filter(Boolean);
     return items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : "—";
   }
   const entries = Object.entries(content)
-    .filter(([key, value]) => !INTERNAL.test(key) && isSafeText(String(value)))
-    .map(([key, value]) => `${safeTitle(key)}：${renderUnknown(value)}`)
+    .map(([key, value]) => {
+      const label = businessObjectLabel(key);
+      const display = renderBusinessValue(value);
+      return label && display ? `${label}：${display}` : "";
+    })
     .filter(Boolean);
   return entries.length ? <ul>{entries.map((item) => <li key={item}>{item}</li>)}</ul> : "—";
 }
 
-function renderUnknown(value: unknown): string {
+function renderBusinessValue(value: unknown): string {
   if (typeof value === "string") return isSafeText(value) ? safeText(value) : "";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(renderBusinessValue).filter(Boolean).join("；");
+  if (isRecord(value)) {
+    return Object.entries(value)
+      .map(([key, nested]) => {
+        const label = businessObjectLabel(key);
+        const display = renderBusinessValue(nested);
+        return label && display ? `${label}：${display}` : "";
+      })
+      .filter(Boolean)
+      .join("；");
+  }
   return "";
 }
 
 function isBusinessSection(section: ArtifactSection) {
-  return !INTERNAL.test(section.key) && !INTERNAL.test(section.title) && isSafeText(String(section.content));
+  return !INTERNAL.test(section.key) && !INTERNAL.test(section.title);
 }
 
 function isSafeText(value: string) {
@@ -183,8 +218,27 @@ function safeText(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function safeTitle(value: string) {
-  return safeText(value).replaceAll("_", " ");
+function businessText(value: string, fallback: string) {
+  const clean = safeText(value);
+  return clean && isSafeText(clean) && (hasChinese(clean) || !/[a-z]/i.test(clean)) ? clean : fallback;
+}
+
+export function businessArtifactTitle(artifact: Artifact) {
+  return businessText(artifact.title, "正式成果");
+}
+
+function businessObjectLabel(key: string) {
+  if (INTERNAL.test(key)) return null;
+  if (NESTED_BUSINESS_TITLES[key]) return NESTED_BUSINESS_TITLES[key];
+  return hasChinese(key) && isSafeText(key) ? safeText(key) : null;
+}
+
+function hasChinese(value: string) {
+  return /[\u3400-\u9fff]/.test(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function statusCopy(status: Artifact["status"]) {

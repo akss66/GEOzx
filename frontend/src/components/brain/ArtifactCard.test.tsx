@@ -103,4 +103,33 @@ describe("ArtifactCard", () => {
     expect(screen.queryByText("正式成果 V1")).not.toBeInTheDocument();
     expect(screen.queryByText("重做中")).not.toBeInTheDocument();
   });
+
+  it("projects unsafe title, summary, nested keys, and critic details into safe Chinese business copy", () => {
+    render(<ArtifactCard
+      artifact={{
+        ...reviewArtifact,
+        title: "raw prompt: secret-token",
+        summary: "Traceback: secret-token",
+        sections: [
+          { key: "key_metrics", title: "key_metrics", content: {
+            engagement_rate: "4.8%",
+            passed: true,
+            score: 92,
+            iterations: 3,
+            trace: "secret-token",
+          } },
+          { key: "issues", title: "主要问题", content: "Traceback: secret-token" },
+          { key: "critic", title: "critic", content: { passed: true, score: 92 } },
+        ],
+      }}
+      onAction={vi.fn()}
+    />);
+
+    expect(screen.getByRole("heading", { name: "正式成果" })).toBeInTheDocument();
+    expect(screen.getByText("成果内容已完成安全核验。")) .toBeInTheDocument();
+    expect(screen.getByText("互动率：4.8%")).toBeInTheDocument();
+    expect(screen.getByText("质量审核")).toBeInTheDocument();
+    expect(screen.getByText("质量审核已完成，详细依据请查看生成依据。")) .toBeInTheDocument();
+    expect(screen.queryByText(/secret-token|Traceback|raw prompt|passed|score|iterations|key_metrics|critic/)).not.toBeInTheDocument();
+  });
 });

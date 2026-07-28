@@ -171,6 +171,28 @@ describe("TurnStream", () => {
     expect(getArtifact).toHaveBeenCalledTimes(callsBefore + 2);
   });
 
+  it("keeps source V1 readable and presents the persisted V2 returned by revision", async () => {
+    const revisedArtifact: Artifact = {
+      ...artifact,
+      id: 5002,
+      title: "账号体检报告（修订版）",
+      version: 2,
+      status: "ready_for_review",
+      summary: "已补充转化数据。",
+    };
+
+    render(
+      <TurnStream
+        thread={thread}
+        revisionArtifacts={{ 5001: revisedArtifact }}
+      />,
+    );
+
+    expect(await screen.findByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    expect(screen.getByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
+    expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
+  });
+
   it("uses the server Turn order and durable IDs for Turn and projection identity", () => {
     const { container } = render(<TurnStream thread={thread} />);
 

@@ -44,7 +44,7 @@ import { OperationalState } from "../components/ui";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import { DecisionRequest } from "../components/brain/DecisionRequest";
 import { TurnStream } from "../components/brain/TurnStream";
-import type { ArtifactAction } from "../components/brain/ArtifactCard";
+import { businessArtifactTitle, type ArtifactAction } from "../components/brain/ArtifactCard";
 import {
   useEventStream,
   type DyEvent,
@@ -70,6 +70,7 @@ import type {
   Account,
   AgentInvocation,
   AgentToolCall,
+  Artifact,
   BrainRuntime,
   BrainTask,
   ConversationThread,
@@ -118,6 +119,7 @@ export default function BrainHome() {
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [approvalComment, setApprovalComment] = useState("");
   const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
+  const [artifactRevisions, setArtifactRevisions] = useState<Record<number, Artifact>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
@@ -385,11 +387,14 @@ export default function BrainHome() {
   });
 
   const formalArtifactAcceptMutation = useMutation({
-    mutationFn: (artifactId: number) => acceptArtifact(artifactId),
-    onSuccess: () => {
+    mutationFn: (input: { artifactId: number; createNextStep: boolean }) => acceptArtifact(input.artifactId),
+    onSuccess: (accepted, input) => {
       setArtifactRefreshKey((value) => value + 1);
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
+      if (input.createNextStep && accepted.id === input.artifactId) {
+        setGoal(nextStepGoal(accepted));
       }
       message.success("报告已采用");
     },
@@ -399,9 +404,14 @@ export default function BrainHome() {
   });
 
   const formalArtifactRevisionMutation = useMutation({
-    mutationFn: (input: { artifactId: number; payload: Record<string, unknown>; note: string }) =>
-      reviseArtifact(input),
-    onSuccess: () => {
+    mutationFn: (input: { sourceArtifact: Artifact; payload: Record<string, unknown>; note: string }) =>
+      reviseArtifact({
+        artifactId: input.sourceArtifact.id,
+        payload: input.payload,
+        note: input.note,
+      }),
+    onSuccess: (revision, input) => {
+      setArtifactRevisions((current) => ({ ...current, [input.sourceArtifact.id]: revision }));
       setArtifactRefreshKey((value) => value + 1);
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
@@ -746,9 +756,10 @@ export default function BrainHome() {
                 <TurnStream
                   thread={activeConversation}
                   artifactRefreshKey={artifactRefreshKey}
+                  revisionArtifacts={artifactRevisions}
                   revisingArtifactId={
                     formalArtifactRevisionMutation.isPending
-                      ? formalArtifactRevisionMutation.variables?.artifactId ?? null
+                      ? formalArtifactRevisionMutation.variables?.sourceArtifact.id ?? null
                       : null
                   }
                   approvingToolCallId={
@@ -763,7 +774,6 @@ export default function BrainHome() {
                   })}
                   onArtifactAction={(action) => handleArtifactAction(
                     action,
-                    setGoal,
                     formalArtifactAcceptMutation.mutate,
                     formalArtifactRevisionMutation.mutate,
                   )}
@@ -920,26 +930,36 @@ function ContextStrip({
 
 function handleArtifactAction(
   action: ArtifactAction,
-  setGoal: Dispatch<SetStateAction<string>>,
-  accept: (artifactId: number) => void,
-  revise: (input: { artifactId: number; payload: Record<string, unknown>; note: string }) => void,
+  accept: (input: { artifactId: number; createNextStep: boolean }) => void,
+  revise: (input: { sourceArtifact: Artifact; payload: Record<string, unknown>; note: string }) => void,
 ) {
   if (action.type === "accept") {
-    accept(action.artifact.id);
+    accept({ artifactId: action.artifact.id, createNextStep: false });
     return;
   }
   if (action.type === "accept_and_continue") {
-    accept(action.artifact.id);
-    setGoal(`已采用《${action.artifact.title}》（成果 #${action.artifact.id}）。请基于该报告提出下一步执行建议。`);
+    accept({ artifactId: action.artifact.id, createNextStep: true });
     return;
   }
   if (action.type === "request_revision") {
     revise({
-      artifactId: action.artifact.id,
-      payload: Object.fromEntries(action.artifact.sections.map((section) => [section.key, section.content])),
+      sourceArtifact: action.artifact,
+      payload: buildArtifactRevisionPayload(action.artifact),
       note: action.note,
     });
   }
+}
+
+function buildArtifactRevisionPayload(artifact: Artifact): Record<string, unknown> {
+  return {
+    title: artifact.title,
+    summary: artifact.summary,
+    ...Object.fromEntries(artifact.sections.map((section) => [section.key, section.content])),
+  };
+}
+
+function nextStepGoal(artifact: Artifact) {
+  return `已采用《${businessArtifactTitle(artifact)}》（成果 #${artifact.id}）。请基于该报告提出下一步执行建议。`;
 }
 
 function ConversationEmpty({

@@ -14,6 +14,7 @@ export function TurnArtifact({
   refreshKey,
   onAction,
   revisionPending,
+  revisionArtifact,
   ...shared
 }: {
   artifactId: number;
@@ -24,6 +25,7 @@ export function TurnArtifact({
   refreshKey: number;
   onAction?: (action: ArtifactAction) => void;
   revisionPending: boolean;
+  revisionArtifact?: Artifact;
   className: string;
   "data-testid": string;
   "data-projection-key": string;
@@ -51,10 +53,26 @@ export function TurnArtifact({
     return () => { current = false; };
   }, [accountId, artifactId, attempt, refreshKey, sourceTurnId, threadAccountId, threadId]);
 
+  const revision = state.kind === "ready" && revisionArtifact && matchesRevision(revisionArtifact, state.artifact)
+    ? revisionArtifact
+    : null;
+
   return (
     <section {...shared} aria-live="polite">
       {state.kind === "ready" ? (
-        <ArtifactCard artifact={state.artifact} onAction={onAction ?? (() => {})} revisionPending={revisionPending} />
+        <>
+          <ArtifactCard
+            artifact={state.artifact}
+            onAction={onAction ?? (() => {})}
+            revisionPending={revisionPending && !revision}
+          />
+          {revision ? (
+            <section className="tz-artifact-card__revision-version" aria-label={`Revision V${revision.version}`}>
+              <p>修订后的最新版本 V{revision.version}</p>
+              <ArtifactCard artifact={revision} onAction={onAction ?? (() => {})} />
+            </section>
+          ) : null}
+        </>
       ) : null}
       {state.kind === "loading" ? <span>正在核验成果…</span> : null}
       {state.kind === "invalid" ? <span>成果校验失败，请重试。</span> : null}
@@ -64,6 +82,14 @@ export function TurnArtifact({
       ) : null}
     </section>
   );
+}
+
+function matchesRevision(revision: Artifact, source: Artifact) {
+  return revision.id !== source.id
+    && revision.version > source.version
+    && revision.account_id === source.account_id
+    && revision.thread_id === source.thread_id
+    && revision.turn_id === source.turn_id;
 }
 
 type ArtifactState =

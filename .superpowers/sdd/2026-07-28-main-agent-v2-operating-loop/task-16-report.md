@@ -51,3 +51,26 @@ From the repository root:
 git diff --check
 passed
 ```
+
+## Review fix round 1
+
+- Revision payloads now preserve the persisted `title` and `summary` alongside
+  the Artifact sections. This matches the backend revision validator, which
+  selects fields for the concrete deliverable schema; in particular it restores
+  the required `ReviewReportPayload.summary` field.
+- “Adopt and create next step” keeps its intent inside the acceptance mutation
+  and only pre-fills the conversation after the exact Artifact acceptance
+  succeeds. A failed acceptance leaves the existing draft unchanged.
+- The revision response is retained by source Artifact ID. The source V1 stays
+  readable, while the exact persisted V2 returned by the endpoint is displayed
+  as the latest revision after matching account, thread, and Turn ownership.
+- Presentation now projects titles, summaries, nested object keys, and quality
+  critic content through a Chinese business-safe allowlist. Unsafe raw/internal
+  content and English internal keys are hidden.
+
+Additional RED/GREEN coverage covers the exact ReviewReport request body,
+adoption success/failure timing, returned V1-to-V2 version display, and nested
+content sanitization.
+
+The final focused verification for the fix round ran all four Task 16 suites:
+`75 tests passed`, followed by `pnpm.cmd exec tsc --noEmit` and `git diff --check`.
