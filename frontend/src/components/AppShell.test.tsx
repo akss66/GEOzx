@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildAppShellMenuItems } from "./AppShell";
+import { APP_SHELL_BRAND_TITLE, buildAppShellMenuItems } from "./AppShell";
 
 function menuKeys(isAdmin: boolean) {
   return buildAppShellMenuItems(isAdmin)
@@ -17,6 +17,10 @@ function menuLabels(isAdmin: boolean) {
 }
 
 describe("AppShell navigation", () => {
+  it("uses the full platform name in the upper-left brand", () => {
+    expect(APP_SHELL_BRAND_TITLE).toBe("同舟行AI新媒体平台");
+  });
+
   it("shows valid Chinese navigation without deferred modules", () => {
     expect(menuKeys(false)).toEqual([
       "/", "/agents", "/accounts", "/tasks", "/approvals", "/review", "/cost", "/knowledge",

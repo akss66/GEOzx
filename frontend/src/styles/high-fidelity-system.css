@@ -81,8 +81,9 @@ body {
 }
 
 .tz-shell-brand strong {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: var(--tz-weight-bold);
+  white-space: nowrap;
 }
 
 .tz-shell-brand small {

@@ -26,6 +26,8 @@ import { OperationalState } from "./ui";
 
 export { buildAppShellMenuItems } from "./shell/navigation";
 
+export const APP_SHELL_BRAND_TITLE = "同舟行AI新媒体平台";
+
 export function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -85,7 +87,7 @@ export function AppShell() {
     <>
       <button type="button" className="tz-shell-brand" onClick={() => navigateFromMenu("/")}>
         <img src="/logo.png" alt="" className="tz-shell-brand-mark" />
-        <span><strong>同舟行</strong><small>AI + Agent + 运营</small></span>
+        <span><strong>{APP_SHELL_BRAND_TITLE}</strong><small>AI + Agent + 运营</small></span>
       </button>
       <div className="tz-shell-workspace">
         {context ? (
