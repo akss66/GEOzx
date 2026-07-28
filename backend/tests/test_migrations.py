@@ -246,6 +246,11 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
             "agent_runs",
             ("id", "thread_id", "turn_id", "org_id"),
         )
+        skill_checks = {
+            item["name"]: item["sqltext"]
+            for item in inspector.get_check_constraints("skill_runs")
+        }
+        assert "ck_skill_runs_skill_version_positive" in skill_checks
         invocation_columns = {
             column["name"]: column
             for column in inspector.get_columns("agent_invocations")
@@ -281,6 +286,23 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
                 "'account.diagnosis', 1, 'completed', '{}', '{}')"
             )
         )
+        for row_id, version in ((72, 0), (73, -1)):
+            with pytest.raises(sa.exc.IntegrityError):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO skill_runs "
+                        "(id, org_id, thread_id, turn_id, run_id, task_id, "
+                        "idempotency_key, skill_code, skill_version, status, "
+                        "input_snapshot, output_snapshot) "
+                        "VALUES (:row_id, 1, 10, 20, 41, NULL, :key, "
+                        "'account.diagnosis', :version, 'running', '{}', '{}')"
+                    ),
+                    {
+                        "row_id": row_id,
+                        "key": f"invalid-version-{version}",
+                        "version": version,
+                    },
+                )
         with pytest.raises(sa.exc.IntegrityError):
             connection.execute(
                 sa.text(
@@ -337,6 +359,10 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         assert "uq_agent_runs_id_thread_turn_org" in {
             item["name"]
             for item in inspector.get_unique_constraints("agent_runs")
+        }
+        assert "ck_skill_runs_skill_version_positive" in {
+            item["name"]
+            for item in inspector.get_check_constraints("skill_runs")
         }
         assert connection.execute(
             sa.text(

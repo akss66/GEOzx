@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -28,6 +29,10 @@ class SkillRun(Base, TimestampMixin):
 
     __tablename__ = "skill_runs"
     __table_args__ = (
+        CheckConstraint(
+            "skill_version > 0",
+            name="ck_skill_runs_skill_version_positive",
+        ),
         UniqueConstraint(
             "run_id",
             "idempotency_key",

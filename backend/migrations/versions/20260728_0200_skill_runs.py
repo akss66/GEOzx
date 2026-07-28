@@ -172,6 +172,10 @@ def upgrade() -> None:
             ],
             name="fk_skill_runs_turn_thread_org",
         ),
+        sa.CheckConstraint(
+            "skill_version > 0",
+            name="ck_skill_runs_skill_version_positive",
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "run_id",
