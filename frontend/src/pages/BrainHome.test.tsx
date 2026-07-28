@@ -11,10 +11,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveDeliverableAcceptance,
   approveToolCall,
+  acceptArtifact,
   getConversation,
   getBrainTaskRuntime,
   listBrainTasks,
   rejectDeliverableAcceptance,
+  reviseArtifact,
   regenerateBrainMessage,
   refreshBrainObservation,
   sendConversationTurn,
@@ -33,6 +35,7 @@ import type {
   ConversationAgentRun,
   ConversationThread,
   DeliverableAcceptance,
+  Artifact,
 } from "../types";
 import BrainHome from "./BrainHome";
 
@@ -342,6 +345,25 @@ const mocks = vi.hoisted(() => {
     updated_at: "2026-07-28T00:01:01Z",
   } satisfies ConversationAgentRun;
 
+  const artifact = {
+    id: 5001,
+    account_id: 3,
+    thread_id: 81,
+    turn_id: 101,
+    run_id: 7001,
+    skill_run_id: 4001,
+    task_id: 21,
+    artifact_type: "account_inspection_report",
+    title: "账号体检报告",
+    version: 1,
+    status: "ready_for_review",
+    summary: "账号具备增长基础。",
+    sections: [{ key: "core_conclusion", title: "核心结论", content: "优先收敛内容主题。" }],
+    evidence_refs: [],
+    quality: null,
+    created_at: "2026-07-28T00:00:00Z",
+  } satisfies Artifact;
+
   const workspace = {
     clientId: 1 as number | null,
     projectId: 2 as number | null,
@@ -368,6 +390,7 @@ const mocks = vi.hoisted(() => {
     contextAccounts,
     conversationThread,
     completedConversationRun,
+    artifact,
   };
 });
 
@@ -387,12 +410,15 @@ vi.mock("../api/shell", () => ({
 }));
 
 vi.mock("../api/brain", () => ({
+  acceptArtifact: vi.fn(async () => ({ ...mocks.artifact, status: "accepted" })),
   approveDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "approved" })),
   approveToolCall: vi.fn(async () => mocks.toolCall),
+  getArtifact: vi.fn(async () => mocks.artifact),
   getConversation: vi.fn(async () => mocks.conversationThread),
   getBrainTaskRuntime: vi.fn(async () => mocks.runtime),
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
+  reviseArtifact: vi.fn(async () => ({ ...mocks.artifact, status: "revision_requested", version: 2 })),
   regenerateBrainMessage: vi.fn(async () => mocks.runtime),
   refreshBrainObservation: vi.fn(async () => ({
     id: 61,
@@ -488,9 +514,33 @@ describe("BrainHome", () => {
     const sourceTurn = await screen.findByTestId("conversation-turn-101");
     const greetingTurn = screen.getByTestId("conversation-turn-102");
 
-    expect(sourceTurn).toHaveTextContent("V2_ARTIFACT_SOURCE_TURN");
-    expect(greetingTurn).not.toHaveTextContent("V2_ARTIFACT_SOURCE_TURN");
+    expect(sourceTurn).toHaveTextContent("账号体检报告");
+    expect(greetingTurn).not.toHaveTextContent("账号体检报告");
     expect(screen.queryByText(mocks.acceptance.title)).not.toBeInTheDocument();
+  });
+
+  it("runs Artifact actions against the exact source Artifact and never the legacy task acceptance", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+
+    renderBrainHome();
+
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    fireEvent.click(screen.getByRole("button", { name: "仅采用报告" }));
+    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(5001));
+    expect(approveDeliverableAcceptance).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), {
+      target: { value: "请补充下周选题。" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
+    await waitFor(() => expect(reviseArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      artifactId: 5001,
+      note: "请补充下周选题。",
+    })));
   });
 
   it("keeps an active V2 Thread exclusive while it loads instead of falling back to legacy Artifacts", async () => {

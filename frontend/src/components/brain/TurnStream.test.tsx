@@ -2,11 +2,35 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ConversationThread } from "../../types";
+import { getArtifact } from "../../api/brain";
+import type { Artifact, ConversationThread } from "../../types";
 import { TurnStream } from "./TurnStream";
+
+vi.mock("../../api/brain", () => ({
+  getArtifact: vi.fn(),
+}));
+
+const artifact = {
+  id: 5001,
+  account_id: 3,
+  thread_id: 81,
+  turn_id: 101,
+  run_id: 7001,
+  skill_run_id: 4001,
+  task_id: 21,
+  artifact_type: "account_inspection_report",
+  title: "账号体检报告",
+  version: 1,
+  status: "ready_for_review",
+  summary: "优先收敛内容主题。",
+  sections: [{ key: "core_conclusion", title: "核心结论", content: "优先收敛内容主题。" }],
+  evidence_refs: [],
+  quality: null,
+  created_at: "2026-07-28T00:00:00Z",
+} satisfies Artifact;
 
 const thread: ConversationThread = {
   id: 81,
@@ -83,17 +107,68 @@ const thread: ConversationThread = {
 
 describe("TurnStream", () => {
   afterEach(cleanup);
+  beforeEach(() => {
+    vi.mocked(getArtifact).mockResolvedValue(artifact);
+  });
 
-  it("keeps an Artifact in its source Turn when later greetings and retries arrive", () => {
+  it("keeps the exact persisted Artifact in its source Turn when later greetings and retries arrive", async () => {
     render(<TurnStream thread={thread} />);
 
-    const sourceTurn = screen.getByTestId("conversation-turn-101");
+    const sourceTurn = await screen.findByTestId("conversation-turn-101");
     const greetingTurn = screen.getByTestId("conversation-turn-102");
     const retryTurn = screen.getByTestId("conversation-turn-103");
 
-    expect(within(sourceTurn).getByLabelText("Artifact: Account Inspection Report")).toBeInTheDocument();
-    expect(greetingTurn).not.toHaveTextContent("Account Inspection Report");
-    expect(retryTurn).not.toHaveTextContent("Account Inspection Report");
+    await waitFor(() => expect(getArtifact).toHaveBeenCalledWith(5001));
+    expect(within(sourceTurn).getByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    expect(greetingTurn).not.toHaveTextContent("账号体检报告");
+    expect(retryTurn).not.toHaveTextContent("账号体检报告");
+  });
+
+  it("fails closed when the fetched Artifact does not match the source account or Turn", async () => {
+    vi.mocked(getArtifact).mockResolvedValue({ ...artifact, account_id: 4, turn_id: 102 });
+
+    render(<TurnStream thread={thread} />);
+
+    expect(await screen.findByText("成果校验失败，请重试。")) .toBeInTheDocument();
+    expect(screen.queryByText("账号体检报告")).not.toBeInTheDocument();
+  });
+
+  it("rejects a projection account that differs from the active Thread account", async () => {
+    vi.mocked(getArtifact).mockResolvedValue({ ...artifact, account_id: 4 });
+    const mismatchedProjectionThread: ConversationThread = {
+      ...thread,
+      turns: [{
+      ...thread.turns[0],
+        projections: [{
+          type: "artifact",
+          turn_id: 101,
+          artifact_id: 5001,
+          artifact_type: "account_inspection_report",
+          skill_run_id: 4001,
+          account_id: 4,
+          report: {},
+        }],
+      }],
+    };
+
+    render(<TurnStream thread={mismatchedProjectionThread} />);
+
+    expect(await screen.findByText("成果校验失败，请重试。")).toBeInTheDocument();
+    expect(screen.queryByText("账号体检报告")).not.toBeInTheDocument();
+  });
+
+  it("refreshes the exact Artifact after a completed business action", async () => {
+    const callsBefore = vi.mocked(getArtifact).mock.calls.length;
+    vi.mocked(getArtifact)
+      .mockResolvedValueOnce(artifact)
+      .mockResolvedValueOnce({ ...artifact, title: "已采用的账号体检报告", status: "accepted" });
+    const view = render(<TurnStream thread={thread} artifactRefreshKey={0} />);
+
+    await screen.findByText("账号体检报告");
+    view.rerender(<TurnStream thread={thread} artifactRefreshKey={1} />);
+
+    expect(await screen.findByText("已采用的账号体检报告")).toBeInTheDocument();
+    expect(getArtifact).toHaveBeenCalledTimes(callsBefore + 2);
   });
 
   it("uses the server Turn order and durable IDs for Turn and projection identity", () => {

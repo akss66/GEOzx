@@ -20,12 +20,14 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
+  acceptArtifact,
   approveDeliverableAcceptance,
   approveToolCall,
   getConversation,
   getBrainTaskRuntime,
   listBrainTasks,
   rejectDeliverableAcceptance,
+  reviseArtifact,
   regenerateBrainMessage,
   refreshBrainObservation,
   reviseBrainDecision,
@@ -42,6 +44,7 @@ import { OperationalState } from "../components/ui";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import { DecisionRequest } from "../components/brain/DecisionRequest";
 import { TurnStream } from "../components/brain/TurnStream";
+import type { ArtifactAction } from "../components/brain/ArtifactCard";
 import {
   useEventStream,
   type DyEvent,
@@ -114,6 +117,7 @@ export default function BrainHome() {
   const [liveMessages, setLiveMessages] = useState<LiveRuntimeMessage[]>([]);
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [approvalComment, setApprovalComment] = useState("");
+  const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
@@ -377,6 +381,35 @@ export default function BrainHome() {
     },
     onError: (error) => message.error(
       presentApiError(error, "修改意见提交失败，请稍后重试。").message,
+    ),
+  });
+
+  const formalArtifactAcceptMutation = useMutation({
+    mutationFn: (artifactId: number) => acceptArtifact(artifactId),
+    onSuccess: () => {
+      setArtifactRefreshKey((value) => value + 1);
+      if (activeConversationThreadId != null) {
+        void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
+      message.success("报告已采用");
+    },
+    onError: (error) => message.error(
+      presentApiError(error, "报告采用失败，请稍后重试。").message,
+    ),
+  });
+
+  const formalArtifactRevisionMutation = useMutation({
+    mutationFn: (input: { artifactId: number; payload: Record<string, unknown>; note: string }) =>
+      reviseArtifact(input),
+    onSuccess: () => {
+      setArtifactRefreshKey((value) => value + 1);
+      if (activeConversationThreadId != null) {
+        void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
+      message.success("修改请求已提交，正在生成新版本");
+    },
+    onError: (error) => message.error(
+      presentApiError(error, "修改请求提交失败，请稍后重试。").message,
     ),
   });
 
@@ -712,6 +745,12 @@ export default function BrainHome() {
               <>
                 <TurnStream
                   thread={activeConversation}
+                  artifactRefreshKey={artifactRefreshKey}
+                  revisingArtifactId={
+                    formalArtifactRevisionMutation.isPending
+                      ? formalArtifactRevisionMutation.variables?.artifactId ?? null
+                      : null
+                  }
                   approvingToolCallId={
                     approveMutation.isPending ? approveMutation.variables?.toolCallId ?? null : null
                   }
@@ -722,6 +761,12 @@ export default function BrainHome() {
                     approved,
                     comment,
                   })}
+                  onArtifactAction={(action) => handleArtifactAction(
+                    action,
+                    setGoal,
+                    formalArtifactAcceptMutation.mutate,
+                    formalArtifactRevisionMutation.mutate,
+                  )}
                 />
                 {pendingTurn ? <PendingConversation turn={pendingTurn} /> : null}
                 {!pendingTurn ? (
@@ -871,6 +916,30 @@ function ContextStrip({
       </div>
     </section>
   );
+}
+
+function handleArtifactAction(
+  action: ArtifactAction,
+  setGoal: Dispatch<SetStateAction<string>>,
+  accept: (artifactId: number) => void,
+  revise: (input: { artifactId: number; payload: Record<string, unknown>; note: string }) => void,
+) {
+  if (action.type === "accept") {
+    accept(action.artifact.id);
+    return;
+  }
+  if (action.type === "accept_and_continue") {
+    accept(action.artifact.id);
+    setGoal(`已采用《${action.artifact.title}》（成果 #${action.artifact.id}）。请基于该报告提出下一步执行建议。`);
+    return;
+  }
+  if (action.type === "request_revision") {
+    revise({
+      artifactId: action.artifact.id,
+      payload: Object.fromEntries(action.artifact.sections.map((section) => [section.key, section.content])),
+      note: action.note,
+    });
+  }
 }
 
 function ConversationEmpty({

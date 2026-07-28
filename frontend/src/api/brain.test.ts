@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   approveToolCall,
+  acceptArtifact,
   approveDeliverableAcceptance,
   closeTaskMemory,
   confirmBrainTask,
   createConversation,
   draftBrainTask,
   getConversation,
+  getArtifact,
   getBrainTaskRuntime,
   listArtifacts,
   listBrainTasks,
@@ -21,6 +23,7 @@ import {
   reviseBrainDecision,
   regenerateBrainMessage,
   refreshBrainObservation,
+  reviseArtifact,
   selectBrainDecision,
   sendConversationTurn,
   sendBrainMessage,
@@ -247,6 +250,30 @@ describe("brain api", () => {
         page: 2,
         page_size: 10,
       },
+    });
+  });
+
+  it("retrieves and acts on the exact persisted Artifact identity", async () => {
+    const artifact = { id: 5001, account_id: 3, status: "ready_for_review" };
+    apiGet.mockResolvedValueOnce({ data: artifact });
+    apiPost
+      .mockResolvedValueOnce({ data: { ...artifact, status: "accepted" } })
+      .mockResolvedValueOnce({ data: { ...artifact, id: 5002, version: 2 } });
+
+    await expect(getArtifact(5001)).resolves.toEqual(artifact);
+    await expect(acceptArtifact(5001)).resolves.toEqual({ ...artifact, status: "accepted" });
+    await expect(reviseArtifact({
+      artifactId: 5001,
+      payload: { core_conclusion: "补充选题" },
+      note: "请补充下周选题。",
+    })).resolves.toEqual({ ...artifact, id: 5002, version: 2 });
+
+    expect(apiGet).toHaveBeenCalledWith("/artifacts/5001");
+    expect(apiPost).toHaveBeenNthCalledWith(1, "/artifact-acceptances", { artifact_id: 5001 });
+    expect(apiPost).toHaveBeenNthCalledWith(2, "/artifact-revisions", {
+      artifact_id: 5001,
+      payload: { core_conclusion: "补充选题" },
+      note: "请补充下周选题。",
     });
   });
 

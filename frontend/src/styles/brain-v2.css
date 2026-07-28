@@ -626,6 +626,120 @@
   gap: 8px;
 }
 
+.tz-artifact-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--tz-brand-red) 25%, var(--tz-line));
+  border-radius: var(--tz-radius-object);
+  background: var(--tz-surface);
+}
+
+.tz-artifact-card__header,
+.tz-artifact-card__actions,
+.tz-artifact-card__revision > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tz-artifact-card__eyebrow {
+  display: block;
+  color: var(--tz-brand-red);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tz-artifact-card__header h3,
+.tz-artifact-card__section h4 {
+  margin: 0;
+  color: var(--tz-ink);
+}
+
+.tz-artifact-card__header h3 {
+  margin-top: 4px;
+  font-size: 17px;
+}
+
+.tz-artifact-card__summary,
+.tz-artifact-card__evidence-summary {
+  margin: 0;
+  color: var(--tz-ink-soft);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.tz-artifact-card__sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tz-artifact-card__sections--remaining {
+  padding-top: 14px;
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+.tz-artifact-card__section {
+  padding: 11px 12px;
+  border-radius: var(--tz-radius-control);
+  background: var(--tz-surface-soft);
+}
+
+.tz-artifact-card__section h4 {
+  margin-bottom: 5px;
+  font-size: 12px;
+}
+
+.tz-artifact-card__section > div,
+.tz-artifact-card__section li,
+.tz-artifact-card__evidence-detail {
+  color: var(--tz-ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.tz-artifact-card__section ul,
+.tz-artifact-card__evidence-detail ul {
+  margin: 0;
+  padding-left: 17px;
+}
+
+.tz-artifact-card__revision-progress {
+  padding: 10px 12px;
+  border-left: 3px solid var(--tz-brand-red);
+  border-radius: var(--tz-radius-control);
+  background: var(--tz-surface-soft);
+  color: var(--tz-ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.tz-artifact-card__actions {
+  flex-wrap: wrap;
+}
+
+.tz-artifact-card__revision {
+  display: grid;
+  gap: 8px;
+}
+
+.tz-artifact-card__evidence .ant-btn {
+  padding-left: 0;
+}
+
+.tz-artifact-card__evidence-detail {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: var(--tz-radius-control);
+  background: var(--tz-surface-soft);
+}
+
+.tz-artifact-card__evidence-detail p {
+  margin: 0 0 5px;
+}
+
 .tz-brain-artifact-details li strong {
   color: var(--tz-ink);
   font-size: 12px;

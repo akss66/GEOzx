@@ -1,6 +1,8 @@
 import type { ConversationThread, ConversationTurn, TurnProjection } from "../../types";
 import { Button, Input } from "antd";
 import type { AgentToolCall } from "../../types";
+import type { ArtifactAction } from "./ArtifactCard";
+import { TurnArtifact } from "./TurnArtifact";
 
 export function TurnStream({
   thread,
@@ -8,12 +10,18 @@ export function TurnStream({
   approvalComment = "",
   onApprovalCommentChange,
   onApprove,
+  onArtifactAction,
+  revisingArtifactId = null,
+  artifactRefreshKey = 0,
 }: {
   thread: ConversationThread;
   approvingToolCallId?: number | null;
   approvalComment?: string;
   onApprovalCommentChange?: (value: string) => void;
   onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onArtifactAction?: (action: ArtifactAction) => void;
+  revisingArtifactId?: number | null;
+  artifactRefreshKey?: number;
 }) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
@@ -21,10 +29,15 @@ export function TurnStream({
         <TurnArticle
           key={turn.id}
           turn={turn}
+          threadId={thread.id}
+          threadAccountId={thread.account_id}
           approvingToolCallId={approvingToolCallId}
           approvalComment={approvalComment}
           onApprovalCommentChange={onApprovalCommentChange}
           onApprove={onApprove}
+          onArtifactAction={onArtifactAction}
+          revisingArtifactId={revisingArtifactId}
+          artifactRefreshKey={artifactRefreshKey}
         />
       ))}
     </div>
@@ -33,16 +46,26 @@ export function TurnStream({
 
 function TurnArticle({
   turn,
+  threadId,
+  threadAccountId,
   approvingToolCallId,
   approvalComment,
   onApprovalCommentChange,
   onApprove,
+  onArtifactAction,
+  revisingArtifactId,
+  artifactRefreshKey,
 }: {
   turn: ConversationTurn;
+  threadId: number;
+  threadAccountId: number;
   approvingToolCallId: number | null;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
   onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onArtifactAction?: (action: ArtifactAction) => void;
+  revisingArtifactId: number | null;
+  artifactRefreshKey: number;
 }) {
   const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
@@ -72,10 +95,15 @@ function TurnArticle({
             key={projectionKey(projection, turn.id)}
             projection={projection}
             turnId={turn.id}
+            threadId={threadId}
+            threadAccountId={threadAccountId}
             approving={approvingToolCallId === approvalId(projection)}
             approvalComment={approvalComment}
             onApprovalCommentChange={onApprovalCommentChange}
             onApprove={onApprove}
+            onArtifactAction={onArtifactAction}
+            revisingArtifactId={revisingArtifactId}
+            artifactRefreshKey={artifactRefreshKey}
           />
         ))}
         {unknownProjection ? <UnknownProjection turnId={turn.id} /> : null}
@@ -101,17 +129,27 @@ function TurnRoute({ intent }: { intent: Record<string, unknown> | null }) {
 function Projection({
   projection,
   turnId,
+  threadId,
+  threadAccountId,
   approving,
   approvalComment,
   onApprovalCommentChange,
   onApprove,
+  onArtifactAction,
+  revisingArtifactId,
+  artifactRefreshKey,
 }: {
   projection: TurnProjection;
   turnId: number;
+  threadId: number;
+  threadAccountId: number;
   approving: boolean;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
   onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onArtifactAction?: (action: ArtifactAction) => void;
+  revisingArtifactId: number | null;
+  artifactRefreshKey: number;
 }) {
   const key = projectionKey(projection, turnId);
   const shared = {
@@ -180,7 +218,19 @@ function Projection({
         </section>
       );
     case "artifact":
-      return <ArtifactProjection {...shared} artifactType={projection.artifact_type} report={projection.report} />;
+      return (
+        <TurnArtifact
+          {...shared}
+          artifactId={projection.artifact_id}
+          accountId={projection.account_id}
+          threadAccountId={threadAccountId}
+          threadId={threadId}
+          sourceTurnId={turnId}
+          onAction={onArtifactAction}
+          revisionPending={revisingArtifactId === projection.artifact_id}
+          refreshKey={artifactRefreshKey}
+        />
+      );
     case "account_data":
       return <section {...shared}>Account data is ready.</section>;
     case "execution_blocked":
@@ -194,29 +244,6 @@ function Projection({
 
 function approvalId(projection: TurnProjection) {
   return projection.type === "approval" ? projection.approval.id : null;
-}
-
-function ArtifactProjection({
-  artifactType,
-  report,
-  ...shared
-}: {
-  artifactType: string;
-  report: Record<string, unknown>;
-  className: string;
-  "data-testid": string;
-  "data-projection-key": string;
-}) {
-  const summary = readableReportText(report, "summary");
-  const recommendations = readableReportText(report, "recommendations");
-
-  return (
-    <section {...shared} aria-label={`Artifact: ${titleCase(artifactType)}`}>
-      <strong>{titleCase(artifactType)}</strong>
-      {summary ? <p>{summary}</p> : null}
-      {recommendations ? <p>{recommendations}</p> : null}
-    </section>
-  );
 }
 
 function UnknownProjection({ turnId }: { turnId: number }) {
@@ -268,17 +295,4 @@ function projectionKey(projection: TurnProjection, turnId: number) {
 function readableIntent(intent: Record<string, unknown> | null, key: string) {
   const value = intent?.[key];
   return typeof value === "string" && value.length <= 80 ? value : null;
-}
-
-function readableReportText(report: Record<string, unknown>, key: string) {
-  const value = report[key];
-  if (typeof value === "string") return value;
-  if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
-    return value.join(" ");
-  }
-  return null;
-}
-
-function titleCase(value: string) {
-  return value.split("_").map((word) => word[0]?.toUpperCase() + word.slice(1)).join(" ");
 }

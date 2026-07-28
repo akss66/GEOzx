@@ -5,6 +5,7 @@ import type {
   BrainRuntime,
   BrainTask,
   ArtifactPage,
+  Artifact,
   ArtifactStatus,
   ConversationThread,
   CreateConversationInput,
@@ -76,6 +77,29 @@ export async function listArtifacts(input: {
       page: input.page ?? 1,
       page_size: input.pageSize ?? 20,
     },
+  });
+  return data;
+}
+
+export async function getArtifact(artifactId: number): Promise<Artifact> {
+  const { data } = await api.get<Artifact>(`/artifacts/${artifactId}`);
+  return data;
+}
+
+export async function acceptArtifact(artifactId: number): Promise<Artifact> {
+  const { data } = await api.post<Artifact>("/artifact-acceptances", { artifact_id: artifactId });
+  return data;
+}
+
+export async function reviseArtifact(input: {
+  artifactId: number;
+  payload: Record<string, unknown>;
+  note: string;
+}): Promise<Artifact> {
+  const { data } = await api.post<Artifact>("/artifact-revisions", {
+    artifact_id: input.artifactId,
+    payload: input.payload,
+    note: input.note,
   });
   return data;
 }
