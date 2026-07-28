@@ -485,6 +485,78 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
 
 
 @pytest.mark.asyncio
+async def test_legacy_analysis_with_positioning_hint_uses_diagnostic_route(
+    client,
+    session,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Legacy positioning account",
+        platform=Platform.DOUYIN,
+        external_account_id="legacy-positioning-open-id",
+        auth={
+            "integration_status": "connected",
+            "auth_status": "authorized",
+            "data_sync_status": "healthy",
+        },
+    )
+    session.add(account)
+    await session.commit()
+
+    async def classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.99,
+            reason="Account positioning diagnosis only.",
+            suggested_expert_codes=["01-positioning"],
+            requires_account_context=True,
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        classify,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "Diagnose account positioning only; do not create a strategy.",
+            "account_id": account.id,
+            "client_message_id": "legacy-positioning-diagnosis",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    runtime = response.json()
+    assert runtime["strategy"] is None
+    invocations = (
+        await session.scalars(
+            select(AgentInvocation).where(
+                AgentInvocation.task_id == runtime["task"]["id"]
+            )
+        )
+    ).all()
+    assert [invocation.agent_code for invocation in invocations] == ["01-positioning"]
+    assert await session.scalar(select(func.count()).select_from(StrategyPlan)) == 0
+    run = await session.scalar(
+        select(AgentRun).where(
+            AgentRun.client_message_id == "legacy-positioning-diagnosis"
+        )
+    )
+    assert run is not None
+    assert run.request_payload["route_decision"]["mode"] == "skill"
+    assert (
+        run.request_payload["route_decision"]["skill_code"]
+        == "account_positioning_diagnosis"
+    )
+
+
+@pytest.mark.asyncio
 async def test_brain_message_greeting_stays_in_main_agent_conversation(client, session, admin):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     response = await client.post(
@@ -1135,7 +1207,7 @@ async def test_brain_runtime_executes_scoped_tool_and_observes_result(
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
-            intent="analysis",
+            intent="workflow",
             confidence=0.98,
             reason="需要读取当前账号概况。",
             requires_account_context=True,
@@ -1207,7 +1279,7 @@ async def test_brain_runtime_respond_completes_turn_without_dispatch(client, adm
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
-            intent="analysis",
+            intent="workflow",
             confidence=0.95,
             reason="当前问题可以由主 Agent 直接回答。",
             requires_account_context=False,
@@ -1401,7 +1473,7 @@ async def test_brain_runtime_never_completes_an_unrecoverable_controller_error(
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
-            intent="analysis",
+            intent="workflow",
             confidence=0.93,
             reason="This request does not require a specialist.",
             suggested_expert_codes=[],
@@ -1447,7 +1519,7 @@ async def test_brain_runtime_ask_user_reports_waiting_user(client, admin, monkey
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
-            intent="analysis",
+            intent="workflow",
             confidence=0.91,
             reason="还缺少目标周期。",
             requires_account_context=False,

@@ -124,12 +124,16 @@ async def execute_agent_run(
                     TurnRouteDecision.model_validate(persisted_route)
                     if persisted_route is not None
                     else intent.route_decision
-                    or route_decision_from_legacy_intent(intent)
+                    or route_decision_from_legacy_intent(
+                        intent,
+                        has_account=bool(task.brief and task.brief.account_ids),
+                    )
                 )
                 await runtime_graph.start_routed(
                     session,
                     task,
                     route_decision=route_decision,
+                    intent=intent,
                     client_message_id=str(request.get("client_message_id") or ""),
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,

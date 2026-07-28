@@ -61,27 +61,47 @@ class IntentDecision(BaseModel):
     route_decision: TurnRouteDecision | None = None
 
 
-def route_decision_from_legacy_intent(intent: IntentDecision) -> TurnRouteDecision:
+def route_decision_from_legacy_intent(
+    intent: IntentDecision,
+    *,
+    has_account: bool,
+) -> TurnRouteDecision:
     """Adapt legacy classifier results without invoking classification again."""
 
-    mode = {
-        "conversation": TurnExecutionMode.ANSWER,
-        "clarification": TurnExecutionMode.CLARIFY,
-        "analysis": TurnExecutionMode.TASK,
-        "workflow": TurnExecutionMode.TASK,
-        "action": TurnExecutionMode.ACTION,
-    }[intent.intent]
+    positioning_diagnosis = (
+        intent.intent == "analysis"
+        and has_account
+        and AgentCode.POSITIONING in intent.suggested_expert_codes
+    )
+    if positioning_diagnosis:
+        mode = TurnExecutionMode.SKILL
+    else:
+        mode = {
+            "conversation": TurnExecutionMode.ANSWER,
+            "clarification": TurnExecutionMode.CLARIFY,
+            "analysis": TurnExecutionMode.QUERY,
+            "workflow": TurnExecutionMode.TASK,
+            "action": TurnExecutionMode.ACTION,
+        }[intent.intent]
     return TurnRouteDecision(
         mode=mode,
         intent=intent.intent,
         confidence=intent.confidence,
         reason=intent.reason,
+        skill_code=(
+            "account_positioning_diagnosis" if positioning_diagnosis else None
+        ),
         requires_account_context=(
-            False
-            if mode is TurnExecutionMode.ANSWER
-            else intent.requires_account_context
+            True
+            if positioning_diagnosis
+            else (
+                False
+                if mode is TurnExecutionMode.ANSWER
+                else intent.requires_account_context
+            )
         ),
         requires_operation_task=mode in {
+            TurnExecutionMode.SKILL,
             TurnExecutionMode.TASK,
             TurnExecutionMode.ACTION,
         },

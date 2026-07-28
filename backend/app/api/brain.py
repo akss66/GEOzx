@@ -755,7 +755,10 @@ async def _execute_brain_message(
             detail=str(exc),
         ) from exc
 
-    route_decision = intent.route_decision or route_decision_from_legacy_intent(intent)
+    route_decision = intent.route_decision or route_decision_from_legacy_intent(
+        intent,
+        has_account=effective_account_id is not None,
+    )
     if intent.route_decision is None:
         intent = intent.model_copy(update={"route_decision": route_decision})
     run = await session.get(AgentRun, agent_run_id)
@@ -911,6 +914,7 @@ async def _execute_brain_message(
             session,
             task,
             route_decision=route_decision,
+            intent=intent,
             client_message_id=body.client_message_id,
             agent_run_id=agent_run_id,
             agent_run_attempt=agent_run_attempt,

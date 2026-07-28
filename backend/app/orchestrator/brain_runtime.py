@@ -358,7 +358,15 @@ class BrainRuntimeGraph:
         diagnostic_graph.add_edge("context_resolution", "dispatch_round")
         diagnostic_graph.add_edge("dispatch_round", "observe_round")
         diagnostic_graph.add_edge("observe_round", "critic_review")
-        diagnostic_graph.add_edge("critic_review", "smart_summarize")
+        diagnostic_graph.add_conditional_edges(
+            "critic_review",
+            self._route_after_critic,
+            {
+                "pass": "smart_summarize",
+                "improve": "dispatch_round",
+                "human": END,
+            },
+        )
         diagnostic_graph.add_edge("smart_summarize", END)
         self._diagnostic_graph = diagnostic_graph.compile(checkpointer=checkpointer)
 
@@ -456,7 +464,10 @@ class BrainRuntimeGraph:
             session,
             task,
             route_decision=intent.route_decision
-            or route_decision_from_legacy_intent(intent),
+            or route_decision_from_legacy_intent(
+                intent,
+                has_account=bool(task.brief and task.brief.account_ids),
+            ),
             intent=intent,
             client_message_id=client_message_id,
             agent_run_id=agent_run_id,

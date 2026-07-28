@@ -22,6 +22,7 @@ from app.orchestrator.brain_intelligence import (
 from app.orchestrator.brain_runtime import BrainRuntimeGraph
 from app.prompts import prompt_registry
 from app.schemas.ai_coo import AccountSituationOut, OperatingStrategyDraft
+from app.schemas.brain import IntentDecision, route_decision_from_legacy_intent
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 
 
@@ -364,6 +365,149 @@ def test_query_route_has_a_deterministic_tool_data_card_without_strategy_nodes()
         "strategy_planning",
         "task_planning",
     }.isdisjoint(nodes)
+
+
+async def _run_diagnostic_critic_routes(
+    monkeypatch,
+    critic_routes: list[str],
+) -> list[str]:
+    runtime = BrainRuntimeGraph()
+    calls: list[str] = []
+    remaining_routes = iter(critic_routes)
+
+    async def context_resolution(state):
+        calls.append("context")
+        return {**state, "status": "context_resolved"}
+
+    async def dispatch_round(state):
+        calls.append("dispatch")
+        return {**state, "status": "round_dispatched"}
+
+    async def observe_round(state):
+        calls.append("observe")
+        return {**state, "status": "round_observed"}
+
+    async def critic_review(state):
+        route = next(remaining_routes)
+        calls.append(f"critic:{route}")
+        return {
+            **state,
+            "status": f"critic_{route}",
+            "critic_route": route,
+            "critic_iteration": int(state.get("critic_iteration", 0))
+            + (1 if route == "improve" else 0),
+        }
+
+    async def smart_summarize(state):
+        calls.append("summary")
+        return {**state, "status": "completed"}
+
+    monkeypatch.setattr(runtime, "_context_resolution", context_resolution)
+    monkeypatch.setattr(runtime, "_dispatch_round", dispatch_round)
+    monkeypatch.setattr(runtime, "_observe_round", observe_round)
+    monkeypatch.setattr(runtime, "_critic_review", critic_review)
+    monkeypatch.setattr(runtime, "_smart_summarize", smart_summarize)
+    runtime._compile_graphs(None)
+
+    await runtime._diagnostic_graph.ainvoke(
+        {
+            "task_id": 1,
+            "thread_id": "diagnostic-critic-routing",
+            "critic_iteration": 0,
+        }
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_critic_pass_emits_formal_summary(monkeypatch) -> None:
+    calls = await _run_diagnostic_critic_routes(monkeypatch, ["pass"])
+
+    assert calls == ["context", "dispatch", "observe", "critic:pass", "summary"]
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_critic_improve_reruns_before_formal_summary(monkeypatch) -> None:
+    calls = await _run_diagnostic_critic_routes(
+        monkeypatch,
+        ["improve", "pass"],
+    )
+
+    assert calls == [
+        "context",
+        "dispatch",
+        "observe",
+        "critic:improve",
+        "dispatch",
+        "observe",
+        "critic:pass",
+        "summary",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_critic_human_never_emits_formal_summary(monkeypatch) -> None:
+    calls = await _run_diagnostic_critic_routes(monkeypatch, ["human"])
+
+    assert calls == ["context", "dispatch", "observe", "critic:human"]
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_critic_rework_is_bounded_before_human_handoff(
+    monkeypatch,
+) -> None:
+    calls = await _run_diagnostic_critic_routes(
+        monkeypatch,
+        ["improve", "improve", "human"],
+    )
+
+    assert calls.count("dispatch") == 3
+    assert calls[-1] == "critic:human"
+    assert "summary" not in calls
+
+
+def test_legacy_analysis_with_positioning_hint_routes_to_diagnostic_skill() -> None:
+    route = route_decision_from_legacy_intent(
+        IntentDecision(
+            intent="analysis",
+            confidence=0.98,
+            reason="account positioning diagnosis",
+            suggested_expert_codes=[AgentCode.POSITIONING],
+            requires_account_context=True,
+        ),
+        has_account=True,
+    )
+
+    assert route.mode is TurnExecutionMode.SKILL
+    assert route.skill_code == "account_positioning_diagnosis"
+    assert route.requires_account_context is True
+    assert route.requires_operation_task is True
+
+
+def test_legacy_plain_analysis_is_query_and_workflow_remains_task() -> None:
+    query_route = route_decision_from_legacy_intent(
+        IntentDecision(
+            intent="analysis",
+            confidence=0.9,
+            reason="read account data",
+            requires_account_context=True,
+        ),
+        has_account=True,
+    )
+    task_route = route_decision_from_legacy_intent(
+        IntentDecision(
+            intent="workflow",
+            confidence=0.9,
+            reason="build a full operating plan",
+            requires_account_context=True,
+        ),
+        has_account=True,
+    )
+
+    assert query_route.mode is TurnExecutionMode.QUERY
+    assert query_route.requires_operation_task is False
+    assert task_route.mode is TurnExecutionMode.TASK
+    assert task_route.requires_operation_task is True
 
 
 @pytest.mark.asyncio

@@ -8,8 +8,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
-from app.models import BrainTask, Event
-from app.models.enums import BrainTaskStatus, BrainTaskType
+from app.models import Account, BrainTask, Event, TaskBrief
+from app.models.enums import BrainTaskStatus, BrainTaskType, Platform
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.schemas.brain import IntentDecision
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
@@ -100,6 +100,96 @@ async def test_worker_validates_persisted_route_and_passes_it_to_routed_start(
     assert result == task.id
     assert captured_routes == [TurnRouteDecision.model_validate(route_payload)]
     assert captured_routes[0].mode is TurnExecutionMode.SKILL
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_legacy_positioning_hint_on_compatibility_route(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Legacy positioning worker account",
+        platform=Platform.DOUYIN,
+        auth={"auth_status": "authorized"},
+    )
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Legacy positioning worker task",
+        type=BrainTaskType.ACCOUNT_DIAGNOSIS,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="langgraph",
+    )
+    task.brief = TaskBrief(
+        goal="positioning diagnosis only",
+        platforms=[Platform.DOUYIN.value],
+        account_ids=[],
+        cycle="current",
+        content_goal="positioning diagnosis",
+        risk_constraints=[],
+        expected_outputs=["positioning diagnosis"],
+        confirmation_actions=[],
+    )
+    session.add_all([account, task])
+    await session.flush()
+    task.brief.account_ids = [account.id]
+    await session.commit()
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id="legacy-positioning-worker",
+        request_payload={},
+    )
+    intent_payload = IntentDecision(
+        intent="analysis",
+        confidence=0.98,
+        reason="positioning diagnosis only",
+        suggested_expert_codes=["01-positioning"],
+        requires_account_context=True,
+    ).model_dump(mode="json")
+    await mark_agent_run_queued(
+        session,
+        run.id,
+        task_id=task.id,
+        request_payload={
+            "operation": "start",
+            "task_id": task.id,
+            "intent": intent_payload,
+        },
+    )
+    captured: list[tuple[IntentDecision, TurnRouteDecision]] = []
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def capture_routed_start(
+        _session,
+        _task,
+        *,
+        intent,
+        route_decision,
+        **_kwargs,
+    ):
+        captured.append((intent, route_decision))
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.runtime_graph.start_routed",
+        capture_routed_start,
+    )
+
+    result = await execute_agent_run({"worker_id": "test-worker"}, run.id)
+
+    assert result == task.id
+    assert len(captured) == 1
+    captured_intent, captured_route = captured[0]
+    assert captured_intent.suggested_expert_codes == ["01-positioning"]
+    assert captured_route.mode is TurnExecutionMode.SKILL
+    assert captured_route.skill_code == "account_positioning_diagnosis"
 
 
 @pytest.mark.asyncio
