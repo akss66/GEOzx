@@ -894,6 +894,19 @@ async def test_brain_conversation_keeps_operations_identity_and_account_context(
     assert captured_contexts[0].prompt_id == "main-agent.conversation"
     assert captured_contexts[0].task_id == response.json()["task"]["id"]
     assert captured_contexts[0].scope["account_id"] == account_id
+    runtime = response.json()
+    assert runtime["invocations"] == []
+    direct_answer = next(
+        event
+        for event in runtime["timeline"]
+        if event["type"] == "brain.runtime.message_done"
+    )
+    assert direct_answer["payload"]["content"] == "我是你的新媒体运营主 Agent。"
+    assert (
+        direct_answer["payload"]["semantic_key"]
+        == "00-decision:main-agent.conversation"
+    )
+    assert "只有对应专家实际完成分析后" not in direct_answer["payload"]["content"]
 
 
 @pytest.mark.asyncio

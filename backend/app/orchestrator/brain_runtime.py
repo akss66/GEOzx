@@ -52,6 +52,7 @@ from app.models import (
 )
 from app.models.enums import (
     AgentCode,
+    AgentInvocationStatus,
     BrainTaskStatus,
     DeliverableAcceptanceStatus,
 )
@@ -142,6 +143,14 @@ _runtime_event_identity: ContextVar[tuple[int, int, int, str] | None] = ContextV
 _runtime_message_semantic: ContextVar[str | None] = ContextVar(
     "brain_runtime_message_semantic",
     default=None,
+)
+_BOUNDED_WORKFLOW_ACKNOWLEDGEMENT = (
+    "已收到你的账号运营需求。我会先核对数据和执行条件；"
+    "只有对应专家实际完成分析后，才会向你交付正式结论。"
+)
+_SPECIALIST_RESULT_BLOCKED_MESSAGE = (
+    "本轮未获得已完成的专家分析，因此不能生成正式诊断结论。"
+    "请检查账号授权和专家执行状态后重试。"
 )
 
 
@@ -1880,7 +1889,22 @@ class BrainRuntimeGraph:
         await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
-            await self._stream_summary_turn(session, task, state.get("observations", []))
+            summary_delivered = await self._stream_summary_turn(
+                session,
+                task,
+                state.get("observations", []),
+                required_expert_codes=state.get("required_expert_codes", []),
+            )
+            if not summary_delivered:
+                task.status = BrainTaskStatus.FAILED
+                task.progress = 0
+                task.current_focus = "专家未完成，无法生成正式结论"
+                await session.commit()
+                return {
+                    **state,
+                    "status": "blocked",
+                    "termination_reason": "no_completed_specialist_invocation",
+                }
             if task.status == BrainTaskStatus.PENDING_ACCEPTANCE:
                 task.progress = max(task.progress, 90)
                 task.current_focus = "本轮专家工作已完成，等待你验收结果"
@@ -2182,15 +2206,31 @@ class BrainRuntimeGraph:
             )
         ).all()
         for invocation in invocations:
+            agent_code = (
+                invocation.agent_code.value
+                if hasattr(invocation.agent_code, "value")
+                else str(invocation.agent_code)
+            )
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.subagent_started",
+                {
+                    "message": f"{invocation.agent_name} 已开始处理。",
+                    "agent_code": agent_code,
+                    "agent_name": invocation.agent_name,
+                    "invocation_id": invocation.id,
+                },
+            )
+            if invocation.status != AgentInvocationStatus.DONE:
+                continue
             await self._record_event(
                 session,
                 task,
                 "brain.runtime.subagent_completed",
                 {
                     "message": f"{invocation.agent_name} 已完成本轮处理。",
-                    "agent_code": invocation.agent_code.value
-                    if hasattr(invocation.agent_code, "value")
-                    else str(invocation.agent_code),
+                    "agent_code": agent_code,
                     "agent_name": invocation.agent_name,
                     "invocation_id": invocation.id,
                 },
@@ -2200,32 +2240,15 @@ class BrainRuntimeGraph:
         if task.brief is None:
             return
         identity = _runtime_event_identity.get()
-        if identity is not None and await self._runtime_message_done_exists(
-            session,
-            identity[3],
-            AgentCode.DECISION.value,
-            semantic_key=_main_agent_message_semantic("main-agent.acknowledgement"),
-        ):
-            return
-        history = await _parent_thread_messages(session, task, task.brief.goal)
-        operating_context = await _main_agent_operating_context(session, task)
-        messages = [
-            *history,
-            {
-                "role": "user",
-                "content": (
-                    f"用户运营目标：{task.brief.goal}\n"
-                    f"平台：{', '.join(task.brief.platforms)}\n"
-                    f"账号 ID：{', '.join(str(item) for item in task.brief.account_ids)}"
-                ),
-            },
-        ]
-        await _chat_main_agent(
+        await self._stream_runtime_message(
             session,
             task,
-            "main-agent.acknowledgement",
-            operating_context,
-            messages,
+            _BOUNDED_WORKFLOW_ACKNOWLEDGEMENT,
+            model="system",
+            client_message_id=identity[3] if identity is not None else None,
+            semantic_key=_main_agent_message_semantic(
+                "main-agent.acknowledgement"
+            ),
         )
 
     async def _stream_summary_turn(
@@ -2233,9 +2256,11 @@ class BrainRuntimeGraph:
         session: AsyncSession,
         task: BrainTask,
         observations: list[dict[str, Any]],
-    ) -> None:
-        if task.brief is None or not observations:
-            return
+        *,
+        required_expert_codes: list[str] | None = None,
+    ) -> bool:
+        if task.brief is None:
+            return False
         identity = _runtime_event_identity.get()
         if identity is not None and await self._runtime_message_done_exists(
             session,
@@ -2243,7 +2268,66 @@ class BrainRuntimeGraph:
             AgentCode.DECISION.value,
             semantic_key=_main_agent_message_semantic("main-agent.summary"),
         ):
-            return
+            return True
+        invocation_ids = {
+            int(item["invocation_id"])
+            for item in observations
+            if item.get("invocation_id") is not None
+        }
+        completed_invocations = (
+            (
+                await session.scalars(
+                    select(AgentInvocation).where(
+                        AgentInvocation.task_id == task.id,
+                        AgentInvocation.id.in_(invocation_ids),
+                        AgentInvocation.status == AgentInvocationStatus.DONE,
+                    )
+                )
+            ).all()
+            if invocation_ids
+            else []
+        )
+        required_codes = set(required_expert_codes or [])
+        if required_codes:
+            completed_invocations = [
+                row
+                for row in completed_invocations
+                if _agent_code_value(row.agent_code) in required_codes
+            ]
+        completed_by_id = {row.id: row for row in completed_invocations}
+        completed_observations = [
+            {
+                "invocation_id": row.id,
+                "agent_code": _agent_code_value(row.agent_code),
+                "agent_name": row.agent_name,
+                "summary": row.output_summary,
+            }
+            for item in observations
+            if (row := completed_by_id.get(int(item.get("invocation_id") or 0)))
+            is not None
+        ]
+        if required_codes and not completed_observations:
+            await self._stream_runtime_message(
+                session,
+                task,
+                _SPECIALIST_RESULT_BLOCKED_MESSAGE,
+                model="system",
+                client_message_id=identity[3] if identity is not None else None,
+                semantic_key=_main_agent_message_semantic(
+                    "main-agent.summary-blocked"
+                ),
+            )
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.summary_blocked",
+                {
+                    "message": _SPECIALIST_RESULT_BLOCKED_MESSAGE,
+                    "reason": "no_completed_specialist_invocation",
+                },
+            )
+            return False
+        summary_observations = completed_observations or observations
         history = await _parent_thread_messages(session, task, "")
         operating_context = await _main_agent_operating_context(session, task)
         await _chat_main_agent(
@@ -2255,10 +2339,14 @@ class BrainRuntimeGraph:
                 *history,
                 {
                     "role": "user",
-                    "content": f"原目标：{task.brief.goal}\n本轮观察：{observations}",
+                    "content": (
+                        f"原目标：{task.brief.goal}\n"
+                        f"本轮可信成果：{summary_observations}"
+                    ),
                 },
             ],
         )
+        return True
 
     async def _stream_conversation_turn(
         self,
@@ -2401,11 +2489,19 @@ class BrainRuntimeGraph:
         *,
         model: str,
         client_message_id: str | None = None,
+        semantic_key: str | None = None,
     ) -> None:
         """Progressively deliver user-facing runtime copy, then persist its checkpoint."""
 
+        message_semantic = semantic_key or _runtime_message_id(
+            client_message_id,
+            AgentCode.DECISION.value,
+        )
         if await self._runtime_message_done_exists(
-            session, client_message_id, AgentCode.DECISION.value
+            session,
+            client_message_id,
+            AgentCode.DECISION.value,
+            semantic_key=message_semantic,
         ):
             return
 
@@ -2421,6 +2517,7 @@ class BrainRuntimeGraph:
             "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
             "model": model,
             "client_message_id": client_message_id,
+            "semantic_key": message_semantic,
         }
         await publish_realtime_event(
             "brain.runtime.message_start",
