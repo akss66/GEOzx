@@ -20,10 +20,13 @@ from app.llm.gateway import (
 )
 from app.models.enums import AgentCode
 from app.orchestrator.agent_identity import with_operations_brain_public_identity
+from app.orchestrator.capability_router import SkillUnavailable, route_explicit_request
+from app.orchestrator.skills.registry import SkillRegistry
 from app.prompts import prompt_registry
 from app.prompts.manifest import LoadedPrompt
 from app.schemas.ai_coo import CriticEvaluation, OperatingStrategyDraft
 from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeNextStep
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 
 
 class IntelligenceUnavailable(RuntimeError):
@@ -68,22 +71,39 @@ _AVAILABLE_EXPERTS = [
 
 
 class BrainIntelligence:
-    async def classify(
+    async def classify_turn(
         self,
         session: AsyncSession | None,
         org_id: int,
         message: str,
         *,
         has_account: bool,
-    ) -> IntentDecision:
+        platform: str,
+        requested_skill_code: str | None = None,
+        registry: SkillRegistry | None = None,
+    ) -> TurnRouteDecision:
+        """Choose the execution mode for one user turn without executing it."""
+
         normalized = _normalize_casual_message(message)
         if normalized in _CASUAL_MESSAGES:
-            return IntentDecision(
+            return TurnRouteDecision(
+                mode=TurnExecutionMode.ANSWER,
                 intent="conversation",
                 confidence=1,
                 reason="用户正在进行普通交流。",
-                suggested_expert_codes=[],
-                requires_account_context=False,
+            )
+
+        if requested_skill_code is not None:
+            if registry is None:
+                raise SkillUnavailable(
+                    code="skill_registry_unavailable",
+                    reason="explicit_skill_registry_required",
+                )
+            return route_explicit_request(
+                requested_skill_code,
+                platform=platform,
+                registry=registry,
+                has_account=has_account,
             )
 
         try:
@@ -101,29 +121,62 @@ class BrainIntelligence:
                         "role": "user",
                         "content": (
                             f"当前是否已选择账号：{'是' if has_account else '否'}\n"
+                            f"当前平台：{platform}\n"
                             f"用户消息：{message}"
                         ),
                     },
                 ],
             )
-            decision = IntentDecision.model_validate(extract_json(result.content))
+            decision = TurnRouteDecision.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:
             raise IntelligenceUnavailable("运营大脑暂时无法可靠理解这条需求") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
             raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
 
-        decision = _sanitize_intent_decision(decision)
         if decision.requires_account_context and not has_account:
-            return IntentDecision(
-                intent="clarification",
+            return TurnRouteDecision(
+                mode=TurnExecutionMode.CLARIFY,
+                intent=decision.intent,
                 confidence=decision.confidence,
-                reason="该任务需要明确账号上下文。",
-                missing_field="account_id",
-                clarifying_question="请先从顶部选择要处理的抖音账号。",
-                suggested_expert_codes=[],
+                reason="该请求需要明确账号上下文。",
                 requires_account_context=True,
+                missing_field="account_id",
+                clarifying_question="请先选择需要查看或操作的账号。",
             )
         return decision
+
+    async def classify(
+        self,
+        session: AsyncSession | None,
+        org_id: int,
+        message: str,
+        *,
+        has_account: bool,
+    ) -> IntentDecision:
+        decision = await self.classify_turn(
+            session,
+            org_id,
+            message,
+            has_account=has_account,
+            platform="douyin",
+        )
+        legacy_intent = {
+            TurnExecutionMode.ANSWER: "conversation",
+            TurnExecutionMode.CLARIFY: "clarification",
+            TurnExecutionMode.QUERY: "analysis",
+            TurnExecutionMode.SKILL: "workflow",
+            TurnExecutionMode.TASK: "workflow",
+            TurnExecutionMode.ACTION: "action",
+        }[decision.mode]
+        return IntentDecision(
+            intent=legacy_intent,
+            confidence=decision.confidence,
+            reason=decision.reason,
+            missing_field=decision.missing_field,
+            clarifying_question=decision.clarifying_question,
+            suggested_expert_codes=[],
+            requires_account_context=decision.requires_account_context,
+        )
 
     async def decide_next(
         self,

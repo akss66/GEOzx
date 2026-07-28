@@ -139,6 +139,14 @@ PRODUCTION_PROMPTS: tuple[PromptSpec, ...] = (
         "main-agent/intent/v1.md",
         "aaba779fa452fac1087fd1522fb488c726777280756595040013a35958d6e444",
         "intent-decision/v1",
+        status="retired",
+    ),
+    PromptSpec(
+        "main-agent.intent",
+        "2.0.0",
+        "main-agent/intent/v2.md",
+        "c1782851e01eb4357ba14879fe220a77de3044a413e82b1f6f8b3eba83758035",
+        "turn-route-decision/v1",
     ),
     PromptSpec(
         "main-agent.next-step",
