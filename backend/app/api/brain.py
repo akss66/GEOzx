@@ -713,6 +713,7 @@ async def _execute_brain_message(
             user.org_id,
             body.message,
             has_account=effective_account_id is not None,
+            platform=body.platform.value,
         )
     except IntelligenceUnavailable as exc:
         raise HTTPException(

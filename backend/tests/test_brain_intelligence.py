@@ -32,34 +32,44 @@ async def test_greeting_does_not_call_model_or_dispatch_experts(monkeypatch):
 @pytest.mark.asyncio
 async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
     payload = {
-        "intent": "clarification",
+        "mode": "clarify",
+        "intent": "optimization_goal",
         "confidence": 0.82,
         "reason": "缺少需要优化的目标",
+        "skill_code": None,
+        "requires_account_context": True,
+        "requires_operation_task": False,
         "missing_field": "optimization_goal",
         "clarifying_question": "你这次最想优先改善播放、互动，还是转化？",
-        "suggested_expert_codes": [],
-        "requires_account_context": True,
     }
 
     captured: dict = {}
 
     async def fake_chat(_self, _session, _org_id, _agent_code, messages):
         captured["system"] = messages[0]["content"]
+        captured["messages"] = messages
         captured["context"] = current_llm_call_context()
         return CompletionResult(json.dumps(payload), "test-model", 4, 8, 12), 0.0
 
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
-    decision = await BrainIntelligence().classify(None, 1, "帮我优化一下", has_account=True)
+    decision = await BrainIntelligence().classify(
+        None,
+        1,
+        "帮我优化一下",
+        has_account=True,
+        platform="xiaohongshu",
+    )
 
     assert decision.intent == "clarification"
     assert decision.clarifying_question == "你这次最想优先改善播放、互动，还是转化？"
     assert decision.suggested_expert_codes == []
-    assert captured["system"].startswith("# 同舟行主 Agent：意图路由")
+    assert captured["system"].startswith("# 同行者主 Agent：本轮执行路由")
     assert "面向用户时统一使用“运营大脑”" in captured["system"]
     assert captured["context"].prompt_id == "main-agent.intent"
-    assert captured["context"].prompt_schema_version == "intent-decision/v1"
+    assert captured["context"].prompt_schema_version == "turn-route-decision/v1"
     assert captured["context"].response_format == {"type": "json_object"}
+    assert "当前平台：xiaohongshu" in captured["messages"][1]["content"]
 
 
 @pytest.mark.asyncio

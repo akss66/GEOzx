@@ -152,13 +152,14 @@ class BrainIntelligence:
         message: str,
         *,
         has_account: bool,
+        platform: str = "douyin",
     ) -> IntentDecision:
         decision = await self.classify_turn(
             session,
             org_id,
             message,
             has_account=has_account,
-            platform="douyin",
+            platform=platform,
         )
         legacy_intent = {
             TurnExecutionMode.ANSWER: "conversation",
@@ -432,22 +433,6 @@ class BrainIntelligence:
 
 def _normalize_casual_message(message: str) -> str:
     return re.sub(r"[\s，。！？!?、,.]+", "", message).lower()
-
-
-def _sanitize_intent_decision(decision: IntentDecision) -> IntentDecision:
-    experts = [
-        code
-        for code in decision.suggested_expert_codes
-        if code.value in _AVAILABLE_EXPERTS and code != AgentCode.DECISION
-    ]
-    if decision.intent in {"conversation", "clarification"}:
-        experts = []
-    question = decision.clarifying_question
-    if decision.intent == "clarification" and not question:
-        question = "这次你最希望优先解决哪个运营问题？"
-    return decision.model_copy(
-        update={"suggested_expert_codes": experts, "clarifying_question": question}
-    )
 
 
 async def _structured_chat(
