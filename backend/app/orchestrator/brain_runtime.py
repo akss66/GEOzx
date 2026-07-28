@@ -39,6 +39,7 @@ from app.llm.gateway import (
 from app.models import (
     Account,
     AgentInvocation,
+    AgentRun,
     AgentToolCall,
     BrainTask,
     Deliverable,
@@ -46,6 +47,7 @@ from app.models import (
     Event,
     ReflectionRecord,
     StrategyPlan,
+    TaskBrief,
     User,
 )
 from app.models.enums import (
@@ -135,6 +137,10 @@ _runtime_session: ContextVar[AsyncSession | None] = ContextVar(
 )
 _runtime_event_identity: ContextVar[tuple[int, int, int, str] | None] = ContextVar(
     "brain_runtime_event_identity",
+    default=None,
+)
+_runtime_message_semantic: ContextVar[str | None] = ContextVar(
+    "brain_runtime_message_semantic",
     default=None,
 )
 
@@ -585,6 +591,31 @@ class BrainRuntimeGraph:
     ) -> BrainTask:
         if not _is_runtime_mode(task.runtime_mode):
             return task
+        runtime_identity_token = _runtime_event_identity.set(
+            await self._runtime_identity_for_run(session, task, agent_run_id)
+        )
+        try:
+            return await self._resume_after_permission_bound(
+                session,
+                task,
+                tool_call,
+                approved,
+                agent_run_id=agent_run_id,
+                agent_run_attempt=agent_run_attempt,
+            )
+        finally:
+            _runtime_event_identity.reset(runtime_identity_token)
+
+    async def _resume_after_permission_bound(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        tool_call: AgentToolCall,
+        approved: bool,
+        *,
+        agent_run_id: int | None,
+        agent_run_attempt: int,
+    ) -> BrainTask:
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         await self._record_event(
             session,
@@ -727,6 +758,35 @@ class BrainRuntimeGraph:
         record_selection: bool = True,
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
+    ) -> BrainTask:
+        runtime_identity_token = _runtime_event_identity.set(
+            await self._runtime_identity_for_run(session, task, agent_run_id)
+        )
+        try:
+            return await self._resume_after_decision_bound(
+                session,
+                task,
+                decision_id=decision_id,
+                choice_id=choice_id,
+                choice_title=choice_title,
+                record_selection=record_selection,
+                agent_run_id=agent_run_id,
+                agent_run_attempt=agent_run_attempt,
+            )
+        finally:
+            _runtime_event_identity.reset(runtime_identity_token)
+
+    async def _resume_after_decision_bound(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        decision_id: str,
+        choice_id: str,
+        choice_title: str,
+        record_selection: bool,
+        agent_run_id: int | None,
+        agent_run_attempt: int,
     ) -> BrainTask:
         if record_selection:
             await self.record_decision_selected(
@@ -2139,6 +2199,14 @@ class BrainRuntimeGraph:
     async def _stream_main_agent_turn(self, session: AsyncSession, task: BrainTask) -> None:
         if task.brief is None:
             return
+        identity = _runtime_event_identity.get()
+        if identity is not None and await self._runtime_message_done_exists(
+            session,
+            identity[3],
+            AgentCode.DECISION.value,
+            semantic_key=_main_agent_message_semantic("main-agent.acknowledgement"),
+        ):
+            return
         history = await _parent_thread_messages(session, task, task.brief.goal)
         operating_context = await _main_agent_operating_context(session, task)
         messages = [
@@ -2168,6 +2236,14 @@ class BrainRuntimeGraph:
     ) -> None:
         if task.brief is None or not observations:
             return
+        identity = _runtime_event_identity.get()
+        if identity is not None and await self._runtime_message_done_exists(
+            session,
+            identity[3],
+            AgentCode.DECISION.value,
+            semantic_key=_main_agent_message_semantic("main-agent.summary"),
+        ):
+            return
         history = await _parent_thread_messages(session, task, "")
         operating_context = await _main_agent_operating_context(session, task)
         await _chat_main_agent(
@@ -2194,7 +2270,10 @@ class BrainRuntimeGraph:
         if task.brief is None:
             return
         if await self._runtime_message_done_exists(
-            session, client_message_id, AgentCode.DECISION.value
+            session,
+            client_message_id,
+            AgentCode.DECISION.value,
+            semantic_key=_main_agent_message_semantic("main-agent.conversation"),
         ):
             return
         history = await _parent_thread_messages(session, task, task.brief.goal)
@@ -2236,6 +2315,9 @@ class BrainRuntimeGraph:
                     "message": result.content,
                     "content": result.content,
                     "client_message_id": client_message_id,
+                    "semantic_key": _main_agent_message_semantic(
+                        "main-agent.conversation"
+                    ),
                 },
             )
 
@@ -2282,11 +2364,21 @@ class BrainRuntimeGraph:
                 )
             elif phase == "done":
                 content = str(event.get("content") or "")
+                message_semantic = _runtime_message_semantic.get()
                 await self._record_event(
                     session,
                     task,
                     "brain.runtime.message_done",
-                    {**base_payload, "message": content, "content": content},
+                    {
+                        **base_payload,
+                        "message": content,
+                        "content": content,
+                        "semantic_key": (
+                            _main_agent_message_semantic(message_semantic)
+                            if message_semantic
+                            else message_id
+                        ),
+                    },
                 )
                 observer_state.finish(agent_code)
             elif phase == "error":
@@ -2352,10 +2444,38 @@ class BrainRuntimeGraph:
         )
 
     @staticmethod
+    async def _runtime_identity_for_run(
+        session: AsyncSession,
+        task: BrainTask,
+        agent_run_id: int | None,
+    ) -> tuple[int, int, int, str] | None:
+        account_ids = list(
+            (
+                await session.scalar(
+                    select(TaskBrief.account_ids).where(TaskBrief.task_id == task.id)
+                )
+            )
+            or []
+        )
+        if agent_run_id is None or len(account_ids) != 1:
+            return None
+        run = await session.get(AgentRun, agent_run_id)
+        if (
+            run is None
+            or run.org_id != task.org_id
+            or run.task_id != task.id
+            or not run.client_message_id
+        ):
+            return None
+        return task.org_id, int(account_ids[0]), run.id, run.client_message_id
+
+    @staticmethod
     async def _runtime_message_done_exists(
         session: AsyncSession,
         client_message_id: str | None,
         agent_code: str,
+        *,
+        semantic_key: str | None = None,
     ) -> bool:
         identity = _runtime_event_identity.get()
         if identity is None or not client_message_id:
@@ -2367,7 +2487,8 @@ class BrainRuntimeGraph:
             run_id=run_id,
             client_message_id=client_message_id,
             event_type="brain.runtime.message_done",
-            semantic_key=_runtime_message_id(client_message_id, agent_code),
+            semantic_key=semantic_key
+            or _runtime_message_id(client_message_id, agent_code),
         )
         return (
             await session.scalar(select(Event.id).where(Event.idempotency_key == key))
@@ -2380,6 +2501,9 @@ class BrainRuntimeGraph:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
+        project_id = await session.scalar(
+            select(TaskBrief.project_id).where(TaskBrief.task_id == task.id)
+        )
         event_payload = {
             **payload,
             "task_id": task.id,
@@ -2405,7 +2529,7 @@ class BrainRuntimeGraph:
                 semantic_key=semantic_key,
                 payload=event_payload,
                 content_item_id=task.content_item_id,
-                project_id=task.brief.project_id if task.brief else None,
+                project_id=project_id,
             )
             if not created:
                 return
@@ -2413,7 +2537,7 @@ class BrainRuntimeGraph:
             event_row = Event(
                 type=event_type,
                 content_item_id=task.content_item_id,
-                project_id=task.brief.project_id if task.brief else None,
+                project_id=project_id,
                 payload=event_payload,
             )
             session.add(event_row)
@@ -2423,7 +2547,7 @@ class BrainRuntimeGraph:
             event_type,
             event_payload,
             content_item_id=task.content_item_id,
-            project_id=task.brief.project_id if task.brief else None,
+            project_id=project_id,
             event_id=event_row.id,
         )
         if (
@@ -2681,19 +2805,23 @@ async def _chat_main_agent(
             "max_cost_usd": settings.agent_runtime_max_cost_usd,
         },
     )
-    with bind_llm_call_context(context):
-        return await gateway.chat(
-            session,
-            task.org_id,
-            AgentCode.DECISION.value,
-            [
-                {
-                    "role": "system",
-                    "content": with_operations_brain_public_identity(prompt.content),
-                },
-                *messages,
-            ],
-        )
+    message_semantic_token = _runtime_message_semantic.set(prompt_id)
+    try:
+        with bind_llm_call_context(context):
+            return await gateway.chat(
+                session,
+                task.org_id,
+                AgentCode.DECISION.value,
+                [
+                    {
+                        "role": "system",
+                        "content": with_operations_brain_public_identity(prompt.content),
+                    },
+                    *messages,
+                ],
+            )
+    finally:
+        _runtime_message_semantic.reset(message_semantic_token)
 
 
 def _platform_display_name(platform: str) -> str:
@@ -2774,6 +2902,10 @@ def _agent_display_name(agent_code: str) -> str:
 def _runtime_message_id(client_message_id: str | None, agent_code: str) -> str:
     run_id = client_message_id or uuid4().hex
     return f"{run_id}:{agent_code}:1"
+
+
+def _main_agent_message_semantic(prompt_id: str) -> str:
+    return f"{AgentCode.DECISION.value}:{prompt_id}"
 
 
 def _realtime_text_chunks(content: str, size: int = 6) -> Iterator[str]:

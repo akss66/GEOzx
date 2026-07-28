@@ -368,6 +368,30 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
     await session.commit()
 
     calls: list[AgentContext] = []
+    realtime_events: list[dict] = []
+
+    async def capture_realtime_event(
+        event_type,
+        payload=None,
+        content_item_id=None,
+        project_id=None,
+        *,
+        event_id=None,
+    ):
+        realtime_events.append(
+            {
+                "type": event_type,
+                "payload": payload,
+                "content_item_id": content_item_id,
+                "project_id": project_id,
+                "event_id": event_id,
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.agent_harness.publish_realtime_event",
+        capture_realtime_event,
+    )
 
     class FakeAdvertisingAgent(BaseAgent):
         code = AgentCode.ADVERTISER.value
@@ -439,6 +463,16 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
     assert invocation_out.run_id == run.id
     assert invocation_out.step_key == "round-1:07-advertiser"
     assert invocation_out.attempt == 1
+    successful_lifecycle = [
+        event
+        for event in realtime_events
+        if event["payload"]["invocation_id"] == first.invocation.id
+    ]
+    assert [event["type"] for event in successful_lifecycle] == [
+        "brain.runtime.subagent_started",
+        "brain.runtime.subagent_completed",
+    ]
+    assert all(event["event_id"] is not None for event in successful_lifecycle)
 
     class FailingAdvertisingAgent(BaseAgent):
         code = AgentCode.ADVERTISER.value
@@ -481,6 +515,16 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
     assert failed is not None
     assert failed.status == AgentInvocationStatus.FAILED
     assert failed.failure_reason == "RuntimeError"
+    failed_lifecycle = [
+        event
+        for event in realtime_events
+        if event["payload"]["invocation_id"] == failed.id
+    ]
+    assert [event["type"] for event in failed_lifecycle] == [
+        "brain.runtime.subagent_started",
+        "brain.runtime.subagent_failed",
+    ]
+    assert all(event["event_id"] is not None for event in failed_lifecycle)
 
 
 @pytest.mark.asyncio

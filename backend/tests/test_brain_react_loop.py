@@ -1,11 +1,23 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.events import record_runtime_event_once
-from app.models import Event
+from app.models import (
+    Account,
+    AgentRun,
+    AgentToolCall,
+    BrainTask,
+    Event,
+    OrchestrationPlan,
+    TaskBrief,
+)
+from app.models.enums import BrainTaskStatus, BrainTaskType, Platform
+from app.orchestrator import brain_runtime as brain_runtime_module
+from app.orchestrator.brain_runtime import BrainRuntimeGraph
 from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLimits
 from app.schemas.brain import RuntimeNextStep, RuntimeToolCall
 
@@ -21,6 +33,61 @@ def _state(**overrides):
     }
     state.update(overrides)
     return state
+
+
+async def _runtime_retry_fixture(session, admin, *, client_message_id: str):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname=f"Runtime account {client_message_id}",
+        auth={"auth_status": "authorized"},
+    )
+    session.add(account)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title=f"Runtime task {client_message_id}",
+        type=BrainTaskType.REVIEW_OPTIMIZATION,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="langgraph",
+        thread_id=f"runtime-thread-{client_message_id}",
+    )
+    task.brief = TaskBrief(
+        goal="Resume runtime safely",
+        project_id=None,
+        project_name=None,
+        platforms=[Platform.DOUYIN.value],
+        account_ids=[account.id],
+        cycle="current",
+        content_goal="resume",
+        risk_constraints=[],
+        expected_outputs=[],
+        confirmation_actions=[],
+    )
+    task.plan = OrchestrationPlan(
+        summary="resume",
+        steps=[],
+        quality_gates=[],
+        estimated_cost=Decimal("0"),
+        requires_human_confirmation=False,
+    )
+    session.add(task)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        client_message_id=client_message_id,
+        request_payload={},
+        result_payload={},
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(task)
+    await session.refresh(task, attribute_names=["brief", "plan"])
+    await session.refresh(run)
+    return account, task, run
 
 
 def test_same_expert_requires_new_purpose_or_evidence_before_repeat():
@@ -196,3 +263,226 @@ async def test_runtime_event_idempotency_reuses_persisted_event_and_isolates_acc
     assert first.payload["account_id"] == 101
     assert first.payload["run_id"] == 202
     assert first.payload["client_message_id"] == "retry-message-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_after_permission_reuses_runtime_event_identity_on_retry(
+    session, admin, monkeypatch
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="permission-retry-1"
+    )
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        tool_code="account.profile",
+        tool_name="Account profile",
+        status="success",
+        requires_human_confirmation=True,
+        input_summary="{}",
+        output_summary="approved",
+        meta={"result": {"ok": True}},
+    )
+    session.add(tool_call)
+    await session.commit()
+
+    runtime = BrainRuntimeGraph()
+    runtime._native_interrupts = False
+
+    async def fake_resume(*_args, **_kwargs):
+        await runtime._record_event(
+            session,
+            task,
+            "brain.runtime.completed",
+            {
+                "message": "resume finished",
+                "semantic_key": "resume-permission-finished",
+            },
+        )
+
+    monkeypatch.setattr(runtime._resume_graph, "ainvoke", fake_resume)
+
+    await runtime.resume_after_permission(
+        session,
+        task,
+        tool_call,
+        True,
+        agent_run_id=run.id,
+        agent_run_attempt=1,
+    )
+    await runtime.resume_after_permission(
+        session,
+        task,
+        tool_call,
+        True,
+        agent_run_id=run.id,
+        agent_run_attempt=2,
+    )
+
+    events = [
+        event
+        for event in (
+            await session.scalars(
+                select(Event)
+                .where(
+                    Event.type.in_(
+                        ["brain.runtime.resumed", "brain.runtime.completed"]
+                    )
+                )
+                .order_by(Event.id)
+            )
+        ).all()
+        if (event.payload or {}).get("task_id") == task.id
+    ]
+    assert [event.type for event in events] == [
+        "brain.runtime.resumed",
+        "brain.runtime.completed",
+    ]
+    assert all(event.idempotency_key is not None for event in events)
+    assert all(event.payload["run_id"] == run.id for event in events)
+    assert all(event.payload["account_id"] == account.id for event in events)
+
+
+@pytest.mark.asyncio
+async def test_resume_after_decision_reuses_runtime_event_identity_on_retry(
+    session, admin, monkeypatch
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="decision-retry-1"
+    )
+    runtime = BrainRuntimeGraph()
+    runtime._native_interrupts = False
+
+    async def fake_resume(*_args, **_kwargs):
+        await runtime._record_event(
+            session,
+            task,
+            "brain.runtime.completed",
+            {
+                "message": "decision resume finished",
+                "semantic_key": "resume-decision-finished",
+            },
+        )
+
+    monkeypatch.setattr(runtime._smart_resume_graph, "ainvoke", fake_resume)
+
+    await runtime.resume_after_decision(
+        session,
+        task,
+        decision_id="decision-1",
+        choice_id="choice-a",
+        choice_title="Pick A",
+        record_selection=False,
+        agent_run_id=run.id,
+        agent_run_attempt=1,
+    )
+    await runtime.resume_after_decision(
+        session,
+        task,
+        decision_id="decision-1",
+        choice_id="choice-a",
+        choice_title="Pick A",
+        record_selection=False,
+        agent_run_id=run.id,
+        agent_run_attempt=2,
+    )
+
+    events = [
+        event
+        for event in (
+            await session.scalars(
+                select(Event)
+                .where(Event.type == "brain.runtime.completed")
+                .order_by(Event.id)
+            )
+        ).all()
+        if (event.payload or {}).get("task_id") == task.id
+    ]
+    assert len(events) == 1
+    assert events[0].payload["run_id"] == run.id
+    assert events[0].payload["account_id"] == account.id
+    assert events[0].payload["semantic_key"] == "resume-decision-finished"
+
+
+@pytest.mark.asyncio
+async def test_stream_main_agent_turn_skips_model_call_when_ack_is_already_persisted(
+    session, admin, monkeypatch
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="ack-retry-1"
+    )
+    runtime = BrainRuntimeGraph()
+    await record_runtime_event_once(
+        session,
+        org_id=task.org_id,
+        account_id=account.id,
+        run_id=run.id,
+        client_message_id=run.client_message_id,
+        event_type="brain.runtime.message_done",
+        semantic_key="00-decision:main-agent.acknowledgement",
+        payload={
+            "task_id": task.id,
+            "semantic_key": "00-decision:main-agent.acknowledgement",
+            "message": "persisted acknowledgement",
+        },
+    )
+
+    async def should_not_call(*_args, **_kwargs):
+        raise AssertionError("acknowledgement should reuse the persisted message")
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime._chat_main_agent",
+        should_not_call,
+    )
+
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        await runtime._stream_main_agent_turn(session, task)
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_stream_summary_turn_skips_model_call_when_summary_is_already_persisted(
+    session, admin, monkeypatch
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="summary-retry-1"
+    )
+    runtime = BrainRuntimeGraph()
+    await record_runtime_event_once(
+        session,
+        org_id=task.org_id,
+        account_id=account.id,
+        run_id=run.id,
+        client_message_id=run.client_message_id,
+        event_type="brain.runtime.message_done",
+        semantic_key="00-decision:main-agent.summary",
+        payload={
+            "task_id": task.id,
+            "semantic_key": "00-decision:main-agent.summary",
+            "message": "persisted summary",
+        },
+    )
+
+    async def should_not_call(*_args, **_kwargs):
+        raise AssertionError("summary should reuse the persisted message")
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime._chat_main_agent",
+        should_not_call,
+    )
+
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        await runtime._stream_summary_turn(
+            session,
+            task,
+            observations=[{"kind": "expert_result", "summary": "ready"}],
+        )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)

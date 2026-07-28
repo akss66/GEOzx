@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.base import AgentContext
 from app.agents.registry import AGENT_SPECS, AgentSpec, get_agent_spec
 from app.core.approval_audit import add_approval_requested
-from app.core.events import record_runtime_event_once
+from app.core.events import publish_realtime_event, record_runtime_event_once
 from app.core.workspace_access import require_account_access, require_project_access
 from app.models import (
     Account,
@@ -460,7 +460,7 @@ class AgentHarness:
         run = await session.get(AgentRun, run_id)
         if run is None or run.org_id != task.org_id:
             return
-        await record_runtime_event_once(
+        event, created = await record_runtime_event_once(
             session,
             org_id=task.org_id,
             account_id=account_id,
@@ -472,6 +472,14 @@ class AgentHarness:
             content_item_id=task.content_item_id,
             project_id=task.brief.project_id if task.brief else None,
         )
+        if created:
+            await publish_realtime_event(
+                event_type,
+                event.payload,
+                content_item_id=event.content_item_id,
+                project_id=event.project_id,
+                event_id=event.id,
+            )
 
     @staticmethod
     def _autonomous_runtime_tool_codes(management: dict) -> set[str]:
