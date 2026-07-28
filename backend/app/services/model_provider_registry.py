@@ -770,7 +770,12 @@ async def _fetch_remote_models(provider: ModelProvider) -> list[str]:
         headers["Authorization"] = f"Bearer {api_key}"
     url = f"{provider.base_url.rstrip('/')}/models"
     try:
-        response = await bounded_outbound_request("GET", url, headers=headers)
+        response = await bounded_outbound_request(
+            "GET",
+            url,
+            headers=headers,
+            _allow_mixed_dns=_is_trusted_deepseek_template(provider),
+        )
     except OutboundRequestTimeoutError as exc:
         raise ProviderUpstreamError("timeout") from exc
     except (OutboundRequestError, UnsafeOutboundURLError) as exc:

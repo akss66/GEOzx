@@ -182,7 +182,11 @@ def _build_pinned_url(
     return urlunsplit(("https", netloc, parsed.path, "", ""))
 
 
-async def _resolve_public_https_target(url: str) -> ValidatedOutboundTarget:
+async def _resolve_public_https_target(
+    url: str,
+    *,
+    allow_mixed_dns: bool = False,
+) -> ValidatedOutboundTarget:
     parsed, hostname, port = _parse_public_https_url(url)
     try:
         results = await asyncio.to_thread(
@@ -198,12 +202,18 @@ async def _resolve_public_https_target(url: str) -> ValidatedOutboundTarget:
     addresses = _resolved_addresses(results)
     if not addresses:
         raise UnsafeOutboundURLError("outbound hostname did not resolve to a public address")
-    if any(
-        address in _METADATA_ADDRESSES or not _is_public_address(address)
+    public_addresses = {
+        address
         for address in addresses
-    ):
+        if address not in _METADATA_ADDRESSES and _is_public_address(address)
+    }
+    if not public_addresses:
         raise UnsafeOutboundURLError("outbound hostname resolved to a non-public address")
-    ordered_addresses = tuple(sorted(addresses, key=lambda item: (item.version, item.packed)))
+    if not allow_mixed_dns and public_addresses != addresses:
+        raise UnsafeOutboundURLError("outbound hostname resolved to a non-public address")
+    ordered_addresses = tuple(
+        sorted(public_addresses, key=lambda item: (item.version, item.packed))
+    )
     selected_address = ordered_addresses[0]
     return ValidatedOutboundTarget(
         original_url=url,
@@ -258,13 +268,17 @@ async def bounded_outbound_stream(
     url: str,
     *,
     _transport: httpx.AsyncBaseTransport | None = None,
+    _allow_mixed_dns: bool = False,
     policy: OutboundRequestPolicy = DEFAULT_OUTBOUND_REQUEST_POLICY,
     **request_options: Any,
 ) -> AsyncIterator[BoundedOutboundStream]:
     """Revalidate, pin, and stream a bounded response without redirects or proxies."""
     try:
         async with asyncio.timeout(policy.total_timeout):
-            target = await _resolve_public_https_target(url)
+            target = await _resolve_public_https_target(
+                url,
+                allow_mixed_dns=_allow_mixed_dns,
+            )
             options = _validated_request_options(target, request_options)
             async with httpx.AsyncClient(
                 follow_redirects=False,
@@ -294,6 +308,7 @@ async def bounded_outbound_request(
     url: str,
     *,
     _transport: httpx.AsyncBaseTransport | None = None,
+    _allow_mixed_dns: bool = False,
     policy: OutboundRequestPolicy = DEFAULT_OUTBOUND_REQUEST_POLICY,
     **request_options: Any,
 ) -> httpx.Response:
@@ -302,6 +317,7 @@ async def bounded_outbound_request(
         method,
         url,
         _transport=_transport,
+        _allow_mixed_dns=_allow_mixed_dns,
         policy=policy,
         **request_options,
     ) as response:

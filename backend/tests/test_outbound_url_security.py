@@ -79,6 +79,31 @@ async def test_rejects_mixed_public_and_private_dns_answers(monkeypatch):
         await validate_public_https_url("https://api.example.com/v1")
 
 
+async def test_trusted_request_can_filter_mixed_dns_and_pin_public_answer(monkeypatch):
+    requests: list[httpx.Request] = []
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: _dns_results("93.184.216.34", "fd00::8"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"data": []}, request=request)
+
+    response = await bounded_outbound_request(
+        "GET",
+        "https://api.example.com/v1/models",
+        _transport=httpx.MockTransport(handler),
+        _allow_mixed_dns=True,
+    )
+
+    assert response.status_code == 200
+    assert requests[0].url == httpx.URL("https://93.184.216.34/v1/models")
+    assert requests[0].headers["host"] == "api.example.com"
+
+
 async def test_accepts_hostname_only_when_every_dns_answer_is_global(monkeypatch):
     monkeypatch.setattr(
         socket,
