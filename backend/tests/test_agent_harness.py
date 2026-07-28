@@ -242,10 +242,31 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     )
     deliverable_count = await session.scalar(
         select(func.count(Deliverable.id)).where(
-            Deliverable.content_item_id == result.deliverable.content_item_id
+            Deliverable.content_item_id == result.deliverable.content_item_id,
+            Deliverable.agent_code == result.deliverable.agent_code,
+            Deliverable.type == result.deliverable.type,
+            Deliverable.version == result.deliverable.version,
         )
     )
     assert deliverable_count == 1
+    completed_events = [
+        event
+        for event in (
+            await session.scalars(
+                select(Event).where(
+                    Event.type == "agent.harness.completed",
+                    Event.content_item_id == result.deliverable.content_item_id,
+                )
+            )
+        ).all()
+        if event.payload is not None
+        and event.payload.get("task_id") == task.id
+        and event.payload.get("run_id") == run.id
+        and event.payload.get("agent_code") == AgentCode.POSITIONING.value
+    ]
+    assert len(completed_events) == 1
+    assert completed_events[0].payload["invocation_id"] == result.invocation.id
+    assert completed_events[0].payload["deliverable_id"] == result.deliverable.id
     invocations = (
         await session.scalars(
             select(AgentInvocation).where(AgentInvocation.task_id == task.id)
