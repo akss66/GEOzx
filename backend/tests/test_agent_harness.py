@@ -385,6 +385,7 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
                 "content_item_id": content_item_id,
                 "project_id": project_id,
                 "event_id": event_id,
+                "in_transaction": session.in_transaction(),
             }
         )
 
@@ -473,6 +474,7 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
         "brain.runtime.subagent_completed",
     ]
     assert all(event["event_id"] is not None for event in successful_lifecycle)
+    assert all(event["in_transaction"] is False for event in successful_lifecycle)
 
     class FailingAdvertisingAgent(BaseAgent):
         code = AgentCode.ADVERTISER.value
@@ -525,6 +527,7 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
         "brain.runtime.subagent_failed",
     ]
     assert all(event["event_id"] is not None for event in failed_lifecycle)
+    assert all(event["in_transaction"] is False for event in failed_lifecycle)
 
 
 @pytest.mark.asyncio

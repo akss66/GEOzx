@@ -74,6 +74,15 @@ class AgentHarnessResult:
     knowledge_sources: list[KnowledgeEntry]
 
 
+@dataclass(frozen=True)
+class _RuntimeLifecycleBroadcast:
+    event_id: int
+    event_type: str
+    payload: dict
+    content_item_id: int | None
+    project_id: int | None
+
+
 _OPERATING_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
 _MANAGEMENT_TO_RUNTIME_TOOL = {
     "account_context": "account.profile",
@@ -170,7 +179,7 @@ class AgentHarness:
                 raise
             return await self._existing_result(session, task, existing)
         invocation_id = invocation.id
-        await self._record_runtime_lifecycle(
+        started_lifecycle = await self._record_runtime_lifecycle(
             session,
             task=task,
             account_id=account.id,
@@ -206,6 +215,7 @@ class AgentHarness:
             )
         )
         await session.commit()
+        await self._publish_runtime_lifecycle(started_lifecycle)
 
         knowledge_rows = (
             await list_agent_knowledge(
@@ -313,7 +323,7 @@ class AgentHarness:
                 failed.status = AgentInvocationStatus.FAILED
                 failed.failure_reason = type(exc).__name__
                 failed.finished_at = datetime.now(UTC)
-                await self._record_runtime_lifecycle(
+                failed_lifecycle = await self._record_runtime_lifecycle(
                     session,
                     task=task,
                     account_id=account.id,
@@ -329,6 +339,7 @@ class AgentHarness:
                     semantic_suffix="failed",
                 )
                 await session.commit()
+                await self._publish_runtime_lifecycle(failed_lifecycle)
             raise AgentHarnessError(f"{spec.name} execution failed") from exc
 
         payload_dict = payload.model_dump(mode="json")
@@ -391,7 +402,7 @@ class AgentHarness:
         invocation.status = AgentInvocationStatus.DONE
         invocation.output_summary = summary
         invocation.finished_at = datetime.now(UTC)
-        await self._record_runtime_lifecycle(
+        completed_lifecycle = await self._record_runtime_lifecycle(
             session,
             task=task,
             account_id=account.id,
@@ -435,6 +446,7 @@ class AgentHarness:
             body=f"{spec.name} has completed its work. Confirm whether to accept it.",
         )
         await session.commit()
+        await self._publish_runtime_lifecycle(completed_lifecycle)
         return AgentHarnessResult(
             task=task,
             invocation=invocation,
@@ -454,12 +466,12 @@ class AgentHarness:
         event_type: str,
         payload: dict,
         semantic_suffix: str,
-    ) -> None:
+    ) -> _RuntimeLifecycleBroadcast | None:
         if run_id is None:
-            return
+            return None
         run = await session.get(AgentRun, run_id)
         if run is None or run.org_id != task.org_id:
-            return
+            return None
         event, created = await record_runtime_event_once(
             session,
             org_id=task.org_id,
@@ -472,14 +484,29 @@ class AgentHarness:
             content_item_id=task.content_item_id,
             project_id=task.brief.project_id if task.brief else None,
         )
-        if created:
-            await publish_realtime_event(
-                event_type,
-                event.payload,
-                content_item_id=event.content_item_id,
-                project_id=event.project_id,
-                event_id=event.id,
-            )
+        if not created:
+            return None
+        return _RuntimeLifecycleBroadcast(
+            event_id=event.id,
+            event_type=event.type,
+            payload=dict(event.payload or {}),
+            content_item_id=event.content_item_id,
+            project_id=event.project_id,
+        )
+
+    @staticmethod
+    async def _publish_runtime_lifecycle(
+        lifecycle: _RuntimeLifecycleBroadcast | None,
+    ) -> None:
+        if lifecycle is None:
+            return
+        await publish_realtime_event(
+            lifecycle.event_type,
+            lifecycle.payload,
+            content_item_id=lifecycle.content_item_id,
+            project_id=lifecycle.project_id,
+            event_id=lifecycle.event_id,
+        )
 
     @staticmethod
     def _autonomous_runtime_tool_codes(management: dict) -> set[str]:
