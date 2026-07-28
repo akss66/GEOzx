@@ -35,6 +35,29 @@ const permission: AgentToolCall = {
 };
 
 describe("BrainComposer", () => {
+  it("starts compact and grows through six rows", () => {
+    render(
+      <BrainComposer
+        value=""
+        disabled={false}
+        loading={false}
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByPlaceholderText(
+      "输入目标、补充要求、打断指令，或直接问一个问题。",
+    );
+    expect(input).toHaveAttribute("data-autosize-min-rows", "1");
+    expect(input).toHaveAttribute("data-autosize-max-rows", "6");
+  });
+
   it("submits with Enter but keeps Shift+Enter for a newline", () => {
     const onSubmit = vi.fn();
     render(

@@ -111,7 +111,9 @@ export function BrainComposer({
             <Input.TextArea
               value={value}
               onChange={(event) => onChange(event.target.value)}
-              rows={3}
+              autoSize={{ minRows: 1, maxRows: 6 }}
+              data-autosize-min-rows="1"
+              data-autosize-max-rows="6"
               maxLength={420}
               showCount
               placeholder="输入目标、补充要求、打断指令，或直接问一个问题。"
@@ -151,7 +153,7 @@ export function BrainComposer({
                   size="large"
                   aria-label="发送给运营大脑"
                   icon={<SendOutlined />}
-                  disabled={disabled}
+                  disabled={disabled || value.trim().length === 0}
                   onClick={onSubmit}
                 />
               )}

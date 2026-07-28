@@ -632,6 +632,13 @@
     box-shadow 180ms ease;
 }
 
+.tz-brain-thread .dy-brain-composer-box[data-mode="message"] {
+  position: relative;
+  padding: 7px 52px 7px 14px;
+  border-radius: 26px;
+  box-shadow: 0 8px 24px rgba(42, 35, 27, 0.07);
+}
+
 .tz-brain-thread .dy-brain-composer-box[data-mode="permission"] {
   border-color: color-mix(in srgb, var(--tz-warning) 42%, var(--tz-line));
   background: color-mix(in srgb, var(--tz-warning) 4%, var(--tz-surface));
@@ -851,7 +858,7 @@
 .tz-brain-thread .dy-brain-composer-box .dy-brain-input.ant-input-textarea-affix-wrapper {
   display: block;
   width: 100%;
-  min-height: 64px;
+  min-height: 24px;
   padding: 0;
   border: 0 !important;
   background: transparent !important;
@@ -860,11 +867,14 @@
 
 .tz-brain-thread .dy-brain-composer-box .dy-brain-input textarea.ant-input {
   width: 100%;
-  min-height: 64px;
-  padding: 8px 7px;
+  min-height: 24px;
+  max-height: 144px;
+  padding: 5px 0;
   border: 0;
   background: transparent !important;
   box-shadow: none;
+  line-height: 24px;
+  overflow-y: auto !important;
   resize: none;
 }
 
@@ -874,6 +884,13 @@
   justify-content: space-between;
   gap: 16px;
   padding: 2px 2px 0;
+}
+
+.tz-brain-thread .dy-brain-composer-box[data-mode="message"] .dy-brain-composer-tools {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  padding: 0;
 }
 
 .tz-brain-thread .dy-brain-prompts {
@@ -886,14 +903,14 @@
 
 .tz-brain-thread .dy-brain-composer-tools > .ant-btn {
   display: inline-flex;
-  width: 40px;
-  min-width: 40px;
-  height: 40px;
-  min-height: 40px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border-radius: var(--tz-radius-control);
+  border-radius: 50%;
 }
 
 .tz-brain-thread .dy-brain-composer-tools > .dy-brain-stop-button {
