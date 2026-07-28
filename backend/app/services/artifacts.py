@@ -1,6 +1,8 @@
 """Account-authorized Artifact projection, versioning, and acceptance."""
 
+import re
 from collections.abc import Collection
+from dataclasses import dataclass
 from math import ceil
 from typing import Any
 
@@ -12,9 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workspace_access import require_account_access
 from app.models import (
+    Account,
+    AgentInvocation,
     AgentQualityScore,
+    AgentRun,
+    BrainTask,
     ContentItem,
     ConversationThread,
+    ConversationTurn,
     Deliverable,
     DeliverableAcceptance,
     SkillRun,
@@ -30,7 +37,7 @@ from app.schemas.artifacts import (
     ArtifactStatus,
     EvidenceRef,
 )
-from app.schemas.deliverable import validate_payload
+from app.schemas.deliverable import get_schema, validate_payload
 
 ARTIFACT_ACTION_ROLES = {
     WorkspaceRole.LEAD,
@@ -92,18 +99,49 @@ _SECTION_TITLES = {
     "response_guidelines": "回复指引",
     "content_opportunities": "内容机会",
 }
-_PRIVATE_PAYLOAD_KEYS = {
-    "acceptance_items",
-    "acceptance_checklist",
+_NON_SECTION_KEYS = {"title", "summary", "evidence_refs"}
+_INTERNAL_KEY_MARKERS = {
+    "acceptance",
+    "checklist",
+    "debug",
+    "kernel",
+    "policy",
     "prompt",
-    "system_prompt",
-    "model",
+    "trace",
+}
+_INTERNAL_COMPOUND_KEYS = {
     "model_config",
+    "raw_tool_log",
     "raw_tool_logs",
+    "tool_log",
     "tool_logs",
 }
-_NON_SECTION_KEYS = {"title", "summary", "evidence_refs"} | _PRIVATE_PAYLOAD_KEYS
-_GENERIC_ACCEPTANCE_TEXT = "confirm that this item"
+_INTERNAL_COMPACT_MARKERS = {
+    "acceptance",
+    "checklist",
+    "debug",
+    "kernel",
+    "modelconfig",
+    "policy",
+    "prompt",
+    "rawtoollog",
+    "toollog",
+    "trace",
+}
+_CONFIRMATION_PATTERNS = (
+    re.compile(
+        r"\b(?:please\s+)?confirm\b.{0,120}\b"
+        r"(?:that|this|the|selected|item|account|artifact)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:请|麻烦)?确认(?:该|此|当前|所选)(?:项|成果|账号|内容)"),
+)
+
+
+@dataclass(frozen=True)
+class _ArtifactProvenance:
+    quality: AgentQualityScore | None
+    task_id: int | None
 
 
 async def list_artifacts(
@@ -117,31 +155,49 @@ async def list_artifacts(
     page_size: int,
 ) -> ArtifactPageOut:
     """List only artifacts whose ContentItem is explicitly bound to the selected account."""
-    await require_account_access(session, user, account_id)
+    account = await require_account_access(session, user, account_id)
     filters = [ContentItem.account_id == account_id]
     if artifact_type is not None:
         filters.append(Deliverable.type == artifact_type)
     if artifact_status is not None:
         filters.append(Deliverable.status == _ARTIFACT_TO_STATUS[artifact_status])
 
-    total = (
-        await session.scalar(
-            select(func.count(Deliverable.id))
-            .join(ContentItem, ContentItem.id == Deliverable.content_item_id)
-            .where(*filters)
-        )
-    ) or 0
-    rows = list(
-        await session.scalars(
-            select(Deliverable)
-            .join(ContentItem, ContentItem.id == Deliverable.content_item_id)
-            .where(*filters)
-            .order_by(Deliverable.created_at.desc(), Deliverable.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
+    candidates = list(
+        (
+            await session.execute(
+                select(Deliverable, ContentItem)
+                .join(ContentItem, ContentItem.id == Deliverable.content_item_id)
+                .where(*filters)
+                .order_by(Deliverable.created_at.desc(), Deliverable.id.desc())
+            )
+        ).all()
     )
-    data = [await project_artifact(session, row, expected_account_id=account_id) for row in rows]
+    valid: list[tuple[Deliverable, ContentItem, _ArtifactProvenance]] = []
+    for deliverable, content in candidates:
+        provenance = await _load_valid_provenance(
+            session,
+            deliverable,
+            content,
+            expected_org_id=account.org_id,
+            expected_account_id=account.id,
+        )
+        if provenance is not None:
+            valid.append((deliverable, content, provenance))
+
+    total = len(valid)
+    start = (page - 1) * page_size
+    selected = valid[start : start + page_size]
+    data = [
+        await project_artifact(
+            session,
+            deliverable,
+            content=content,
+            expected_org_id=account.org_id,
+            expected_account_id=account.id,
+            provenance=provenance,
+        )
+        for deliverable, content, provenance in selected
+    ]
     return ArtifactPageOut(
         data=data,
         pagination=ArtifactPagination(
@@ -159,27 +215,37 @@ async def get_artifact(
     artifact_id: int,
     *,
     roles: Collection[WorkspaceRole] | None = None,
-) -> tuple[Deliverable, ContentItem]:
+) -> tuple[Deliverable, ContentItem, _ArtifactProvenance]:
     deliverable = await session.get(Deliverable, artifact_id)
     if deliverable is None:
         raise _artifact_not_found()
     content = await session.get(ContentItem, deliverable.content_item_id)
     if content is None or content.account_id is None:
         raise _artifact_not_found()
-    await require_account_access(session, user, content.account_id, roles=roles)
-    await _require_matching_provenance_account(session, deliverable, content.account_id)
-    return deliverable, content
+    account = await require_account_access(session, user, content.account_id, roles=roles)
+    provenance = await _load_valid_provenance(
+        session,
+        deliverable,
+        content,
+        expected_org_id=account.org_id,
+        expected_account_id=account.id,
+    )
+    if provenance is None:
+        raise _artifact_not_found()
+    return deliverable, content, provenance
 
 
 async def get_artifact_out(
     session: AsyncSession, user: User, artifact_id: int
 ) -> ArtifactOut:
-    deliverable, content = await get_artifact(session, user, artifact_id)
+    deliverable, content, provenance = await get_artifact(session, user, artifact_id)
     return await project_artifact(
         session,
         deliverable,
         content=content,
+        expected_org_id=user.org_id,
         expected_account_id=content.account_id,
+        provenance=provenance,
     )
 
 
@@ -191,7 +257,7 @@ async def create_artifact_revision(
     payload: dict[str, Any],
     note: str | None,
 ) -> ArtifactOut:
-    source, content = await get_artifact(
+    source, content, _ = await get_artifact(
         session,
         user,
         artifact_id,
@@ -253,6 +319,7 @@ async def create_artifact_revision(
         session,
         revision,
         content=content,
+        expected_org_id=user.org_id,
         expected_account_id=content.account_id,
     )
 
@@ -263,7 +330,7 @@ async def accept_artifact(
     *,
     artifact_id: int,
 ) -> ArtifactOut:
-    selected, content = await get_artifact(
+    selected, content, provenance = await get_artifact(
         session,
         user,
         artifact_id,
@@ -292,7 +359,9 @@ async def accept_artifact(
         session,
         selected,
         content=content,
+        expected_org_id=user.org_id,
         expected_account_id=content.account_id,
+        provenance=provenance,
     )
 
 
@@ -301,38 +370,30 @@ async def project_artifact(
     deliverable: Deliverable,
     *,
     content: ContentItem | None = None,
-    expected_account_id: int | None = None,
+    expected_org_id: int,
+    expected_account_id: int,
+    provenance: _ArtifactProvenance | None = None,
 ) -> ArtifactOut:
     """Create the single Artifact identity consumed by list and detail surfaces."""
     content = content or await session.get(ContentItem, deliverable.content_item_id)
-    if (
-        content is None
-        or content.account_id is None
-        or (expected_account_id is not None and content.account_id != expected_account_id)
-    ):
+    if content is None or content.account_id != expected_account_id:
         raise _artifact_not_found()
-    await _require_matching_provenance_account(session, deliverable, content.account_id)
-
-    quality = await session.scalar(
-        select(AgentQualityScore)
-        .where(AgentQualityScore.deliverable_id == deliverable.id)
-        .order_by(AgentQualityScore.iteration.desc(), AgentQualityScore.id.desc())
-        .limit(1)
+    provenance = provenance or await _load_valid_provenance(
+        session,
+        deliverable,
+        content,
+        expected_org_id=expected_org_id,
+        expected_account_id=expected_account_id,
     )
-    task_id = quality.task_id if quality is not None else None
-    if task_id is None and deliverable.skill_run_id is not None:
-        task_id = await session.scalar(
-            select(SkillRun.task_id).where(SkillRun.id == deliverable.skill_run_id)
-        )
-    if task_id is None:
-        task_id = await session.scalar(
-            select(DeliverableAcceptance.task_id)
-            .where(DeliverableAcceptance.deliverable_id == deliverable.id)
-            .order_by(DeliverableAcceptance.id.desc())
-            .limit(1)
-        )
+    if provenance is None:
+        raise _artifact_not_found()
+    quality = provenance.quality
 
-    payload = deliverable.payload if isinstance(deliverable.payload, dict) else {}
+    raw_payload = deliverable.payload if isinstance(deliverable.payload, dict) else {}
+    payload = _safe_payload(deliverable.type, raw_payload)
+    quality_issues = (
+        _safe_business_value(list(quality.issues or [])) if quality is not None else []
+    )
     return ArtifactOut(
         id=deliverable.id,
         account_id=content.account_id,
@@ -340,19 +401,19 @@ async def project_artifact(
         turn_id=deliverable.turn_id,
         run_id=deliverable.run_id,
         skill_run_id=deliverable.skill_run_id,
-        task_id=task_id,
+        task_id=provenance.task_id,
         artifact_type=deliverable.type.value,
         title=_artifact_title(payload, content),
         version=deliverable.version,
         status=_STATUS_TO_ARTIFACT[deliverable.status],
-        summary=_artifact_summary(payload, deliverable, content),
-        sections=_artifact_sections(payload),
+        summary=_artifact_summary(payload, content),
+        sections=_artifact_sections(deliverable.type, payload),
         evidence_refs=_evidence_refs(payload, quality),
         quality=(
             ArtifactQuality(
                 score=float(quality.score),
                 passed=quality.passed,
-                issues=list(quality.issues or []),
+                issues=quality_issues if isinstance(quality_issues, list) else [],
             )
             if quality is not None
             else None
@@ -364,10 +425,14 @@ async def project_artifact(
 def _validate_revision_payload(
     deliverable_type: DeliverableType, payload: dict[str, Any]
 ) -> dict[str, Any]:
+    schema = get_schema(deliverable_type)
+    if schema is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="成果内容不符合当前类型要求",
+        )
     business_payload = {
-        key: value
-        for key, value in payload.items()
-        if key not in _PRIVATE_PAYLOAD_KEYS and key != "evidence_refs"
+        key: payload[key] for key in schema.model_fields if key in payload
     }
     try:
         return validate_payload(deliverable_type, business_payload).model_dump(mode="json")
@@ -378,18 +443,135 @@ def _validate_revision_payload(
         ) from exc
 
 
-async def _require_matching_provenance_account(
-    session: AsyncSession, deliverable: Deliverable, account_id: int
-) -> None:
-    if deliverable.thread_id is None:
-        return
-    thread_account_id = await session.scalar(
-        select(ConversationThread.account_id).where(
-            ConversationThread.id == deliverable.thread_id
+async def _load_valid_provenance(
+    session: AsyncSession,
+    deliverable: Deliverable,
+    content: ContentItem,
+    *,
+    expected_org_id: int,
+    expected_account_id: int,
+) -> _ArtifactProvenance | None:
+    """Return provenance only when every non-null link stays in one account chain."""
+    if content.account_id != expected_account_id:
+        return None
+    account = await session.get(Account, expected_account_id)
+    if account is None or account.org_id != expected_org_id:
+        return None
+
+    thread: ConversationThread | None = None
+    if deliverable.thread_id is not None:
+        thread = await session.get(ConversationThread, deliverable.thread_id)
+        if (
+            thread is None
+            or thread.org_id != expected_org_id
+            or thread.account_id != expected_account_id
+        ):
+            return None
+
+    turn: ConversationTurn | None = None
+    if deliverable.turn_id is not None:
+        if thread is None:
+            return None
+        turn = await session.get(ConversationTurn, deliverable.turn_id)
+        if (
+            turn is None
+            or turn.org_id != expected_org_id
+            or turn.thread_id != thread.id
+        ):
+            return None
+
+    run: AgentRun | None = None
+    if deliverable.run_id is not None:
+        if thread is None or turn is None:
+            return None
+        run = await session.get(AgentRun, deliverable.run_id)
+        if (
+            run is None
+            or run.org_id != expected_org_id
+            or run.thread_id != thread.id
+            or run.turn_id != turn.id
+        ):
+            return None
+
+    skill_run: SkillRun | None = None
+    if deliverable.skill_run_id is not None:
+        if thread is None or turn is None or run is None:
+            return None
+        skill_run = await session.get(SkillRun, deliverable.skill_run_id)
+        if (
+            skill_run is None
+            or skill_run.org_id != expected_org_id
+            or skill_run.thread_id != thread.id
+            or skill_run.turn_id != turn.id
+            or skill_run.run_id != run.id
+        ):
+            return None
+
+    task_ids: set[int] = set()
+    if run is not None and run.task_id is not None:
+        task_ids.add(run.task_id)
+    if skill_run is not None and skill_run.task_id is not None:
+        task_ids.add(skill_run.task_id)
+
+    quality_rows = list(
+        await session.scalars(
+            select(AgentQualityScore)
+            .where(AgentQualityScore.deliverable_id == deliverable.id)
+            .order_by(AgentQualityScore.iteration.desc(), AgentQualityScore.id.desc())
         )
     )
-    if thread_account_id != account_id:
-        raise _artifact_not_found()
+    for quality in quality_rows:
+        if (
+            quality.org_id != expected_org_id
+            or not _optional_link_matches(quality.thread_id, deliverable.thread_id)
+            or not _optional_link_matches(quality.turn_id, deliverable.turn_id)
+            or not _optional_link_matches(quality.run_id, deliverable.run_id)
+            or not _optional_link_matches(quality.skill_run_id, deliverable.skill_run_id)
+        ):
+            return None
+        task_ids.add(quality.task_id)
+        if quality.invocation_id is not None:
+            invocation = await session.get(AgentInvocation, quality.invocation_id)
+            if (
+                invocation is None
+                or invocation.task_id != quality.task_id
+                or not _optional_link_matches(invocation.thread_id, deliverable.thread_id)
+                or not _optional_link_matches(invocation.turn_id, deliverable.turn_id)
+                or not _optional_link_matches(invocation.run_id, deliverable.run_id)
+                or not _optional_link_matches(
+                    invocation.skill_run_id, deliverable.skill_run_id
+                )
+            ):
+                return None
+
+    acceptance_rows = list(
+        await session.scalars(
+            select(DeliverableAcceptance).where(
+                DeliverableAcceptance.deliverable_id == deliverable.id
+            )
+        )
+    )
+    task_ids.update(row.task_id for row in acceptance_rows)
+    if len(task_ids) > 1:
+        return None
+    task_id = next(iter(task_ids), None)
+    if task_id is not None:
+        task = await session.get(BrainTask, task_id)
+        if (
+            task is None
+            or task.org_id != expected_org_id
+            or task.content_item_id != content.id
+        ):
+            return None
+
+    return _ArtifactProvenance(
+        quality=quality_rows[0] if quality_rows else None,
+        task_id=task_id,
+    )
+
+
+def _optional_link_matches(value: int | None, expected: int | None) -> bool:
+    return value is None or value == expected
 
 
 def _artifact_title(payload: dict[str, Any], content: ContentItem) -> str:
@@ -397,30 +579,44 @@ def _artifact_title(payload: dict[str, Any], content: ContentItem) -> str:
     return title.strip() if isinstance(title, str) and title.strip() else content.title
 
 
-def _artifact_summary(
-    payload: dict[str, Any], deliverable: Deliverable, content: ContentItem
-) -> str:
+def _artifact_summary(payload: dict[str, Any], content: ContentItem) -> str:
     summary = payload.get("summary")
     if isinstance(summary, str) and summary.strip():
         return summary.strip()
-    if deliverable.note and deliverable.note.strip():
-        return deliverable.note.strip()
     return content.title
 
 
-def _artifact_sections(payload: dict[str, Any]) -> list[ArtifactSection]:
+def _safe_payload(
+    deliverable_type: DeliverableType, payload: dict[str, Any]
+) -> dict[str, Any]:
+    schema = get_schema(deliverable_type)
+    allowed_fields = set(schema.model_fields) if schema is not None else set()
+    safe: dict[str, Any] = {}
+    for key in allowed_fields:
+        if key not in payload:
+            continue
+        cleaned = _safe_business_value(payload[key])
+        if cleaned is not None:
+            safe[key] = cleaned
+    if isinstance(payload.get("evidence_refs"), list):
+        safe["evidence_refs"] = payload["evidence_refs"]
+    return safe
+
+
+def _artifact_sections(
+    deliverable_type: DeliverableType, payload: dict[str, Any]
+) -> list[ArtifactSection]:
+    schema = get_schema(deliverable_type)
+    allowed_fields = set(schema.model_fields) if schema is not None else set()
     sections: list[ArtifactSection] = []
     for key, value in payload.items():
-        if key in _NON_SECTION_KEYS or value is None:
-            continue
-        safe_value = _safe_business_value(value)
-        if safe_value is None:
+        if key not in allowed_fields or key in _NON_SECTION_KEYS or value is None:
             continue
         sections.append(
             ArtifactSection(
                 key=key,
                 title=_SECTION_TITLES.get(key, _humanize_key(key)),
-                content=safe_value,
+                content=value,
             )
         )
     return sections
@@ -428,7 +624,7 @@ def _artifact_sections(payload: dict[str, Any]) -> list[ArtifactSection]:
 
 def _safe_business_value(value: Any) -> str | list[Any] | dict[str, Any] | None:
     if isinstance(value, str):
-        if _GENERIC_ACCEPTANCE_TEXT in value.lower():
+        if _looks_like_internal_confirmation(value):
             return None
         return value
     if isinstance(value, list):
@@ -442,10 +638,26 @@ def _safe_business_value(value: Any) -> str | list[Any] | dict[str, Any] | None:
         return {
             str(key): cleaned
             for key, item in value.items()
-            if key not in _PRIVATE_PAYLOAD_KEYS
+            if not _is_internal_key(str(key))
             and (cleaned := _safe_business_value(item)) is not None
         }
     return str(value)
+
+
+def _is_internal_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    if normalized in _INTERNAL_COMPOUND_KEYS:
+        return True
+    tokens = set(normalized.split("_"))
+    compact = normalized.replace("_", "")
+    return bool(tokens & _INTERNAL_KEY_MARKERS) or any(
+        marker in compact for marker in _INTERNAL_COMPACT_MARKERS
+    )
+
+
+def _looks_like_internal_confirmation(value: str) -> bool:
+    normalized = " ".join(value.split())
+    return any(pattern.search(normalized) for pattern in _CONFIRMATION_PATTERNS)
 
 
 def _evidence_refs(
@@ -469,14 +681,21 @@ def _evidence_refs(
             evidence_id = int(raw_id)
         except (TypeError, ValueError):
             continue
-        if not isinstance(kind, str) or not kind.strip():
+        if (
+            not isinstance(kind, str)
+            or not kind.strip()
+            or _is_internal_key(kind)
+        ):
             continue
         identity = (kind, evidence_id)
         if identity in seen:
             continue
         seen.add(identity)
         label = candidate.get("label") or candidate.get("metric") or f"{kind} #{evidence_id}"
-        refs.append(EvidenceRef(kind=kind, id=evidence_id, label=str(label)))
+        safe_label = str(label)
+        if _looks_like_internal_confirmation(safe_label):
+            safe_label = f"{kind} #{evidence_id}"
+        refs.append(EvidenceRef(kind=kind, id=evidence_id, label=safe_label))
     return refs
 
 

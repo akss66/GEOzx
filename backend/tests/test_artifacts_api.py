@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     Account,
@@ -485,3 +486,317 @@ async def test_reviewer_cannot_revise_or_accept_artifact(client, session, admin,
 
     assert revision.status_code == 403
     assert acceptance.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_corrupt_cross_account_provenance_is_hidden_before_pagination_and_actions(
+    client, session, admin
+):
+    account_a = await _seed_artifact(session, admin, account_name="provenance-a")
+    account_b = await _seed_artifact(session, admin, account_name="provenance-b")
+    corrupt_turn = Deliverable(
+        content_item_id=account_a[2].id,
+        thread_id=account_a[3].id,
+        turn_id=account_b[4].id,
+        agent_code="06-operator",
+        type=DeliverableType.REVIEW_REPORT,
+        version=2,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=_review_payload(summary="foreign turn must never be exposed"),
+    )
+    corrupt_run = Deliverable(
+        content_item_id=account_a[2].id,
+        thread_id=account_a[3].id,
+        turn_id=account_a[4].id,
+        run_id=account_b[6].id,
+        agent_code="06-operator",
+        type=DeliverableType.REVIEW_REPORT,
+        version=3,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=_review_payload(summary="foreign run must never be exposed"),
+    )
+    corrupt_skill_run = Deliverable(
+        content_item_id=account_a[2].id,
+        thread_id=account_a[3].id,
+        turn_id=account_a[4].id,
+        run_id=account_a[6].id,
+        skill_run_id=account_b[7].id,
+        agent_code="06-operator",
+        type=DeliverableType.REVIEW_REPORT,
+        version=4,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=_review_payload(summary="foreign skill run must never be exposed"),
+    )
+    corrupt_quality_task = Deliverable(
+        content_item_id=account_a[2].id,
+        thread_id=account_a[3].id,
+        turn_id=account_a[4].id,
+        run_id=account_a[6].id,
+        skill_run_id=account_a[7].id,
+        agent_code="06-operator",
+        type=DeliverableType.REVIEW_REPORT,
+        version=5,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=_review_payload(summary="foreign quality task must never be exposed"),
+    )
+    corrupt_artifacts = [
+        corrupt_turn,
+        corrupt_run,
+        corrupt_skill_run,
+        corrupt_quality_task,
+    ]
+    session.add_all(corrupt_artifacts)
+    await session.flush()
+    session.add(
+        AgentQualityScore(
+            org_id=admin.org_id,
+            task_id=account_b[5].id,
+            run_id=account_a[6].id,
+            thread_id=account_a[3].id,
+            turn_id=account_a[4].id,
+            skill_run_id=account_a[7].id,
+            deliverable_id=corrupt_quality_task.id,
+            score=99,
+            dimensions={},
+            issues=["cross-account-quality-must-not-leak"],
+            suggestions=[],
+            passed=True,
+            iteration=0,
+            evidence_refs=[],
+        )
+    )
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+
+    listing = await client.get(
+        f"/artifacts?account_id={account_a[1].id}&page=1&page_size=20",
+        headers=headers,
+    )
+
+    assert listing.status_code == 200
+    assert listing.json()["pagination"]["total"] == 1
+    assert [row["id"] for row in listing.json()["data"]] == [account_a[8].id]
+    listed = listing.json()["data"][0]
+    assert listed["turn_id"] == account_a[4].id != account_b[4].id
+    assert listed["run_id"] == account_a[6].id != account_b[6].id
+    assert listed["skill_run_id"] == account_a[7].id != account_b[7].id
+    assert listed["task_id"] == account_a[5].id != account_b[5].id
+    serialized = str(listing.json())
+    assert "cross-account-quality-must-not-leak" not in serialized
+    for corrupt in corrupt_artifacts:
+        detail = await client.get(f"/artifacts/{corrupt.id}", headers=headers)
+        revision = await client.post(
+            "/artifact-revisions",
+            headers=headers,
+            json={"artifact_id": corrupt.id, "payload": _review_payload()},
+        )
+        acceptance = await client.post(
+            "/artifact-acceptances",
+            headers=headers,
+            json={"artifact_id": corrupt.id},
+        )
+        assert detail.status_code == 404
+        assert revision.status_code == 404
+        assert acceptance.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_artifact_projection_recursively_removes_internal_data_but_keeps_art_prompts(
+    client, session, admin
+):
+    unsafe_payload = _review_payload()
+    unsafe_payload["key_metrics"] = {
+        "engagement": "5.2%",
+        "raw_tool_log": {"authorization": "secret-tool-output"},
+        "nested": {
+            "debug_trace": "private-debug-trace",
+            "model-config": {"temperature": 0.9},
+            "rawToolLog": "private-camel-tool-log",
+            "systemPrompt": "private-camel-system-prompt",
+            "policy_kernel": "private-policy",
+            "business_value": "retained-business-value",
+        },
+    }
+    unsafe_payload["highlights"] = [
+        "legitimate-highlight",
+        "Please CONFIRM   that the selected account matches this artifact.",
+    ]
+    unsafe_payload["internal_checklist"] = ["private-checklist-copy"]
+    unsafe_payload["runtime_trace"] = {"step": "private-runtime-step"}
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="sanitizer-account",
+        payload=unsafe_payload,
+    )
+    art_prompt = Deliverable(
+        content_item_id=seeded[2].id,
+        thread_id=seeded[3].id,
+        turn_id=seeded[4].id,
+        run_id=seeded[6].id,
+        skill_run_id=seeded[7].id,
+        agent_code="03-art-director",
+        type=DeliverableType.ART_PROMPT,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={
+            "visual_style": "clean editorial",
+            "prompts": ["sunlit glass office", "close-up installation detail"],
+            "negative_prompt": "watermark, distorted hands",
+            "aspect_ratio": "9:16",
+            "system_prompt": "private-system-prompt",
+            "debug": {"trace": "private-art-debug"},
+        },
+    )
+    session.add(art_prompt)
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+
+    review = await client.get(f"/artifacts/{seeded[8].id}", headers=headers)
+    art = await client.get(f"/artifacts/{art_prompt.id}", headers=headers)
+
+    assert review.status_code == 200
+    review_serialized = str(review.json())
+    assert "retained-business-value" in review_serialized
+    assert "legitimate-highlight" in review_serialized
+    for private_value in [
+        "secret-tool-output",
+        "private-debug-trace",
+        "private-camel-tool-log",
+        "private-camel-system-prompt",
+        "private-policy",
+        "private-checklist-copy",
+        "private-runtime-step",
+        "selected account matches",
+    ]:
+        assert private_value not in review_serialized
+
+    assert art.status_code == 200
+    art_sections = {section["key"]: section["content"] for section in art.json()["sections"]}
+    assert art_sections["prompts"] == [
+        "sunlit glass office",
+        "close-up installation detail",
+    ]
+    assert art_sections["negative_prompt"] == "watermark, distorted hands"
+    assert "private-system-prompt" not in str(art.json())
+    assert "private-art-debug" not in str(art.json())
+
+
+@pytest.mark.asyncio
+async def test_every_deliverable_status_maps_and_filters_to_business_status(
+    client, session, admin
+):
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="status-account",
+        status=DeliverableStatus.DRAFT,
+    )
+    statuses = [
+        (DeliverableStatus.DRAFT, "draft"),
+        (DeliverableStatus.PENDING_REVIEW, "ready_for_review"),
+        (DeliverableStatus.APPROVED, "accepted"),
+        (DeliverableStatus.REJECTED, "revision_requested"),
+        (DeliverableStatus.SUPERSEDED, "superseded"),
+    ]
+    artifacts = {DeliverableStatus.DRAFT: seeded[8]}
+    for version, (internal_status, _business_status) in enumerate(statuses[1:], start=2):
+        row = Deliverable(
+            content_item_id=seeded[2].id,
+            thread_id=seeded[3].id,
+            turn_id=seeded[4].id,
+            run_id=seeded[6].id,
+            skill_run_id=seeded[7].id,
+            agent_code="06-operator",
+            type=DeliverableType.REVIEW_REPORT,
+            version=version,
+            status=internal_status,
+            payload=_review_payload(summary=f"status-{internal_status.value}"),
+        )
+        session.add(row)
+        artifacts[internal_status] = row
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+
+    for internal_status, business_status in statuses:
+        response = await client.get(
+            f"/artifacts?account_id={seeded[1].id}&status={business_status}",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["pagination"]["total"] == 1
+        assert response.json()["data"][0]["id"] == artifacts[internal_status].id
+        assert response.json()["data"][0]["status"] == business_status
+
+
+@pytest.mark.asyncio
+async def test_invalid_revision_does_not_supersede_source(client, session, admin):
+    seeded = await _seed_artifact(session, admin, account_name="invalid-revision")
+    source = seeded[8]
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+
+    response = await client.post(
+        "/artifact-revisions",
+        headers=headers,
+        json={"artifact_id": source.id, "payload": {"period": "missing required fields"}},
+    )
+
+    assert response.status_code == 422
+    await session.refresh(source)
+    assert source.status == DeliverableStatus.PENDING_REVIEW
+    versions = list(
+        await session.scalars(
+            select(Deliverable).where(
+                Deliverable.content_item_id == seeded[2].id,
+                Deliverable.type == DeliverableType.REVIEW_REPORT,
+            )
+        )
+    )
+    assert [row.version for row in versions] == [1]
+
+
+@pytest.mark.asyncio
+async def test_revision_integrity_race_rolls_back_without_duplicate_version(
+    client, session, admin, monkeypatch
+):
+    seeded = await _seed_artifact(session, admin, account_name="revision-race")
+    source = seeded[8]
+    content_item_id = source.content_item_id
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+    original_flush = session.flush
+
+    async def collide_on_revision(objects=None):
+        if any(
+            isinstance(row, Deliverable)
+            and row.content_item_id == source.content_item_id
+            and row.type == source.type
+            and row.version == 2
+            for row in session.new
+        ):
+            raise IntegrityError("INSERT deliverables", {}, Exception("unique collision"))
+        return await original_flush(objects)
+
+    monkeypatch.setattr(session, "flush", collide_on_revision)
+    response = await client.post(
+        "/artifact-revisions",
+        headers=headers,
+        json={"artifact_id": source.id, "payload": _review_payload(summary="race loser")},
+    )
+
+    assert response.status_code == 409
+    await session.refresh(source)
+    assert source.status == DeliverableStatus.PENDING_REVIEW
+    versions = list(
+            await session.scalars(
+                select(Deliverable).where(
+                    Deliverable.content_item_id == content_item_id,
+                    Deliverable.type == DeliverableType.REVIEW_REPORT,
+                )
+        )
+    )
+    assert [row.version for row in versions] == [1]
