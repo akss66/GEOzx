@@ -20,11 +20,18 @@ const INITIAL_FILTERS: Filters = {
 };
 
 const STATUS_OPTIONS: Array<{ value: ArtifactStatus; label: string }> = [
-  { value: "draft", label: "Draft" },
-  { value: "ready_for_review", label: "Ready for review" },
-  { value: "accepted", label: "Accepted" },
-  { value: "revision_requested", label: "Revision requested" },
-  { value: "superseded", label: "Superseded" },
+  { value: "draft", label: "草稿" },
+  { value: "ready_for_review", label: "待采用" },
+  { value: "accepted", label: "已采用" },
+  { value: "revision_requested", label: "修改中" },
+  { value: "superseded", label: "已更新" },
+];
+
+const ARTIFACT_TYPE_OPTIONS = [
+  { value: "account_inspection_report", label: "账号体检报告" },
+  { value: "weekly_review", label: "周度复盘报告" },
+  { value: "content_strategy", label: "内容策略" },
+  { value: "publish_plan", label: "发布计划" },
 ];
 
 export function ArtifactCenter({
@@ -75,90 +82,93 @@ export function ArtifactCenter({
     () => accountArtifacts.filter((artifact) => isInDateRange(artifact.created_at, filters)),
     [accountArtifacts, filters],
   );
-  const typeOptions = useMemo(
-    () => Array.from(new Set(accountArtifacts.map((artifact) => artifact.artifact_type))).sort(),
-    [accountArtifacts],
-  );
-
   const updateFilter = <Key extends keyof Filters>(key: Key, value: Filters[Key]) => {
     setPage(1);
     setFilters((current) => ({ ...current, [key]: value }));
   };
 
   if (accountId == null) {
-    return <section className="tz-artifact-center" aria-label="Artifact center">Select an account to view its results.</section>;
+    return <section className="tz-artifact-center" aria-label="成果中心">请先选择账号，再查看该账号的正式成果。</section>;
   }
 
   return (
-    <section className="tz-artifact-center" aria-label="Artifact center">
+    <section className="tz-artifact-center" aria-label="成果中心">
       <header className="tz-artifact-center__header">
         <div>
-          <span>Account results</span>
-          <h2>Artifacts</h2>
+          <span>当前账号</span>
+          <h2>成果中心</h2>
         </div>
-        <small>{filters.createdFrom || filters.createdTo ? "Current page only" : `Page ${page}`}</small>
+        <small>{filters.createdFrom || filters.createdTo ? "仅筛当前页" : `第 ${page} 页`}</small>
       </header>
-      <div className="tz-artifact-center__filters" aria-label="Artifact filters">
+      <div className="tz-artifact-center__filters" aria-label="成果筛选">
         <label>
-          Artifact type
+          成果类型
           <select value={filters.artifactType} onChange={(event) => updateFilter("artifactType", event.target.value)}>
-            <option value="">All types</option>
-            {typeOptions.map((type) => <option key={type} value={type}>{type}</option>)}
+            <option value="">全部类型</option>
+            {ARTIFACT_TYPE_OPTIONS.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
           </select>
         </label>
         <label>
-          Artifact status
+          状态
           <select value={filters.status} onChange={(event) => updateFilter("status", event.target.value as Filters["status"])}>
-            <option value="">All statuses</option>
+            <option value="">全部状态</option>
             {STATUS_OPTIONS.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}
           </select>
         </label>
         <label>
-          Created from
+          创建时间（起）
           <input type="date" value={filters.createdFrom} onChange={(event) => updateFilter("createdFrom", event.target.value)} />
         </label>
         <label>
-          Created to
+          创建时间（止）
           <input type="date" value={filters.createdTo} onChange={(event) => updateFilter("createdTo", event.target.value)} />
         </label>
       </div>
 
-      {query.isPending ? <p role="status">Loading artifacts…</p> : null}
+      {query.isPending ? <p role="status">正在加载成果…</p> : null}
       {query.isError ? (
         <div className="tz-artifact-center__error" role="alert">
-          <p>Artifacts are temporarily unavailable.</p>
-          <Button onClick={() => void query.refetch()} aria-label="Retry artifacts">Retry</Button>
+          <p>成果暂时无法加载，请重试。</p>
+          <Button onClick={() => void query.refetch()} aria-label="重试加载成果">重新加载</Button>
         </div>
       ) : null}
       {!query.isPending && !query.isError && visibleArtifacts.length === 0 ? (
-        <p className="tz-artifact-center__empty">No results match the current account and filters.</p>
+        <p className="tz-artifact-center__empty">当前账号下没有符合筛选条件的成果。</p>
       ) : null}
       <div className="tz-artifact-center__list">
         {visibleArtifacts.map((artifact) => (
           <article key={artifact.id} className="tz-artifact-center__row">
             <div>
               <strong>{artifact.title}</strong>
-              <span>{artifact.artifact_type} · V{artifact.version} · {artifact.status}</span>
+              <span>{artifactTypeLabel(artifact.artifact_type)} · V{artifact.version} · {statusLabel(artifact.status)}</span>
             </div>
-            <Button onClick={() => onSelect(artifact)} aria-label={`Open ${artifact.title}`}>Open</Button>
+            <Button onClick={() => onSelect(artifact)} aria-label={`打开成果：${artifact.title}`}>查看</Button>
           </article>
         ))}
       </div>
       {query.data && query.data.pagination.pages > 1 ? (
         <footer className="tz-artifact-center__pagination">
-          <Button disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Previous page</Button>
-          <span>Page {page} of {query.data.pagination.pages}</span>
+          <Button disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>上一页</Button>
+          <span>第 {page} / {query.data.pagination.pages} 页</span>
           <Button
             disabled={page >= query.data.pagination.pages}
             onClick={() => setPage((current) => current + 1)}
-            aria-label="Next page"
+            aria-label="下一页"
           >
-            Next page
+            下一页
           </Button>
         </footer>
       ) : null}
     </section>
   );
+}
+
+function artifactTypeLabel(value: string) {
+  return ARTIFACT_TYPE_OPTIONS.find((option) => option.value === value)?.label ?? "其他成果";
+}
+
+function statusLabel(value: ArtifactStatus) {
+  return STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
 function isInDateRange(createdAt: string, filters: Filters) {

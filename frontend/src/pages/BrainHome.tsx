@@ -414,6 +414,10 @@ export default function BrainHome() {
         return;
       }
       setArtifactRevisionChains((current) => updateExistingArtifactChain(current, accepted));
+      setSelectedArtifact((current) => current?.id === input.sourceArtifact.id
+        && current.account_id === input.sourceArtifact.account_id
+        ? accepted
+        : current);
       setArtifactRefreshKey((value) => value + 1);
       void qc.invalidateQueries({ queryKey: ["account-artifacts", input.sourceArtifact.account_id] });
       if (activeConversationThreadId != null) {
@@ -443,6 +447,10 @@ export default function BrainHome() {
       }
       setArtifactRevisionChains((current) => appendArtifactRevision(current, input.sourceArtifact, revision));
       setArtifactSourceOverrides((current) => supersedeRootArtifact(current, input.sourceArtifact));
+      setSelectedArtifact((current) => current?.id === input.sourceArtifact.id
+        && current.account_id === input.sourceArtifact.account_id
+        ? revision
+        : current);
       setArtifactRefreshKey((value) => value + 1);
       void qc.invalidateQueries({ queryKey: ["account-artifacts", input.sourceArtifact.account_id] });
       if (activeConversationThreadId != null) {
@@ -580,20 +588,29 @@ export default function BrainHome() {
 
   useEffect(() => {
     if (!sourceReturnTarget) return;
+    if (sourceReturnTarget.accountId !== effectiveAccount?.id) {
+      setSourceReturnTarget(null);
+      return;
+    }
     if (conversationQuery.isError) {
-      setSourceReturnError("The source conversation could not be loaded. Retry from the result center.");
+      setSourceReturnError("来源对话暂时无法加载，请在成果中心重试。");
       setSourceReturnTarget(null);
       return;
     }
     const source = conversationQuery.data;
-    if (!source || source.id !== sourceReturnTarget.threadId || source.account_id !== sourceReturnTarget.accountId) return;
+    if (!source) return;
+    if (source.id !== sourceReturnTarget.threadId || source.account_id !== sourceReturnTarget.accountId) {
+      setSourceReturnError("来源对话与当前成果不匹配，请在成果中心重试。");
+      setSourceReturnTarget(null);
+      return;
+    }
     if (!source.turns.some((turn) => turn.id === sourceReturnTarget.turnId)) {
-      setSourceReturnError("The source turn is unavailable. Retry from the result center.");
+      setSourceReturnError("来源对话未包含该成果所在轮次，请在成果中心重试。");
       setSourceReturnTarget(null);
       return;
     }
     setWorkspaceMode("conversation");
-  }, [conversationQuery.data, conversationQuery.isError, sourceReturnTarget]);
+  }, [conversationQuery.data, conversationQuery.isError, effectiveAccount?.id, sourceReturnTarget]);
 
   useEffect(() => {
     if (
@@ -716,7 +733,7 @@ export default function BrainHome() {
     setSourceReturnError(null);
   };
 
-  const returnToArtifactSource = () => {
+  const returnToArtifactSource = (retry = false) => {
     if (
       !selectedArtifact
       || !effectiveAccount
@@ -724,15 +741,22 @@ export default function BrainHome() {
       || selectedArtifact.thread_id == null
       || selectedArtifact.turn_id == null
     ) return;
-    setSourceReturnError(null);
-    setSourceReturnTarget({
+    const target: SourceReturnTarget = {
       accountId: effectiveAccount.id,
       threadId: selectedArtifact.thread_id,
       turnId: selectedArtifact.turn_id,
-    });
+    };
+    setSourceReturnError(null);
     persistActiveConversationThreadId(effectiveAccount.id, selectedArtifact.thread_id);
     setActiveConversationThreadId(selectedArtifact.thread_id);
-    if (conversationQuery.isError) void conversationQuery.refetch();
+    if (retry) {
+      void conversationQuery.refetch().then((result) => {
+        if (result.data) setSourceReturnTarget(target);
+        else setSourceReturnError("来源对话暂时无法加载，请在成果中心重试。");
+      });
+      return;
+    }
+    setSourceReturnTarget(target);
   };
 
   const hasConversation = Boolean(activeTask || activeConversationThreadId || pendingTurn);
@@ -822,13 +846,14 @@ export default function BrainHome() {
             {workspaceMode === "results" ? (
               <div className="tz-artifact-center-panel">
                 <ArtifactCenter
+                  key={effectiveAccount?.id ?? "unavailable-account"}
                   accountId={effectiveAccount?.id ?? null}
                   onSelect={selectCenterArtifact}
                 />
                 {sourceReturnError ? (
                   <div className="tz-artifact-center__error" role="alert">
                     <p>{sourceReturnError}</p>
-                    <Button onClick={returnToArtifactSource}>Retry source conversation</Button>
+                    <Button onClick={() => returnToArtifactSource(true)}>重试返回来源对话</Button>
                   </div>
                 ) : null}
                 {selectedArtifact && selectedArtifact.account_id === effectiveAccount?.id ? (
@@ -846,8 +871,8 @@ export default function BrainHome() {
                       )}
                     />
                     {selectedArtifact.thread_id != null && selectedArtifact.turn_id != null ? (
-                      <Button onClick={returnToArtifactSource} aria-label="Return to source conversation">
-                        Return to source conversation
+                      <Button onClick={() => returnToArtifactSource()} aria-label="返回来源对话">
+                        返回来源对话
                       </Button>
                     ) : null}
                   </section>
@@ -1051,17 +1076,17 @@ function ContextStrip({
             type={workspaceMode === "conversation" ? "primary" : "text"}
             size="small"
             onClick={() => onWorkspaceModeChange("conversation")}
-            aria-label="Conversation view"
+            aria-label="对话视图"
           >
-            Conversation
+            对话
           </Button>
           <Button
             type={workspaceMode === "results" ? "primary" : "text"}
             size="small"
             onClick={() => onWorkspaceModeChange("results")}
-            aria-label="Results view"
+            aria-label="成果视图"
           >
-            Results
+            成果
           </Button>
         </div>
         <Tag style={{ marginInlineEnd: 0 }}>抖音</Tag>

@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { listArtifacts } from "../../api/brain";
@@ -59,7 +59,7 @@ describe("ArtifactCenter", () => {
 
     expect(await screen.findByText("Artifact 1")).toBeInTheDocument();
     expect(screen.queryByText("Artifact 99")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open Artifact 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开成果：Artifact 1" }));
     expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1, account_id: 3 }));
   });
 
@@ -71,20 +71,25 @@ describe("ArtifactCenter", () => {
     renderCenter(3);
     await screen.findByText("Artifact 1");
 
-    fireEvent.change(screen.getByLabelText("Artifact type"), { target: { value: "weekly_review" } });
+    expect(screen.getByRole("option", { name: "账号体检报告" })).toHaveValue("account_inspection_report");
+    expect(screen.getByRole("option", { name: "周度复盘报告" })).toHaveValue("weekly_review");
+    expect(screen.getByRole("option", { name: "内容策略" })).toHaveValue("content_strategy");
+    expect(screen.getByRole("option", { name: "发布计划" })).toHaveValue("publish_plan");
+
+    fireEvent.change(screen.getByLabelText("成果类型"), { target: { value: "weekly_review" } });
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
       accountId: 3, artifactType: "weekly_review", status: undefined, page: 1,
     })));
-    fireEvent.change(screen.getByLabelText("Artifact status"), { target: { value: "accepted" } });
+    fireEvent.change(screen.getByLabelText("状态"), { target: { value: "accepted" } });
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
       accountId: 3, artifactType: "weekly_review", status: "accepted", page: 1,
     })));
-    fireEvent.change(screen.getByLabelText("Created from"), { target: { value: "2026-07-28" } });
+    fireEvent.change(screen.getByLabelText("创建时间（起）"), { target: { value: "2026-07-28" } });
     expect(screen.queryByText("Artifact 1")).not.toBeInTheDocument();
-    expect(screen.getByText("Current page only")).toBeInTheDocument();
+    expect(screen.getByText("仅筛当前页")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 })));
     expect(await screen.findByText("Artifact 3")).toBeInTheDocument();
   });
@@ -96,10 +101,10 @@ describe("ArtifactCenter", () => {
       .mockResolvedValueOnce(page([artifact(4, 4)]));
     const { onSelect, rerender } = renderCenter(3);
 
-    expect(await screen.findByText("Artifacts are temporarily unavailable.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry artifacts" }));
+    expect(await screen.findByText("成果暂时无法加载，请重试。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试加载成果" }));
     expect(await screen.findByText("Artifact 1")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open Artifact 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开成果：Artifact 1" }));
 
     rerender(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -109,5 +114,42 @@ describe("ArtifactCenter", () => {
     await waitFor(() => expect(onSelect).toHaveBeenLastCalledWith(null));
     expect(screen.queryByText("Artifact 1")).not.toBeInTheDocument();
     expect(await screen.findByText("Artifact 4")).toBeInTheDocument();
+  });
+
+  it("starts a new account with clean filters and ignores a late response from the prior account", async () => {
+    let resolveAccountA: ((value: ArtifactPage) => void) | undefined;
+    vi.mocked(listArtifacts).mockImplementation((input) => {
+      if (input.accountId === 3) {
+        return new Promise<ArtifactPage>((resolve) => { resolveAccountA = resolve; });
+      }
+      return Promise.resolve(page([artifact(4, 4)]));
+    });
+    const onSelect = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={client}>
+        <ArtifactCenter key="account-3" accountId={3} onSelect={onSelect} />
+      </QueryClientProvider>,
+    );
+    fireEvent.change(screen.getByLabelText("成果类型"), { target: { value: "weekly_review" } });
+
+    rerender(
+      <QueryClientProvider client={client}>
+        <ArtifactCenter key="account-4" accountId={4} onSelect={onSelect} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledWith({
+      accountId: 4,
+      artifactType: undefined,
+      status: undefined,
+      page: 1,
+      pageSize: 20,
+    }));
+    expect(await screen.findByText("Artifact 4")).toBeInTheDocument();
+
+    await act(async () => resolveAccountA?.(page([artifact(1)])));
+    expect(screen.queryByText("Artifact 1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("成果类型")).toHaveValue("");
+    expect(onSelect).toHaveBeenLastCalledWith(null);
   });
 });

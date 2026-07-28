@@ -24,3 +24,18 @@
 - `git diff --check` — passed.
 
 The existing jsdom suite still emits its known React Router, Ant Design resize-observer, and pseudo-element warnings; no test failed.
+
+## Review fix round 1
+
+- The selected result detail now changes only after the accept/revision response passes the exact artifact identity check; it uses the accepted or V2 payload returned by the API and preserves the existing detail on a failed or mismatched response.
+- The account results component is keyed by account. A new account begins at page 1 with empty server filters, while delayed responses from an earlier account cannot render, select, or alter the new account state.
+- Return-to-source now fails closed for a wrong account, wrong thread, or missing source Turn. Each outcome remains in the results center, shows a Chinese retryable error, and retry forces a fresh conversation request even when a previous request technically succeeded with invalid provenance.
+- Product-facing labels, filters, pagination, date scope, and statuses are now professional Chinese. Artifact type options are stable business choices with their server codes preserved as option values; unknown server types render as “其他成果”.
+- Added regressions for exact accept/revision detail updates and list refresh, account switch with a deferred earlier response, and wrong-account/wrong-thread/missing-Turn source retries.
+
+### Review verification
+
+- `pnpm.cmd exec vitest run src/api/brain.test.ts src/components/brain/ArtifactCard.test.tsx src/components/brain/ArtifactCenter.test.tsx src/pages/BrainHome.test.tsx` — 4 files, 80 tests passed.
+- `pnpm.cmd exec tsc --noEmit` — passed.
+- `pnpm.cmd build` — passed.
+- `git diff --check` — passed.

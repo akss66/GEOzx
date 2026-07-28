@@ -542,11 +542,11 @@ describe("BrainHome", () => {
     });
     renderBrainHome();
 
-    fireEvent.click(screen.getByRole("button", { name: "Results view" }));
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
     expect(await screen.findByText(mocks.artifact.title)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: `Open ${mocks.artifact.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
     await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "Return to source conversation" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
 
     await waitFor(() => expect(getConversation).toHaveBeenCalledWith(81));
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
@@ -558,15 +558,86 @@ describe("BrainHome", () => {
     vi.mocked(getConversation).mockRejectedValueOnce(new Error("network"));
     renderBrainHome();
 
-    fireEvent.click(screen.getByRole("button", { name: "Results view" }));
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
     await screen.findByText(mocks.artifact.title);
-    fireEvent.click(screen.getByRole("button", { name: `Open ${mocks.artifact.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
     await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "Return to source conversation" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
 
-    expect(await screen.findByText("The source conversation could not be loaded. Retry from the result center.")).toBeInTheDocument();
-    expect(screen.getByLabelText("Artifact center")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry source conversation" }));
+    expect(await screen.findByText("来源对话暂时无法加载，请在成果中心重试。")).toBeInTheDocument();
+    expect(screen.getByLabelText("成果中心")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试返回来源对话" }));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId("conversation-turn-101")).toBeInTheDocument();
+  });
+
+  it("updates the selected center detail from the exact accepted response and refreshes its list", async () => {
+    const accepted = { ...mocks.artifact, title: "已采用精确成果", status: "accepted" as const };
+    vi.mocked(acceptArtifact).mockResolvedValueOnce(accepted);
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
+    await screen.findByText(mocks.artifact.title);
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: "仅采用报告" }));
+
+    expect(await screen.findByText("已采用精确成果")).toBeInTheDocument();
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+  });
+
+  it("updates the selected center detail to the exact returned revision and refreshes its list", async () => {
+    const revision = { ...mocks.artifact, id: 5002, version: 2, title: "修订后精确成果", status: "revision_requested" as const };
+    vi.mocked(reviseArtifact).mockResolvedValueOnce(revision);
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
+    await screen.findByText(mocks.artifact.title);
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), { target: { value: "补充数据依据" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
+
+    expect(await screen.findByText("修订后精确成果")).toBeInTheDocument();
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+  });
+
+  it("fails closed for a wrong-account source response and refetches the exact source on retry", async () => {
+    vi.mocked(getConversation)
+      .mockResolvedValueOnce({ ...mocks.conversationThread, account_id: 4 })
+      .mockResolvedValueOnce(mocks.conversationThread);
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
+    await screen.findByText(mocks.artifact.title);
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
+
+    expect(await screen.findByText("来源对话与当前成果不匹配，请在成果中心重试。")).toBeInTheDocument();
+    expect(screen.getByLabelText("成果中心")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试返回来源对话" }));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId("conversation-turn-101")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["wrong thread", { ...mocks.conversationThread, id: 82 }, "来源对话与当前成果不匹配，请在成果中心重试。"],
+    ["missing source turn", {
+      ...mocks.conversationThread,
+      turns: mocks.conversationThread.turns.filter((turn) => turn.id !== 101),
+    }, "来源对话未包含该成果所在轮次，请在成果中心重试。"],
+  ])("fails closed for a %s response and retries the exact source", async (_case, invalidConversation, expectedError) => {
+    vi.mocked(getConversation)
+      .mockResolvedValueOnce(invalidConversation)
+      .mockResolvedValueOnce(mocks.conversationThread);
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
+    await screen.findByText(mocks.artifact.title);
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
+    fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
+
+    expect(await screen.findByText(expectedError)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试返回来源对话" }));
     await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
     expect(await screen.findByTestId("conversation-turn-101")).toBeInTheDocument();
   });
