@@ -109,6 +109,7 @@ export function BrainComposer({
         ) : (
           <>
             <Input.TextArea
+              aria-label="运营大脑消息"
               value={value}
               onChange={(event) => onChange(event.target.value)}
               autoSize={{ minRows: 1, maxRows: 6 }}
@@ -116,7 +117,6 @@ export function BrainComposer({
               data-autosize-max-rows="6"
               maxLength={420}
               showCount
-              placeholder="输入目标、补充要求、打断指令，或直接问一个问题。"
               className="dy-brain-input"
               onKeyDown={(event) => {
                 if (

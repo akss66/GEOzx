@@ -155,6 +155,63 @@ async def test_brain_message_greeting_stays_in_main_agent_conversation(client, s
 
 
 @pytest.mark.asyncio
+async def test_brain_clarification_is_delivered_as_realtime_deltas(
+    client,
+    admin,
+    monkeypatch,
+):
+    question = "你想看账号整体播放量，还是某条视频的播放量？"
+    published: list[tuple[str, dict]] = []
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="clarification",
+            confidence=0.97,
+            reason="还需要确认数据范围。",
+            missing_field="metric_scope",
+            clarifying_question=question,
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    async def capture_realtime(event_type, payload, *args, **kwargs):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event",
+        capture_realtime,
+    )
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    response = await client.post(
+        "/brain/messages",
+        headers=_auth(token),
+        json={
+            "message": "看一下播放量",
+            "client_message_id": "clarification-stream-1",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    message_events = [
+        (event_type, payload)
+        for event_type, payload in published
+        if payload.get("message_id") == "clarification-stream-1:00-decision:1"
+    ]
+    assert message_events[0][0] == "brain.runtime.message_start"
+    assert "".join(
+        payload["delta"]
+        for event_type, payload in message_events
+        if event_type == "brain.runtime.message_delta"
+    ) == question
+    assert message_events[-1][0] == "brain.runtime.message_done"
+
+
+@pytest.mark.asyncio
 async def test_brain_message_client_id_is_idempotent(client, session, admin):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)

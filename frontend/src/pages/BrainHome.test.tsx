@@ -592,7 +592,7 @@ describe("BrainHome", () => {
   it("opens runtime status and expert handoff only when execution details are requested", async () => {
     renderBrainHome();
 
-    const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
     await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
@@ -607,7 +607,7 @@ describe("BrainHome", () => {
   it("keeps the composer at the bottom and starts a workflow directly", async () => {
     renderBrainHome();
 
-    const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
@@ -646,9 +646,7 @@ describe("BrainHome", () => {
     );
 
     renderBrainHome();
-    const input = await screen.findByPlaceholderText(
-      "输入目标、补充要求、打断指令，或直接问一个问题。",
-    );
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "分析这个账号最近的内容表现" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
@@ -665,9 +663,7 @@ describe("BrainHome", () => {
     vi.mocked(sendBrainMessage).mockImplementationOnce(() => new Promise(() => undefined));
 
     renderBrainHome();
-    const input = await screen.findByPlaceholderText(
-      "输入目标、补充要求、打断指令，或直接问一个问题。",
-    );
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "先生成三个内容方向" } });
     fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
     await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
@@ -783,9 +779,7 @@ describe("BrainHome", () => {
 
     renderBrainHome();
     expect(await screen.findByText("这是上一轮已经完成的回复。")).toBeInTheDocument();
-    const input = await screen.findByPlaceholderText(
-      "输入目标、补充要求、打断指令，或直接问一个问题。",
-    );
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "继续流式分析" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
@@ -837,10 +831,71 @@ describe("BrainHome", () => {
     vi.mocked(getBrainTaskRuntime).mockResolvedValue(mocks.runtime);
   });
 
+  it("follows new messages at the bottom but pauses while the user reads history", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
+
+    const conversation = screen.getByRole("region", { name: "运营大脑对话流" });
+    let scrollTop = 580;
+    Object.defineProperties(conversation, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1000 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => { scrollTop = value; },
+      },
+    });
+    const scrollTo = vi.fn(({ top }: ScrollToOptions) => {
+      if (typeof top === "number") scrollTop = top;
+    });
+    Object.defineProperty(conversation, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    fireEvent.scroll(conversation);
+    await act(async () => {
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_delta",
+        payload: {
+          task_id: 12,
+          message_id: "auto-follow:00-decision:1",
+          agent_code: "00-decision",
+          agent_name: "主 Agent",
+          delta: "继续生成最新内容",
+        },
+      });
+    });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+
+    scrollTo.mockClear();
+    scrollTop = 120;
+    fireEvent.scroll(conversation);
+    await act(async () => {
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_delta",
+        payload: {
+          task_id: 12,
+          message_id: "auto-follow:00-decision:1",
+          agent_code: "00-decision",
+          agent_name: "主 Agent",
+          delta: "，但不要打断历史阅读",
+        },
+      });
+    });
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
   it("sends artifact revision feedback through the rerun workflow", async () => {
     renderBrainHome();
 
-    const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
     await screen.findByRole("article", { name: "正式成果：账号定位诊断" });
@@ -906,7 +961,7 @@ describe("BrainHome", () => {
     vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce(greetingRuntime);
     renderBrainHome();
 
-    const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "你好" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
@@ -931,7 +986,7 @@ describe("BrainHome", () => {
   it("submits confirmation comments from the inline approval panel", async () => {
     renderBrainHome();
 
-    const input = await screen.findByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
@@ -1147,7 +1202,7 @@ describe("BrainHome", () => {
     renderBrainHome();
     await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
 
-    const input = screen.getByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = screen.getByRole("textbox", { name: "运营大脑消息" });
     fireEvent.change(input, { target: { value: "先补充三个更年轻化的选题" } });
     fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 

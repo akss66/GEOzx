@@ -51,9 +51,8 @@ describe("BrainComposer", () => {
       />,
     );
 
-    const input = screen.getByPlaceholderText(
-      "输入目标、补充要求、打断指令，或直接问一个问题。",
-    );
+    const input = screen.getByRole("textbox", { name: "运营大脑消息" });
+    expect(input).not.toHaveAttribute("placeholder");
     expect(input).toHaveAttribute("data-autosize-min-rows", "1");
     expect(input).toHaveAttribute("data-autosize-max-rows", "6");
     expect(screen.getByRole("button", { name: "发送给运营大脑" })).toHaveClass(
@@ -78,7 +77,7 @@ describe("BrainComposer", () => {
       />,
     );
 
-    const input = screen.getByPlaceholderText("输入目标、补充要求、打断指令，或直接问一个问题。");
+    const input = screen.getByRole("textbox", { name: "运营大脑消息" });
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", shiftKey: true });
     expect(onSubmit).not.toHaveBeenCalled();
     fireEvent.keyDown(input, { key: "Enter", code: "Enter" });

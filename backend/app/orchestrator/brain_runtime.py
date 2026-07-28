@@ -8,6 +8,7 @@ are stored as `Event` rows.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -450,22 +451,12 @@ class BrainRuntimeGraph:
                 question = intent.clarifying_question or "这次你最希望优先解决什么问题？"
                 task.current_focus = "等待你补充一个关键信息"
                 await session.commit()
-                await self._record_event(
+                await self._stream_runtime_message(
                     session,
                     task,
-                    "brain.runtime.message_done",
-                    {
-                        "message_id": _runtime_message_id(
-                            client_message_id,
-                            AgentCode.DECISION.value,
-                        ),
-                        "agent_code": AgentCode.DECISION.value,
-                        "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
-                        "model": "system",
-                        "message": question,
-                        "content": question,
-                        "client_message_id": client_message_id,
-                    },
+                    question,
+                    model="system",
+                    client_message_id=client_message_id,
                 )
                 await self._record_event(
                     session,
@@ -1725,18 +1716,11 @@ class BrainRuntimeGraph:
                 }
 
             if step.action == "respond":
-                await self._record_event(
+                await self._stream_runtime_message(
                     session,
                     task,
-                    "brain.runtime.message_done",
-                    {
-                        "message_id": _runtime_message_id(None, AgentCode.DECISION.value),
-                        "agent_code": AgentCode.DECISION.value,
-                        "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
-                        "model": "runtime-decision",
-                        "message": step.handoff_message,
-                        "content": step.handoff_message,
-                    },
+                    step.handoff_message,
+                    model="runtime-decision",
                 )
                 task.status = BrainTaskStatus.COMPLETED
                 task.progress = 100
@@ -1767,6 +1751,12 @@ class BrainRuntimeGraph:
                 }
 
             if step.action == "ask_user":
+                await self._stream_runtime_message(
+                    session,
+                    task,
+                    step.handoff_message,
+                    model="runtime-decision",
+                )
                 await self._record_event(
                     session,
                     task,
@@ -2269,6 +2259,51 @@ class BrainRuntimeGraph:
 
         return observer
 
+    async def _stream_runtime_message(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        content: str,
+        *,
+        model: str,
+        client_message_id: str | None = None,
+    ) -> None:
+        """Progressively deliver user-facing runtime copy, then persist its checkpoint."""
+
+        message_id = _runtime_message_id(
+            client_message_id,
+            AgentCode.DECISION.value,
+        )
+        base_payload = {
+            "task_id": task.id,
+            "thread_id": task.thread_id or self.thread_id_for(task.id),
+            "message_id": message_id,
+            "agent_code": AgentCode.DECISION.value,
+            "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
+            "model": model,
+            "client_message_id": client_message_id,
+        }
+        await publish_realtime_event(
+            "brain.runtime.message_start",
+            base_payload,
+            content_item_id=task.content_item_id,
+            project_id=task.brief.project_id if task.brief else None,
+        )
+        for delta in _realtime_text_chunks(content):
+            await publish_realtime_event(
+                "brain.runtime.message_delta",
+                {**base_payload, "delta": delta},
+                content_item_id=task.content_item_id,
+                project_id=task.brief.project_id if task.brief else None,
+            )
+            await asyncio.sleep(0.018)
+        await self._record_event(
+            session,
+            task,
+            "brain.runtime.message_done",
+            {**base_payload, "message": content, "content": content},
+        )
+
     async def _record_event(
         self,
         session: AsyncSession,
@@ -2645,6 +2680,12 @@ def _agent_display_name(agent_code: str) -> str:
 def _runtime_message_id(client_message_id: str | None, agent_code: str) -> str:
     run_id = client_message_id or uuid4().hex
     return f"{run_id}:{agent_code}:1"
+
+
+def _realtime_text_chunks(content: str, size: int = 6) -> Iterator[str]:
+    bounded_size = max(size, (len(content) + 39) // 40)
+    for offset in range(0, len(content), bounded_size):
+        yield content[offset : offset + bounded_size]
 
 
 def _agent_code_value(value: Any) -> str:

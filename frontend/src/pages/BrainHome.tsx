@@ -108,6 +108,8 @@ export default function BrainHome() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
+  const conversationRef = useRef<HTMLElement | null>(null);
+  const followLatestMessage = useRef(true);
   const { clientId, projectId, platform, accountId } = useCurrentWorkspace();
   const location = useLocation();
   const navigate = useNavigate();
@@ -423,6 +425,7 @@ export default function BrainHome() {
     }
 
     const clientMessageId = createClientMessageId();
+    followLatestMessage.current = true;
     pendingClientMessageId.current = clientMessageId;
     setPendingTurn({
       clientMessageId,
@@ -482,6 +485,41 @@ export default function BrainHome() {
 
   const hasConversation = Boolean(activeTask || pendingTurn);
 
+  useEffect(() => {
+    followLatestMessage.current = true;
+  }, [activeRuntimeTaskId]);
+
+  useEffect(() => {
+    if (!hasConversation || !followLatestMessage.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const conversation = conversationRef.current;
+      if (!conversation) return;
+      if (typeof conversation.scrollTo === "function") {
+        conversation.scrollTo({ top: conversation.scrollHeight, behavior: "auto" });
+      } else {
+        conversation.scrollTop = conversation.scrollHeight;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    activeRuntimeTaskId,
+    hasConversation,
+    isGenerating,
+    liveMessages,
+    pendingTurn,
+    runtimeError,
+    tasksError,
+    visibleRuntime,
+  ]);
+
+  const handleConversationScroll = () => {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    const distanceFromBottom =
+      conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+    followLatestMessage.current = distanceFromBottom <= 96;
+  };
+
   return (
     <div className={`tz-brain-page${hasConversation ? " has-conversation" : " is-empty"}`}>
       {hasConversation ? <header className="tz-brain-toolbar">
@@ -518,7 +556,12 @@ export default function BrainHome() {
             loading={contextQuery.isLoading}
           />
 
-          <section className="dy-brain-conversation" aria-label="运营大脑对话流">
+          <section
+            ref={conversationRef}
+            className="dy-brain-conversation"
+            aria-label="运营大脑对话流"
+            onScroll={handleConversationScroll}
+          >
             {tasksError ? (
               <OperationalState
                 kind="error"

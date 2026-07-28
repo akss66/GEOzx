@@ -173,7 +173,7 @@ In `frontend/src/styles/brain-v2.css`, update only the normal message-mode selec
   position: relative;
   min-height: 64px;
   padding: 11px 60px 11px 18px;
-  border-radius: 32px;
+  border-radius: 18px;
   box-shadow: 0 8px 24px rgba(42, 35, 27, 0.07);
 }
 
@@ -271,7 +271,7 @@ Upload the archive to `/home/admin/releases/`, verify its SHA-256 on the server,
 docker compose -f docker-compose.prod.yml up -d --remove-orphans
 ```
 
-Keep `/home/admin/releases/dyflow-20260728-brand-cleanup-4137a24` as the rollback target.
+Keep `/home/admin/releases/dyflow-20260728-composer-balance-c4efd87` as the rollback target.
 
 - [ ] **Step 5: Verify production health and UI**
 
@@ -288,3 +288,18 @@ Expected:
 - all Compose services healthy or running
 - migration `20260727_0300 (head)`
 - production browser matches the two acceptance checks with no new console errors.
+
+### Task 4: Conversation follow and progressive runtime messages
+
+**Files:**
+- Modify: `frontend/src/pages/BrainHome.tsx`
+- Modify: `frontend/src/pages/BrainHome.test.tsx`
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `backend/tests/test_brain_api.py`
+
+- [x] Add a failing UI regression proving the scroll container follows new messages only while the reader remains near the bottom.
+- [x] Bind the conversation scroll container, use a 96px bottom threshold, and force following again when the user submits a message.
+- [x] Add a failing API regression proving clarification replies emit `message_start`, one or more `message_delta` events, and a final durable `message_done`.
+- [x] Progressively publish clarification, direct-response, and runtime follow-up copy while retaining the durable completion event.
+- [x] Remove the visible composer placeholder, add an accessible input name, and reduce the ordinary composer radius to 18px.
+- [ ] Run complete frontend and affected backend suites, build the production bundle, deploy, and verify health.
