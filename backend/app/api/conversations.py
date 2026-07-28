@@ -28,6 +28,10 @@ from app.services.turn_execution import execute_conversation_turn
 
 router = APIRouter(prefix="/brain", tags=["brain-conversations"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+_MAIN_AGENT_V2_DISABLED_DETAIL = {
+    "code": "MAIN_AGENT_V2_DISABLED",
+    "message": "Main Agent V2 is disabled",
+}
 
 
 def _require_v2_enabled() -> None:
@@ -35,10 +39,7 @@ def _require_v2_enabled() -> None:
         return
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "MAIN_AGENT_V2_DISABLED",
-            "message": "Main Agent V2 is disabled",
-        },
+        detail=_MAIN_AGENT_V2_DISABLED_DETAIL,
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
 
@@ -50,6 +51,7 @@ _QUERY_SKILL_CODES = {"account_data_query", "account.data_context"}
 _QUERY_SKILL_CODE = "account_data_query"
 _QUERY_SKILL_VERSION = 1
 _QUERY_IDEMPOTENCY_KEY = "account-data-query:v1"
+log = logging.getLogger("dyflow.main_agent_v2")
 
 
 async def execute_conversation_turn(
@@ -270,6 +272,7 @@ async def _execute_composite_skill(
         task_status=task_status,
         error_code=executed.error_code,
     )
+    _log_turn_completion(turn, run, result)
     return result
 
 
@@ -372,7 +375,54 @@ async def _deliver_task_free(
         error_code=error_code,
         extra_events=extra_events,
     )
+    _log_turn_completion(turn, run, result)
     return result
+
+
+def _log_turn_completion(
+    turn: ConversationTurn,
+    run: AgentRun,
+    result: TurnExecutionResult,
+) -> None:
+    """Emit allowlisted rollout diagnostics for one finalized Turn."""
+
+    log.info(
+        "main_agent_turn_completed",
+        extra={
+            "event": "main_agent_turn_completed",
+            "thread_id": turn.thread_id,
+            "turn_id": turn.id,
+            "run_id": run.id,
+            "mode": result.mode.value,
+            "skill_run_id": _first_projection_id(result.projections, "skill_run_id"),
+            "task_id": result.task_id,
+            "artifact_ids": _projection_ids(result.projections, "artifact_id"),
+            "status": result.status,
+        },
+    )
+
+
+def _first_projection_id(
+    projections: list[dict[str, Any]],
+    field: str,
+) -> int | None:
+    for projection in projections:
+        value = projection.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _projection_ids(
+    projections: list[dict[str, Any]],
+    field: str,
+) -> list[int]:
+    ids: list[int] = []
+    for projection in projections:
+        value = projection.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            ids.append(value)
+    return ids
 
 
 async def _execute_query(
@@ -774,6 +824,7 @@ async def _close_operation_state(
         task_status=task_status,
         error_code=error_code,
     )
+    _log_turn_completion(turn, run, result)
     return result
 
 

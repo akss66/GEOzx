@@ -1,5 +1,7 @@
 """Additive, account-scoped main-Agent conversation API contracts."""
 
+import logging
+
 import pytest
 from sqlalchemy import func, select
 
@@ -12,6 +14,7 @@ from app.models import (
     Client,
     ClientMembership,
     ConversationTurn,
+    Event,
     Org,
     User,
 )
@@ -460,3 +463,96 @@ async def test_legacy_brain_messages_remains_reachable_when_v2_is_disabled(
         "code": "MAIN_AGENT_V2_DISABLED",
         "message": "Main Agent V2 is disabled",
     }
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_disabled_returns_typed_turn_error_and_keeps_legacy_messages(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "feature-flag-disabled")
+    thread = await _create_thread(client, admin, account)
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", False)
+    turn_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="feature-flag-disabled-turn",
+        message="禁用后新 turn 入口应阻断",
+    )
+    legacy_response = await client.post(
+        "/brain/messages",
+        headers=_auth(admin),
+        json={},
+    )
+
+    assert turn_response.status_code == 503
+    assert turn_response.json()["detail"] == {
+        "code": "MAIN_AGENT_V2_DISABLED",
+        "message": "Main Agent V2 is disabled",
+    }
+    assert legacy_response.status_code == 422
+    assert legacy_response.json()["detail"] != turn_response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
+    client, session, admin, monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "feature-flag-diagnostics")
+    thread = await _create_thread(client, admin, account)
+
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="dyflow.main_agent_v2")
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="feature-flag-query-log",
+        message="查看近七天数据",
+        requested_skill_code="account_data_query",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    skill_run_id = body["projections"][0]["skill_run_id"]
+    run_event = next(
+        event
+        for event in (await session.scalars(select(Event).order_by(Event.id))).all()
+        if event.turn_id == body["turn"]["id"]
+    )
+    diagnostics = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "main_agent_turn_completed"
+    ]
+
+    assert diagnostics, "expected rollout diagnostics log"
+    record = diagnostics[-1]
+    assert record.thread_id == thread["id"]
+    assert record.turn_id == body["turn"]["id"]
+    assert record.run_id == body["run"]["id"]
+    assert record.mode == "query"
+    assert record.skill_run_id == skill_run_id
+    assert record.task_id is None
+    assert record.artifact_ids == []
+    assert record.status == "completed"
+    custom_keys = (
+        set(record.__dict__) - set(logging.makeLogRecord({}).__dict__) - {"message"}
+    )
+    assert custom_keys == {
+        "artifact_ids",
+        "event",
+        "mode",
+        "run_id",
+        "skill_run_id",
+        "status",
+        "task_id",
+        "thread_id",
+        "turn_id",
+    }
+    serialized = caplog.text + str(record.__dict__) + str(run_event.payload)
+    assert "查看近七天数据" not in serialized
+    assert "request_payload" not in record.__dict__
+    assert "result_payload" not in record.__dict__
