@@ -206,6 +206,7 @@ describe("TurnStream", () => {
     expect(await screen.findByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
     expect(screen.getByText("修订版本校验失败，请重试。")) .toBeInTheDocument();
     expect(screen.queryByLabelText("Artifact: 不可信修订版")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /重\s*试/ })).toBeInTheDocument();
   });
 
   it("preserves verified V1 and V2 when a later source refresh fails", async () => {
@@ -219,13 +220,31 @@ describe("TurnStream", () => {
     vi.mocked(getArtifact)
       .mockResolvedValueOnce(artifact)
       .mockRejectedValueOnce(new Error("network"));
-    const view = render(<TurnStream thread={thread} revisionArtifacts={{ 5001: [revision] }} artifactRefreshKey={0} />);
+    const sourceOverride: Artifact = { ...artifact, status: "superseded" };
+    const view = render(
+      <TurnStream
+        thread={thread}
+        revisionArtifacts={{ 5001: [revision] }}
+        sourceArtifactOverrides={{ 5001: sourceOverride }}
+        artifactRefreshKey={0}
+      />,
+    );
 
     expect(await screen.findByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
-    view.rerender(<TurnStream thread={thread} revisionArtifacts={{ 5001: [revision] }} artifactRefreshKey={1} />);
+    view.rerender(
+      <TurnStream
+        thread={thread}
+        revisionArtifacts={{ 5001: [revision] }}
+        sourceArtifactOverrides={{ 5001: sourceOverride }}
+        artifactRefreshKey={1}
+      />,
+    );
 
     expect(await screen.findByText("成果更新失败，已保留已验证版本。")) .toBeInTheDocument();
-    expect(screen.getByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    const v1Card = screen.getByLabelText("Artifact: 账号体检报告");
+    expect(within(v1Card).getByText("已更新")).toBeInTheDocument();
+    expect(within(v1Card).queryByRole("button", { name: "仅采用报告" })).not.toBeInTheDocument();
+    expect(within(v1Card).queryByRole("button", { name: "提出修改" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
   });
 

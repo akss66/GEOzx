@@ -14,6 +14,7 @@ export function TurnStream({
   revisingArtifactId = null,
   artifactRefreshKey = 0,
   revisionArtifacts = {},
+  sourceArtifactOverrides = {},
 }: {
   thread: ConversationThread;
   approvingToolCallId?: number | null;
@@ -24,6 +25,7 @@ export function TurnStream({
   revisingArtifactId?: number | null;
   artifactRefreshKey?: number;
   revisionArtifacts?: Record<number, Artifact[]>;
+  sourceArtifactOverrides?: Record<number, Artifact>;
 }) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
@@ -41,6 +43,7 @@ export function TurnStream({
           revisingArtifactId={revisingArtifactId}
           artifactRefreshKey={artifactRefreshKey}
           revisionArtifacts={revisionArtifacts}
+          sourceArtifactOverrides={sourceArtifactOverrides}
         />
       ))}
     </div>
@@ -59,6 +62,7 @@ function TurnArticle({
   revisingArtifactId,
   artifactRefreshKey,
   revisionArtifacts,
+  sourceArtifactOverrides,
 }: {
   turn: ConversationTurn;
   threadId: number;
@@ -71,6 +75,7 @@ function TurnArticle({
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
   revisionArtifacts: Record<number, Artifact[]>;
+  sourceArtifactOverrides: Record<number, Artifact>;
 }) {
   const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
@@ -110,6 +115,7 @@ function TurnArticle({
             revisingArtifactId={revisingArtifactId}
             artifactRefreshKey={artifactRefreshKey}
             revisionArtifacts={revisionArtifacts}
+            sourceArtifactOverrides={sourceArtifactOverrides}
           />
         ))}
         {unknownProjection ? <UnknownProjection turnId={turn.id} /> : null}
@@ -145,6 +151,7 @@ function Projection({
   revisingArtifactId,
   artifactRefreshKey,
   revisionArtifacts,
+  sourceArtifactOverrides,
 }: {
   projection: TurnProjection;
   turnId: number;
@@ -158,6 +165,7 @@ function Projection({
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
   revisionArtifacts: Record<number, Artifact[]>;
+  sourceArtifactOverrides: Record<number, Artifact>;
 }) {
   const key = projectionKey(projection, turnId);
   const shared = {
@@ -237,6 +245,7 @@ function Projection({
           onAction={onArtifactAction}
           revisingArtifactId={revisingArtifactId}
           revisionArtifacts={revisionArtifacts[projection.artifact_id]}
+          sourceArtifactOverride={sourceArtifactOverrides[projection.artifact_id]}
           refreshKey={artifactRefreshKey}
         />
       );

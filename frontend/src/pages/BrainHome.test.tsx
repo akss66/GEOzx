@@ -618,7 +618,7 @@ describe("BrainHome", () => {
       .toHaveValue("已采用《正式成果》（成果 #5001）。请基于该报告提出下一步执行建议。"));
   });
 
-  it("keeps the source V1 visible beside the exact V2 returned by Artifact revision", async () => {
+  it("supersedes V1 and leaves the returned V2 actionable after Artifact revision", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",
       JSON.stringify({ version: 1, accounts: { 3: 81 } }),
@@ -640,8 +640,13 @@ describe("BrainHome", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
 
-    expect(await screen.findByRole("article", { name: "Artifact: 账号体检报告（修订版）" })).toBeInTheDocument();
-    expect(screen.getByRole("article", { name: "Artifact: 账号体检报告" })).toBeInTheDocument();
+    const v2Card = await screen.findByRole("article", { name: "Artifact: 账号体检报告（修订版）" });
+    const v1Card = screen.getByRole("article", { name: "Artifact: 账号体检报告" });
+    expect(within(v1Card).getByText("已更新")).toBeInTheDocument();
+    expect(within(v1Card).queryByRole("button", { name: "仅采用报告" })).not.toBeInTheDocument();
+    expect(within(v1Card).queryByRole("button", { name: "提出修改" })).not.toBeInTheDocument();
+    expect(within(v2Card).getByRole("button", { name: "仅采用报告" })).toBeInTheDocument();
+    expect(within(v2Card).getByRole("button", { name: "提出修改" })).toBeInTheDocument();
     expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
   });
 
@@ -673,7 +678,7 @@ describe("BrainHome", () => {
     expect(within(v2Card).queryByRole("button", { name: "仅采用报告" })).not.toBeInTheDocument();
   });
 
-  it("keeps V2 and appends V3 to the same source Artifact chain", async () => {
+  it("supersedes V2 and leaves V3 actionable in the same source Artifact chain", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",
       JSON.stringify({ version: 1, accounts: { 3: 81 } }),
@@ -704,8 +709,12 @@ describe("BrainHome", () => {
     fireEvent.change(within(v2Card).getByRole("textbox", { name: "修改说明" }), { target: { value: "补充复盘结论" } });
     fireEvent.click(within(v2Card).getByRole("button", { name: "提交修改" }));
 
-    expect(await screen.findByRole("article", { name: "Artifact: 账号体检报告（第二次修订）" })).toBeInTheDocument();
-    expect(screen.getByRole("article", { name: "Artifact: 账号体检报告（修订版）" })).toBeInTheDocument();
+    const v3Card = await screen.findByRole("article", { name: "Artifact: 账号体检报告（第二次修订）" });
+    expect(within(v2Card).getByText("已更新")).toBeInTheDocument();
+    expect(within(v2Card).queryByRole("button", { name: "仅采用报告" })).not.toBeInTheDocument();
+    expect(within(v2Card).queryByRole("button", { name: "提出修改" })).not.toBeInTheDocument();
+    expect(within(v3Card).getByRole("button", { name: "仅采用报告" })).toBeInTheDocument();
+    expect(within(v3Card).getByRole("button", { name: "提出修改" })).toBeInTheDocument();
   });
 
   it("keeps an active V2 Thread exclusive while it loads instead of falling back to legacy Artifacts", async () => {

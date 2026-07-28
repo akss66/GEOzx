@@ -120,6 +120,7 @@ export default function BrainHome() {
   const [approvalComment, setApprovalComment] = useState("");
   const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
   const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
+  const [artifactSourceOverrides, setArtifactSourceOverrides] = useState<Record<number, Artifact>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
@@ -420,7 +421,8 @@ export default function BrainHome() {
         message.error("修订成果校验失败，请重试。");
         return;
       }
-      setArtifactRevisionChains((current) => appendArtifactRevision(current, input.sourceArtifact.id, revision));
+      setArtifactRevisionChains((current) => appendArtifactRevision(current, input.sourceArtifact, revision));
+      setArtifactSourceOverrides((current) => supersedeRootArtifact(current, input.sourceArtifact));
       setArtifactRefreshKey((value) => value + 1);
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
@@ -766,6 +768,7 @@ export default function BrainHome() {
                   thread={activeConversation}
                   artifactRefreshKey={artifactRefreshKey}
                   revisionArtifacts={artifactRevisionChains}
+                  sourceArtifactOverrides={artifactSourceOverrides}
                   revisingArtifactId={
                     formalArtifactRevisionMutation.isPending
                       ? formalArtifactRevisionMutation.variables?.sourceArtifact.id ?? null
@@ -991,22 +994,32 @@ function updateExistingArtifactChain(
 
 function appendArtifactRevision(
   chains: Record<number, Artifact[]>,
-  revisedArtifactId: number,
+  sourceArtifact: Artifact,
   revision: Artifact,
 ) {
+  const revisedArtifactId = sourceArtifact.id;
   const sourceId = Object.entries(chains).find(([rootId, chain]) =>
     Number(rootId) === revisedArtifactId || chain.some((artifact) => artifact.id === revisedArtifactId),
   )?.[0] ?? String(revisedArtifactId);
   const currentChain = chains[Number(sourceId)] ?? [];
   const existingIndex = currentChain.findIndex((artifact) => artifact.id === revision.id);
+  const supersededChain = currentChain.map((artifact) => artifact.id === revisedArtifactId
+    ? { ...artifact, status: "superseded" }
+    : artifact);
   const nextChain = existingIndex >= 0
-    ? currentChain.map((artifact, index) => index === existingIndex ? revision : artifact)
-    : [...currentChain, revision];
+    ? supersededChain.map((artifact, index) => index === existingIndex ? revision : artifact)
+    : [...supersededChain, revision];
 
   return {
     ...chains,
     [sourceId]: [...nextChain].sort((left, right) => left.version - right.version),
   };
+}
+
+function supersedeRootArtifact(overrides: Record<number, Artifact>, sourceArtifact: Artifact) {
+  return sourceArtifact.version === 1
+    ? { ...overrides, [sourceArtifact.id]: { ...sourceArtifact, status: "superseded" as const } }
+    : overrides;
 }
 
 function buildArtifactRevisionPayload(artifact: Artifact): Record<string, unknown> {

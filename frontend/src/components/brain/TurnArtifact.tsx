@@ -15,6 +15,7 @@ export function TurnArtifact({
   onAction,
   revisingArtifactId,
   revisionArtifacts = [],
+  sourceArtifactOverride,
   ...shared
 }: {
   artifactId: number;
@@ -26,6 +27,7 @@ export function TurnArtifact({
   onAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   revisionArtifacts?: Artifact[];
+  sourceArtifactOverride?: Artifact;
   className: string;
   "data-testid": string;
   "data-projection-key": string;
@@ -62,7 +64,10 @@ export function TurnArtifact({
     return () => { current = false; };
   }, [accountId, artifactId, attempt, refreshKey, sourceTurnId, threadAccountId, threadId]);
 
-  const source = state.artifact;
+  const source = state.artifact && sourceArtifactOverride
+    && matchesSourceOverride(sourceArtifactOverride, state.artifact)
+    ? sourceArtifactOverride
+    : state.artifact;
   const revisionChain = source ? validatedRevisionChain(revisionArtifacts, source) : null;
 
   return (
@@ -99,7 +104,7 @@ export function TurnArtifact({
       {state.kind === "error" ? <span>成果暂时无法加载，请重试。</span> : null}
       {state.kind === "refresh-invalid" ? <span>成果更新校验失败，已保留已验证版本。</span> : null}
       {state.kind === "refresh-error" ? <span>成果更新失败，已保留已验证版本。</span> : null}
-      {state.kind !== "ready" && state.kind !== "loading" && state.kind !== "refreshing" ? (
+      {(state.kind !== "ready" && state.kind !== "loading" && state.kind !== "refreshing") || revisionChain === null ? (
         <Button size="small" onClick={() => setAttempt((value) => value + 1)}>重试</Button>
       ) : null}
     </section>
@@ -132,6 +137,15 @@ function validatedRevisionChain(revisions: Artifact[], source: Artifact): Artifa
     previousVersion = revision.version;
   }
   return revisions;
+}
+
+function matchesSourceOverride(override: Artifact, source: Artifact) {
+  return override.id === source.id
+    && override.version === source.version
+    && override.account_id === source.account_id
+    && override.thread_id === source.thread_id
+    && override.turn_id === source.turn_id
+    && override.artifact_type === source.artifact_type;
 }
 
 function matchesSource(
