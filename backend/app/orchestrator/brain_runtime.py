@@ -938,6 +938,12 @@ class BrainRuntimeGraph:
                 task.brief.goal if task.brief else task.title
             )
             evidence_refs = list(state.get("selected_expert_evidence_refs", []))
+            completed_tool_results = [
+                observation
+                for observation in state.get("observations", [])
+                if observation.get("kind") == "tool_result"
+                and isinstance(observation.get("result"), dict)
+            ]
             current_outputs: list[dict[str, Any]] = []
             for code in selected:
                 await self._record_event(
@@ -959,6 +965,7 @@ class BrainRuntimeGraph:
                     code=agent_code,
                     purpose=purpose,
                     evidence_refs=evidence_refs,
+                    upstream={"tool_results": {"items": completed_tool_results}},
                     run_id=state.get("agent_run_id"),
                     step_key=f"round-{round_index}:{agent_code.value}",
                     attempt=state.get("agent_run_attempt", 0),

@@ -14,6 +14,7 @@ from app.agents.registry import AGENT_SPECS, AgentSpec, get_agent_spec
 from app.core.approval_audit import add_approval_requested
 from app.core.workspace_access import require_account_access, require_project_access
 from app.models import (
+    Account,
     AgentInvocation,
     BrainTask,
     ContentItem,
@@ -22,6 +23,7 @@ from app.models import (
     Event,
     KnowledgeEntry,
     ModelConfig,
+    Project,
     ProjectAccount,
     User,
 )
@@ -118,7 +120,7 @@ class AgentHarness:
             session,
             task=task,
             user=user,
-            project_id=project.id,
+            project_id=project_id,
             account_id=account.id,
             spec=spec,
         )
@@ -171,7 +173,7 @@ class AgentHarness:
             Event(
                 type="agent.harness.started",
                 content_item_id=content_item.id,
-                project_id=project.id,
+                project_id=project_id,
                 payload={
                     "task_id": task.id,
                     "run_id": run_id,
@@ -193,25 +195,25 @@ class AgentHarness:
                 session,
                 org_id=user.org_id,
                 client_id=project.client_id,
-                project_id=project.id,
+                project_id=project_id,
             )
-            if project.client_id is not None
+            if project is not None and project.client_id is not None
             else []
         )
         operating_context = {
+            **self._account_scoped_upstream(upstream, account_id=account.id),
             "account_context": {
                 "account_id": account.id,
                 "nickname": account.nickname,
                 "platform": account.platform.value,
-                "project_id": project.id,
-                "project_name": project.name,
+                "project_id": project_id,
+                "project_name": project.name if project is not None else None,
             },
             "evidence_refs": {"items": evidence_refs},
             "agent_policy": {
                 "tool_permissions": management["tool_permissions"],
                 "quality_gates": management["quality_gates"],
             },
-            **(upstream or {}),
         }
         operating_context["agent_policy"]["kernel"] = kernel_policy.as_context()
         runner = spec.runner()
@@ -251,7 +253,7 @@ class AgentHarness:
                 Event(
                     type=f"agent.kernel.{event_type.value}",
                     content_item_id=content_item.id,
-                    project_id=project.id,
+                    project_id=project_id,
                     payload={
                         "task_id": task.id,
                         "run_id": run_id,
@@ -274,7 +276,7 @@ class AgentHarness:
                     task_id=task.id,
                     invocation_id=invocation.id,
                     trace_id=f"agent-run:{run_id}" if run_id is not None else task.thread_id,
-                    project_id=project.id,
+                    project_id=project_id,
                     account_id=account.id,
                     request=purpose,
                     upstream=operating_context,
@@ -337,13 +339,13 @@ class AgentHarness:
         )
         session.add(acceptance)
         await session.flush()
-        if project.client_id is not None:
+        if project is not None and project.client_id is not None:
             await record_knowledge_citations(
                 session,
                 rows=knowledge_rows,
                 org_id=user.org_id,
                 client_id=project.client_id,
-                project_id=project.id,
+                project_id=project_id,
                 task_id=task.id,
                 invocation_id=invocation.id,
                 agent_code=code.value,
@@ -357,7 +359,7 @@ class AgentHarness:
             Event(
                 type="agent.harness.completed",
                 content_item_id=content_item.id,
-                project_id=project.id,
+                project_id=project_id,
                 payload={
                     "task_id": task.id,
                     "run_id": run_id,
@@ -373,7 +375,7 @@ class AgentHarness:
         await add_approval_requested(
             session,
             org_id=user.org_id,
-            project_id=project.id,
+            project_id=project_id,
             content_item_id=content_item.id,
             approval_kind="deliverable",
             source_id=acceptance.id,
@@ -409,12 +411,12 @@ class AgentHarness:
         }
 
     @staticmethod
-    def _task_scope(task: BrainTask) -> tuple[int, int]:
+    def _task_scope(task: BrainTask) -> tuple[int | None, int]:
         brief = task.brief
-        if brief is None or brief.project_id is None or len(brief.account_ids) != 1:
+        if brief is None or len(brief.account_ids) != 1:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Agent execution requires one explicit project and account",
+                detail="Agent execution requires exactly one account",
             )
         return brief.project_id, brief.account_ids[0]
 
@@ -423,11 +425,24 @@ class AgentHarness:
         session: AsyncSession,
         *,
         user: User,
-        project_id: int,
+        project_id: int | None,
         account_id: int,
-    ):
-        project = await require_project_access(session, user, project_id, roles=_OPERATING_ROLES)
+    ) -> tuple[Project | None, Account]:
         account = await require_account_access(session, user, account_id, roles=_OPERATING_ROLES)
+        if account.status != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The selected account is inactive",
+            )
+        if account.auth_status != "authorized":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The selected account is not authorized",
+            )
+        if project_id is None:
+            return None, account
+
+        project = await require_project_access(session, user, project_id, roles=_OPERATING_ROLES)
         linked_id = await session.scalar(
             select(ProjectAccount.id).where(
                 ProjectAccount.project_id == project.id,
@@ -439,11 +454,6 @@ class AgentHarness:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Account is not assigned to the selected project",
             )
-        if account.status != AccountStatus.ACTIVE:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="The selected account is inactive",
-            )
         return project, account
 
     @staticmethod
@@ -452,7 +462,7 @@ class AgentHarness:
         *,
         task: BrainTask,
         user: User,
-        project_id: int,
+        project_id: int | None,
         account_id: int,
         spec: AgentSpec,
     ) -> ContentItem:
@@ -479,6 +489,34 @@ class AgentHarness:
         return current
 
     @staticmethod
+    def _account_scoped_upstream(
+        upstream: dict | None, *, account_id: int
+    ) -> dict:
+        if not upstream:
+            return {}
+        packet = dict(upstream)
+        tool_results = packet.get("tool_results")
+        if not isinstance(tool_results, dict):
+            return packet
+        items = tool_results.get("items")
+        if not isinstance(items, list):
+            return packet
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            result = item.get("result")
+            if (
+                item.get("tool_code") in _MANAGEMENT_TO_RUNTIME_TOOL.values()
+                and isinstance(result, dict)
+                and result.get("account_id") != account_id
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Tool result does not match the selected account",
+                )
+        return packet
+
+    @staticmethod
     async def _find_invocation(
         session: AsyncSession, *, run_id: int, step_key: str, attempt: int
     ) -> AgentInvocation | None:
@@ -494,6 +532,11 @@ class AgentHarness:
     async def _existing_result(
         session: AsyncSession, task: BrainTask, invocation: AgentInvocation
     ) -> AgentHarnessResult:
+        if invocation.task_id != task.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Invocation does not belong to the selected task",
+            )
         if invocation.status != AgentInvocationStatus.DONE:
             raise AgentStepInProgress(
                 f"Agent step {invocation.step_key or invocation.id} is {invocation.status.value}"

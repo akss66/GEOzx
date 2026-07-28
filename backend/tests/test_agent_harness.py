@@ -30,7 +30,11 @@ from app.models.enums import (
 from app.orchestrator.agent_harness import AgentHarness, AgentHarnessError
 from app.orchestrator.brain_runtime import BrainRuntimeGraph, bind_runtime_session
 from app.schemas.brain import AgentInvocationOut
-from app.schemas.deliverable import AdPlanPayload, DeliverablePayload
+from app.schemas.deliverable import (
+    AdPlanPayload,
+    DeliverablePayload,
+    PositioningStrategyPayload,
+)
 
 
 def test_agent_registry_contains_every_specialist() -> None:
@@ -57,6 +61,133 @@ def test_harness_only_exposes_auto_runtime_tools_to_specialists() -> None:
             }
         }
     ) == {"account.profile", "account.data_context"}
+
+
+@pytest.mark.asyncio
+async def test_harness_runs_positioning_with_one_account_without_project(
+    session, admin, monkeypatch
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Projectless positioning account",
+        auth={"auth_status": "authorized"},
+    )
+    session.add(account)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Projectless positioning diagnosis",
+        type=BrainTaskType.REVIEW_OPTIMIZATION,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="langgraph",
+        thread_id="projectless-positioning-thread",
+    )
+    task.brief = TaskBrief(
+        goal="Diagnose this account's positioning",
+        project_id=None,
+        project_name=None,
+        platforms=[Platform.DOUYIN.value],
+        account_ids=[account.id],
+        cycle="current",
+        content_goal="positioning diagnosis",
+        risk_constraints=[],
+        expected_outputs=["positioning diagnosis"],
+        confirmation_actions=[],
+    )
+    task.plan = OrchestrationPlan(
+        summary="diagnosis only",
+        steps=[],
+        quality_gates=[],
+        estimated_cost=Decimal("0"),
+        requires_human_confirmation=True,
+    )
+    session.add(task)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        client_message_id="agent-run-38",
+        request_payload={},
+        result_payload={},
+    )
+    session.add(run)
+    await session.commit()
+
+    contexts: list[AgentContext] = []
+
+    class FakePositioningAgent(BaseAgent):
+        code = AgentCode.POSITIONING.value
+        output_type = DeliverableType.POSITIONING_STRATEGY
+
+        async def run(self, runtime_session, org_id, ctx: AgentContext):
+            contexts.append(ctx)
+            return PositioningStrategyPayload(
+                account_persona="Practical creator",
+                target_audience="Early-stage operators",
+                differentiation=["Evidence-led", "Actionable"],
+                content_pillars=["Account diagnosis", "Operating playbooks"],
+            )
+
+    original = AGENT_SPECS[AgentCode.POSITIONING]
+    monkeypatch.setitem(
+        AGENT_SPECS,
+        AgentCode.POSITIONING,
+        original.__class__(
+            original.name,
+            FakePositioningAgent,
+            original.deliverable_type,
+            original.deliverable_title,
+            original.stage,
+            original.task_type,
+        ),
+    )
+    upstream = {
+        "tool_results": {
+            "items": [
+                {
+                    "tool_code": "account.profile",
+                    "result": {"account_id": account.id, "nickname": account.nickname},
+                },
+                {
+                    "tool_code": "account.data_context",
+                    "result": {"account_id": account.id, "coverage": "complete"},
+                },
+            ]
+        }
+    }
+
+    result = await AgentHarness().execute(
+        session,
+        user=admin,
+        task=task,
+        code=AgentCode.POSITIONING,
+        purpose="Diagnosis only",
+        evidence_refs=["account-profile:38", "account-data-context:38"],
+        upstream=upstream,
+        run_id=run.id,
+        step_key="round-1:01-positioning",
+    )
+
+    assert result.invocation.status == AgentInvocationStatus.DONE
+    assert result.deliverable.content_item_id == result.task.content_item_id
+    assert result.task.content_item_id is not None
+    content_item = await session.get(ContentItem, result.task.content_item_id)
+    assert content_item is not None
+    assert content_item.project_id is None
+    assert content_item.account_id == account.id
+    assert len(contexts) == 1
+    assert contexts[0].project_id is None
+    assert contexts[0].account_id == account.id
+    assert contexts[0].upstream["tool_results"] == upstream["tool_results"]
+    invocations = (
+        await session.scalars(
+            select(AgentInvocation).where(AgentInvocation.task_id == task.id)
+        )
+    ).all()
+    assert [invocation.id for invocation in invocations] == [result.invocation.id]
 
 
 @pytest.mark.asyncio
@@ -310,6 +441,22 @@ async def test_runtime_dispatches_growth_expert_through_the_shared_harness(
                 "selected_experts": [AgentCode.ADVERTISER.value],
                 "selected_expert_purpose": "Assess paid growth",
                 "selected_expert_evidence_refs": ["metrics:7"],
+                "observations": [
+                    {
+                        "kind": "tool_result",
+                        "tool_call_id": 7,
+                        "tool_code": "account.profile",
+                        "summary": "profile loaded",
+                        "result": {"account_id": account.id, "nickname": account.nickname},
+                    },
+                    {
+                        "kind": "tool_result",
+                        "tool_call_id": 8,
+                        "tool_code": "account.data_context",
+                        "summary": "data context loaded",
+                        "result": {"account_id": account.id, "coverage": "complete"},
+                    },
+                ],
             }
         )
 
@@ -323,3 +470,23 @@ async def test_runtime_dispatches_growth_expert_through_the_shared_harness(
     assert captured[0]["step_key"] == "round-3:07-advertiser"
     assert captured[0]["purpose"] == "Assess paid growth"
     assert captured[0]["evidence_refs"] == ["metrics:7"]
+    assert captured[0]["upstream"] == {
+        "tool_results": {
+            "items": [
+                {
+                    "kind": "tool_result",
+                    "tool_call_id": 7,
+                    "tool_code": "account.profile",
+                    "summary": "profile loaded",
+                    "result": {"account_id": account.id, "nickname": account.nickname},
+                },
+                {
+                    "kind": "tool_result",
+                    "tool_call_id": 8,
+                    "tool_code": "account.data_context",
+                    "summary": "data context loaded",
+                    "result": {"account_id": account.id, "coverage": "complete"},
+                },
+            ]
+        }
+    }
