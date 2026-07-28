@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +32,13 @@ async def claim_agent_run(
     requested_by_id: int,
     client_message_id: str,
     request_payload: dict,
+    thread_id: int | None = None,
+    turn_id: int | None = None,
 ) -> tuple[AgentRun, bool]:
     """Atomically claim a client message or return its existing run."""
+
+    if turn_id is not None and thread_id is None:
+        raise ValueError("turn_id requires thread_id")
 
     existing = await get_agent_run(
         session,
@@ -41,11 +47,19 @@ async def claim_agent_run(
         client_message_id=client_message_id,
     )
     if existing is not None:
+        _require_compatible_claim(
+            existing,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_payload=request_payload,
+        )
         return existing, False
 
     run = AgentRun(
         org_id=org_id,
         requested_by_id=requested_by_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
         client_message_id=client_message_id,
         status="claimed",
         phase="request",
@@ -65,9 +79,46 @@ async def claim_agent_run(
         )
         if existing is None:
             raise
+        _require_compatible_claim(
+            existing,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_payload=request_payload,
+        )
         return existing, False
     await session.refresh(run)
     return run, True
+
+
+def _require_compatible_claim(
+    run: AgentRun,
+    *,
+    thread_id: int | None,
+    turn_id: int | None,
+    request_payload: dict,
+) -> None:
+    """Prevent a V2 idempotency key from being rebound to another Turn."""
+
+    is_turn_owned_claim = any(
+        value is not None
+        for value in (run.thread_id, run.turn_id, thread_id, turn_id)
+    )
+    if not is_turn_owned_claim:
+        # Legacy BrainTask runs mutate request_payload as execution advances.
+        # Their established idempotency behavior remains unchanged.
+        return
+    if (
+        run.thread_id != thread_id
+        or run.turn_id != turn_id
+        or run.request_payload != request_payload
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CLIENT_MESSAGE_CONFLICT",
+                "message": "client_message_id is already bound to another request",
+            },
+        )
 
 
 async def get_agent_run(

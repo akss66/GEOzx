@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CreateConversationThreadRequest(BaseModel):
@@ -19,6 +20,60 @@ class CreateConversationTurnRequest(BaseModel):
     requested_skill_code: str | None = Field(default=None, min_length=1, max_length=120)
     execution_preference: Literal["AUTO", "DISCUSS_ONLY", "FORMAL_TASK"] = "AUTO"
     attachment_ids: list[int] = Field(default_factory=list)
+
+
+class ConversationTurnOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    thread_id: int
+    org_id: int
+    created_by_id: int | None
+    client_message_id: str | None
+    user_input: str
+    assistant_response: str | None
+    intent: dict[str, Any] | None
+    projections: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationThreadOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    org_id: int
+    created_by_id: int | None
+    client_id: int | None
+    project_id: int | None
+    account_id: int
+    title: str
+    turns: list[ConversationTurnOut] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationAgentRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    org_id: int
+    requested_by_id: int
+    task_id: int | None
+    thread_id: int | None
+    turn_id: int | None
+    client_message_id: str
+    status: str
+    phase: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TurnSubmissionOut(BaseModel):
+    turn: ConversationTurnOut
+    run: ConversationAgentRunOut
+    task_id: int | None = None
+    projections: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TurnExecutionMode(StrEnum):
