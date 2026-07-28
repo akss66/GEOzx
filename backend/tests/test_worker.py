@@ -1,6 +1,7 @@
 """Runtime worker terminal-failure behavior."""
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from arq import Retry
@@ -8,13 +9,231 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
-from app.models import Account, BrainTask, Event, TaskBrief
+from app.models import (
+    Account,
+    AgentRun,
+    AgentToolCall,
+    BrainTask,
+    ContentItem,
+    ConversationThread,
+    ConversationTurn,
+    Event,
+    SkillRun,
+    TaskBrief,
+)
 from app.models.enums import BrainTaskStatus, BrainTaskType, Platform
 from app.orchestrator.agent_harness import AgentHarnessError
+from app.orchestrator.skills.account_inspection import ACCOUNT_INSPECTION_SKILL
 from app.schemas.brain import IntentDecision
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.agent_runs import claim_agent_run, mark_agent_run_queued
 from app.worker import execute_agent_run
+
+
+@pytest.mark.parametrize(
+    (
+        "skill_status",
+        "has_ambiguous_call",
+        "skill_is_published",
+        "expected_run_status",
+        "expected_error",
+    ),
+    [
+        (
+            "running",
+            True,
+            True,
+            "failed",
+            "SKILL_EXECUTION_INTERRUPTED",
+        ),
+        (
+            "completed",
+            False,
+            True,
+            "completed",
+            None,
+        ),
+        (
+            "completed",
+            False,
+            False,
+            "completed",
+            None,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
+    session,
+    admin,
+    monkeypatch,
+    skill_status,
+    has_ambiguous_call,
+    skill_is_published,
+    expected_run_status,
+    expected_error,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Expired Skill worker account",
+        platform=Platform.DOUYIN,
+        auth={"auth_status": "authorized", "data_sync_status": "ready"},
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Expired Skill worker thread",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="expired-v2-skill",
+        user_input="Run account inspection",
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="Expired Skill worker content",
+    )
+    session.add_all([turn, content])
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="Expired Skill worker task",
+        type=BrainTaskType.ACCOUNT_DIAGNOSIS,
+        status=(
+            BrainTaskStatus.RUNNING
+            if skill_status == "running"
+            else BrainTaskStatus.COMPLETED
+        ),
+        runtime_mode="skill",
+    )
+    session.add(task)
+    await session.flush()
+    expired_at = datetime.now(UTC) - timedelta(seconds=1)
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        task_id=task.id,
+        client_message_id=turn.client_message_id,
+        status="running",
+        phase="skill_runtime",
+        lease_owner="crashed-request",
+        leased_until=expired_at,
+        heartbeat_at=expired_at,
+        request_payload={
+            "account_id": account.id,
+            "attachment_ids": [],
+            "client_message_id": turn.client_message_id,
+            "execution_preference": "FORMAL_TASK",
+            "message": turn.user_input,
+            "requested_skill_code": "account_inspection",
+            "thread_id": thread.id,
+            "turn_id": turn.id,
+        },
+    )
+    session.add(run)
+    await session.flush()
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=(
+            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
+        ),
+        skill_code="account_inspection",
+        skill_version=ACCOUNT_INSPECTION_SKILL.version,
+        status=skill_status,
+        input_snapshot={"account_id": account.id, "days": 30},
+        output_snapshot=(
+            {}
+            if skill_status == "running"
+            else {
+                "status": "completed",
+                "task_id": task.id,
+                "artifact_id": None,
+                "artifact_type": "account_inspection_report",
+                "report": {"summary": "Completed before request crash"},
+                "response": "账号体检已完成",
+                "error_code": None,
+            }
+        ),
+    )
+    session.add(skill_run)
+    await session.flush()
+    tool_call = None
+    if has_ambiguous_call:
+        tool_call = AgentToolCall(
+            org_id=admin.org_id,
+            task_id=task.id,
+            skill_run_id=skill_run.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            tool_code="account.profile",
+            tool_name="Account profile",
+            idempotency_key=f"{skill_run.id}:account.profile",
+            status="running",
+            meta={"arguments": {}},
+        )
+        session.add(tool_call)
+    await session.commit()
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    if not skill_is_published:
+        from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
+
+        monkeypatch.delitem(PUBLIC_SKILL_POLICIES, "account_inspection")
+
+        class UnexpectedRouteRegistry:
+            def get(self, _skill_code):
+                raise AssertionError(
+                    "persisted SkillRun recovery consulted the current route registry"
+                )
+
+        monkeypatch.setattr(
+            "app.services.turn_execution.skill_registry",
+            UnexpectedRouteRegistry(),
+        )
+
+    result = await execute_agent_run({"worker_id": "recovery-worker"}, run.id)
+
+    await session.refresh(run)
+    await session.refresh(turn)
+    await session.refresh(task)
+    await session.refresh(skill_run)
+    if tool_call is not None:
+        await session.refresh(tool_call)
+    assert result == task.id
+    assert run.status == expected_run_status
+    assert run.error_code == expected_error
+    assert turn.assistant_response
+    if skill_status == "running":
+        assert task.status is BrainTaskStatus.FAILED
+        assert skill_run.status == "failed"
+        assert skill_run.error_code == "SKILL_EXECUTION_INTERRUPTED"
+        assert tool_call is not None
+        assert tool_call.status == "failed"
+        assert tool_call.error == "SKILL_EXECUTION_INTERRUPTED"
+    else:
+        assert task.status is BrainTaskStatus.COMPLETED
+        assert skill_run.status == "completed"
+        assert skill_run.error_code is None
 
 
 @pytest.mark.asyncio

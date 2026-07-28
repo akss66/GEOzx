@@ -333,14 +333,7 @@ async def create_artifact_revision(
         artifact_id,
         roles=ARTIFACT_ACTION_ROLES,
     )
-    latest_version = (
-        await session.scalar(
-            select(func.max(Deliverable.version)).where(
-                Deliverable.content_item_id == source.content_item_id,
-                Deliverable.type == source.type,
-            )
-        )
-    ) or 0
+    latest_version = await _require_latest_artifact_version(session, source)
     if (
         source.status == DeliverableStatus.SUPERSEDED
         or source.version != latest_version
@@ -409,12 +402,23 @@ async def accept_artifact(
         artifact_id,
         roles=ARTIFACT_ACTION_ROLES,
     )
+    latest_version = await _require_latest_artifact_version(session, selected)
+    if (
+        selected.status == DeliverableStatus.SUPERSEDED
+        or selected.version != latest_version
+    ):
+        raise _artifact_version_conflict(
+            artifact_id=selected.id,
+            selected_version=selected.version,
+            latest_version=latest_version,
+        )
     other_active = list(
         await session.scalars(
             select(Deliverable).where(
                 Deliverable.content_item_id == selected.content_item_id,
                 Deliverable.type == selected.type,
                 Deliverable.id != selected.id,
+                Deliverable.version < selected.version,
                 Deliverable.status != DeliverableStatus.SUPERSEDED,
             )
         )
@@ -425,8 +429,8 @@ async def accept_artifact(
     if selected.status != DeliverableStatus.APPROVED:
         selected.status = DeliverableStatus.APPROVED
         changed = True
+    await session.commit()
     if changed:
-        await session.commit()
         await session.refresh(selected)
     return await project_artifact(
         session,
@@ -799,6 +803,50 @@ def _evidence_refs(
 
 def _humanize_key(key: str) -> str:
     return key.replace("_", " ").strip()
+
+
+async def _require_latest_artifact_version(
+    session: AsyncSession,
+    selected: Deliverable,
+) -> int:
+    locked_content_id = await session.scalar(
+        select(ContentItem.id)
+        .where(ContentItem.id == selected.content_item_id)
+        .with_for_update()
+    )
+    if locked_content_id is None:
+        raise _artifact_not_found()
+    return int(
+        (
+            await session.scalar(
+                select(func.max(Deliverable.version)).where(
+                    Deliverable.content_item_id == selected.content_item_id,
+                    Deliverable.type == selected.type,
+                )
+            )
+        )
+        or 0
+    )
+
+
+def _artifact_version_conflict(
+    *,
+    artifact_id: int,
+    selected_version: int,
+    latest_version: int,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "ARTIFACT_VERSION_CONFLICT",
+            "message": "成果版本已更新，请刷新后重试",
+            "details": {
+                "artifact_id": artifact_id,
+                "selected_version": selected_version,
+                "latest_version": latest_version,
+            },
+        },
+    )
 
 
 def _artifact_not_found() -> HTTPException:

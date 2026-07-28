@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.runtime_failures import FailureDisposition
 from app.models import BrainTask, Event, OrchestrationPlan, TaskBrief
@@ -16,6 +17,7 @@ from app.services.agent_runs import (
     acquire_agent_run,
     claim_agent_run,
     complete_agent_run,
+    heartbeat_agent_run,
     mark_agent_run_queued,
     promote_next_waiting_agent_run,
     queue_agent_run_behind_task,
@@ -69,6 +71,54 @@ async def test_agent_run_lease_blocks_concurrent_worker_and_allows_expired_takeo
     assert takeover is not None
     assert takeover.lease_owner == "worker-b"
     assert takeover.attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_session_cannot_heartbeat_after_an_expired_lease_is_taken_over(
+    session,
+    admin,
+) -> None:
+    run, claimed = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id="lease-heartbeat-fence",
+        request_payload={"message": "test"},
+    )
+    assert claimed is True
+    await mark_agent_run_queued(session, run.id, task_id=None)
+    maker = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async with maker() as stale_session, maker() as takeover_session:
+        stale_run = await acquire_agent_run(
+            stale_session,
+            run.id,
+            worker_id="worker-a",
+            lease_seconds=60,
+        )
+        assert stale_run is not None
+        stale_run.leased_until = utc_now() - timedelta(seconds=1)
+        await stale_session.commit()
+
+        takeover = await acquire_agent_run(
+            takeover_session,
+            run.id,
+            worker_id="worker-b",
+            lease_seconds=60,
+        )
+        assert takeover is not None
+        assert takeover.lease_owner == "worker-b"
+
+        renewed = await heartbeat_agent_run(
+            stale_session,
+            run.id,
+            worker_id="worker-a",
+            lease_seconds=60,
+        )
+
+        assert renewed is False
+        await takeover_session.refresh(takeover)
+        assert takeover.lease_owner == "worker-b"
 
 
 @pytest.mark.asyncio

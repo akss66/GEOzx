@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import (
+    AgentInvocation,
     AgentQualityScore,
     AgentRun,
     AgentToolCall,
@@ -25,6 +29,7 @@ from app.models import (
 )
 from app.models.enums import (
     AgentCode,
+    AgentInvocationStatus,
     BrainTaskStatus,
     BrainTaskType,
     ContentStage,
@@ -47,6 +52,7 @@ from app.orchestrator.skills.account_inspection import (
 from app.orchestrator.skills.registry import skill_registry
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
+from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 
 _ACCOUNT_INSPECTION = "account_inspection"
 _MAX_CRITIC_IMPROVEMENTS = 2
@@ -76,6 +82,10 @@ class _ToolScopeMismatch(PermissionError):
     pass
 
 
+class _SkillLeaseLost(RuntimeError):
+    pass
+
+
 class SkillRuntime:
     """Execute one frozen Skill graph without entering the strategy runtime."""
 
@@ -100,6 +110,7 @@ class SkillRuntime:
         run: AgentRun,
         skill_code: str,
         days: int = 30,
+        lease_owner: str | None = None,
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
         run_id = run.id
@@ -108,6 +119,7 @@ class SkillRuntime:
             raise KeyError(skill_code)
         frozen_input = definition.input_model(days=days)
         idempotency_key = f"skill:{definition.code}:v{definition.version}"
+        lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
         existing = await session.scalar(
             select(SkillRun).where(
                 SkillRun.run_id == run_id,
@@ -118,12 +130,28 @@ class SkillRuntime:
             "blocked",
             "completed",
             "failed",
-            "running",
             "stopped",
             "waiting_permission",
             "waiting_user",
         }:
             return self._existing_result(existing)
+        recovering = False
+        if existing is not None and existing.status == "running":
+            recovering = True
+            claimed = (
+                run
+                if run.status == "running" and run.lease_owner == lease_owner
+                else await acquire_agent_run(
+                    session,
+                    run_id,
+                    worker_id=lease_owner,
+                    lease_seconds=settings.agent_run_lease_seconds,
+                )
+            )
+            if claimed is None:
+                await session.refresh(existing)
+                return self._existing_result(existing)
+            run = claimed
 
         task, content = await self._compatibility_task(
             session,
@@ -151,6 +179,17 @@ class SkillRuntime:
                 output_snapshot={},
             )
             session.add(skill_run)
+            now = utc_now()
+            run.status = "running"
+            run.phase = "skill_runtime"
+            run.attempt += 1
+            run.lease_owner = lease_owner
+            run.leased_until = now + timedelta(
+                seconds=max(1, settings.agent_run_lease_seconds)
+            )
+            run.heartbeat_at = now
+            run.started_at = run.started_at or now
+            run.next_retry_at = None
             try:
                 await session.commit()
                 await session.refresh(skill_run)
@@ -177,6 +216,14 @@ class SkillRuntime:
 
         skill_run_id = skill_run.id
         task_id = task.id
+        if recovering and await self._interrupt_ambiguous_side_effects(
+            session,
+            run=run,
+            turn=turn,
+            skill_run=skill_run,
+            task=task,
+        ):
+            return self._existing_result(skill_run)
         try:
             return await self._execute_account_inspection(
                 session,
@@ -188,7 +235,14 @@ class SkillRuntime:
                 content=content,
                 skill_run=skill_run,
                 days=frozen_input.days,
+                lease_owner=lease_owner,
             )
+        except _SkillLeaseLost:
+            await session.rollback()
+            persisted = await session.get(SkillRun, skill_run_id)
+            if persisted is None:
+                raise
+            return self._existing_result(persisted)
         except Exception as exc:
             await session.rollback()
             persisted = await session.get(SkillRun, skill_run_id)
@@ -239,6 +293,7 @@ class SkillRuntime:
         content: ContentItem,
         skill_run: SkillRun,
         days: int,
+        lease_owner: str,
     ) -> SkillExecutionResult:
         tool_executor = self._tool_executor or DurableToolExecutor(
             build_runtime_tool_adapter()
@@ -248,6 +303,7 @@ class SkillRuntime:
             ("account.profile", {}),
             ("account.data_context", {"days": days}),
         ):
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             outcome = await tool_executor.execute(
                 task=task,
                 user=user,
@@ -264,6 +320,7 @@ class SkillRuntime:
                 thread_id=thread.id,
                 turn_id=turn.id,
             )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             if outcome.status != "success" or outcome.result is None:
                 return await self._pause_for_tool(
                     session,
@@ -293,6 +350,7 @@ class SkillRuntime:
                 AgentCode.CONTENT_DIRECTOR,
             )
         ):
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             result = await self._harness.execute(
                 session,
                 user=user,
@@ -312,6 +370,7 @@ class SkillRuntime:
                 turn_id=turn.id,
                 trace_only=True,
             )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             await self._attach_expert_provenance(
                 session,
                 result=result,
@@ -343,6 +402,7 @@ class SkillRuntime:
             critic_iterations=1,
         )
         for iteration in range(_MAX_CRITIC_IMPROVEMENTS + 1):
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             review = await self._review(
                 session,
                 user=user,
@@ -353,6 +413,7 @@ class SkillRuntime:
                 evidence_refs=evidence_refs,
                 iteration=iteration,
             )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             critic_history.append(review)
             report = report.model_copy(
                 update={
@@ -374,6 +435,7 @@ class SkillRuntime:
                     task=task,
                     report=report,
                 )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             latest_result = await self._harness.execute(
                 session,
                 user=user,
@@ -398,6 +460,7 @@ class SkillRuntime:
                 turn_id=turn.id,
                 trace_only=True,
             )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
             await self._attach_expert_provenance(
                 session,
                 result=latest_result,
@@ -408,6 +471,7 @@ class SkillRuntime:
             )
             expert_results.append(latest_result)
 
+        await self._heartbeat(session, run=run, lease_owner=lease_owner)
         final_deliverable = Deliverable(
             content_item_id=content.id,
             thread_id=thread.id,
@@ -520,6 +584,118 @@ class SkillRuntime:
             issues=list(score.issues or []),
             suggestions=list(score.suggestions or []),
         )
+
+    @staticmethod
+    async def _heartbeat(
+        session: AsyncSession,
+        *,
+        run: AgentRun,
+        lease_owner: str,
+    ) -> None:
+        renewed = await heartbeat_agent_run(
+            session,
+            run.id,
+            worker_id=lease_owner,
+            lease_seconds=settings.agent_run_lease_seconds,
+        )
+        if not renewed:
+            raise _SkillLeaseLost("Skill execution lease ownership changed")
+
+    @staticmethod
+    async def _interrupt_ambiguous_side_effects(
+        session: AsyncSession,
+        *,
+        run: AgentRun,
+        turn: ConversationTurn,
+        skill_run: SkillRun,
+        task: BrainTask,
+    ) -> bool:
+        tool_calls = list(
+            await session.scalars(
+                select(AgentToolCall)
+                .where(
+                    AgentToolCall.skill_run_id == skill_run.id,
+                    AgentToolCall.status.in_({"planned", "running"}),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        invocations = list(
+            await session.scalars(
+                select(AgentInvocation)
+                .where(
+                    AgentInvocation.skill_run_id == skill_run.id,
+                    AgentInvocation.status.in_(
+                        {
+                            AgentInvocationStatus.QUEUED,
+                            AgentInvocationStatus.RUNNING,
+                        }
+                    ),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        if not tool_calls and not invocations:
+            return False
+
+        now = datetime.now(UTC)
+        error_code = "SKILL_EXECUTION_INTERRUPTED"
+        response = (
+            "账号体检执行被中断。为避免重复调用状态不明的工具或专家，"
+            "本次执行已安全关闭，请重新发起一次新的体检。"
+        )
+        for tool_call in tool_calls:
+            tool_call.status = "failed"
+            tool_call.error = error_code
+            tool_call.finished_at = now
+        for invocation in invocations:
+            invocation.status = AgentInvocationStatus.FAILED
+            invocation.failure_reason = error_code
+            invocation.finished_at = now
+        task.status = BrainTaskStatus.FAILED
+        task.progress = 0
+        task.current_focus = response
+        skill_run.status = "failed"
+        skill_run.error_code = error_code
+        output_snapshot = {
+            "status": "failed",
+            "task_id": task.id,
+            "artifact_id": None,
+            "artifact_type": "account_inspection_report",
+            "report": {},
+            "response": response,
+            "error_code": error_code,
+        }
+        skill_run.output_snapshot = output_snapshot
+        turn.assistant_response = response
+        run.status = "failed"
+        run.phase = "failed"
+        run.finished_at = now
+        run.lease_owner = None
+        run.leased_until = None
+        run.next_retry_at = None
+        run.heartbeat_at = now
+        run.error_code = error_code
+        run.error_detail = None
+        run.result_payload = {
+            "mode": "skill",
+            "status": "failed",
+            "response": response,
+            "task_id": task.id,
+            "projections": [
+                {
+                    "type": "execution_blocked",
+                    "artifact_type": "account_inspection_report",
+                    "skill_run_id": skill_run.id,
+                    "code": error_code,
+                }
+            ],
+            "error_code": error_code,
+        }
+        await session.commit()
+        return True
 
     @staticmethod
     async def _attach_expert_provenance(

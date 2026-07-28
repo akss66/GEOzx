@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -16,11 +17,13 @@ from app.models import (
     ContentItem,
     ConversationThread,
     ConversationTurn,
+    Deliverable,
     Event,
     SkillRun,
     StrategyPlan,
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, Platform
+from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
@@ -75,11 +78,13 @@ def _request(
     message: str | None = None,
     *,
     execution_preference: str = "AUTO",
+    requested_skill_code: str | None = None,
 ) -> CreateConversationTurnRequest:
     return CreateConversationTurnRequest(
         client_message_id=key,
         message=message or f"message-{key}",
         execution_preference=execution_preference,
+        requested_skill_code=requested_skill_code,
     )
 
 
@@ -447,6 +452,124 @@ async def test_unavailable_skill_is_structured_blocked_without_artifact(
     assert run.error_code == "SKILL_EXECUTOR_UNAVAILABLE"
     assert await session.scalar(select(func.count(ContentItem.id))) == 0
     assert await session.scalar(select(func.count(BrainTask.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_explicit_skill_is_blocked_without_formal_side_effects(
+    session,
+    admin,
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="explicit-unknown-skill"
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "explicit-unknown-skill",
+            requested_skill_code="not_registered",
+        ),
+    )
+
+    assert result.status == "blocked"
+    assert result.error_code == "UNKNOWN_SKILL"
+    assert result.task_id is None
+    assert result.projections == [
+        {
+            "type": "execution_blocked",
+            "skill_code": "not_registered",
+            "code": "UNKNOWN_SKILL",
+            "recovery_action": "请从当前公开能力目录重新选择。",
+        }
+    ]
+    assert run.status == "blocked"
+    for model in (SkillRun, Deliverable, ContentItem, BrainTask):
+        assert await session.scalar(select(func.count(model.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_platform_incompatible_explicit_skill_never_reaches_executor(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="explicit-platform-incompatible"
+    )
+    definition = replace(
+        skill_registry.get("account_inspection"),
+        supported_platforms=frozenset({"xiaohongshu"}),
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_registry",
+        SkillRegistry([definition]),
+        raising=False,
+    )
+
+    async def must_not_execute(*_args, **_kwargs):
+        raise AssertionError("platform-incompatible Skill must not execute")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute",
+        must_not_execute,
+    )
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "explicit-platform-incompatible",
+            requested_skill_code="account_inspection",
+        ),
+    )
+
+    assert result.status == "blocked"
+    assert result.error_code == "UNSUPPORTED_PLATFORM"
+    assert result.task_id is None
+    for model in (SkillRun, Deliverable, ContentItem, BrainTask):
+        assert await session.scalar(select(func.count(model.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_unpublished_explicit_skill_is_blocked_without_skill_run(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="explicit-unpublished"
+    )
+    public_definition = skill_registry.get("account_inspection")
+    private_definition = replace(
+        public_definition,
+        code="internal_shadow_skill",
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_registry",
+        SkillRegistry([public_definition, private_definition]),
+        raising=False,
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "explicit-unpublished",
+            requested_skill_code="internal_shadow_skill",
+        ),
+    )
+
+    assert result.status == "blocked"
+    assert result.error_code == "UNPUBLISHED_SKILL"
+    assert result.task_id is None
+    for model in (SkillRun, Deliverable, ContentItem, BrainTask):
+        assert await session.scalar(select(func.count(model.id))) == 0
 
 
 @pytest.mark.parametrize(

@@ -473,7 +473,7 @@ async def test_artifact_revision_increments_version_and_rejects_stale_source(
 
 
 @pytest.mark.asyncio
-async def test_artifact_acceptance_is_idempotent_and_supersedes_other_active_versions(
+async def test_artifact_acceptance_is_idempotent_until_a_newer_version_exists(
     client, session, admin
 ):
     seeded = await _seed_artifact(
@@ -505,6 +505,11 @@ async def test_artifact_acceptance_is_idempotent_and_supersedes_other_active_ver
         headers=headers,
         json={"artifact_id": selected.id},
     )
+    idempotent = await client.post(
+        "/artifact-acceptances",
+        headers=headers,
+        json={"artifact_id": selected.id},
+    )
     later_draft = Deliverable(
         content_item_id=seeded[2].id,
         thread_id=seeded[3].id,
@@ -519,22 +524,92 @@ async def test_artifact_acceptance_is_idempotent_and_supersedes_other_active_ver
     )
     session.add(later_draft)
     await session.commit()
-    second = await client.post(
+    stale = await client.post(
         "/artifact-acceptances",
         headers=headers,
         json={"artifact_id": selected.id},
     )
 
     assert first.status_code == 200
-    assert second.status_code == 200
-    assert first.json() == second.json()
+    assert idempotent.status_code == 200
+    assert idempotent.json() == first.json()
     assert first.json()["status"] == "accepted"
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "ARTIFACT_VERSION_CONFLICT"
+    assert stale.json()["detail"]["details"] == {
+        "artifact_id": selected.id,
+        "selected_version": 2,
+        "latest_version": 3,
+    }
     await session.refresh(older)
     await session.refresh(selected)
     await session.refresh(later_draft)
     assert older.status == DeliverableStatus.SUPERSEDED
     assert selected.status == DeliverableStatus.APPROVED
-    assert later_draft.status == DeliverableStatus.SUPERSEDED
+    assert later_draft.status == DeliverableStatus.DRAFT
+
+
+@pytest.mark.asyncio
+async def test_artifact_first_acceptance_rejects_stale_version_without_mutation(
+    client,
+    session,
+    admin,
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="stale-first-acceptance",
+    )
+    source = seeded[8]
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+    second = await client.post(
+        "/artifact-revisions",
+        headers=headers,
+        json={
+            "artifact_id": source.id,
+            "payload": _review_payload(summary="second version"),
+        },
+    )
+    assert second.status_code == 201
+    second_id = second.json()["id"]
+    third = await client.post(
+        "/artifact-revisions",
+        headers=headers,
+        json={
+            "artifact_id": second_id,
+            "payload": _review_payload(summary="third version"),
+        },
+    )
+    assert third.status_code == 201
+    third_id = third.json()["id"]
+
+    stale = await client.post(
+        "/artifact-acceptances",
+        headers=headers,
+        json={"artifact_id": second_id},
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == {
+        "code": "ARTIFACT_VERSION_CONFLICT",
+        "message": "成果版本已更新，请刷新后重试",
+        "details": {
+            "artifact_id": second_id,
+            "selected_version": 2,
+            "latest_version": 3,
+        },
+    }
+    second_row = await session.get(Deliverable, second_id)
+    third_row = await session.get(Deliverable, third_id)
+    assert second_row is not None
+    assert third_row is not None
+    assert second_row.status == DeliverableStatus.SUPERSEDED
+    assert third_row.status == DeliverableStatus.PENDING_REVIEW
+    assert third_row.thread_id == seeded[3].id
+    assert third_row.turn_id == seeded[4].id
+    assert third_row.run_id == seeded[6].id
+    assert third_row.skill_run_id == seeded[7].id
 
 
 @pytest.mark.asyncio

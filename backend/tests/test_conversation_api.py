@@ -12,11 +12,15 @@ from app.models import (
     Account,
     AccountMembership,
     AgentRun,
+    BrainTask,
     Client,
     ClientMembership,
+    ContentItem,
     ConversationTurn,
+    Deliverable,
     Event,
     Org,
+    SkillRun,
     User,
 )
 from app.models.enums import Platform, UserRole, WorkspaceRole
@@ -208,6 +212,42 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     )
     assert turn_response.status_code == 200
     assert turn_response.json() == body["turn"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_explicit_skill_returns_blocked_turn_without_formal_records(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "unsupported-explicit-skill")
+    thread = await _create_thread(client, admin, account)
+
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="unsupported-explicit-skill",
+        message="Run a capability that is not in the public catalog",
+        requested_skill_code="not_registered",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["task_id"] is None
+    assert body["run"]["status"] == "blocked"
+    assert body["projections"] == [
+        {
+            "type": "execution_blocked",
+            "skill_code": "not_registered",
+            "code": "UNKNOWN_SKILL",
+            "recovery_action": "请从当前公开能力目录重新选择。",
+        }
+    ]
+    for model in (SkillRun, Deliverable, ContentItem, BrainTask):
+        assert await session.scalar(select(func.count(model.id))) == 0
 
 
 @pytest.mark.asyncio

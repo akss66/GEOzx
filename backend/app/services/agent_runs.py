@@ -328,7 +328,12 @@ async def heartbeat_agent_run(
     worker_id: str,
     lease_seconds: int,
 ) -> bool:
-    run = await session.get(AgentRun, run_id)
+    run = await session.scalar(
+        select(AgentRun)
+        .where(AgentRun.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if run is None or run.status != "running" or run.lease_owner != worker_id:
         return False
     now = utc_now()

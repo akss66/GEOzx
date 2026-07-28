@@ -1,44 +1,22 @@
 """User-facing Skill catalog with a strict business-only projection."""
 
-from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Query
 
 from app.core.auth import CurrentUser
-from app.models.enums import Platform, UserRole
+from app.models.enums import Platform
+from app.orchestrator.skills.public_catalog import (
+    PUBLIC_SKILL_POLICIES as _PUBLIC_SKILL_POLICIES,
+)
 from app.orchestrator.skills.registry import skill_registry
 from app.schemas.skills import (
     PublicSkillCatalogItem,
     PublicSkillCatalogOut,
-    PublicSkillCategory,
     SkillCatalogSurface,
 )
 
 router = APIRouter(tags=["skills"])
-
-
-@dataclass(frozen=True)
-class _PublicSkillPolicy:
-    code: str
-    category: PublicSkillCategory
-    icon: str
-    requires_account: bool
-    surfaces: frozenset[SkillCatalogSurface]
-    enabled: bool = True
-    allowed_roles: frozenset[UserRole] = frozenset({UserRole.ADMIN, UserRole.USER})
-    internal_disabled_reason: str | None = None
-
-
-_PUBLIC_SKILL_POLICIES: dict[str, _PublicSkillPolicy] = {
-    "account_inspection": _PublicSkillPolicy(
-        code="account_inspection",
-        category="quick_operations",
-        icon="activity",
-        requires_account=True,
-        surfaces=frozenset({"composer"}),
-    ),
-}
 
 
 @router.get("/skills", response_model=PublicSkillCatalogOut)

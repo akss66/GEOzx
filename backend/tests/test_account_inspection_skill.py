@@ -1,5 +1,6 @@
 """Contract tests for the bounded one-click account-inspection Skill."""
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -514,13 +515,19 @@ async def test_account_inspection_concurrent_creator_reuses_unique_winner(
 
 
 @pytest.mark.asyncio
-async def test_account_inspection_reuses_running_winner_without_reexecution(
+async def test_account_inspection_active_owner_reuses_running_winner_without_reexecution(
     session,
     admin,
 ) -> None:
     _account, thread, turn, run = await _conversation_scope(
         session, admin, key="inspection-running-winner"
     )
+    now = datetime.now(UTC)
+    run.status = "running"
+    run.phase = "skill_runtime"
+    run.lease_owner = "skill-owner-a"
+    run.heartbeat_at = now
+    run.leased_until = now + timedelta(minutes=5)
     content = ContentItem(
         account_id=thread.account_id,
         created_by_id=admin.id,
@@ -601,6 +608,134 @@ async def test_account_inspection_reuses_running_winner_without_reexecution(
     assert persisted_winner.error_code is None
     assert persisted_tool is not None
     assert persisted_tool.status == "running"
+
+    active_lease_until = run.leased_until
+    routed = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        CreateConversationTurnRequest(
+            client_message_id=turn.client_message_id,
+            message=turn.user_input,
+            requested_skill_code="account_inspection",
+            execution_preference="FORMAL_TASK",
+        ),
+    )
+
+    await session.refresh(run)
+    assert routed.status == "running"
+    assert run.status == "running"
+    assert run.phase == "skill_runtime"
+    assert run.lease_owner == "skill-owner-a"
+    assert run.leased_until == active_lease_until
+    assert run.finished_at is None
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_crash_replay_closes_stale_running_side_effects(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-crash-replay"
+    )
+    now = datetime.now(UTC)
+    run.status = "running"
+    run.phase = "skill_runtime"
+    run.lease_owner = "crashed-skill-owner"
+    run.heartbeat_at = now - timedelta(minutes=5)
+    run.leased_until = now - timedelta(seconds=1)
+    content = ContentItem(
+        account_id=thread.account_id,
+        created_by_id=admin.id,
+        title="Interrupted account inspection",
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="Interrupted account inspection",
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="skill",
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    winner = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=(
+            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
+        ),
+        skill_code="account_inspection",
+        skill_version=ACCOUNT_INSPECTION_SKILL.version,
+        status="running",
+        input_snapshot={"account_id": thread.account_id, "days": 30},
+        output_snapshot={},
+    )
+    session.add(winner)
+    await session.flush()
+    running_tool = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        skill_run_id=winner.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        tool_code="account.profile",
+        tool_name="Account profile",
+        idempotency_key=f"{winner.id}:account.profile",
+        status="running",
+        meta={"arguments": {}},
+    )
+    session.add(running_tool)
+    await session.commit()
+    tools = _FakeTools(sufficient=True)
+    harness = _FakeHarness()
+    critic = _PassingCritic()
+
+    result = await SkillRuntime(
+        tool_executor=tools,
+        harness=harness,
+        critic=critic,
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "SKILL_EXECUTION_INTERRUPTED"
+    assert result.skill_run_id == winner.id
+    assert tools.calls == []
+    assert harness.calls == []
+    assert critic.calls == 0
+    assert await session.scalar(select(func.count(Deliverable.id))) == 0
+    await session.refresh(winner)
+    await session.refresh(running_tool)
+    await session.refresh(task)
+    await session.refresh(run)
+    await session.refresh(turn)
+    assert winner.status == "failed"
+    assert running_tool.status == "failed"
+    assert running_tool.error == "SKILL_EXECUTION_INTERRUPTED"
+    assert task.status is BrainTaskStatus.FAILED
+    assert run.status == "failed"
+    assert run.phase == "failed"
+    assert run.finished_at is not None
+    assert run.lease_owner is None
+    assert run.leased_until is None
+    assert run.error_code == "SKILL_EXECUTION_INTERRUPTED"
+    assert run.result_payload["status"] == "failed"
+    assert turn.assistant_response == result.response
 
 
 @pytest.mark.asyncio

@@ -27,8 +27,14 @@ from app.orchestrator.brain_intelligence import (
     brain_intelligence,
 )
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
+from app.orchestrator.capability_router import (
+    SkillUnavailable,
+    route_explicit_request,
+)
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_runtime import skill_runtime
+from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
+from app.orchestrator.skills.registry import skill_registry
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
@@ -61,10 +67,21 @@ async def execute_conversation_turn(
     turn: ConversationTurn,
     run: AgentRun,
     request: CreateConversationTurnRequest,
+    *,
+    execution_owner: str | None = None,
+    resume_skill_run: SkillRun | None = None,
 ) -> TurnExecutionResult:
     """Route and execute one Turn while preserving its account ownership."""
 
     _require_owned_request(user, turn, run, request)
+    if resume_skill_run is not None:
+        _require_resumable_skill_run(
+            user=user,
+            turn=turn,
+            run=run,
+            request=request,
+            skill_run=resume_skill_run,
+        )
     persisted = _terminal_result(run)
     if persisted is not None:
         return persisted
@@ -80,11 +97,24 @@ async def execute_conversation_turn(
         raise PermissionError("conversation Thread is unavailable")
     account = await require_account_access(session, user, thread.account_id)
     try:
-        decision = await _route_turn(
+        decision = (
+            _route_persisted_skill_run(resume_skill_run)
+            if resume_skill_run is not None
+            else await _route_turn(
+                session,
+                user,
+                request,
+                platform=account.platform.value,
+            )
+        )
+    except SkillUnavailable as skill_unavailable:
+        return await _block_invalid_explicit_skill(
             session,
-            user,
-            request,
-            platform=account.platform.value,
+            thread=thread,
+            turn=turn,
+            run=run,
+            requested_skill_code=(request.requested_skill_code or "").strip(),
+            unavailable=skill_unavailable,
         )
     except IntelligenceUnavailable:
         unavailable = TurnRouteDecision(
@@ -178,6 +208,7 @@ async def execute_conversation_turn(
                 turn=turn,
                 run=run,
                 decision=decision,
+                execution_owner=execution_owner,
             )
         return await _block_unavailable_skill(
             session,
@@ -204,16 +235,19 @@ async def _execute_composite_skill(
     turn: ConversationTurn,
     run: AgentRun,
     decision: TurnRouteDecision,
+    execution_owner: str | None = None,
 ) -> TurnExecutionResult:
-    executed = await skill_runtime.execute(
-        session,
-        user=user,
-        thread=thread,
-        turn=turn,
-        run=run,
-        skill_code=decision.skill_code or "",
-        days=30,
-    )
+    execution_kwargs: dict[str, Any] = {
+        "user": user,
+        "thread": thread,
+        "turn": turn,
+        "run": run,
+        "skill_code": decision.skill_code or "",
+        "days": 30,
+    }
+    if execution_owner is not None:
+        execution_kwargs["lease_owner"] = execution_owner
+    executed = await skill_runtime.execute(session, **execution_kwargs)
     projections: list[dict[str, Any]] = []
     if executed.artifact_id is not None:
         projections.append(
@@ -244,6 +278,8 @@ async def _execute_composite_skill(
         projections=projections,
         error_code=executed.error_code,
     )
+    if executed.status == "running":
+        return result
     task = (
         await session.get(BrainTask, executed.task_id)
         if executed.task_id is not None
@@ -297,6 +333,24 @@ def _require_owned_request(
         raise PermissionError("conversation Turn execution ownership does not match")
 
 
+def _require_resumable_skill_run(
+    *,
+    user: User,
+    turn: ConversationTurn,
+    run: AgentRun,
+    request: CreateConversationTurnRequest,
+    skill_run: SkillRun,
+) -> None:
+    if (
+        skill_run.org_id != user.org_id
+        or skill_run.run_id != run.id
+        or skill_run.thread_id != turn.thread_id
+        or skill_run.turn_id != turn.id
+        or skill_run.skill_code != request.requested_skill_code
+    ):
+        raise PermissionError("persisted SkillRun recovery ownership does not match")
+
+
 def _terminal_result(run: AgentRun) -> TurnExecutionResult | None:
     if run.status not in _TERMINAL_RUN_STATUSES:
         return None
@@ -304,6 +358,28 @@ def _terminal_result(run: AgentRun) -> TurnExecutionResult | None:
     if not payload:
         return None
     return TurnExecutionResult.model_validate(payload)
+
+
+def _route_persisted_skill_run(skill_run: SkillRun) -> TurnRouteDecision:
+    if skill_run.skill_code in _QUERY_SKILL_CODES:
+        return TurnRouteDecision(
+            mode=TurnExecutionMode.QUERY,
+            intent="account_data_query",
+            confidence=1,
+            reason="Resume the persisted account data query.",
+            skill_code=_QUERY_SKILL_CODE,
+            requires_account_context=True,
+            requires_operation_task=False,
+        )
+    return TurnRouteDecision(
+        mode=TurnExecutionMode.SKILL,
+        intent="explicit_skill",
+        confidence=1,
+        reason="Resume the persisted SkillRun.",
+        skill_code=skill_run.skill_code,
+        requires_account_context=True,
+        requires_operation_task=True,
+    )
 
 
 async def _route_turn(
@@ -325,15 +401,29 @@ async def _route_turn(
             requires_operation_task=False,
         )
     if requested:
-        return TurnRouteDecision(
-            mode=TurnExecutionMode.SKILL,
-            intent="explicit_skill",
-            confidence=1,
-            reason="The user explicitly selected a business Skill.",
-            skill_code=requested,
-            requires_account_context=True,
-            requires_operation_task=True,
+        decision = route_explicit_request(
+            requested,
+            platform=platform,
+            registry=skill_registry,
+            has_account=True,
         )
+        policy = PUBLIC_SKILL_POLICIES.get(requested)
+        if policy is None or "composer" not in policy.surfaces:
+            raise SkillUnavailable(
+                code="unpublished_skill",
+                reason="requested_skill_not_published",
+            )
+        if not policy.enabled or user.role not in policy.allowed_roles:
+            raise SkillUnavailable(
+                code="skill_unavailable",
+                reason="requested_skill_not_available",
+            )
+        if decision is None:
+            raise SkillUnavailable(
+                code="unknown_skill",
+                reason="requested_skill_not_registered",
+            )
+        return decision
     return await brain_intelligence.classify_turn(
         session,
         user.org_id,
@@ -589,6 +679,45 @@ async def _close_query_failure(
                     "error_code": error_code,
                 },
             )
+        ],
+    )
+
+
+async def _block_invalid_explicit_skill(
+    session: AsyncSession,
+    *,
+    thread: ConversationThread,
+    turn: ConversationTurn,
+    run: AgentRun,
+    requested_skill_code: str,
+    unavailable: SkillUnavailable,
+) -> TurnExecutionResult:
+    error_code = unavailable.code.upper()
+    decision = TurnRouteDecision(
+        mode=TurnExecutionMode.SKILL,
+        intent="explicit_skill",
+        confidence=1,
+        reason=unavailable.reason,
+        skill_code=requested_skill_code or None,
+        requires_account_context=True,
+        requires_operation_task=True,
+    )
+    return await _deliver_task_free(
+        session,
+        turn=turn,
+        run=run,
+        account_id=thread.account_id,
+        decision=decision,
+        response="该能力当前不可用，请从当前公开能力目录重新选择。",
+        status="blocked",
+        error_code=error_code,
+        projections=[
+            {
+                "type": "execution_blocked",
+                "skill_code": requested_skill_code,
+                "code": error_code,
+                "recovery_action": "请从当前公开能力目录重新选择。",
+            }
         ],
     )
 

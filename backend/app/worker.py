@@ -20,7 +20,16 @@ from app.config import settings
 from app.core.events import EVENTS_CHANNEL, dispatch, redis_settings
 from app.core.runtime_failures import FailureDisposition, describe_runtime_failure
 from app.db import async_session
-from app.models import AgentRun, AgentToolCall, BrainTask, Event, User
+from app.models import (
+    AgentRun,
+    AgentToolCall,
+    BrainTask,
+    ConversationThread,
+    ConversationTurn,
+    Event,
+    SkillRun,
+    User,
+)
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
 from app.orchestrator.checkpointing import open_postgres_checkpointer
 from app.schemas.brain import (
@@ -28,7 +37,7 @@ from app.schemas.brain import (
     IntentDecision,
     route_decision_from_legacy_intent,
 )
-from app.schemas.conversation import TurnRouteDecision
+from app.schemas.conversation import CreateConversationTurnRequest, TurnRouteDecision
 from app.services.agent_runs import (
     acquire_agent_run,
     cancel_agent_run,
@@ -38,6 +47,7 @@ from app.services.agent_runs import (
     promote_next_waiting_agent_run,
     release_agent_run_failure,
 )
+from app.services.turn_execution import execute_conversation_turn
 
 log = logging.getLogger("dyflow.worker")
 
@@ -116,6 +126,27 @@ async def execute_agent_run(
 
         heartbeat_task = asyncio.create_task(_heartbeat_loop(run_id, worker_id))
         try:
+            recoverable_skill = await session.scalar(
+                select(SkillRun)
+                .where(
+                    SkillRun.run_id == run.id,
+                    SkillRun.org_id == run.org_id,
+                )
+                .order_by(SkillRun.id.desc())
+            )
+            if (
+                recoverable_skill is not None
+                and run.thread_id is not None
+                and run.turn_id is not None
+            ):
+                await _recover_v2_skill_run(
+                    session,
+                    run=run,
+                    skill_run=recoverable_skill,
+                    worker_id=worker_id,
+                )
+                return task.id
+
             operation = str(request.get("operation") or "start")
             if operation == "start":
                 intent = IntentDecision.model_validate(request.get("intent"))
@@ -245,6 +276,62 @@ async def execute_agent_run(
                 heartbeat_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await heartbeat_task
+
+
+async def _recover_v2_skill_run(
+    session,
+    *,
+    run: AgentRun,
+    skill_run: SkillRun,
+    worker_id: str,
+) -> None:
+    user = await session.scalar(
+        select(User).where(
+            User.id == run.requested_by_id,
+            User.org_id == run.org_id,
+        )
+    )
+    thread = await session.scalar(
+        select(ConversationThread).where(
+            ConversationThread.id == run.thread_id,
+            ConversationThread.org_id == run.org_id,
+        )
+    )
+    turn = await session.scalar(
+        select(ConversationTurn).where(
+            ConversationTurn.id == run.turn_id,
+            ConversationTurn.thread_id == run.thread_id,
+            ConversationTurn.org_id == run.org_id,
+        )
+    )
+    if user is None or thread is None or turn is None:
+        raise ValueError("Turn-owned SkillRun recovery scope is unavailable")
+    if (
+        skill_run.thread_id != thread.id
+        or skill_run.turn_id != turn.id
+        or skill_run.org_id != run.org_id
+    ):
+        raise PermissionError("Turn-owned SkillRun recovery scope does not match")
+
+    payload = dict(run.request_payload or {})
+    request = CreateConversationTurnRequest.model_validate(
+        {
+            "attachment_ids": payload.get("attachment_ids") or [],
+            "client_message_id": run.client_message_id,
+            "execution_preference": payload.get("execution_preference") or "AUTO",
+            "message": turn.user_input,
+            "requested_skill_code": skill_run.skill_code,
+        }
+    )
+    await execute_conversation_turn(
+        session,
+        user,
+        turn,
+        run,
+        request,
+        execution_owner=worker_id,
+        resume_skill_run=skill_run,
+    )
 
 
 async def _load_runtime_task(
