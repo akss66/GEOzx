@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.agents.base import AgentContext, BaseAgent
 from app.agents.registry import AGENT_SPECS
@@ -15,6 +15,7 @@ from app.models import (
     BrainTask,
     Client,
     ContentItem,
+    Deliverable,
     Event,
     OrchestrationPlan,
     Project,
@@ -239,6 +240,12 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert result.acceptance.brain_rejudge_basis[0] == (
         "The result is scoped to the selected account."
     )
+    deliverable_count = await session.scalar(
+        select(func.count(Deliverable.id)).where(
+            Deliverable.content_item_id == result.deliverable.content_item_id
+        )
+    )
+    assert deliverable_count == 1
     invocations = (
         await session.scalars(
             select(AgentInvocation).where(AgentInvocation.task_id == task.id)
