@@ -70,3 +70,29 @@ class SkillCatalogItem(BaseModel):
             approval_policy=definition.approval_policy,
             artifact_type=definition.artifact_type,
         )
+
+
+PublicSkillCategory = Literal["quick_operations", "context", "expert_help"]
+SkillCatalogSurface = Literal["composer", "artifact_center", "expert_panel"]
+
+
+class PublicSkillCatalogItem(BaseModel):
+    """Strict business-only Skill metadata safe for user-facing surfaces."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str
+    version: int
+    name: str
+    description: str
+    category: PublicSkillCategory
+    icon: str
+    requires_account: bool
+    is_available: bool
+    unavailable_reason: str | None = None
+
+
+class PublicSkillCatalogOut(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    data: list[PublicSkillCatalogItem]

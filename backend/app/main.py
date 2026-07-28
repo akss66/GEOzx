@@ -42,6 +42,7 @@ from app.api import (
     publishing,
     risks,
     search,
+    skills,
     users,
     workspace_context,
     ws,
@@ -95,6 +96,7 @@ app.include_router(clients.router)
 app.include_router(workspace_context.router)
 app.include_router(notifications.router)
 app.include_router(search.router)
+app.include_router(skills.router)
 app.include_router(brain.router)
 app.include_router(conversations.router)
 app.include_router(experience_memories.router)
