@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+
+class CreateConversationThreadRequest(BaseModel):
+    account_id: int = Field(gt=0)
+    title: str = Field(default="", max_length=300)
+
+
+class CreateConversationTurnRequest(BaseModel):
+    client_message_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1)
+    requested_skill_code: str | None = Field(default=None, min_length=1, max_length=120)
+    execution_preference: Literal["AUTO", "DISCUSS_ONLY", "FORMAL_TASK"] = "AUTO"
+    attachment_ids: list[int] = Field(default_factory=list)
 
 
 class TurnExecutionMode(StrEnum):

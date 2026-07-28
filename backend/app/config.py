@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     app_name: str = "同舟行"
     environment: str = "development"
+    main_agent_v2_enabled: bool = False
 
     # CORS：前端开发服务器与容器内 nginx 来源
     cors_origins: list[str] = [
