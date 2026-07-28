@@ -154,6 +154,20 @@ describe("CapabilityLauncher", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
+  it("keeps focus on the trigger for an all-disabled menu and lets Escape close it", () => {
+    render(<CapabilityLauncher skills={[{ ...accountInspection, is_available: false }]} />);
+
+    const trigger = screen.getByRole("button", { name: "添加能力或材料" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("supports arrow navigation and returns focus to the trigger after Escape", () => {
     render(
       <CapabilityLauncher
