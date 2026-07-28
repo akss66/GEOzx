@@ -176,6 +176,66 @@
   gap: 22px;
 }
 
+.tz-turn-stream {
+  display: grid;
+  width: 100%;
+  max-width: 900px;
+  gap: 22px;
+}
+
+.tz-conversation-turn {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 14px;
+  background: var(--tz-surface);
+}
+
+.tz-conversation-turn__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--tz-muted);
+  font-size: 12px;
+}
+
+.tz-conversation-turn__route {
+  text-align: end;
+}
+
+.tz-conversation-turn__user,
+.tz-conversation-turn__assistant,
+.tz-turn-projection {
+  color: var(--tz-ink);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.tz-conversation-turn__user {
+  font-weight: var(--tz-weight-medium);
+}
+
+.tz-conversation-turn__assistant,
+.tz-turn-projection {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--tz-surface-soft);
+}
+
+.tz-conversation-turn__projections {
+  display: grid;
+  gap: 8px;
+}
+
+.tz-turn-projection p {
+  margin: 6px 0 0;
+}
+
+.tz-turn-projection--unknown {
+  color: var(--tz-muted);
+}
+
 .tz-brain-thread .dy-runtime-header {
   min-height: 26px;
   padding: 4px 9px;

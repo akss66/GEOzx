@@ -22,6 +22,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import {
   approveDeliverableAcceptance,
   approveToolCall,
+  getConversation,
   getBrainTaskRuntime,
   listBrainTasks,
   rejectDeliverableAcceptance,
@@ -39,6 +40,7 @@ import { AgentAvatar } from "../components/agents/AgentAvatar";
 import { OperationalState } from "../components/ui";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import { DecisionRequest } from "../components/brain/DecisionRequest";
+import { TurnStream } from "../components/brain/TurnStream";
 import {
   useEventStream,
   type DyEvent,
@@ -46,6 +48,7 @@ import {
 } from "../hooks/useEventStream";
 import {
   clearActiveBrainTaskId,
+  getActiveConversationThreadId,
   getActiveBrainTaskId,
   setActiveBrainTaskId,
 } from "../stores/brainConversation";
@@ -103,6 +106,7 @@ export default function BrainHome() {
   const [goal, setGoal] = useState("");
   const [localTasks, setLocalTasks] = useState<BrainTask[]>([]);
   const [activeRuntimeTaskId, setActiveRuntimeTaskId] = useState<number | null>(null);
+  const [activeConversationThreadId, setActiveConversationThreadId] = useState<number | null>(null);
   const [liveMessages, setLiveMessages] = useState<LiveRuntimeMessage[]>([]);
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [approvalComment, setApprovalComment] = useState("");
@@ -172,6 +176,14 @@ export default function BrainHome() {
     effectiveAccount &&
     (effectiveAccount.auth_status === "authorized" || effectiveAccount.auth_status === "manual"),
   );
+
+  useEffect(() => {
+    setActiveConversationThreadId(
+      effectiveAccount ? getActiveConversationThreadId(effectiveAccount.id) : null,
+    );
+    setLiveMessages([]);
+    setPendingTurn(null);
+  }, [effectiveAccount?.id]);
 
   const messageMutation = useMutation({
     mutationFn: sendBrainMessage,
@@ -391,8 +403,23 @@ export default function BrainHome() {
     queryFn: () => getBrainTaskRuntime(activeRuntimeTaskId!),
     enabled: activeRuntimeTaskId != null,
   });
+  const conversationQuery = useQuery({
+    queryKey: ["brain-conversation", activeConversationThreadId],
+    queryFn: () => getConversation(activeConversationThreadId!),
+    enabled: activeConversationThreadId != null,
+  });
+  const activeConversation =
+    activeConversationThreadId != null
+    && effectiveAccount != null
+    && conversationQuery.data?.id === activeConversationThreadId
+    && conversationQuery.data.account_id === effectiveAccount.id
+      ? conversationQuery.data
+      : null;
   const runtime =
-    activeRuntimeTaskId != null && runtimeQuery.data?.task.id === activeRuntimeTaskId
+    activeRuntimeTaskId != null
+    && effectiveAccount != null
+    && runtimeQuery.data?.task.id === activeRuntimeTaskId
+    && runtimeQuery.data.task.brief.account_ids.includes(effectiveAccount.id)
       ? runtimeQuery.data
       : null;
   const visibleRuntime = runtime;
@@ -406,6 +433,9 @@ export default function BrainHome() {
     : null;
   const runtimeError = runtimeQuery.isError
     ? presentApiError(runtimeQuery.error, "当前任务运行时暂时不可用。")
+    : null;
+  const conversationError = conversationQuery.isError
+    ? presentApiError(conversationQuery.error, "Conversation history is temporarily unavailable.")
     : null;
   const isGenerating = messageMutation.isPending || regenerateMutation.isPending;
 
@@ -484,7 +514,7 @@ export default function BrainHome() {
     setDetailsOpen(false);
   };
 
-  const hasConversation = Boolean(activeTask || pendingTurn);
+  const hasConversation = Boolean(activeTask || activeConversationThreadId || pendingTurn);
 
   useEffect(() => {
     followLatestMessage.current = true;
@@ -572,6 +602,17 @@ export default function BrainHome() {
                 actionLabel="重试"
                 onAction={() => void tasksQuery.refetch()}
               />
+            ) : activeConversationThreadId != null && conversationError ? (
+              <OperationalState
+                kind="error"
+                title="对话记录加载失败"
+                description={`${conversationError.message} 当前账号不会显示其他账号的对话记录。`}
+                diagnostic={conversationError.diagnostic}
+                actionLabel="重试"
+                onAction={() => void conversationQuery.refetch()}
+              />
+            ) : activeConversation ? (
+              <TurnStream thread={activeConversation} />
             ) : activeTask && runtimeError ? (
               <OperationalState
                 kind="error"

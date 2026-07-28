@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveDeliverableAcceptance,
   approveToolCall,
+  getConversation,
   getBrainTaskRuntime,
   listBrainTasks,
   rejectDeliverableAcceptance,
@@ -28,6 +29,7 @@ import type {
   AgentToolCall,
   BrainRuntime,
   BrainTask,
+  ConversationThread,
   DeliverableAcceptance,
 } from "../types";
 import BrainHome from "./BrainHome";
@@ -276,6 +278,54 @@ const mocks = vi.hoisted(() => {
     next_actions: ["review_pending_permissions"],
   } satisfies BrainRuntime;
 
+  const conversationThread = {
+    id: 81,
+    org_id: 1,
+    created_by_id: 2,
+    client_id: null,
+    project_id: 2,
+    account_id: 3,
+    title: "V2 account conversation",
+    created_at: "2026-07-28T00:00:00Z",
+    updated_at: "2026-07-28T00:02:00Z",
+    turns: [
+      {
+        id: 101,
+        thread_id: 81,
+        org_id: 1,
+        created_by_id: 2,
+        client_message_id: "v2-turn-101",
+        user_input: "V2_INSPECT_REQUEST",
+        assistant_response: "V2_INSPECT_RESPONSE",
+        intent: { mode: "SKILL", status: "completed" },
+        projections: [{
+          type: "artifact",
+          turn_id: 101,
+          artifact_id: 5001,
+          artifact_type: "account_inspection_report",
+          skill_run_id: 4001,
+          account_id: 3,
+          report: { summary: "V2_ARTIFACT_SOURCE_TURN" },
+        }],
+        created_at: "2026-07-28T00:00:00Z",
+        updated_at: "2026-07-28T00:00:00Z",
+      },
+      {
+        id: 102,
+        thread_id: 81,
+        org_id: 1,
+        created_by_id: 2,
+        client_message_id: "v2-turn-102",
+        user_input: "V2_LATER_GREETING",
+        assistant_response: "V2_GREETING_RESPONSE",
+        intent: { mode: "ANSWER" },
+        projections: [],
+        created_at: "2026-07-28T00:01:00Z",
+        updated_at: "2026-07-28T00:01:00Z",
+      },
+    ],
+  } satisfies ConversationThread;
+
   const workspace = {
     clientId: 1 as number | null,
     projectId: 2 as number | null,
@@ -300,6 +350,7 @@ const mocks = vi.hoisted(() => {
     toolCall,
     workspace,
     contextAccounts,
+    conversationThread,
   };
 });
 
@@ -321,6 +372,7 @@ vi.mock("../api/shell", () => ({
 vi.mock("../api/brain", () => ({
   approveDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "approved" })),
   approveToolCall: vi.fn(async () => mocks.toolCall),
+  getConversation: vi.fn(async () => mocks.conversationThread),
   getBrainTaskRuntime: vi.fn(async () => mocks.runtime),
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
@@ -399,6 +451,41 @@ describe("BrainHome", () => {
     mocks.runtime.timeline[0].payload.message = "分析当前账号定位，生成下周内容计划";
     mocks.runtime.timeline[1].payload.agent_name = "主 Agent";
     mocks.runtime.timeline[1].payload.content = "好的，我先理解目标，然后调用账号定位专家。";
+  });
+
+  it("renders an active V2 Thread by source Turn instead of task-global legacy Artifacts", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+
+    renderBrainHome();
+
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith(81));
+    const sourceTurn = await screen.findByTestId("conversation-turn-101");
+    const greetingTurn = screen.getByTestId("conversation-turn-102");
+
+    expect(sourceTurn).toHaveTextContent("V2_ARTIFACT_SOURCE_TURN");
+    expect(greetingTurn).not.toHaveTextContent("V2_ARTIFACT_SOURCE_TURN");
+    expect(screen.queryByText(mocks.acceptance.title)).not.toBeInTheDocument();
+  });
+
+  it("clears a stale V2 Thread from the screen when the selected account changes", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    const view = renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+
+    mocks.workspace.accountId = 4;
+    mocks.contextAccounts.push({ ...mocks.account, id: 4, nickname: "V2 account B" });
+    view.rerender(brainHomeTree());
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("conversation-turn-101")).not.toBeInTheDocument();
+      expect(screen.getByText("V2 account B")).toBeInTheDocument();
+    });
   });
 
   it("does not show preset prompt shortcuts in the composer", async () => {
@@ -1533,13 +1620,19 @@ function renderBrainHome() {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
 
-  return render(
+  return render(brainHomeTree(client));
+}
+
+function brainHomeTree(client = new QueryClient({
+  defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+})) {
+  return (
     <MemoryRouter>
       <QueryClientProvider client={client}>
         <AntApp>
           <BrainHome />
         </AntApp>
       </QueryClientProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
