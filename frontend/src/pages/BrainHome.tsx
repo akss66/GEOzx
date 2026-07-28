@@ -96,8 +96,6 @@ type ConversationItem =
     }
   | { kind: "status"; id: string; content: string };
 
-const PROMPT_CHIPS = ["账号定位诊断", "冷启动内容", "脚本生成", "发布前检查"];
-
 export default function BrainHome() {
   const { message } = AntApp.useApp();
   const qc = useQueryClient();
@@ -611,7 +609,6 @@ export default function BrainHome() {
             pendingPermission={pendingPermission}
             approvalComment={approvalComment}
             approving={approveMutation.isPending}
-            promptChips={PROMPT_CHIPS}
             onChange={setGoal}
             onApprovalCommentChange={setApprovalComment}
             onApprovePermission={(toolCallId, approved, comment) =>

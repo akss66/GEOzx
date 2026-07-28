@@ -396,6 +396,16 @@ describe("BrainHome", () => {
     mocks.runtime.timeline[1].payload.content = "好的，我先理解目标，然后调用账号定位专家。";
   });
 
+  it("does not show preset prompt shortcuts in the composer", async () => {
+    renderBrainHome();
+
+    expect(await screen.findByText("本地开发账号")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "账号定位诊断" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "冷启动内容" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "脚本生成" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "发布前检查" })).not.toBeInTheDocument();
+  });
+
   it("requires the account selected in the global shell instead of silently picking one", async () => {
     mocks.workspace.accountId = null;
 
