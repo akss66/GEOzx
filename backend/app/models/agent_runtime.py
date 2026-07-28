@@ -1,12 +1,16 @@
 """Durable execution records for the operations-agent runtime."""
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.conversation import ConversationThread, ConversationTurn
 
 
 class AgentRun(Base, TimestampMixin):
@@ -32,6 +36,16 @@ class AgentRun(Base, TimestampMixin):
     task_id: Mapped[int | None] = mapped_column(
         ForeignKey("brain_tasks.id", ondelete="CASCADE"), index=True, nullable=True
     )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     client_message_id: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(
         String(40), default="claimed", server_default="claimed", index=True, nullable=False
@@ -56,3 +70,6 @@ class AgentRun(Base, TimestampMixin):
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_payload: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     result_payload: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+
+    thread: Mapped["ConversationThread | None"] = relationship(back_populates="agent_runs")
+    turn: Mapped["ConversationTurn | None"] = relationship(back_populates="agent_runs")
