@@ -78,8 +78,205 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_versioned_skill_runs() -> None:
-    assert get_head_revision() == "20260728_0200"
+def test_migration_head_is_turn_provenance() -> None:
+    assert get_head_revision() == "20260728_0300"
+
+
+def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260728_0300_turn_provenance"
+    )
+    assert migration.down_revision == "20260728_0200"
+
+    engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    metadata = sa.MetaData()
+    conversation_threads = sa.Table(
+        "conversation_threads",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    conversation_turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    agent_runs = sa.Table(
+        "agent_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    skill_runs = sa.Table(
+        "skill_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    deliverables = sa.Table(
+        "deliverables",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("payload", sa.JSON, nullable=False),
+    )
+    ledger_tables = {}
+    for table_name in (
+        "strategy_plans",
+        "decision_traces",
+        "reflection_records",
+        "agent_quality_scores",
+    ):
+        ledger_tables[table_name] = sa.Table(
+            table_name,
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column(
+                "run_id",
+                sa.Integer,
+                sa.ForeignKey("agent_runs.id", ondelete="SET NULL"),
+                index=True,
+                nullable=True,
+            ),
+        )
+    events = sa.Table(
+        "events",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("type", sa.String(length=128), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(conversation_threads.insert(), [{"id": 10}])
+        connection.execute(conversation_turns.insert(), [{"id": 20}])
+        connection.execute(agent_runs.insert(), [{"id": 30}, {"id": 31}])
+        connection.execute(skill_runs.insert(), [{"id": 40}])
+        connection.execute(
+            deliverables.insert(),
+            [{"id": 1, "payload": {"legacy": True}}],
+        )
+        for table in ledger_tables.values():
+            connection.execute(table.insert(), [{"id": 1, "run_id": 31}])
+        connection.execute(events.insert(), [{"id": 1, "type": "legacy.event"}])
+
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+        migration.upgrade()
+
+        task7_columns = {"thread_id", "turn_id", "run_id", "skill_run_id"}
+        all_tables = ("deliverables", *ledger_tables, "events")
+        for table_name in all_tables:
+            inspector = sa.inspect(connection)
+            columns = {
+                column["name"]: column
+                for column in inspector.get_columns(table_name)
+            }
+            assert task7_columns <= columns.keys()
+            for column_name in task7_columns:
+                assert columns[column_name]["nullable"] is True
+
+            indexes = {
+                tuple(index["column_names"])
+                for index in inspector.get_indexes(table_name)
+            }
+            for column_name in task7_columns:
+                assert (column_name,) in indexes
+
+            foreign_keys = {
+                tuple(item["constrained_columns"]): item
+                for item in inspector.get_foreign_keys(table_name)
+            }
+            for column_name, source_table in (
+                ("thread_id", "conversation_threads"),
+                ("turn_id", "conversation_turns"),
+                ("run_id", "agent_runs"),
+                ("skill_run_id", "skill_runs"),
+            ):
+                foreign_key = foreign_keys[(column_name,)]
+                assert foreign_key["referred_table"] == source_table
+                assert foreign_key["options"]["ondelete"] == "SET NULL"
+
+        assert connection.execute(
+            sa.select(deliverables.c.payload).where(deliverables.c.id == 1)
+        ).scalar_one() == {"legacy": True}
+        assert connection.execute(
+            sa.text(
+                "SELECT thread_id, turn_id, run_id, skill_run_id "
+                "FROM deliverables WHERE id = 1"
+            )
+        ).one() == (None, None, None, None)
+        for table_name in ledger_tables:
+            assert connection.execute(
+                sa.text(
+                    f"SELECT run_id, thread_id, turn_id, skill_run_id "
+                    f"FROM {table_name} WHERE id = 1"
+                )
+            ).one() == (31, None, None, None)
+
+        migration.downgrade()
+        for table_name in ledger_tables:
+            columns = {
+                column["name"]
+                for column in sa.inspect(connection).get_columns(table_name)
+            }
+            assert "run_id" in columns
+            assert {"thread_id", "turn_id", "skill_run_id"}.isdisjoint(columns)
+            assert connection.execute(
+                sa.text(f"SELECT run_id FROM {table_name} WHERE id = 1")
+            ).scalar_one() == 31
+        for table_name in ("deliverables", "events"):
+            columns = {
+                column["name"]
+                for column in sa.inspect(connection).get_columns(table_name)
+            }
+            assert task7_columns.isdisjoint(columns)
+
+        migration.upgrade()
+        for table_name in all_tables:
+            columns = {
+                column["name"]
+                for column in sa.inspect(connection).get_columns(table_name)
+            }
+            assert task7_columns <= columns
+
+        for table_name in all_tables:
+            existing_columns = {
+                column["name"]
+                for column in sa.inspect(connection).get_columns(table_name)
+            }
+            values = {
+                "id": 2,
+                "thread_id": 10,
+                "turn_id": 20,
+                "run_id": 30,
+                "skill_run_id": 40,
+            }
+            if "payload" in existing_columns:
+                values["payload"] = {"traceable": True}
+            if "type" in existing_columns:
+                values["type"] = "traceable.event"
+            reflected_table = sa.Table(
+                table_name,
+                sa.MetaData(),
+                autoload_with=connection,
+            )
+            connection.execute(reflected_table.insert(), values)
+
+        connection.execute(skill_runs.delete().where(skill_runs.c.id == 40))
+        connection.execute(agent_runs.delete().where(agent_runs.c.id == 30))
+        connection.execute(conversation_turns.delete().where(conversation_turns.c.id == 20))
+        connection.execute(
+            conversation_threads.delete().where(conversation_threads.c.id == 10)
+        )
+        for table_name in all_tables:
+            assert connection.execute(
+                sa.text(
+                    f"SELECT thread_id, turn_id, run_id, skill_run_id "
+                    f"FROM {table_name} WHERE id = 2"
+                )
+            ).one() == (None, None, None, None)
 
 
 def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None:

@@ -42,6 +42,21 @@ class StrategyPlan(Base, TimestampMixin):
     run_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     client_id: Mapped[int | None] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), index=True, nullable=True
     )
@@ -102,6 +117,21 @@ class DecisionTrace(Base, TimestampMixin):
     run_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     client_id: Mapped[int | None] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), index=True, nullable=True
     )
@@ -152,6 +182,21 @@ class ReflectionRecord(Base, TimestampMixin):
     )
     run_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
     )
     client_id: Mapped[int | None] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), index=True, nullable=True
@@ -275,6 +320,21 @@ class AgentQualityScore(Base, TimestampMixin):
     )
     run_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
     )
     invocation_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_invocations.id", ondelete="SET NULL"), index=True, nullable=True

@@ -65,6 +65,26 @@ class Deliverable(Base, TimestampMixin):
     content_item_id: Mapped[int] = mapped_column(
         ForeignKey("content_items.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     agent_code: Mapped[str] = mapped_column(String(64), nullable=False)
     type: Mapped[DeliverableType] = mapped_column(
         pg_enum(DeliverableType, "deliverable_type"), index=True, nullable=False

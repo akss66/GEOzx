@@ -53,6 +53,26 @@ class Event(Base):
     project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
+    thread_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    skill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("skill_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     payload: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(
         String(64), nullable=True
