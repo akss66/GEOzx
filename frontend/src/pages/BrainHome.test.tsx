@@ -828,36 +828,47 @@ describe("BrainHome", () => {
       }),
     );
 
-    renderBrainHome();
+    try {
+      renderBrainHome();
 
-    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
-    await screen.findByText(mocks.artifact.title);
-    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
-    await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
-    await waitFor(() => expect(document.activeElement).toHaveAttribute("data-turn-id", "101"));
+      fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
+      await screen.findByText(mocks.artifact.title);
+      fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
+      await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
+      await waitFor(() => expect(document.activeElement).toHaveAttribute("data-turn-id", "101"));
 
-    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
-      target: { value: "V2_LATER_GREETING_FROM_SOURCE" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+        target: { value: "V2_LATER_GREETING_FROM_SOURCE" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
 
-    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, {
-      client_message_id: expect.any(String),
-      message: "V2_LATER_GREETING_FROM_SOURCE",
-    }));
-    await act(async () => resolveTurn?.());
-    expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads"))
-      .toContain("\"3\":81");
-    expect(await screen.findByText("V2_LATER_GREETING_FROM_SOURCE")).toBeInTheDocument();
-    const sourceTurn = await screen.findByTestId("conversation-turn-101");
-    const laterTurn = await screen.findByTestId("conversation-turn-103");
-    expect(sourceTurn).toHaveTextContent(mocks.artifact.title);
-    expect(laterTurn).not.toHaveTextContent(mocks.artifact.title);
-    expect(within(sourceTurn).getByRole("article", {
-      name: `Artifact: ${mocks.artifact.title}`,
-    })).toBeInTheDocument();
-    vi.mocked(getConversation).mockResolvedValue(mocks.conversationThread);
+      await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, {
+        client_message_id: expect.any(String),
+        message: "V2_LATER_GREETING_FROM_SOURCE",
+      }));
+      await act(async () => resolveTurn?.());
+      expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads"))
+        .toContain("\"3\":81");
+      expect(await screen.findByText("V2_LATER_GREETING_FROM_SOURCE")).toBeInTheDocument();
+      const sourceTurn = await screen.findByTestId("conversation-turn-101");
+      const laterTurn = await screen.findByTestId("conversation-turn-103");
+      expect(sourceTurn).toHaveTextContent(mocks.artifact.title);
+      expect(laterTurn).not.toHaveTextContent(mocks.artifact.title);
+      expect(within(sourceTurn).getByRole("article", {
+        name: `Artifact: ${mocks.artifact.title}`,
+      })).toBeInTheDocument();
+    } finally {
+      vi.mocked(getConversation).mockReset();
+      vi.mocked(getConversation).mockImplementation(async () => mocks.conversationThread);
+      vi.mocked(sendConversationTurn).mockReset();
+      vi.mocked(sendConversationTurn).mockImplementation(async () => ({
+        turn: mocks.conversationThread.turns[1],
+        run: mocks.completedConversationRun,
+        task_id: null,
+        projections: [],
+      }));
+    }
   });
 
   it("keeps the user in results and retries the exact source conversation when it cannot load", async () => {

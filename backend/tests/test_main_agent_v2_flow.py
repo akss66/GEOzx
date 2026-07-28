@@ -325,6 +325,9 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
         )
     )
     inspection_artifact = await session.scalar(select(Deliverable))
+    inspection_skill_run = await session.scalar(
+        select(SkillRun).where(SkillRun.turn_id == turns[2].id)
+    )
     explanation_artifact_count = await session.scalar(
         select(func.count(Deliverable.id)).where(
             Deliverable.turn_id == turns[3].id,
@@ -335,14 +338,18 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
     )
 
     assert len(turns) == 6
-    assert len(turns[0].agent_runs) == 1
+    assert [len(turn.agent_runs) for turn in turns] == [1, 1, 1, 1, 1, 1]
     assert turns[0].agent_runs[0].task_id is None
-    assert len(turns[1].agent_runs) == 1
     assert turns[1].agent_runs[0].task_id is None
     assert inspection_artifact is not None
     assert inspection_artifact.turn_id == turns[2].id
+    assert inspection_skill_run is not None
+    assert inspection_artifact.skill_run_id == inspection_skill_run.id
+    assert inspection_skill_run.task_id == turns[2].agent_runs[0].task_id
+    assert turns[2].agent_runs[0].task_id is not None
     assert explanation_artifact_count == 0
+    assert turns[3].agent_runs[0].task_id is None
     assert strategy is not None
-    assert len(turns[4].agent_runs) == 1
     assert strategy.task_id == turns[4].agent_runs[0].task_id
+    assert turns[5].agent_runs[0].task_id is None
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
