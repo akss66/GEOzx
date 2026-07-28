@@ -436,6 +436,182 @@ export interface AgentToolCall {
   updated_at: string;
 }
 
+export type ConversationExecutionPreference =
+  | "AUTO"
+  | "DISCUSS_ONLY"
+  | "FORMAL_TASK";
+
+export interface CreateConversationInput {
+  account_id: number;
+  title?: string;
+}
+
+export interface SendConversationTurnInput {
+  client_message_id: string;
+  message: string;
+  requested_skill_code?: string | null;
+  execution_preference?: ConversationExecutionPreference;
+  attachment_ids?: number[];
+}
+
+export interface ConversationAgentRun {
+  id: number;
+  org_id: number;
+  requested_by_id: number;
+  task_id: number | null;
+  thread_id: number | null;
+  turn_id: number | null;
+  client_message_id: string;
+  status: string;
+  phase: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ArtifactSection {
+  key: string;
+  title: string;
+  content: string | unknown[] | Record<string, unknown>;
+}
+
+export interface ArtifactEvidenceRef {
+  kind: string;
+  id: number;
+  label: string;
+}
+
+export interface ArtifactQuality {
+  score: number;
+  passed: boolean;
+  issues: string[];
+}
+
+export type ArtifactStatus =
+  | "draft"
+  | "ready_for_review"
+  | "accepted"
+  | "revision_requested"
+  | "superseded";
+
+export interface Artifact {
+  id: number;
+  account_id: number;
+  thread_id: number | null;
+  turn_id: number | null;
+  run_id: number | null;
+  skill_run_id: number | null;
+  task_id: number | null;
+  artifact_type: string;
+  title: string;
+  version: number;
+  status: ArtifactStatus;
+  summary: string;
+  sections: ArtifactSection[];
+  evidence_refs: ArtifactEvidenceRef[];
+  quality: ArtifactQuality | null;
+  created_at: string;
+}
+
+export interface ArtifactPage {
+  data: Artifact[];
+  pagination: {
+    page: number;
+    page_size: number;
+    total: number;
+    pages: number;
+  };
+}
+
+export interface PublicSkill {
+  code: string;
+  version: number;
+  name: string;
+  description: string;
+  category: "quick_operations" | "context" | "expert_help";
+  icon: string;
+  requires_account: boolean;
+  is_available: boolean;
+  unavailable_reason: string | null;
+}
+
+export type SkillStage = {
+  code: string;
+  name: string;
+  status: string;
+};
+
+export type TurnProjection =
+  | { type: "answer"; turn_id: number; message: string }
+  | {
+      type: "progress";
+      turn_id: number;
+      skill_run_id: number;
+      stages: SkillStage[];
+    }
+  | { type: "expert"; turn_id: number; invocation: AgentInvocation }
+  | { type: "approval"; turn_id: number; approval: AgentToolCall }
+  | {
+      type: "artifact";
+      artifact_id: number;
+      artifact_type: string;
+      skill_run_id: number;
+      account_id: number;
+      report: Record<string, unknown>;
+      turn_id?: number;
+    }
+  | {
+      type: "account_data";
+      account_id: number;
+      skill_code: string;
+      skill_run_id: number;
+      data: Record<string, unknown>;
+      turn_id?: number;
+    }
+  | {
+      type: "execution_blocked";
+      skill_run_id: number;
+      code: string;
+      artifact_type?: string;
+      account_id?: number;
+      skill_code?: string;
+      recovery_action?: string;
+      turn_id?: number;
+    };
+
+export interface ConversationTurn {
+  id: number;
+  thread_id: number;
+  org_id: number;
+  created_by_id: number | null;
+  client_message_id: string | null;
+  user_input: string;
+  assistant_response: string | null;
+  intent: Record<string, unknown> | null;
+  projections: TurnProjection[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationThread {
+  id: number;
+  org_id: number;
+  created_by_id: number | null;
+  client_id: number | null;
+  project_id: number | null;
+  account_id: number;
+  title: string;
+  turns: ConversationTurn[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TurnSubmission {
+  turn: ConversationTurn;
+  run: ConversationAgentRun;
+  task_id: number | null;
+  projections: TurnProjection[];
+}
+
 export interface RuntimeEvent {
   id: number;
   type: string;

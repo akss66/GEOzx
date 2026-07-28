@@ -5,9 +5,13 @@ import {
   approveDeliverableAcceptance,
   closeTaskMemory,
   confirmBrainTask,
+  createConversation,
   draftBrainTask,
+  getConversation,
   getBrainTaskRuntime,
+  listArtifacts,
   listBrainTasks,
+  listComposerSkills,
   listDeliverableAcceptances,
   listPendingToolCallApprovals,
   listTaskInvocations,
@@ -18,12 +22,21 @@ import {
   regenerateBrainMessage,
   refreshBrainObservation,
   selectBrainDecision,
+  sendConversationTurn,
   sendBrainMessage,
   stopBrainGeneration,
   verifyBrainExperienceCandidate,
 } from "./brain";
 import { api } from "./client";
 import type { AgentToolCall, BrainRuntime, BrainTask, DeliverableAcceptance } from "../types";
+import {
+  clearActiveConversationThreadId,
+  getActiveBrainTaskId,
+  getActiveConversationThreadId,
+  setActiveBrainTaskId,
+  setActiveConversationThreadId,
+} from "../stores/brainConversation";
+import { installLocalStorage } from "../test/storage";
 
 vi.mock("./client", () => ({
   api: {
@@ -143,6 +156,132 @@ const runtime = {
 describe("brain api", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    installLocalStorage();
+  });
+
+  it("calls the account-scoped conversation endpoints with an idempotent turn", async () => {
+    const thread = { id: 21, account_id: 3, turns: [] };
+    const submission = {
+      turn: { id: 31, thread_id: 21, projections: [] },
+      run: { id: 41, thread_id: 21, turn_id: 31 },
+      task_id: null,
+      projections: [],
+    };
+    apiPost
+      .mockResolvedValueOnce({ data: thread })
+      .mockResolvedValueOnce({ data: submission });
+    apiGet.mockResolvedValueOnce({ data: thread });
+
+    await expect(
+      createConversation({ account_id: 3, title: "账号运营" }),
+    ).resolves.toEqual(thread);
+    await expect(
+      sendConversationTurn(21, {
+        client_message_id: "turn-1",
+        message: "体检这个账号",
+        requested_skill_code: "account_inspection",
+        execution_preference: "AUTO",
+      }),
+    ).resolves.toEqual(submission);
+    await expect(getConversation(21)).resolves.toEqual(thread);
+
+    expect(apiPost).toHaveBeenNthCalledWith(1, "/brain/conversations", {
+      account_id: 3,
+      title: "账号运营",
+    });
+    expect(apiPost).toHaveBeenNthCalledWith(
+      2,
+      "/brain/conversations/21/turns",
+      {
+        client_message_id: "turn-1",
+        message: "体检这个账号",
+        requested_skill_code: "account_inspection",
+        execution_preference: "AUTO",
+        attachment_ids: [],
+      },
+    );
+    expect(apiGet).toHaveBeenCalledWith("/brain/conversations/21");
+  });
+
+  it("lists only public composer Skills and paginated account artifacts", async () => {
+    const skills = [
+      {
+        code: "account_inspection",
+        version: 1,
+        name: "一键账号体检",
+        description: "体检",
+        category: "quick_operations",
+        icon: "activity",
+        requires_account: true,
+        is_available: true,
+        unavailable_reason: null,
+      },
+    ];
+    const artifacts = {
+      data: [],
+      pagination: { page: 2, page_size: 10, total: 0, pages: 0 },
+    };
+    apiGet
+      .mockResolvedValueOnce({ data: { data: skills } })
+      .mockResolvedValueOnce({ data: artifacts });
+
+    await expect(listComposerSkills()).resolves.toEqual(skills);
+    await expect(
+      listArtifacts({
+        accountId: 3,
+        artifactType: "account_inspection_report",
+        status: "ready_for_review",
+        page: 2,
+        pageSize: 10,
+      }),
+    ).resolves.toEqual(artifacts);
+
+    expect(apiGet).toHaveBeenNthCalledWith(1, "/skills", {
+      params: { platform: "douyin", surface: "composer" },
+    });
+    expect(apiGet).toHaveBeenNthCalledWith(2, "/artifacts", {
+      params: {
+        account_id: 3,
+        artifact_type: "account_inspection_report",
+        status: "ready_for_review",
+        page: 2,
+        page_size: 10,
+      },
+    });
+  });
+
+  it("isolates active conversation Threads by account without replacing legacy tasks", () => {
+    setActiveBrainTaskId(1, 101);
+    setActiveConversationThreadId(1, 201);
+    setActiveConversationThreadId(2, 202);
+
+    expect(getActiveConversationThreadId(1)).toBe(201);
+    expect(getActiveConversationThreadId(2)).toBe(202);
+    expect(getActiveBrainTaskId(1)).toBe(101);
+
+    clearActiveConversationThreadId(2);
+    expect(getActiveConversationThreadId(2)).toBeNull();
+    expect(getActiveConversationThreadId(1)).toBe(201);
+    expect(getActiveBrainTaskId(1)).toBe(101);
+  });
+
+  it("ignores malformed or non-positive active conversation storage", () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({
+        version: 1,
+        accounts: { "1": -4, "2": 0, "3": "bad", nope: 7 },
+      }),
+    );
+    expect(getActiveConversationThreadId(1)).toBeNull();
+    expect(getActiveConversationThreadId(2)).toBeNull();
+    expect(getActiveConversationThreadId(3)).toBeNull();
+
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      "{broken",
+    );
+    expect(getActiveConversationThreadId(1)).toBeNull();
   });
 
   it("calls task list and draft endpoints", async () => {

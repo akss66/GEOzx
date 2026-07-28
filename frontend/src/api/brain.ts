@@ -4,12 +4,81 @@ import type {
   AgentToolCall,
   BrainRuntime,
   BrainTask,
+  ArtifactPage,
+  ArtifactStatus,
+  ConversationThread,
+  CreateConversationInput,
   DeliverableAcceptance,
   DraftBrainTaskInput,
   ExperienceMemorySummary,
   ReflectionRecordSummary,
   RerunScope,
+  PublicSkill,
+  SendConversationTurnInput,
+  TurnSubmission,
 } from "../types";
+
+export async function createConversation(
+  input: CreateConversationInput,
+): Promise<ConversationThread> {
+  const { data } = await api.post<ConversationThread>("/brain/conversations", {
+    account_id: input.account_id,
+    title: input.title ?? "",
+  });
+  return data;
+}
+
+export async function sendConversationTurn(
+  threadId: number,
+  input: SendConversationTurnInput,
+): Promise<TurnSubmission> {
+  const { data } = await api.post<TurnSubmission>(
+    `/brain/conversations/${threadId}/turns`,
+    {
+      client_message_id: input.client_message_id,
+      message: input.message,
+      requested_skill_code: input.requested_skill_code ?? null,
+      execution_preference: input.execution_preference ?? "AUTO",
+      attachment_ids: input.attachment_ids ?? [],
+    },
+  );
+  return data;
+}
+
+export async function getConversation(threadId: number): Promise<ConversationThread> {
+  const { data } = await api.get<ConversationThread>(
+    `/brain/conversations/${threadId}`,
+  );
+  return data;
+}
+
+export async function listComposerSkills(
+  platform = "douyin",
+): Promise<PublicSkill[]> {
+  const { data } = await api.get<{ data: PublicSkill[] }>("/skills", {
+    params: { platform, surface: "composer" },
+  });
+  return data.data;
+}
+
+export async function listArtifacts(input: {
+  accountId: number;
+  artifactType?: string;
+  status?: ArtifactStatus;
+  page?: number;
+  pageSize?: number;
+}): Promise<ArtifactPage> {
+  const { data } = await api.get<ArtifactPage>("/artifacts", {
+    params: {
+      account_id: input.accountId,
+      artifact_type: input.artifactType,
+      status: input.status,
+      page: input.page ?? 1,
+      page_size: input.pageSize ?? 20,
+    },
+  });
+  return data;
+}
 
 export async function listBrainTasks(): Promise<BrainTask[]> {
   const { data } = await api.get<BrainTask[]>("/brain/tasks");
