@@ -270,6 +270,7 @@ async def test_account_inspection_reports_missing_data_without_fabricated_metric
     assert report.missing_data
     assert report.key_metrics == []
     assert "无法" in report.summary
+    assert all("output" not in finding for finding in report.findings)
     assert report.account_id == account.id
 
 

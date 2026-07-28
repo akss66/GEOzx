@@ -744,6 +744,8 @@ def _build_report(
     ]
     findings = [item for item in summaries if item]
     if sufficiency == "insufficient":
+        findings = ["当前只能确认数据缺口，尚不能形成账号表现或内容方向结论。"]
+    if sufficiency == "insufficient":
         summary = (
             "现有数据不足，无法形成可靠的表现结论；本报告先列出缺失数据和补数动作。"
         )
