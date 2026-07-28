@@ -24,7 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.core.events import publish_realtime_event
+from app.core.events import (
+    publish_realtime_event,
+    record_runtime_event_once,
+    runtime_event_idempotency_key,
+)
 from app.llm.gateway import (
     LLMCallContext,
     bind_llm_call_context,
@@ -127,6 +131,10 @@ class BrainRuntimeState(TypedDict, total=False):
 
 _runtime_session: ContextVar[AsyncSession | None] = ContextVar(
     "brain_runtime_session",
+    default=None,
+)
+_runtime_event_identity: ContextVar[tuple[int, int, int, str] | None] = ContextVar(
+    "brain_runtime_event_identity",
     default=None,
 )
 
@@ -409,6 +417,12 @@ class BrainRuntimeGraph:
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         task.status = BrainTaskStatus.RUNNING
         task.current_focus = "运营大脑正在理解你的目标"
+        account_ids = list(task.brief.account_ids if task.brief else [])
+        runtime_identity_token = _runtime_event_identity.set(
+            (task.org_id, account_ids[0], agent_run_id, client_message_id)
+            if agent_run_id is not None and client_message_id and len(account_ids) == 1
+            else None
+        )
         await session.commit()
         await self._record_event(
             session,
@@ -503,6 +517,7 @@ class BrainRuntimeGraph:
         finally:
             reset_stream_observer(token)
             _runtime_session.reset(runtime_session_token)
+            _runtime_event_identity.reset(runtime_identity_token)
         await session.refresh(task)
         return task
 
@@ -900,25 +915,6 @@ class BrainRuntimeGraph:
     async def _dispatch_experts(self, state: BrainRuntimeState) -> BrainRuntimeState:
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
-            first_step = next(
-                (
-                    step
-                    for step in (task.plan.steps if task.plan else [])
-                    if step.get("status") != "skipped"
-                ),
-                None,
-            )
-            if first_step:
-                await self._record_event(
-                    session,
-                    task,
-                    "brain.runtime.subagent_started",
-                    {
-                        "message": f"运营大脑正在调用 {first_step.get('agent_name')}。",
-                        "agent_code": first_step.get("agent_code"),
-                        "agent_name": first_step.get("agent_name"),
-                    },
-                )
             await run_brain_task_pipeline(session, task)
             await self._record_subagent_results(session, task)
         return {**state, "status": "experts_dispatched"}
@@ -946,17 +942,6 @@ class BrainRuntimeGraph:
             ]
             current_outputs: list[dict[str, Any]] = []
             for code in selected:
-                await self._record_event(
-                    session,
-                    task,
-                    "brain.runtime.subagent_started",
-                    {
-                        "message": f"{_agent_display_name(code)}开始处理。",
-                        "agent_code": code,
-                        "agent_name": _agent_display_name(code),
-                        "round_index": round_index,
-                    },
-                )
                 agent_code = AgentCode(code)
                 result = await agent_harness.execute(
                     session,
@@ -2208,6 +2193,10 @@ class BrainRuntimeGraph:
     ) -> None:
         if task.brief is None:
             return
+        if await self._runtime_message_done_exists(
+            session, client_message_id, AgentCode.DECISION.value
+        ):
+            return
         history = await _parent_thread_messages(session, task, task.brief.goal)
         operating_context = await _main_agent_operating_context(session, task)
         completed_event_ids_before = {
@@ -2323,6 +2312,11 @@ class BrainRuntimeGraph:
     ) -> None:
         """Progressively deliver user-facing runtime copy, then persist its checkpoint."""
 
+        if await self._runtime_message_done_exists(
+            session, client_message_id, AgentCode.DECISION.value
+        ):
+            return
+
         message_id = _runtime_message_id(
             client_message_id,
             AgentCode.DECISION.value,
@@ -2357,6 +2351,28 @@ class BrainRuntimeGraph:
             {**base_payload, "message": content, "content": content},
         )
 
+    @staticmethod
+    async def _runtime_message_done_exists(
+        session: AsyncSession,
+        client_message_id: str | None,
+        agent_code: str,
+    ) -> bool:
+        identity = _runtime_event_identity.get()
+        if identity is None or not client_message_id:
+            return False
+        org_id, account_id, run_id, _current_message_id = identity
+        key = runtime_event_idempotency_key(
+            org_id=org_id,
+            account_id=account_id,
+            run_id=run_id,
+            client_message_id=client_message_id,
+            event_type="brain.runtime.message_done",
+            semantic_key=_runtime_message_id(client_message_id, agent_code),
+        )
+        return (
+            await session.scalar(select(Event.id).where(Event.idempotency_key == key))
+        ) is not None
+
     async def _record_event(
         self,
         session: AsyncSession,
@@ -2369,13 +2385,38 @@ class BrainRuntimeGraph:
             "task_id": task.id,
             "thread_id": task.thread_id or self.thread_id_for(task.id),
         }
-        event_row = Event(
-            type=event_type,
-            content_item_id=task.content_item_id,
-            project_id=task.brief.project_id if task.brief else None,
-            payload=event_payload,
-        )
-        session.add(event_row)
+        identity = _runtime_event_identity.get()
+        if identity is not None:
+            org_id, account_id, run_id, client_message_id = identity
+            semantic_key = str(
+                event_payload.get("semantic_key")
+                or event_payload.get("message_id")
+                or event_payload.get("invocation_id")
+                or event_payload.get("tool_call_id")
+                or event_type
+            )
+            event_row, created = await record_runtime_event_once(
+                session,
+                org_id=org_id,
+                account_id=account_id,
+                run_id=run_id,
+                client_message_id=client_message_id,
+                event_type=event_type,
+                semantic_key=semantic_key,
+                payload=event_payload,
+                content_item_id=task.content_item_id,
+                project_id=task.brief.project_id if task.brief else None,
+            )
+            if not created:
+                return
+        else:
+            event_row = Event(
+                type=event_type,
+                content_item_id=task.content_item_id,
+                project_id=task.brief.project_id if task.brief else None,
+                payload=event_payload,
+            )
+            session.add(event_row)
         await session.commit()
         await session.refresh(event_row)
         await publish_realtime_event(

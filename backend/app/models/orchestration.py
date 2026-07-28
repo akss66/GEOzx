@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -41,6 +41,9 @@ class Event(Base):
     """事件日志 / 事件溯源。created_at 由 server_default 提供（事件不可变，无 updated_at）。"""
 
     __tablename__ = "events"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_events_idempotency_key"),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     type: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
@@ -51,6 +54,9 @@ class Event(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
     payload: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

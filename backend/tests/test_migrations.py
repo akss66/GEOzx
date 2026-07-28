@@ -79,7 +79,64 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
 
 
 def test_migration_head_is_account_scoped_content() -> None:
-    assert get_head_revision() == "20260728_0150"
+    assert get_head_revision() == "20260728_0175"
+
+
+def test_runtime_event_idempotency_migration_is_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260728_0175_runtime_event_idempotency"
+    )
+    assert migration.down_revision == "20260728_0150"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    events = sa.Table(
+        "events",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("type", sa.String(length=128), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=True),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            events.insert(),
+            [{"id": 1, "type": "legacy.event", "payload": {"legacy": True}}],
+        )
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+
+        migration.upgrade()
+        columns = {item["name"] for item in sa.inspect(connection).get_columns("events")}
+        assert "idempotency_key" in columns
+        connection.execute(
+            sa.text(
+                "INSERT INTO events (id, type, idempotency_key) "
+                "VALUES (2, 'brain.runtime.message_done', 'same-runtime-event')"
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO events (id, type, idempotency_key) "
+                    "VALUES (3, 'brain.runtime.message_done', 'same-runtime-event')"
+                )
+            )
+        connection.execute(
+            sa.text("INSERT INTO events (id, type) VALUES (4, 'legacy.event')")
+        )
+        assert connection.execute(
+            sa.text("SELECT payload FROM events WHERE id = 1")
+        ).scalar_one() is not None
+
+        migration.downgrade()
+        assert "idempotency_key" not in {
+            item["name"] for item in sa.inspect(connection).get_columns("events")
+        }
+        migration.upgrade()
+        assert "idempotency_key" in {
+            item["name"] for item in sa.inspect(connection).get_columns("events")
+        }
 
 
 def test_account_scoped_content_migration_is_reversible_only_without_unscoped_rows(

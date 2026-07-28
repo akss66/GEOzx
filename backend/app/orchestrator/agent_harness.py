@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.base import AgentContext
 from app.agents.registry import AGENT_SPECS, AgentSpec, get_agent_spec
 from app.core.approval_audit import add_approval_requested
+from app.core.events import record_runtime_event_once
 from app.core.workspace_access import require_account_access, require_project_access
 from app.models import (
     Account,
     AgentInvocation,
+    AgentRun,
     BrainTask,
     ContentItem,
     Deliverable,
@@ -168,6 +170,21 @@ class AgentHarness:
                 raise
             return await self._existing_result(session, task, existing)
         invocation_id = invocation.id
+        await self._record_runtime_lifecycle(
+            session,
+            task=task,
+            account_id=account.id,
+            run_id=run_id,
+            invocation=invocation,
+            event_type="brain.runtime.subagent_started",
+            payload={
+                "message": f"{spec.name}开始处理。",
+                "agent_code": code.value,
+                "agent_name": spec.name,
+                "invocation_id": invocation.id,
+            },
+            semantic_suffix="started",
+        )
 
         session.add(
             Event(
@@ -296,6 +313,21 @@ class AgentHarness:
                 failed.status = AgentInvocationStatus.FAILED
                 failed.failure_reason = type(exc).__name__
                 failed.finished_at = datetime.now(UTC)
+                await self._record_runtime_lifecycle(
+                    session,
+                    task=task,
+                    account_id=account.id,
+                    run_id=run_id,
+                    invocation=failed,
+                    event_type="brain.runtime.subagent_failed",
+                    payload={
+                        "message": f"{spec.name}处理失败。",
+                        "agent_code": code.value,
+                        "agent_name": spec.name,
+                        "invocation_id": failed.id,
+                    },
+                    semantic_suffix="failed",
+                )
                 await session.commit()
             raise AgentHarnessError(f"{spec.name} execution failed") from exc
 
@@ -359,6 +391,22 @@ class AgentHarness:
         invocation.status = AgentInvocationStatus.DONE
         invocation.output_summary = summary
         invocation.finished_at = datetime.now(UTC)
+        await self._record_runtime_lifecycle(
+            session,
+            task=task,
+            account_id=account.id,
+            run_id=run_id,
+            invocation=invocation,
+            event_type="brain.runtime.subagent_completed",
+            payload={
+                "message": f"{spec.name}已完成本轮处理。",
+                "agent_code": code.value,
+                "agent_name": spec.name,
+                "invocation_id": invocation.id,
+                "summary": summary,
+            },
+            semantic_suffix="completed",
+        )
         session.add(
             Event(
                 type="agent.harness.completed",
@@ -393,6 +441,36 @@ class AgentHarness:
             deliverable=deliverable,
             acceptance=acceptance,
             knowledge_sources=knowledge_rows,
+        )
+
+    @staticmethod
+    async def _record_runtime_lifecycle(
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        account_id: int,
+        run_id: int | None,
+        invocation: AgentInvocation,
+        event_type: str,
+        payload: dict,
+        semantic_suffix: str,
+    ) -> None:
+        if run_id is None:
+            return
+        run = await session.get(AgentRun, run_id)
+        if run is None or run.org_id != task.org_id:
+            return
+        await record_runtime_event_once(
+            session,
+            org_id=task.org_id,
+            account_id=account_id,
+            run_id=run.id,
+            client_message_id=run.client_message_id,
+            event_type=event_type,
+            semantic_key=f"invocation:{invocation.id}:{semantic_suffix}",
+            payload={"task_id": task.id, **payload},
+            content_item_id=task.content_item_id,
+            project_id=task.brief.project_id if task.brief else None,
         )
 
     @staticmethod

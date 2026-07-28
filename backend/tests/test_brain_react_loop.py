@@ -2,7 +2,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import select
 
+from app.core.events import record_runtime_event_once
+from app.models import Event
 from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLimits
 from app.schemas.brain import RuntimeNextStep, RuntimeToolCall
 
@@ -130,3 +133,66 @@ def test_request_permission_requires_a_concrete_tool_call():
     )
 
     assert step.action == "request_permission"
+
+
+@pytest.mark.asyncio
+async def test_runtime_event_idempotency_reuses_persisted_event_and_isolates_account(
+    session, admin
+) -> None:
+    """The DB unique key, rather than a process-local check, owns runtime replay."""
+
+    identity = {
+        "org_id": admin.org_id,
+        "account_id": 101,
+        "run_id": 202,
+        "client_message_id": "retry-message-1",
+        "event_type": "brain.runtime.message_done",
+        "semantic_key": "main-agent:done",
+    }
+    first, created_first = await record_runtime_event_once(
+        session,
+        payload={"content": "persisted reply"},
+        **identity,
+    )
+    second, created_second = await record_runtime_event_once(
+        session,
+        payload={"content": "retry must reuse this"},
+        **identity,
+    )
+    other_account, created_other_account = await record_runtime_event_once(
+        session,
+        payload={"content": "different account is independent"},
+        **{**identity, "account_id": 102},
+    )
+    other_run, created_other_run = await record_runtime_event_once(
+        session,
+        payload={"content": "different run is independent"},
+        **{**identity, "run_id": 203},
+    )
+    other_client_message, created_other_client_message = await record_runtime_event_once(
+        session,
+        payload={"content": "different user message is independent"},
+        **{**identity, "client_message_id": "retry-message-2"},
+    )
+    await session.commit()
+
+    rows = list(
+        await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.message_done")
+        )
+    )
+    assert created_first is True
+    assert created_second is False
+    assert created_other_account is True
+    assert created_other_run is True
+    assert created_other_client_message is True
+    assert first.id == second.id
+    assert first.payload["content"] == "persisted reply"
+    assert other_account.id != first.id
+    assert other_run.id != first.id
+    assert other_client_message.id != first.id
+    assert len(rows) == 4
+    assert first.payload["org_id"] == admin.org_id
+    assert first.payload["account_id"] == 101
+    assert first.payload["run_id"] == 202
+    assert first.payload["client_message_id"] == "retry-message-1"

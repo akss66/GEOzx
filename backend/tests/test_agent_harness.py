@@ -267,6 +267,29 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert len(completed_events) == 1
     assert completed_events[0].payload["invocation_id"] == result.invocation.id
     assert completed_events[0].payload["deliverable_id"] == result.deliverable.id
+    lifecycle_events = [
+        event
+        for event in (
+            await session.scalars(
+                select(Event).where(
+                    Event.type.in_(
+                        [
+                            "brain.runtime.subagent_started",
+                            "brain.runtime.subagent_completed",
+                        ]
+                    )
+                ).order_by(Event.id)
+            )
+        ).all()
+        if event.payload is not None
+        and event.payload.get("invocation_id") == result.invocation.id
+    ]
+    assert [event.type for event in lifecycle_events] == [
+        "brain.runtime.subagent_started",
+        "brain.runtime.subagent_completed",
+    ]
+    assert all(event.payload["invocation_id"] == result.invocation.id for event in lifecycle_events)
+    assert all(event.idempotency_key is not None for event in lifecycle_events)
     invocations = (
         await session.scalars(
             select(AgentInvocation).where(AgentInvocation.task_id == task.id)
