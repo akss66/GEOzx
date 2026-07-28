@@ -119,7 +119,7 @@ export default function BrainHome() {
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [approvalComment, setApprovalComment] = useState("");
   const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
-  const [artifactRevisions, setArtifactRevisions] = useState<Record<number, Artifact>>({});
+  const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
@@ -387,13 +387,18 @@ export default function BrainHome() {
   });
 
   const formalArtifactAcceptMutation = useMutation({
-    mutationFn: (input: { artifactId: number; createNextStep: boolean }) => acceptArtifact(input.artifactId),
+    mutationFn: (input: { sourceArtifact: Artifact; createNextStep: boolean }) => acceptArtifact(input.sourceArtifact.id),
     onSuccess: (accepted, input) => {
+      if (!matchesArtifactResponse(accepted, input.sourceArtifact, "accept")) {
+        message.error("成果返回校验失败，请重试。");
+        return;
+      }
+      setArtifactRevisionChains((current) => updateExistingArtifactChain(current, accepted));
       setArtifactRefreshKey((value) => value + 1);
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
       }
-      if (input.createNextStep && accepted.id === input.artifactId) {
+      if (input.createNextStep) {
         setGoal(nextStepGoal(accepted));
       }
       message.success("报告已采用");
@@ -411,7 +416,11 @@ export default function BrainHome() {
         note: input.note,
       }),
     onSuccess: (revision, input) => {
-      setArtifactRevisions((current) => ({ ...current, [input.sourceArtifact.id]: revision }));
+      if (!matchesArtifactResponse(revision, input.sourceArtifact, "revision")) {
+        message.error("修订成果校验失败，请重试。");
+        return;
+      }
+      setArtifactRevisionChains((current) => appendArtifactRevision(current, input.sourceArtifact.id, revision));
       setArtifactRefreshKey((value) => value + 1);
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
@@ -756,7 +765,7 @@ export default function BrainHome() {
                 <TurnStream
                   thread={activeConversation}
                   artifactRefreshKey={artifactRefreshKey}
-                  revisionArtifacts={artifactRevisions}
+                  revisionArtifacts={artifactRevisionChains}
                   revisingArtifactId={
                     formalArtifactRevisionMutation.isPending
                       ? formalArtifactRevisionMutation.variables?.sourceArtifact.id ?? null
@@ -930,15 +939,15 @@ function ContextStrip({
 
 function handleArtifactAction(
   action: ArtifactAction,
-  accept: (input: { artifactId: number; createNextStep: boolean }) => void,
+  accept: (input: { sourceArtifact: Artifact; createNextStep: boolean }) => void,
   revise: (input: { sourceArtifact: Artifact; payload: Record<string, unknown>; note: string }) => void,
 ) {
   if (action.type === "accept") {
-    accept({ artifactId: action.artifact.id, createNextStep: false });
+    accept({ sourceArtifact: action.artifact, createNextStep: false });
     return;
   }
   if (action.type === "accept_and_continue") {
-    accept({ artifactId: action.artifact.id, createNextStep: true });
+    accept({ sourceArtifact: action.artifact, createNextStep: true });
     return;
   }
   if (action.type === "request_revision") {
@@ -948,6 +957,56 @@ function handleArtifactAction(
       note: action.note,
     });
   }
+}
+
+function matchesArtifactResponse(
+  returned: Artifact,
+  source: Artifact,
+  operation: "accept" | "revision",
+) {
+  const sameScope = returned.account_id === source.account_id
+    && returned.thread_id === source.thread_id
+    && returned.turn_id === source.turn_id
+    && returned.artifact_type === source.artifact_type;
+
+  return sameScope && (operation === "accept"
+    ? returned.id === source.id && returned.version === source.version
+    : returned.id !== source.id && returned.version === source.version + 1);
+}
+
+function updateExistingArtifactChain(
+  chains: Record<number, Artifact[]>,
+  accepted: Artifact,
+) {
+  for (const [sourceId, chain] of Object.entries(chains)) {
+    const versionIndex = chain.findIndex((artifact) => artifact.id === accepted.id);
+    if (versionIndex >= 0) {
+      const nextChain = [...chain];
+      nextChain[versionIndex] = accepted;
+      return { ...chains, [sourceId]: nextChain };
+    }
+  }
+  return chains;
+}
+
+function appendArtifactRevision(
+  chains: Record<number, Artifact[]>,
+  revisedArtifactId: number,
+  revision: Artifact,
+) {
+  const sourceId = Object.entries(chains).find(([rootId, chain]) =>
+    Number(rootId) === revisedArtifactId || chain.some((artifact) => artifact.id === revisedArtifactId),
+  )?.[0] ?? String(revisedArtifactId);
+  const currentChain = chains[Number(sourceId)] ?? [];
+  const existingIndex = currentChain.findIndex((artifact) => artifact.id === revision.id);
+  const nextChain = existingIndex >= 0
+    ? currentChain.map((artifact, index) => index === existingIndex ? revision : artifact)
+    : [...currentChain, revision];
+
+  return {
+    ...chains,
+    [sourceId]: [...nextChain].sort((left, right) => left.version - right.version),
+  };
 }
 
 function buildArtifactRevisionPayload(artifact: Artifact): Record<string, unknown> {

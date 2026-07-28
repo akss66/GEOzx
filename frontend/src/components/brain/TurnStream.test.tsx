@@ -184,13 +184,49 @@ describe("TurnStream", () => {
     render(
       <TurnStream
         thread={thread}
-        revisionArtifacts={{ 5001: revisedArtifact }}
+        revisionArtifacts={{ 5001: [revisedArtifact] }}
       />,
     );
 
     expect(await screen.findByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
     expect(screen.getByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
     expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
+  });
+
+  it("fails closed for a returned revision whose persisted identity does not match the source chain", async () => {
+    render(
+      <TurnStream
+        thread={thread}
+        revisionArtifacts={{
+          5001: [{ ...artifact, id: 5002, version: 2, account_id: 4, title: "不可信修订版" }],
+        }}
+      />,
+    );
+
+    expect(await screen.findByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    expect(screen.getByText("修订版本校验失败，请重试。")) .toBeInTheDocument();
+    expect(screen.queryByLabelText("Artifact: 不可信修订版")).not.toBeInTheDocument();
+  });
+
+  it("preserves verified V1 and V2 when a later source refresh fails", async () => {
+    const revision: Artifact = {
+      ...artifact,
+      id: 5002,
+      title: "账号体检报告（修订版）",
+      version: 2,
+      status: "ready_for_review",
+    };
+    vi.mocked(getArtifact)
+      .mockResolvedValueOnce(artifact)
+      .mockRejectedValueOnce(new Error("network"));
+    const view = render(<TurnStream thread={thread} revisionArtifacts={{ 5001: [revision] }} artifactRefreshKey={0} />);
+
+    expect(await screen.findByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
+    view.rerender(<TurnStream thread={thread} revisionArtifacts={{ 5001: [revision] }} artifactRefreshKey={1} />);
+
+    expect(await screen.findByText("成果更新失败，已保留已验证版本。")) .toBeInTheDocument();
+    expect(screen.getByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    expect(screen.getByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
   });
 
   it("uses the server Turn order and durable IDs for Turn and projection identity", () => {

@@ -23,7 +23,7 @@ export function TurnStream({
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId?: number | null;
   artifactRefreshKey?: number;
-  revisionArtifacts?: Record<number, Artifact>;
+  revisionArtifacts?: Record<number, Artifact[]>;
 }) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
@@ -70,7 +70,7 @@ function TurnArticle({
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
-  revisionArtifacts: Record<number, Artifact>;
+  revisionArtifacts: Record<number, Artifact[]>;
 }) {
   const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
@@ -157,7 +157,7 @@ function Projection({
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
-  revisionArtifacts: Record<number, Artifact>;
+  revisionArtifacts: Record<number, Artifact[]>;
 }) {
   const key = projectionKey(projection, turnId);
   const shared = {
@@ -235,8 +235,8 @@ function Projection({
           threadId={threadId}
           sourceTurnId={turnId}
           onAction={onArtifactAction}
-          revisionPending={revisingArtifactId === projection.artifact_id}
-          revisionArtifact={revisionArtifacts[projection.artifact_id]}
+          revisingArtifactId={revisingArtifactId}
+          revisionArtifacts={revisionArtifacts[projection.artifact_id]}
           refreshKey={artifactRefreshKey}
         />
       );

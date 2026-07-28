@@ -645,6 +645,69 @@ describe("BrainHome", () => {
     expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
   });
 
+  it("updates the exact V2 card from its persisted acceptance response", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    const v2: Artifact = {
+      ...mocks.artifact,
+      id: 5002,
+      title: "账号体检报告（修订版）",
+      version: 2,
+      status: "ready_for_review",
+    };
+    vi.mocked(reviseArtifact).mockResolvedValueOnce(v2);
+    vi.mocked(acceptArtifact).mockResolvedValueOnce({ ...v2, status: "accepted" });
+
+    renderBrainHome();
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), { target: { value: "补充转化数据" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
+
+    const v2Card = await screen.findByRole("article", { name: "Artifact: 账号体检报告（修订版）" });
+    fireEvent.click(within(v2Card).getByRole("button", { name: "仅采用报告" }));
+
+    await waitFor(() => expect(within(v2Card).getByText("已采用")).toBeInTheDocument());
+    expect(within(v2Card).queryByRole("button", { name: "仅采用报告" })).not.toBeInTheDocument();
+  });
+
+  it("keeps V2 and appends V3 to the same source Artifact chain", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    const v2: Artifact = {
+      ...mocks.artifact,
+      id: 5002,
+      title: "账号体检报告（修订版）",
+      version: 2,
+      status: "ready_for_review",
+    };
+    const v3: Artifact = {
+      ...v2,
+      id: 5003,
+      title: "账号体检报告（第二次修订）",
+      version: 3,
+    };
+    vi.mocked(reviseArtifact).mockResolvedValueOnce(v2).mockResolvedValueOnce(v3);
+
+    renderBrainHome();
+    await screen.findByRole("article", { name: "Artifact: 账号体检报告" });
+    fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), { target: { value: "补充转化数据" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
+
+    const v2Card = await screen.findByRole("article", { name: "Artifact: 账号体检报告（修订版）" });
+    fireEvent.click(within(v2Card).getByRole("button", { name: "提出修改" }));
+    fireEvent.change(within(v2Card).getByRole("textbox", { name: "修改说明" }), { target: { value: "补充复盘结论" } });
+    fireEvent.click(within(v2Card).getByRole("button", { name: "提交修改" }));
+
+    expect(await screen.findByRole("article", { name: "Artifact: 账号体检报告（第二次修订）" })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "Artifact: 账号体检报告（修订版）" })).toBeInTheDocument();
+  });
+
   it("keeps an active V2 Thread exclusive while it loads instead of falling back to legacy Artifacts", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",
