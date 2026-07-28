@@ -17,6 +17,7 @@ import {
   rejectDeliverableAcceptance,
   regenerateBrainMessage,
   refreshBrainObservation,
+  sendConversationTurn,
   sendBrainMessage,
   stopBrainGeneration,
   verifyBrainExperienceCandidate,
@@ -403,6 +404,12 @@ vi.mock("../api/brain", () => ({
   reviseBrainDecision: vi.fn(async () => mocks.runtime),
   selectBrainDecision: vi.fn(async () => mocks.runtime),
   sendBrainMessage: vi.fn(async () => mocks.runtime),
+  sendConversationTurn: vi.fn(async () => ({
+    turn: mocks.conversationThread.turns[1],
+    run: {},
+    task_id: null,
+    projections: [],
+  })),
   stopBrainGeneration: vi.fn(async () => ({
     client_message_id: "pending-turn",
     stop_requested: true,
@@ -468,6 +475,193 @@ describe("BrainHome", () => {
     expect(sourceTurn).toHaveTextContent("V2_ARTIFACT_SOURCE_TURN");
     expect(greetingTurn).not.toHaveTextContent("V2_ARTIFACT_SOURCE_TURN");
     expect(screen.queryByText(mocks.acceptance.title)).not.toBeInTheDocument();
+  });
+
+  it("keeps an active V2 Thread exclusive while it loads instead of falling back to legacy Artifacts", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+    vi.mocked(getConversation).mockImplementationOnce(() => new Promise(() => undefined));
+
+    renderBrainHome();
+
+    expect(await screen.findByText("Loading conversation…")).toBeInTheDocument();
+    expect(screen.queryByText(mocks.acceptance.title)).not.toBeInTheDocument();
+  });
+
+  it("does not let a legacy task-list failure hide a readable V2 Thread", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(listBrainTasks).mockRejectedValueOnce({ response: { status: 503 } });
+
+    renderBrainHome();
+
+    expect(await screen.findByTestId("conversation-turn-101")).toBeInTheDocument();
+  });
+
+  it("submits V2 messages through the active Thread and keeps the pending Turn visible", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    let resolveTurn: (() => void) | undefined;
+    vi.mocked(sendConversationTurn).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveTurn = () => resolve({
+        turn: mocks.conversationThread.turns[1], run: {} as never, task_id: null, projections: [],
+      }); }),
+    );
+
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+    const input = screen.getByRole("textbox", { name: "运营大脑消息" });
+    fireEvent.change(input, { target: { value: "V2_SEND_MESSAGE" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, {
+      client_message_id: expect.any(String),
+      message: "V2_SEND_MESSAGE",
+    }));
+    expect(await screen.findByText("V2_SEND_MESSAGE")).toBeInTheDocument();
+    await act(async () => resolveTurn?.());
+  });
+
+  it("refreshes the active V2 Thread after a realtime lifecycle event", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+    const callsBeforeEvent = vi.mocked(getConversation).mock.calls.length;
+
+    await act(async () => mocks.eventHandler?.({
+      type: "brain.runtime.subagent_completed",
+      payload: { thread_id: 81 },
+    }));
+
+    await waitFor(() => expect(vi.mocked(getConversation).mock.calls.length).toBeGreaterThan(callsBeforeEvent));
+  });
+
+  it("regenerates the latest V2 source Turn through the active Thread", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-102");
+
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate V2 turn" }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, {
+      client_message_id: expect.any(String),
+      message: "V2_LATER_GREETING",
+    }));
+  });
+
+  it("keeps stop available for a pending V2 Turn", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    let resolveTurn: (() => void) | undefined;
+    vi.mocked(sendConversationTurn).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveTurn = () => resolve({
+        turn: mocks.conversationThread.turns[1], run: {} as never, task_id: null, projections: [],
+      }); }),
+    );
+
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      target: { value: "V2_STOP_MESSAGE" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await screen.findByText("V2_STOP_MESSAGE");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    await waitFor(() => expect(stopBrainGeneration).toHaveBeenCalled());
+    expect(vi.mocked(stopBrainGeneration).mock.calls[0]?.[0]).toEqual({
+      clientMessageId: expect.any(String),
+      taskId: null,
+    });
+    await act(async () => resolveTurn?.());
+  });
+
+  it("executes a V2 approval from its projected source Turn", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(getConversation).mockResolvedValueOnce({
+      ...mocks.conversationThread,
+      turns: mocks.conversationThread.turns.map((turn) => turn.id === 101 ? {
+        ...turn,
+        projections: [{
+          type: "approval",
+          turn_id: 101,
+          approval: { ...mocks.toolCall, id: 9001 },
+        }, ...turn.projections],
+      } : turn),
+    } as ConversationThread);
+
+    renderBrainHome();
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(approveToolCall).toHaveBeenCalled());
+    expect(vi.mocked(approveToolCall).mock.calls[0]?.[0]).toEqual({
+      toolCallId: 9001,
+      approved: true,
+    });
+  });
+
+  it("follows the latest V2 Turn after the initial history refresh", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    let resolveThread: ((thread: ConversationThread) => void) | undefined;
+    vi.mocked(getConversation).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveThread = resolve; }),
+    );
+    const view = renderBrainHome();
+    const conversation = view.container.querySelector(".dy-brain-conversation") as HTMLElement;
+    const scrollTo = vi.fn();
+    Object.defineProperties(conversation, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, value: 0, writable: true },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith(81));
+    await act(async () => resolveThread?.(mocks.conversationThread));
+    await screen.findByTestId("conversation-turn-102");
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({
+      top: 1000,
+      behavior: "auto",
+    }));
+  });
+
+  it("clears the active V2 Thread when the user starts a new conversation", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+
+    fireEvent.click(screen.getByRole("button", { name: /新对话/ }));
+
+    expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads")).not.toContain('"3":81');
+    expect(screen.queryByTestId("conversation-turn-101")).not.toBeInTheDocument();
   });
 
   it("clears a stale V2 Thread from the screen when the selected account changes", async () => {

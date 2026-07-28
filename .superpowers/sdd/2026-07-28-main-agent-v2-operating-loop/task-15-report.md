@@ -13,6 +13,9 @@ only when their `turn_id` matches the enclosing Turn.
 - GREEN: the same test passed after the minimal component implementation.
 - Added BrainHome integration coverage for V2 source-Turn ownership and
   account-change stale-Thread isolation.
+- Follow-up review coverage verifies V2-only loading, turn submission,
+  lifecycle refresh, regenerate, stop, approval, reset, and latest-turn
+  scrolling.
 
 ## Coverage
 
@@ -23,6 +26,13 @@ only when their `turn_id` matches the enclosing Turn.
 - Unknown projection kinds render one compact safe fallback without raw JSON
   or technical detail disclosure.
 - The V2 path does not append task-global legacy acceptances/Artifacts.
+- While an active V2 Thread is loading or readable, legacy task errors and
+  artifacts cannot replace it. V2 submission is optimistic at the UI layer and
+  reconciles/invalidates the Thread query on completion; lifecycle, stop, and
+  approval operations also refresh that same query.
+- Approval projections call the existing tool-approval business operation.
+  Artifact acceptance and revision controls are intentionally deferred to
+  Task16, whose ArtifactCard owns the required artifact action contract.
 - The legacy runtime renderer remains in place and its existing behavior is
   exercised by the BrainHome suite.
 - Switching accounts hides a stale Thread before the selected account's Thread
@@ -33,7 +43,7 @@ only when their `turn_id` matches the enclosing Turn.
 From `frontend`:
 
 - `pnpm.cmd exec vitest run src/components/brain/TurnStream.test.tsx src/pages/BrainHome.test.tsx`
-  - 2 files, 38 tests passed.
+  - 2 files, 48 tests passed.
 - `pnpm.cmd exec tsc --noEmit`
   - passed.
 - `git diff --check`

@@ -1,16 +1,39 @@
 import type { ConversationThread, ConversationTurn, TurnProjection } from "../../types";
+import { Button } from "antd";
+import type { AgentToolCall } from "../../types";
 
-export function TurnStream({ thread }: { thread: ConversationThread }) {
+export function TurnStream({
+  thread,
+  approvingToolCallId = null,
+  onApprove,
+}: {
+  thread: ConversationThread;
+  approvingToolCallId?: number | null;
+  onApprove?: (approval: AgentToolCall, approved: boolean) => void;
+}) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
       {thread.turns.map((turn) => (
-        <TurnArticle key={turn.id} turn={turn} />
+        <TurnArticle
+          key={turn.id}
+          turn={turn}
+          approvingToolCallId={approvingToolCallId}
+          onApprove={onApprove}
+        />
       ))}
     </div>
   );
 }
 
-function TurnArticle({ turn }: { turn: ConversationTurn }) {
+function TurnArticle({
+  turn,
+  approvingToolCallId,
+  onApprove,
+}: {
+  turn: ConversationTurn;
+  approvingToolCallId: number | null;
+  onApprove?: (approval: AgentToolCall, approved: boolean) => void;
+}) {
   const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
 
@@ -35,7 +58,13 @@ function TurnArticle({ turn }: { turn: ConversationTurn }) {
       ) : null}
       <div className="tz-conversation-turn__projections">
         {projections.filter(isKnownProjection).map((projection) => (
-          <Projection key={projectionKey(projection, turn.id)} projection={projection} turnId={turn.id} />
+          <Projection
+            key={projectionKey(projection, turn.id)}
+            projection={projection}
+            turnId={turn.id}
+            approving={approvingToolCallId === approvalId(projection)}
+            onApprove={onApprove}
+          />
         ))}
         {unknownProjection ? <UnknownProjection turnId={turn.id} /> : null}
       </div>
@@ -57,7 +86,17 @@ function TurnRoute({ intent }: { intent: Record<string, unknown> | null }) {
   );
 }
 
-function Projection({ projection, turnId }: { projection: TurnProjection; turnId: number }) {
+function Projection({
+  projection,
+  turnId,
+  approving,
+  onApprove,
+}: {
+  projection: TurnProjection;
+  turnId: number;
+  approving: boolean;
+  onApprove?: (approval: AgentToolCall, approved: boolean) => void;
+}) {
   const key = projectionKey(projection, turnId);
   const shared = {
     className: "tz-turn-projection",
@@ -88,6 +127,16 @@ function Projection({ projection, turnId }: { projection: TurnProjection; turnId
       return (
         <section {...shared} aria-label="Approval required">
           Approval required: {projection.approval.tool_name || projection.approval.tool_code}
+          {onApprove ? (
+            <div>
+              <Button loading={approving} onClick={() => onApprove(projection.approval, true)}>
+                Approve
+              </Button>
+              <Button danger disabled={approving} onClick={() => onApprove(projection.approval, false)}>
+                Reject
+              </Button>
+            </div>
+          ) : null}
         </section>
       );
     case "artifact":
@@ -101,6 +150,10 @@ function Projection({ projection, turnId }: { projection: TurnProjection; turnId
         </section>
       );
   }
+}
+
+function approvalId(projection: TurnProjection) {
+  return projection.type === "approval" ? projection.approval.id : null;
 }
 
 function ArtifactProjection({

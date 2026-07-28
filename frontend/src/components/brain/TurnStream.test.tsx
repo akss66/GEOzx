@@ -2,8 +2,8 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConversationThread } from "../../types";
 import { TurnStream } from "./TurnStream";
@@ -133,5 +133,25 @@ describe("TurnStream", () => {
     expect(screen.queryByText("future_projection")).not.toBeInTheDocument();
     expect(screen.queryByText("Traceback: secret-token")).not.toBeInTheDocument();
     expect(screen.queryByText("must never render")).not.toBeInTheDocument();
+  });
+
+  it("routes an approval from its source Turn through the supplied business callback", () => {
+    const onApprove = vi.fn();
+    const approvalThread: ConversationThread = {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        projections: [{
+          type: "approval",
+          turn_id: 101,
+          approval: { id: 9001, tool_name: "Review action", tool_code: "review" },
+        } as never],
+      }],
+    };
+
+    render(<TurnStream thread={approvalThread} onApprove={onApprove} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(onApprove).toHaveBeenCalledWith(expect.objectContaining({ id: 9001 }), true);
   });
 });

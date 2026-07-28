@@ -31,6 +31,7 @@ import {
   reviseBrainDecision,
   selectBrainDecision,
   sendBrainMessage,
+  sendConversationTurn,
   stopBrainGeneration,
   verifyBrainExperienceCandidate,
 } from "../api/brain";
@@ -48,6 +49,7 @@ import {
 } from "../hooks/useEventStream";
 import {
   clearActiveBrainTaskId,
+  clearActiveConversationThreadId,
   getActiveConversationThreadId,
   getActiveBrainTaskId,
   setActiveBrainTaskId,
@@ -67,7 +69,9 @@ import type {
   AgentToolCall,
   BrainRuntime,
   BrainTask,
+  ConversationThread,
   DeliverableAcceptance,
+  TurnSubmission,
   OrchestrationPlanStep,
 } from "../types";
 
@@ -147,6 +151,7 @@ export default function BrainHome() {
       ? payload.client_message_id
       : null;
     const eventTaskId = payload?.task_id == null ? null : Number(payload.task_id);
+    const eventThreadId = payload?.thread_id == null ? null : Number(payload.thread_id);
     if (
       eventTaskId != null
       && Number.isFinite(eventTaskId)
@@ -163,11 +168,17 @@ export default function BrainHome() {
     if (!["brain.runtime.message_start", "brain.runtime.message_delta"].includes(event.type)) {
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
       qc.invalidateQueries({ queryKey: ["brain-runtime"] });
+      if (eventThreadId === activeConversationThreadId) {
+        qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
     }
   }, {
     onReconnect: () => {
       void qc.invalidateQueries({ queryKey: ["brain-tasks"] });
       void qc.invalidateQueries({ queryKey: ["brain-runtime"] });
+      if (activeConversationThreadId != null) {
+        void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
     },
   });
 
@@ -184,6 +195,33 @@ export default function BrainHome() {
     setLiveMessages([]);
     setPendingTurn(null);
   }, [effectiveAccount?.id]);
+
+  const conversationTurnMutation = useMutation({
+    mutationFn: ({ threadId, message, clientMessageId }: {
+      threadId: number;
+      message: string;
+      clientMessageId: string;
+    }) => sendConversationTurn(threadId, {
+      client_message_id: clientMessageId,
+      message,
+    }),
+    onSuccess: (submission, variables) => {
+      qc.setQueryData<ConversationThread>(["brain-conversation", variables.threadId], (current) =>
+        mergeConversationTurn(current, submission),
+      );
+      void qc.invalidateQueries({ queryKey: ["brain-conversation", variables.threadId] });
+      setPendingTurn(null);
+      pendingClientMessageId.current = null;
+    },
+    onError: (error) => {
+      setPendingTurn((current) => {
+        if (current) setGoal((value) => value || current.content);
+        return null;
+      });
+      pendingClientMessageId.current = null;
+      message.error(presentApiError(error, "Conversation turn failed.").message);
+    },
+  });
 
   const messageMutation = useMutation({
     mutationFn: sendBrainMessage,
@@ -250,6 +288,11 @@ export default function BrainHome() {
     onError: (error) => message.error(
       presentApiError(error, "停止生成失败，请稍后重试。").message,
     ),
+    onSettled: () => {
+      if (activeConversationThreadId != null) {
+        void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
+    },
   });
 
   const selectDecisionMutation = useMutation({
@@ -280,6 +323,9 @@ export default function BrainHome() {
       setApprovalComment("");
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
       qc.invalidateQueries({ queryKey: ["brain-runtime", toolCall.task_id] });
+      if (activeConversationThreadId != null) {
+        void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
+      }
       message.success("工具权限已处理，Runtime 正在继续");
     },
     onError: (error) => message.error(
@@ -431,13 +477,15 @@ export default function BrainHome() {
   const tasksError = tasksQuery.isError
     ? presentApiError(tasksQuery.error, "任务记录暂时不可用。")
     : null;
+  const visibleTasksError = activeConversationThreadId == null ? tasksError : null;
   const runtimeError = runtimeQuery.isError
     ? presentApiError(runtimeQuery.error, "当前任务运行时暂时不可用。")
     : null;
   const conversationError = conversationQuery.isError
     ? presentApiError(conversationQuery.error, "Conversation history is temporarily unavailable.")
     : null;
-  const isGenerating = messageMutation.isPending || regenerateMutation.isPending;
+  const isGenerating =
+    messageMutation.isPending || regenerateMutation.isPending || conversationTurnMutation.isPending;
 
   const startWorkflow = () => {
     if (isGenerating) return;
@@ -461,10 +509,18 @@ export default function BrainHome() {
     setPendingTurn({
       clientMessageId,
       content: trimmed,
-      taskId: activeTask?.id ?? null,
+      taskId: activeConversationThreadId == null ? activeTask?.id ?? null : null,
       showUser: true,
     });
     setGoal("");
+    if (activeConversationThreadId != null) {
+      conversationTurnMutation.mutate({
+        threadId: activeConversationThreadId,
+        message: trimmed,
+        clientMessageId,
+      });
+      return;
+    }
     messageMutation.mutate({
       message: trimmed,
       client_message_id: clientMessageId,
@@ -484,6 +540,19 @@ export default function BrainHome() {
   };
 
   const regenerateLastTurn = () => {
+    if (activeConversation && !isGenerating) {
+      const sourceMessage = activeConversation.turns.at(-1)?.user_input.trim();
+      if (!sourceMessage) return;
+      const clientMessageId = createClientMessageId();
+      pendingClientMessageId.current = clientMessageId;
+      setPendingTurn({ clientMessageId, content: sourceMessage, taskId: null, showUser: false });
+      conversationTurnMutation.mutate({
+        threadId: activeConversation.id,
+        message: sourceMessage,
+        clientMessageId,
+      });
+      return;
+    }
     if (!visibleRuntime || isGenerating) return;
     const sourceMessage = latestUserMessage(visibleRuntime);
     if (!sourceMessage) {
@@ -505,8 +574,12 @@ export default function BrainHome() {
   };
 
   const resetConversation = () => {
-    if (effectiveAccount) clearActiveBrainTaskId(effectiveAccount.id);
+    if (effectiveAccount) {
+      clearActiveBrainTaskId(effectiveAccount.id);
+      clearActiveConversationThreadId(effectiveAccount.id);
+    }
     setActiveRuntimeTaskId(null);
+    setActiveConversationThreadId(null);
     setLiveMessages([]);
     setPendingTurn(null);
     setApprovalComment("");
@@ -534,6 +607,9 @@ export default function BrainHome() {
     return () => window.cancelAnimationFrame(frame);
   }, [
     activeRuntimeTaskId,
+    activeConversationThreadId,
+    activeConversation,
+    conversationQuery.dataUpdatedAt,
     hasConversation,
     isGenerating,
     liveMessages,
@@ -593,12 +669,12 @@ export default function BrainHome() {
             aria-label="运营大脑对话流"
             onScroll={handleConversationScroll}
           >
-            {tasksError ? (
+            {visibleTasksError ? (
               <OperationalState
                 kind="error"
                 title="任务记录加载失败"
-                description={`${tasksError.message} 当前账号选择和已保存会话不会被修改。`}
-                diagnostic={tasksError.diagnostic}
+                description={`${visibleTasksError.message} 当前账号选择和已保存会话不会被修改。`}
+                diagnostic={visibleTasksError.diagnostic}
                 actionLabel="重试"
                 onAction={() => void tasksQuery.refetch()}
               />
@@ -612,7 +688,23 @@ export default function BrainHome() {
                 onAction={() => void conversationQuery.refetch()}
               />
             ) : activeConversation ? (
-              <TurnStream thread={activeConversation} />
+              <>
+                <TurnStream
+                  thread={activeConversation}
+                  approvingToolCallId={
+                    approveMutation.isPending ? approveMutation.variables?.toolCallId ?? null : null
+                  }
+                  onApprove={(approval, approved) => approveMutation.mutate({ toolCallId: approval.id, approved })}
+                />
+                {pendingTurn ? <PendingConversation turn={pendingTurn} /> : null}
+                {!pendingTurn ? (
+                  <Button aria-label="Regenerate V2 turn" type="text" onClick={regenerateLastTurn}>
+                    Regenerate
+                  </Button>
+                ) : null}
+              </>
+            ) : activeConversationThreadId != null ? (
+              <div className="tz-turn-stream" aria-live="polite">Loading conversation…</div>
             ) : activeTask && runtimeError ? (
               <OperationalState
                 kind="error"
@@ -687,8 +779,7 @@ export default function BrainHome() {
             disabled={
               !accountReady
               || isGenerating
-              || tasksQuery.isError
-              || runtimeQuery.isError
+              || (activeConversationThreadId == null && (tasksQuery.isError || runtimeQuery.isError))
             }
             loading={isGenerating}
             pendingPermission={pendingPermission}
@@ -1894,6 +1985,17 @@ function latestUserMessage(runtime: BrainRuntime) {
     if (content) return content;
   }
   return cleanBrainCopy(runtime.task.brief.goal).trim();
+}
+
+function mergeConversationTurn(
+  current: ConversationThread | undefined,
+  submission: TurnSubmission,
+) {
+  if (!current || current.id !== submission.turn.thread_id) return current;
+  const turns = current.turns.some((turn) => turn.id === submission.turn.id)
+    ? current.turns.map((turn) => turn.id === submission.turn.id ? submission.turn : turn)
+    : [...current.turns, submission.turn];
+  return { ...current, turns };
 }
 
 function createClientMessageId() {
