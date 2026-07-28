@@ -78,7 +78,7 @@ async def test_skill_run_completes_without_legacy_task_and_round_trips_snapshots
         task_id=None,
         idempotency_key="diagnosis:standalone:v2",
         skill_code="account.diagnosis",
-        skill_version="2.1.0",
+        skill_version=2,
         status="completed",
         input_snapshot={"period": "last_30_days"},
         output_snapshot={"summary": "Positioning is too broad"},
@@ -94,7 +94,7 @@ async def test_skill_run_completes_without_legacy_task_and_round_trips_snapshots
     assert persisted is not None
     assert persisted.task_id is None
     assert persisted.skill_code == "account.diagnosis"
-    assert persisted.skill_version == "2.1.0"
+    assert persisted.skill_version == 2
     assert persisted.status == "completed"
     assert persisted.input_snapshot == {"period": "last_30_days"}
     assert persisted.output_snapshot == {"summary": "Positioning is too broad"}
@@ -127,7 +127,7 @@ async def test_expert_and_tool_rows_are_queryable_by_skill_run_and_turn(
         task_id=task.id,
         idempotency_key="diagnosis:provenance:v1",
         skill_code="account.diagnosis",
-        skill_version="1.0.0",
+        skill_version=1,
         status="running",
         input_snapshot={},
         output_snapshot={},
@@ -199,7 +199,7 @@ async def test_skill_run_rejects_duplicate_run_idempotency_key(session, admin) -
         "run_id": run.id,
         "idempotency_key": "same-key",
         "skill_code": "account.diagnosis",
-        "skill_version": "1.0.0",
+        "skill_version": 1,
         "status": "running",
         "input_snapshot": {},
         "output_snapshot": {},
@@ -238,7 +238,7 @@ async def test_skill_run_rejects_turn_from_another_account_thread(
             run_id=run_a.id,
             idempotency_key="cross-account-turn",
             skill_code="account.diagnosis",
-            skill_version="1.0.0",
+            skill_version=1,
             status="running",
             input_snapshot={},
             output_snapshot={},
@@ -247,6 +247,59 @@ async def test_skill_run_rejects_turn_from_another_account_thread(
 
     with pytest.raises(IntegrityError):
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_skill_run_rejects_agent_run_from_another_account_thread(
+    session,
+    admin,
+) -> None:
+    await session.execute(text("PRAGMA foreign_keys = ON"))
+    _account_a, thread_a, turn_a, _run_a = await _create_conversation_scope(
+        session,
+        admin,
+        suffix="skill-account-a",
+    )
+    _account_b, _thread_b, _turn_b, run_b = await _create_conversation_scope(
+        session,
+        admin,
+        suffix="run-account-b",
+    )
+    await session.commit()
+
+    session.add(
+        models.SkillRun(
+            org_id=admin.org_id,
+            thread_id=thread_a.id,
+            turn_id=turn_a.id,
+            run_id=run_b.id,
+            idempotency_key="cross-account-run",
+            skill_code="account.diagnosis",
+            skill_version=1,
+            status="running",
+            input_snapshot={},
+            output_snapshot={},
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+def test_skill_run_rejects_string_skill_version() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        models.SkillRun(
+            org_id=1,
+            thread_id=1,
+            turn_id=1,
+            run_id=1,
+            idempotency_key="string-version",
+            skill_code="account.diagnosis",
+            skill_version="1.0.0",
+            status="running",
+            input_snapshot={},
+            output_snapshot={},
+        )
 
 
 @pytest.mark.asyncio

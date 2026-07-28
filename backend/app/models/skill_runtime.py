@@ -7,11 +7,12 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin
@@ -46,6 +47,16 @@ class SkillRun(Base, TimestampMixin):
             ],
             name="fk_skill_runs_turn_thread_org",
         ),
+        ForeignKeyConstraint(
+            ["run_id", "thread_id", "turn_id", "org_id"],
+            [
+                "agent_runs.id",
+                "agent_runs.thread_id",
+                "agent_runs.turn_id",
+                "agent_runs.org_id",
+            ],
+            name="fk_skill_runs_run_thread_turn_org",
+        ),
         Index("ix_skill_runs_org_status", "org_id", "status"),
         Index("ix_skill_runs_thread_created", "thread_id", "created_at"),
         Index("ix_skill_runs_turn_skill", "turn_id", "skill_code"),
@@ -69,7 +80,7 @@ class SkillRun(Base, TimestampMixin):
     )
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     skill_code: Mapped[str] = mapped_column(String(120), nullable=False)
-    skill_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    skill_version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     input_snapshot: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     output_snapshot: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
@@ -91,3 +102,9 @@ class SkillRun(Base, TimestampMixin):
         back_populates="skill_run",
         foreign_keys="AgentToolCall.skill_run_id",
     )
+
+    @validates("skill_version")
+    def validate_skill_version(self, _key: str, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("skill_version must be a positive integer")
+        return value

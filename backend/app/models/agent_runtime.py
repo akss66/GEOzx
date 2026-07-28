@@ -33,6 +33,13 @@ class AgentRun(Base, TimestampMixin):
             "client_message_id",
             name="uq_agent_run_request",
         ),
+        UniqueConstraint(
+            "id",
+            "thread_id",
+            "turn_id",
+            "org_id",
+            name="uq_agent_runs_id_thread_turn_org",
+        ),
         ForeignKeyConstraint(
             ["thread_id", "org_id"],
             ["conversation_threads.id", "conversation_threads.org_id"],

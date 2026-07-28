@@ -84,6 +84,12 @@ def _drop_runtime_provenance(table_name: str) -> None:
 
 
 def upgrade() -> None:
+    with op.batch_alter_table("agent_runs") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_agent_runs_id_thread_turn_org",
+            ["id", "thread_id", "turn_id", "org_id"],
+        )
+
     op.create_table(
         "skill_runs",
         sa.Column("id", sa.BigInteger(), nullable=False),
@@ -94,7 +100,7 @@ def upgrade() -> None:
         sa.Column("task_id", sa.BigInteger(), nullable=True),
         sa.Column("idempotency_key", sa.String(length=160), nullable=False),
         sa.Column("skill_code", sa.String(length=120), nullable=False),
-        sa.Column("skill_version", sa.String(length=64), nullable=False),
+        sa.Column("skill_version", sa.Integer(), nullable=False),
         sa.Column("status", sa.String(length=40), nullable=False),
         sa.Column("input_snapshot", sa.JSON(), nullable=False),
         sa.Column("output_snapshot", sa.JSON(), nullable=False),
@@ -141,6 +147,16 @@ def upgrade() -> None:
             ["brain_tasks.id"],
             name="fk_skill_runs_task_id_brain_tasks",
             ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["run_id", "thread_id", "turn_id", "org_id"],
+            [
+                "agent_runs.id",
+                "agent_runs.thread_id",
+                "agent_runs.turn_id",
+                "agent_runs.org_id",
+            ],
+            name="fk_skill_runs_run_thread_turn_org",
         ),
         sa.ForeignKeyConstraint(
             ["thread_id", "org_id"],
@@ -198,3 +214,9 @@ def downgrade() -> None:
     op.drop_index("ix_skill_runs_task_id", table_name="skill_runs")
     op.drop_index("ix_skill_runs_run_id", table_name="skill_runs")
     op.drop_table("skill_runs")
+
+    with op.batch_alter_table("agent_runs") as batch_op:
+        batch_op.drop_constraint(
+            "uq_agent_runs_id_thread_turn_org",
+            type_="unique",
+        )

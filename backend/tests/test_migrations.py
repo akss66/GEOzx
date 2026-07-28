@@ -125,6 +125,9 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         "agent_runs",
         metadata,
         sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.Column("thread_id", sa.Integer, nullable=True),
+        sa.Column("turn_id", sa.Integer, nullable=True),
     )
     agent_invocations = sa.Table(
         "agent_invocations",
@@ -144,14 +147,39 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         connection.execute(orgs.insert(), [{"id": 1}])
         connection.execute(
             conversation_threads.insert(),
-            [{"id": 10, "org_id": 1}],
+            [{"id": 10, "org_id": 1}, {"id": 11, "org_id": 1}],
         )
         connection.execute(
             conversation_turns.insert(),
-            [{"id": 20, "thread_id": 10, "org_id": 1}],
+            [
+                {"id": 20, "thread_id": 10, "org_id": 1},
+                {"id": 21, "thread_id": 11, "org_id": 1},
+            ],
         )
         connection.execute(brain_tasks.insert(), [{"id": 30}])
-        connection.execute(agent_runs.insert(), [{"id": 40}])
+        connection.execute(
+            agent_runs.insert(),
+            [
+                {
+                    "id": 40,
+                    "org_id": 1,
+                    "thread_id": None,
+                    "turn_id": None,
+                },
+                {
+                    "id": 41,
+                    "org_id": 1,
+                    "thread_id": 10,
+                    "turn_id": 20,
+                },
+                {
+                    "id": 42,
+                    "org_id": 1,
+                    "thread_id": 11,
+                    "turn_id": 21,
+                },
+            ],
+        )
         connection.execute(
             agent_invocations.insert(),
             [{"id": 50, "status": "done"}],
@@ -186,6 +214,7 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
             "error_code",
         } <= skill_columns.keys()
         assert skill_columns["task_id"]["nullable"] is True
+        assert isinstance(skill_columns["skill_version"]["type"], sa.Integer)
         skill_uniques = {
             item["name"]: tuple(item["column_names"])
             for item in inspector.get_unique_constraints("skill_runs")
@@ -193,6 +222,29 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         assert skill_uniques["uq_skill_runs_run_idempotency"] == (
             "run_id",
             "idempotency_key",
+        )
+        run_uniques = {
+            item["name"]: tuple(item["column_names"])
+            for item in inspector.get_unique_constraints("agent_runs")
+        }
+        assert run_uniques["uq_agent_runs_id_thread_turn_org"] == (
+            "id",
+            "thread_id",
+            "turn_id",
+            "org_id",
+        )
+        skill_foreign_keys = {
+            item["name"]: (
+                tuple(item["constrained_columns"]),
+                item["referred_table"],
+                tuple(item["referred_columns"]),
+            )
+            for item in inspector.get_foreign_keys("skill_runs")
+        }
+        assert skill_foreign_keys["fk_skill_runs_run_thread_turn_org"] == (
+            ("run_id", "thread_id", "turn_id", "org_id"),
+            "agent_runs",
+            ("id", "thread_id", "turn_id", "org_id"),
         )
         invocation_columns = {
             column["name"]: column
@@ -225,10 +277,21 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
                 "(id, org_id, thread_id, turn_id, run_id, task_id, "
                 "idempotency_key, skill_code, skill_version, status, "
                 "input_snapshot, output_snapshot) "
-                "VALUES (70, 1, 10, 20, 40, NULL, 'run-40-diagnosis', "
-                "'account.diagnosis', '1.0.0', 'completed', '{}', '{}')"
+                "VALUES (70, 1, 10, 20, 41, NULL, 'run-41-diagnosis', "
+                "'account.diagnosis', 1, 'completed', '{}', '{}')"
             )
         )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO skill_runs "
+                    "(id, org_id, thread_id, turn_id, run_id, task_id, "
+                    "idempotency_key, skill_code, skill_version, status, "
+                    "input_snapshot, output_snapshot) "
+                    "VALUES (71, 1, 10, 20, 42, NULL, 'cross-thread-run', "
+                    "'account.diagnosis', 1, 'running', '{}', '{}')"
+                )
+            )
         connection.execute(
             sa.text(
                 "UPDATE agent_invocations "
@@ -249,6 +312,10 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         assert inspector.has_table("skill_runs") is False
         assert inspector.has_table("agent_invocations") is True
         assert inspector.has_table("agent_tool_calls") is True
+        assert "uq_agent_runs_id_thread_turn_org" not in {
+            item["name"]
+            for item in inspector.get_unique_constraints("agent_runs")
+        }
         assert {"skill_run_id", "thread_id", "turn_id"}.isdisjoint(
             column["name"]
             for column in inspector.get_columns("agent_invocations")
@@ -265,7 +332,12 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         ).scalar_one() == "success"
 
         migration.upgrade()
-        assert sa.inspect(connection).has_table("skill_runs") is True
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("skill_runs") is True
+        assert "uq_agent_runs_id_thread_turn_org" in {
+            item["name"]
+            for item in inspector.get_unique_constraints("agent_runs")
+        }
         assert connection.execute(
             sa.text(
                 "SELECT status, skill_run_id, thread_id, turn_id "
