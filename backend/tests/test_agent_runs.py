@@ -5,8 +5,10 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 
-from app.models import BrainTask, OrchestrationPlan, TaskBrief
+from app.core.runtime_failures import FailureDisposition
+from app.models import BrainTask, Event, OrchestrationPlan, TaskBrief
 from app.models.enums import BrainTaskStatus, BrainTaskType
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.schemas.brain import IntentDecision
@@ -85,6 +87,7 @@ async def test_agent_run_failure_retries_then_moves_to_dead_letter(session, admi
     retryable, retry_delay = await release_agent_run_failure(
         session,
         run.id,
+        disposition=FailureDisposition.RETRYABLE,
         error_code="TemporaryFailure",
         error_detail="temporary",
     )
@@ -99,6 +102,7 @@ async def test_agent_run_failure_retries_then_moves_to_dead_letter(session, admi
     retryable, retry_delay = await release_agent_run_failure(
         session,
         run.id,
+        disposition=FailureDisposition.RETRYABLE,
         error_code="PermanentFailure",
         error_detail="still failing",
     )
@@ -106,6 +110,67 @@ async def test_agent_run_failure_retries_then_moves_to_dead_letter(session, admi
     assert retry_delay == 0
     assert run.status == "dead_letter"
     assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_finalization_is_idempotent_and_closes_task(
+    session, admin
+) -> None:
+    """Repeating terminal finalization cannot duplicate the runtime failure event."""
+
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Terminal task",
+        type=BrainTaskType.CONTENT_CREATION,
+        status=BrainTaskStatus.RUNNING,
+        current_focus="处理中",
+    )
+    session.add(task)
+    await session.commit()
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id="terminal-finalize-once",
+        request_payload={},
+    )
+    await mark_agent_run_queued(session, run.id, task_id=task.id)
+    await acquire_agent_run(session, run.id, worker_id="worker-a", lease_seconds=60)
+
+    first = await release_agent_run_failure(
+        session,
+        run.id,
+        disposition=FailureDisposition.TERMINAL,
+        error_code="runtime.http_409",
+        error_detail="任务因业务冲突未能继续，请处理后重试",
+        user_message="任务因业务冲突未能继续，请处理后重试",
+        recovery_action="请刷新任务状态，处理冲突后重新提交。",
+    )
+    second = await release_agent_run_failure(
+        session,
+        run.id,
+        disposition=FailureDisposition.TERMINAL,
+        error_code="runtime.http_409",
+        error_detail="任务因业务冲突未能继续，请处理后重试",
+        user_message="任务因业务冲突未能继续，请处理后重试",
+        recovery_action="请刷新任务状态，处理冲突后重新提交。",
+    )
+
+    await session.refresh(run)
+    await session.refresh(task)
+    failures = list(
+        await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.failed")
+        )
+    )
+    assert first == (False, 0)
+    assert second == (False, 0)
+    assert run.status == "failed"
+    assert run.next_retry_at is None
+    assert run.leased_until is None
+    assert task.status == BrainTaskStatus.FAILED
+    assert len(failures) == 1
 
 
 @pytest.mark.asyncio

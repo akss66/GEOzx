@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.core.events import EVENTS_CHANNEL, dispatch, redis_settings
+from app.core.runtime_failures import FailureDisposition, describe_runtime_failure
 from app.db import async_session
 from app.models import AgentRun, AgentToolCall, BrainTask, Event, User
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
@@ -28,12 +29,10 @@ from app.services.agent_runs import (
     cancel_agent_run,
     complete_agent_run,
     enqueue_agent_runtime,
-    fail_agent_run,
     heartbeat_agent_run,
     promote_next_waiting_agent_run,
     release_agent_run_failure,
 )
-from app.services.model_infrastructure import ModelRouteConfigurationError
 
 log = logging.getLogger("dyflow.worker")
 
@@ -102,8 +101,11 @@ async def execute_agent_run(
             await release_agent_run_failure(
                 session,
                 run_id,
-                error_code="TaskNotFound",
-                error_detail=f"BrainTask not found: {task_id}",
+                disposition=FailureDisposition.TERMINAL,
+                error_code="runtime.task_not_found",
+                error_detail="任务不存在，无法继续执行。",
+                user_message="任务不存在，无法继续执行。",
+                recovery_action="请刷新任务状态后重新提交。",
             )
             return None
 
@@ -208,19 +210,15 @@ async def execute_agent_run(
                 )
             return None
         except Exception as exc:  # noqa: BLE001 - persisted and retried by policy
-            if _exception_chain_contains(exc, ModelRouteConfigurationError):
-                await fail_agent_run(session, run_id, exc)
-                log.exception(
-                    "AgentRun #%s stopped for invalid model route configuration on worker %s",
-                    run_id,
-                    worker_id,
-                )
-                return None
+            failure = describe_runtime_failure(exc)
             retryable, retry_delay = await release_agent_run_failure(
                 session,
                 run_id,
-                error_code=type(exc).__name__,
-                error_detail=str(exc),
+                disposition=failure.disposition,
+                error_code=failure.error_code,
+                error_detail=failure.message,
+                user_message=failure.message,
+                recovery_action=failure.recovery_action,
             )
             log.exception("AgentRun #%s failed on worker %s", run_id, worker_id)
             if retryable:
@@ -231,20 +229,6 @@ async def execute_agent_run(
                 heartbeat_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await heartbeat_task
-
-
-def _exception_chain_contains(
-    exc: BaseException,
-    expected_type: type[BaseException],
-) -> bool:
-    current: BaseException | None = exc
-    visited: set[int] = set()
-    while current is not None and id(current) not in visited:
-        if isinstance(current, expected_type):
-            return True
-        visited.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
 
 
 async def _load_runtime_task(

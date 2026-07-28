@@ -7,7 +7,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import AgentRun, BrainTask
+from app.core.runtime_failures import FailureDisposition
+from app.models import AgentRun, BrainTask, Event
+from app.models.enums import BrainTaskStatus
 
 ACTIVE_TASK_RUN_STATUSES = {
     "claimed",
@@ -289,12 +291,19 @@ async def release_agent_run_failure(
     session: AsyncSession,
     run_id: int,
     *,
+    disposition: FailureDisposition,
     error_code: str,
     error_detail: str,
+    user_message: str | None = None,
+    recovery_action: str | None = None,
 ) -> tuple[bool, int]:
     await session.rollback()
-    run = await session.get(AgentRun, run_id)
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.id == run_id).with_for_update()
+    )
     if run is None:
+        return False, 0
+    if run.status in {"failed", "dead_letter", "cancelled", "completed"}:
         return False, 0
 
     now = utc_now()
@@ -303,6 +312,36 @@ async def release_agent_run_failure(
     run.lease_owner = None
     run.leased_until = None
     run.heartbeat_at = now
+    if disposition is FailureDisposition.TERMINAL:
+        run.status = "failed"
+        run.phase = "failed"
+        run.finished_at = now
+        run.next_retry_at = None
+        task = None
+        if run.task_id is not None:
+            task = await session.scalar(
+                select(BrainTask).where(BrainTask.id == run.task_id).with_for_update()
+            )
+        if task is not None:
+            message = user_message or "任务未能继续执行，请检查配置后重试。"
+            task.status = BrainTaskStatus.FAILED
+            task.current_focus = message[:500]
+            session.add(
+                Event(
+                    type="brain.runtime.failed",
+                    content_item_id=task.content_item_id,
+                    payload={
+                        "task_id": task.id,
+                        "agent_run_id": run.id,
+                        "error_code": error_code[:120],
+                        "message": message,
+                        "recovery_action": recovery_action
+                        or "请检查任务配置、权限和可用资源后重新提交。",
+                    },
+                )
+            )
+        await session.commit()
+        return False, 0
     if run.attempt >= run.max_attempts:
         run.status = "dead_letter"
         run.phase = "dead_letter"
