@@ -23,7 +23,12 @@ from app.db import async_session
 from app.models import AgentRun, AgentToolCall, BrainTask, Event, User
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
 from app.orchestrator.checkpointing import open_postgres_checkpointer
-from app.schemas.brain import BrainMessageRequest, IntentDecision
+from app.schemas.brain import (
+    BrainMessageRequest,
+    IntentDecision,
+    route_decision_from_legacy_intent,
+)
+from app.schemas.conversation import TurnRouteDecision
 from app.services.agent_runs import (
     acquire_agent_run,
     cancel_agent_run,
@@ -114,10 +119,17 @@ async def execute_agent_run(
             operation = str(request.get("operation") or "start")
             if operation == "start":
                 intent = IntentDecision.model_validate(request.get("intent"))
-                await runtime_graph.start_smart(
+                persisted_route = request.get("route_decision")
+                route_decision = (
+                    TurnRouteDecision.model_validate(persisted_route)
+                    if persisted_route is not None
+                    else intent.route_decision
+                    or route_decision_from_legacy_intent(intent)
+                )
+                await runtime_graph.start_routed(
                     session,
                     task,
-                    intent,
+                    route_decision=route_decision,
                     client_message_id=str(request.get("client_message_id") or ""),
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,

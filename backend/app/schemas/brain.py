@@ -28,6 +28,7 @@ from app.schemas.ai_coo import (
     ReflectionRecordOut,
     StrategyPlanOut,
 )
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 
 ToolPermissionMode = Literal["auto", "confirm", "manual", "disabled"]
 IntentKind = Literal["conversation", "clarification", "analysis", "workflow", "action"]
@@ -57,6 +58,44 @@ class IntentDecision(BaseModel):
     clarifying_question: str | None = Field(default=None, max_length=500)
     suggested_expert_codes: list[AgentCode] = Field(default_factory=list)
     requires_account_context: bool = False
+    route_decision: TurnRouteDecision | None = None
+
+
+def route_decision_from_legacy_intent(intent: IntentDecision) -> TurnRouteDecision:
+    """Adapt legacy classifier results without invoking classification again."""
+
+    mode = {
+        "conversation": TurnExecutionMode.ANSWER,
+        "clarification": TurnExecutionMode.CLARIFY,
+        "analysis": TurnExecutionMode.TASK,
+        "workflow": TurnExecutionMode.TASK,
+        "action": TurnExecutionMode.ACTION,
+    }[intent.intent]
+    return TurnRouteDecision(
+        mode=mode,
+        intent=intent.intent,
+        confidence=intent.confidence,
+        reason=intent.reason,
+        requires_account_context=(
+            False
+            if mode is TurnExecutionMode.ANSWER
+            else intent.requires_account_context
+        ),
+        requires_operation_task=mode in {
+            TurnExecutionMode.TASK,
+            TurnExecutionMode.ACTION,
+        },
+        missing_field=(
+            intent.missing_field or "request_detail"
+            if mode is TurnExecutionMode.CLARIFY
+            else None
+        ),
+        clarifying_question=(
+            intent.clarifying_question or "Please clarify the requested outcome."
+            if mode is TurnExecutionMode.CLARIFY
+            else None
+        ),
+    )
 
 
 class DecisionChoice(BaseModel):

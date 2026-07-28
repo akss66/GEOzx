@@ -80,7 +80,9 @@ from app.schemas.brain import (
     IntentDecision,
     RuntimeNextStep,
     RuntimeToolCall,
+    route_decision_from_legacy_intent,
 )
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.ai_coo_evidence import build_account_situation
 from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.runtime_memory import runtime_memory_service
@@ -346,6 +348,28 @@ class BrainRuntimeGraph:
         smart_graph.add_edge("wait_for_measurement", END)
         self._smart_graph = smart_graph.compile(checkpointer=checkpointer)
 
+        diagnostic_graph = StateGraph(BrainRuntimeState)
+        diagnostic_graph.add_node("context_resolution", self._context_resolution)
+        diagnostic_graph.add_node("dispatch_round", self._dispatch_round)
+        diagnostic_graph.add_node("observe_round", self._observe_round)
+        diagnostic_graph.add_node("critic_review", self._critic_review)
+        diagnostic_graph.add_node("smart_summarize", self._smart_summarize)
+        diagnostic_graph.add_edge(START, "context_resolution")
+        diagnostic_graph.add_edge("context_resolution", "dispatch_round")
+        diagnostic_graph.add_edge("dispatch_round", "observe_round")
+        diagnostic_graph.add_edge("observe_round", "critic_review")
+        diagnostic_graph.add_edge("critic_review", "smart_summarize")
+        diagnostic_graph.add_edge("smart_summarize", END)
+        self._diagnostic_graph = diagnostic_graph.compile(checkpointer=checkpointer)
+
+        query_graph = StateGraph(BrainRuntimeState)
+        query_graph.add_node("context_resolution", self._context_resolution)
+        query_graph.add_node("query_data_card", self._query_data_card)
+        query_graph.add_edge(START, "context_resolution")
+        query_graph.add_edge("context_resolution", "query_data_card")
+        query_graph.add_edge("query_data_card", END)
+        self._query_graph = query_graph.compile(checkpointer=checkpointer)
+
         smart_resume_graph = StateGraph(BrainRuntimeState)
         smart_resume_graph.add_node("decide_next", self._decide_next)
         smart_resume_graph.add_node("dispatch_round", self._dispatch_round)
@@ -426,7 +450,55 @@ class BrainRuntimeGraph:
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
     ) -> BrainTask:
-        """Start one server-classified conversation or dynamic expert workflow."""
+        """Compatibility entry point for legacy intent-only callers."""
+
+        return await self.start_routed(
+            session,
+            task,
+            route_decision=intent.route_decision
+            or route_decision_from_legacy_intent(intent),
+            intent=intent,
+            client_message_id=client_message_id,
+            agent_run_id=agent_run_id,
+            agent_run_attempt=agent_run_attempt,
+        )
+
+    async def start_routed(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        route_decision: TurnRouteDecision,
+        intent: IntentDecision | None = None,
+        client_message_id: str | None = None,
+        agent_run_id: int | None = None,
+        agent_run_attempt: int = 0,
+    ) -> BrainTask:
+        """Start one turn through the graph selected by its persisted route."""
+
+        effective_intent = intent or _intent_for_route(route_decision)
+        return await self._start_routed_with_intent(
+            session,
+            task,
+            effective_intent,
+            route_decision,
+            client_message_id=client_message_id,
+            agent_run_id=agent_run_id,
+            agent_run_attempt=agent_run_attempt,
+        )
+
+    async def _start_routed_with_intent(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        intent: IntentDecision,
+        route_decision: TurnRouteDecision,
+        *,
+        client_message_id: str | None = None,
+        agent_run_id: int | None = None,
+        agent_run_attempt: int = 0,
+    ) -> BrainTask:
+        """Execute a validated route while preserving the legacy response contract."""
 
         task.runtime_mode = "langgraph"
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
@@ -454,6 +526,7 @@ class BrainRuntimeGraph:
             "brain.runtime.intent_classified",
             {
                 "intent": intent.model_dump(mode="json"),
+                "route_decision": route_decision.model_dump(mode="json"),
                 "client_message_id": client_message_id,
             },
         )
@@ -469,7 +542,7 @@ class BrainRuntimeGraph:
             )
         )
         try:
-            if intent.intent == "conversation":
+            if route_decision.mode is TurnExecutionMode.ANSWER:
                 await self._stream_conversation_turn(
                     session,
                     task,
@@ -481,7 +554,7 @@ class BrainRuntimeGraph:
                 await session.commit()
                 return task
 
-            if intent.intent == "clarification":
+            if route_decision.mode is TurnExecutionMode.CLARIFY:
                 question = intent.clarifying_question or "这次你最希望优先解决什么问题？"
                 task.current_focus = "等待你补充一个关键信息"
                 await session.commit()
@@ -496,39 +569,58 @@ class BrainRuntimeGraph:
                     session,
                     task,
                     "brain.runtime.clarification_requested",
-                    {"message": question, "missing_field": intent.missing_field},
+                    {
+                        "message": question,
+                        "missing_field": route_decision.missing_field,
+                    },
                 )
                 return task
 
             task.runtime_mode = "coo_v1"
             task.current_focus = "运营大脑正在建立运营态势与策略上下文"
             await session.commit()
-            await self._stream_main_agent_turn(session, task)
-            await self._smart_graph.ainvoke(
-                {
-                    "task_id": task.id,
-                    "agent_run_id": agent_run_id,
-                    "agent_run_attempt": agent_run_attempt,
-                    "thread_id": task.thread_id,
-                    "round_index": 1,
-                    "required_expert_codes": [
-                        code.value for code in intent.suggested_expert_codes
-                    ],
-                    "selected_experts": [],
-                    "selected_tool_calls": [],
-                    "observations": [],
-                    "runtime_started_at": datetime.now(UTC).isoformat(),
-                    "expert_dispatch_history": [],
-                    "tool_call_count": 0,
-                    "token_count": 0,
-                    "cost_usd": 0.0,
-                    "current_outputs": [],
-                    "quality_score_ids": [],
-                    "critic_iteration": 0,
-                    "critic_feedback": [],
-                },
-                config=self.graph_config(task.thread_id),
-            )
+            expert_codes = _expert_codes_for_route(route_decision, intent)
+            state: BrainRuntimeState = {
+                "task_id": task.id,
+                "agent_run_id": agent_run_id,
+                "agent_run_attempt": agent_run_attempt,
+                "thread_id": task.thread_id,
+                "round_index": 1,
+                "required_expert_codes": expert_codes,
+                "selected_experts": (
+                    expert_codes
+                    if route_decision.mode is TurnExecutionMode.SKILL
+                    else []
+                ),
+                "selected_tool_calls": [],
+                "observations": [],
+                "runtime_started_at": datetime.now(UTC).isoformat(),
+                "expert_dispatch_history": [],
+                "tool_call_count": 0,
+                "token_count": 0,
+                "cost_usd": 0.0,
+                "current_outputs": [],
+                "quality_score_ids": [],
+                "critic_iteration": 0,
+                "critic_feedback": [],
+            }
+            if route_decision.mode is TurnExecutionMode.QUERY:
+                await self._query_graph.ainvoke(
+                    state,
+                    config=self.graph_config(task.thread_id),
+                )
+            elif route_decision.mode is TurnExecutionMode.SKILL:
+                await self._stream_main_agent_turn(session, task)
+                await self._diagnostic_graph.ainvoke(
+                    state,
+                    config=self.graph_config(task.thread_id),
+                )
+            else:
+                await self._stream_main_agent_turn(session, task)
+                await self._smart_graph.ainvoke(
+                    state,
+                    config=self.graph_config(task.thread_id),
+                )
         finally:
             reset_stream_observer(token)
             _runtime_session.reset(runtime_session_token)
@@ -1457,6 +1549,86 @@ class BrainRuntimeGraph:
             "status": "context_resolved",
             "account_id": account_id,
             **scope,
+        }
+
+    async def _query_data_card(self, state: BrainRuntimeState) -> BrainRuntimeState:
+        """Return a deterministic account data card without strategy generation."""
+
+        await self._check_main_turn_boundary(state)
+        async with _session_from_state(state) as session:
+            task = await _load_task(session, state["task_id"])
+            account_id = state.get("account_id")
+            if account_id is None:
+                card: dict[str, Any] = {
+                    "data_sufficiency": "insufficient",
+                    "missing_data": ["account_id"],
+                    "evidence_refs": [],
+                }
+                tool_call_id = None
+            else:
+                if task.created_by_id is None:
+                    raise RuntimeError("brain task has no authenticated creator")
+                user = await session.get(User, task.created_by_id)
+                if user is None or user.org_id != task.org_id:
+                    raise PermissionError("brain task creator is unavailable")
+                outcome = await DurableToolExecutor(
+                    build_runtime_tool_adapter()
+                ).execute(
+                    task=task,
+                    user=user,
+                    request=RuntimeToolCall(
+                        tool_code="account.data_context",
+                        arguments={"days": 30},
+                        purpose="Load the selected account data card.",
+                        idempotency_key=(
+                            f"query-data-card:{state.get('agent_run_id') or task.id}"
+                        ),
+                    ),
+                    project_id=task.brief.project_id if task.brief else None,
+                    account_id=int(account_id),
+                )
+                if outcome.status != "success" or outcome.result is None:
+                    raise RuntimeError("account data-card query did not complete")
+                card = outcome.result
+                tool_call_id = outcome.tool_call.id
+            await self._stream_runtime_message(
+                session,
+                task,
+                str(card),
+                model="tool:account.data_context",
+                client_message_id=(
+                    _runtime_event_identity.get()[3]
+                    if _runtime_event_identity.get() is not None
+                    else None
+                ),
+            )
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.tool_completed",
+                {
+                    "message": "Account data card loaded.",
+                    "tool_code": "account.data_context",
+                    "tool_call_id": tool_call_id,
+                    "result": card,
+                },
+            )
+            task.status = BrainTaskStatus.COMPLETED
+            task.progress = 100
+            task.current_focus = "Account data query completed"
+            await session.commit()
+        return {
+            **state,
+            "status": "completed",
+            "observations": [
+                *state.get("observations", []),
+                {
+                    "kind": "tool_result",
+                    "tool_call_id": tool_call_id,
+                    "tool_code": "account.data_context",
+                    "result": card,
+                },
+            ],
         }
 
     async def _situation_awareness(self, state: BrainRuntimeState) -> BrainRuntimeState:
@@ -3030,6 +3202,45 @@ def _required_expert_codes(
             and str(step.get("agent_code")) != AgentCode.DECISION.value
         )
     )
+
+
+def _intent_for_route(route: TurnRouteDecision) -> IntentDecision:
+    legacy_intent = {
+        TurnExecutionMode.ANSWER: "conversation",
+        TurnExecutionMode.CLARIFY: "clarification",
+        TurnExecutionMode.QUERY: "analysis",
+        TurnExecutionMode.SKILL: "workflow",
+        TurnExecutionMode.TASK: "workflow",
+        TurnExecutionMode.ACTION: "action",
+    }[route.mode]
+    return IntentDecision(
+        intent=legacy_intent,
+        confidence=route.confidence,
+        reason=route.reason,
+        missing_field=route.missing_field,
+        clarifying_question=route.clarifying_question,
+        suggested_expert_codes=_expert_codes_for_route(route),
+        requires_account_context=route.requires_account_context,
+        route_decision=route,
+    )
+
+
+def _expert_codes_for_route(
+    route: TurnRouteDecision,
+    intent: IntentDecision | None = None,
+) -> list[str]:
+    if route.mode is TurnExecutionMode.SKILL:
+        normalized = (route.skill_code or "").strip().lower().replace("-", "_")
+        if normalized in {
+            "account_positioning",
+            "account_positioning_diagnosis",
+            "positioning",
+            "positioning_diagnosis",
+        } or "positioning" in normalized:
+            return [AgentCode.POSITIONING.value]
+    if intent is None:
+        return []
+    return list(dict.fromkeys(code.value for code in intent.suggested_expert_codes))
 
 
 def _successful_expert_codes(observations: list[dict[str, Any]]) -> set[str]:

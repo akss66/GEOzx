@@ -99,6 +99,7 @@ from app.schemas.brain import (
     RuntimeEventOut,
     StopBrainGenerationOut,
     StopBrainGenerationRequest,
+    route_decision_from_legacy_intent,
 )
 from app.services.agent_management import quality_gate_labels, require_agent_enabled
 from app.services.agent_runs import (
@@ -754,6 +755,17 @@ async def _execute_brain_message(
             detail=str(exc),
         ) from exc
 
+    route_decision = intent.route_decision or route_decision_from_legacy_intent(intent)
+    if intent.route_decision is None:
+        intent = intent.model_copy(update={"route_decision": route_decision})
+    run = await session.get(AgentRun, agent_run_id)
+    if run is not None:
+        run.request_payload = {
+            **dict(run.request_payload or {}),
+            "route_decision": route_decision.model_dump(mode="json"),
+        }
+        await session.commit()
+
     bindings = {
         "project_name": task.brief.project_name if task and task.brief else None,
         "account_group_name": None,
@@ -877,6 +889,7 @@ async def _execute_brain_message(
                 "operation": "start",
                 "task_id": task.id,
                 "intent": intent.model_dump(mode="json"),
+                "route_decision": route_decision.model_dump(mode="json"),
                 "client_message_id": body.client_message_id or uuid4().hex,
             },
         )
@@ -894,10 +907,10 @@ async def _execute_brain_message(
                 generation_user_id,
                 body.client_message_id,
             )
-        await runtime_graph.start_smart(
+        await runtime_graph.start_routed(
             session,
             task,
-            intent,
+            route_decision=route_decision,
             client_message_id=body.client_message_id,
             agent_run_id=agent_run_id,
             agent_run_attempt=agent_run_attempt,

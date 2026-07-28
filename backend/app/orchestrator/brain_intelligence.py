@@ -175,8 +175,9 @@ class BrainIntelligence:
             reason=decision.reason,
             missing_field=decision.missing_field,
             clarifying_question=decision.clarifying_question,
-            suggested_expert_codes=[],
+            suggested_expert_codes=_experts_for_route(decision),
             requires_account_context=decision.requires_account_context,
+            route_decision=decision,
         )
 
     async def decide_next(
@@ -481,3 +482,17 @@ def _sanitize_capabilities(
 
 
 brain_intelligence = BrainIntelligence()
+
+
+def _experts_for_route(decision: TurnRouteDecision) -> list[AgentCode]:
+    if decision.mode is not TurnExecutionMode.SKILL:
+        return []
+    normalized = (decision.skill_code or "").strip().lower().replace("_", "-")
+    if normalized in {
+        "account-positioning",
+        "account-positioning-diagnosis",
+        "positioning",
+        "positioning-diagnosis",
+    } or "positioning" in normalized:
+        return [AgentCode.POSITIONING]
+    return []

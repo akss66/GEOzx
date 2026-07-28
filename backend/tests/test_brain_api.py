@@ -3,12 +3,22 @@ import json
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.brain import _send_brain_message
 from app.llm.adapters import CompletionResult
-from app.models import AgentRun, BrainTask, ContentItem, Event, GateApproval, TaskBrief
-from app.models.enums import BrainTaskStatus, GateStatus, GateType, UserRole
+from app.models import (
+    Account,
+    AgentInvocation,
+    AgentRun,
+    BrainTask,
+    ContentItem,
+    Event,
+    GateApproval,
+    StrategyPlan,
+    TaskBrief,
+)
+from app.models.enums import BrainTaskStatus, GateStatus, GateType, Platform, UserRole
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable
 from app.schemas.brain import (
     BrainMessageRequest,
@@ -18,6 +28,7 @@ from app.schemas.brain import (
     RuntimeNextStep,
     RuntimeToolCall,
 )
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.tools import ToolAdapter, ToolSpec
 from app.tools.adapter import EmptyParams
 
@@ -133,7 +144,7 @@ async def test_sync_runtime_client_returns_only_safe_failure_detail(
         "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
         classify_sync_failure,
     )
-    monkeypatch.setattr("app.api.brain.runtime_graph.start_smart", fail_start)
+    monkeypatch.setattr("app.api.brain.runtime_graph.start_routed", fail_start)
     token = await _token(client, "admin@test.com", "admin-pw-123")
 
     response = await client.post(
@@ -190,7 +201,7 @@ async def test_sync_runtime_conflict_finalizes_task_with_safe_failure_event(
         "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
         classify_sync_conflict,
     )
-    monkeypatch.setattr("app.api.brain.runtime_graph.start_smart", fail_start)
+    monkeypatch.setattr("app.api.brain.runtime_graph.start_routed", fail_start)
 
     with pytest.raises(HTTPException) as raised:
         await _send_brain_message(
@@ -248,7 +259,7 @@ async def test_sync_retryable_runtime_failure_finishes_without_arq_retry(
         "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
         classify_sync_failure,
     )
-    monkeypatch.setattr("app.api.brain.runtime_graph.start_smart", fail_start)
+    monkeypatch.setattr("app.api.brain.runtime_graph.start_routed", fail_start)
 
     with pytest.raises(HTTPException) as raised:
         await _send_brain_message(
@@ -393,6 +404,84 @@ async def _authorized_douyin_account(
         },
     )
     return account["id"]
+
+
+@pytest.mark.asyncio
+async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
+    client,
+    session,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    account = Account(
+        org_id=admin.org_id,
+        nickname="诊断账号",
+        platform=Platform.DOUYIN,
+        external_account_id="positioning-diagnosis-open-id",
+        auth={
+            "integration_status": "connected",
+            "auth_status": "authorized",
+            "data_sync_status": "healthy",
+        },
+    )
+    session.add(account)
+    await session.commit()
+    route = TurnRouteDecision(
+        mode=TurnExecutionMode.SKILL,
+        intent="account_positioning_diagnosis",
+        confidence=1,
+        reason="用户明确只要求账号定位诊断，不生成策略。",
+        skill_code="account_positioning_diagnosis",
+        requires_account_context=True,
+        requires_operation_task=True,
+    )
+
+    async def classify(*args, **kwargs):
+        decision = IntentDecision(
+            intent="workflow",
+            confidence=route.confidence,
+            reason=route.reason,
+            suggested_expert_codes=["01-positioning"],
+            requires_account_context=True,
+            route_decision=route,
+        )
+        return decision
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        classify,
+    )
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "读取已有数据并调用账号定位专家，只返回诊断，不生成30天策略",
+            "account_id": account.id,
+            "client_message_id": "positioning-diagnosis-no-strategy",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    runtime = response.json()
+    assert runtime["strategy"] is None
+    invocations = (
+        await session.scalars(
+            select(AgentInvocation).where(
+                AgentInvocation.task_id == runtime["task"]["id"]
+            )
+        )
+    ).all()
+    assert [invocation.agent_code for invocation in invocations] == ["01-positioning"]
+    assert await session.scalar(select(func.count()).select_from(StrategyPlan)) == 0
+    run = await session.scalar(
+        select(AgentRun).where(
+            AgentRun.client_message_id == "positioning-diagnosis-no-strategy"
+        )
+    )
+    assert run is not None
+    assert run.request_payload["route_decision"] == route.model_dump(mode="json")
 
 
 @pytest.mark.asyncio

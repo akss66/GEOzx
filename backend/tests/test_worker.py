@@ -12,8 +12,94 @@ from app.models import BrainTask, Event
 from app.models.enums import BrainTaskStatus, BrainTaskType
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.schemas.brain import IntentDecision
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.agent_runs import claim_agent_run, mark_agent_run_queued
 from app.worker import execute_agent_run
+
+
+@pytest.mark.asyncio
+async def test_worker_validates_persisted_route_and_passes_it_to_routed_start(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Persisted route task",
+        type=BrainTaskType.CONTENT_CREATION,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="langgraph",
+    )
+    session.add(task)
+    await session.commit()
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id="persisted-route-worker",
+        request_payload={},
+    )
+    route_payload = {
+        "mode": "skill",
+        "intent": "account_positioning_diagnosis",
+        "confidence": 1,
+        "reason": "diagnosis only",
+        "skill_code": "account_positioning_diagnosis",
+        "requires_account_context": True,
+        "requires_operation_task": True,
+    }
+    await mark_agent_run_queued(
+        session,
+        run.id,
+        task_id=task.id,
+        request_payload={
+            "operation": "start",
+            "task_id": task.id,
+            "intent": IntentDecision(
+                intent="workflow",
+                confidence=1,
+                reason="diagnosis only",
+                suggested_expert_codes=["01-positioning"],
+                requires_account_context=True,
+            ).model_dump(mode="json"),
+            "route_decision": route_payload,
+        },
+    )
+    captured_routes: list[TurnRouteDecision] = []
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def capture_routed_start(
+        _session,
+        _task,
+        *,
+        route_decision,
+        **_kwargs,
+    ):
+        captured_routes.append(route_decision)
+
+    async def reject_legacy_start(*_args, **_kwargs):
+        raise AssertionError("worker must use start_routed")
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.runtime_graph.start_routed",
+        capture_routed_start,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.worker.runtime_graph.start_smart",
+        reject_legacy_start,
+    )
+
+    result = await execute_agent_run({"worker_id": "test-worker"}, run.id)
+
+    assert result == task.id
+    assert captured_routes == [TurnRouteDecision.model_validate(route_payload)]
+    assert captured_routes[0].mode is TurnExecutionMode.SKILL
 
 
 @pytest.mark.asyncio
@@ -69,7 +155,7 @@ async def test_worker_409_conflict_finishes_run_and_task_once(session, admin, mo
         raise wrapped
 
     monkeypatch.setattr("app.worker.async_session", test_session_factory)
-    monkeypatch.setattr("app.worker.runtime_graph.start_smart", raise_wrapped_conflict)
+    monkeypatch.setattr("app.worker.runtime_graph.start_routed", raise_wrapped_conflict)
 
     result = await execute_agent_run({"worker_id": "test-worker"}, run.id)
 
@@ -158,7 +244,7 @@ async def test_worker_retryable_failures_raise_arq_retry(
         raise failure
 
     monkeypatch.setattr("app.worker.async_session", test_session_factory)
-    monkeypatch.setattr("app.worker.runtime_graph.start_smart", raise_retryable)
+    monkeypatch.setattr("app.worker.runtime_graph.start_routed", raise_retryable)
 
     with pytest.raises(Retry):
         await execute_agent_run({"worker_id": "test-worker"}, run.id)

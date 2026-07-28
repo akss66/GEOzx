@@ -22,6 +22,7 @@ from app.orchestrator.brain_intelligence import (
 from app.orchestrator.brain_runtime import BrainRuntimeGraph
 from app.prompts import prompt_registry
 from app.schemas.ai_coo import AccountSituationOut, OperatingStrategyDraft
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 
 
 async def _task_with_account(session, admin) -> tuple[Account, BrainTask]:
@@ -298,6 +299,124 @@ def test_smart_runtime_enters_ai_coo_operating_nodes_before_dynamic_dispatch() -
     assert ("strategy_planning", "task_planning") in edges
     assert ("task_planning", "decide_next") in edges
     assert ("smart_summarize", "wait_for_measurement") in edges
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_skill_route_bypasses_strategy_and_selects_positioning_once(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, task = await _task_with_account(session, admin)
+    runtime = BrainRuntimeGraph()
+    captured_states: list[dict] = []
+
+    async def capture_diagnostic(state, *, config):
+        captured_states.append(state)
+
+    async def ignore_runtime_output(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime._diagnostic_graph, "ainvoke", capture_diagnostic)
+    monkeypatch.setattr(runtime, "_record_event", ignore_runtime_output)
+    monkeypatch.setattr(runtime, "_stream_main_agent_turn", ignore_runtime_output)
+    route = TurnRouteDecision(
+        mode=TurnExecutionMode.SKILL,
+        intent="account_positioning_diagnosis",
+        confidence=1,
+        reason="diagnosis only",
+        skill_code="account_positioning_diagnosis",
+        requires_account_context=True,
+        requires_operation_task=True,
+    )
+
+    await runtime.start_routed(
+        session,
+        task,
+        route_decision=route,
+    )
+
+    graph = runtime._diagnostic_graph.get_graph()
+    nodes = set(graph.nodes)
+    assert {
+        "context_resolution",
+        "dispatch_round",
+        "observe_round",
+        "critic_review",
+        "smart_summarize",
+    }.issubset(nodes)
+    assert {
+        "situation_awareness",
+        "strategy_planning",
+        "task_planning",
+    }.isdisjoint(nodes)
+    assert len(captured_states) == 1
+    assert captured_states[0]["selected_experts"] == [AgentCode.POSITIONING.value]
+
+
+def test_query_route_has_a_deterministic_tool_data_card_without_strategy_nodes() -> None:
+    graph = BrainRuntimeGraph()._query_graph.get_graph()
+    nodes = set(graph.nodes)
+
+    assert {"context_resolution", "query_data_card"}.issubset(nodes)
+    assert {
+        "situation_awareness",
+        "strategy_planning",
+        "task_planning",
+    }.isdisjoint(nodes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        TurnExecutionMode.TASK,
+        TurnExecutionMode.ACTION,
+    ],
+)
+async def test_task_and_action_routes_keep_the_full_strategy_graph(
+    session,
+    admin,
+    monkeypatch,
+    mode,
+) -> None:
+    _account, task = await _task_with_account(session, admin)
+    runtime = BrainRuntimeGraph()
+    captured_states: list[dict] = []
+
+    async def capture_full_graph(state, *, config):
+        captured_states.append(state)
+
+    async def ignore_runtime_output(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime._smart_graph, "ainvoke", capture_full_graph)
+    monkeypatch.setattr(runtime, "_record_event", ignore_runtime_output)
+    monkeypatch.setattr(runtime, "_stream_main_agent_turn", ignore_runtime_output)
+    route = TurnRouteDecision(
+        mode=mode,
+        intent=f"{mode.value}_request",
+        confidence=1,
+        reason="full operating workflow required",
+        requires_account_context=True,
+        requires_operation_task=True,
+    )
+
+    await runtime.start_routed(
+        session,
+        task,
+        route_decision=route,
+    )
+
+    assert len(captured_states) == 1
+    graph_nodes = runtime._smart_graph.get_graph().nodes
+    assert "strategy_planning" in graph_nodes
+    if mode is TurnExecutionMode.ACTION:
+        assert {
+            "collect_permissions",
+            "smart_permission_gate",
+            "execute_tools",
+        }.issubset(graph_nodes)
 
 
 def test_observation_runtime_uses_real_learning_nodes() -> None:
