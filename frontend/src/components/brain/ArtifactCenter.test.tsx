@@ -35,6 +35,20 @@ const page = (data: Artifact[], current = 1, pages = 1): ArtifactPage => ({
   pagination: { page: current, page_size: 20, total: data.length, pages },
 });
 
+const ARTIFACT_TYPE_CASES = [
+  ["账号体检报告", "account_inspection_report"],
+  ["账号定位策略", "positioning_strategy"],
+  ["选题规划", "topic_plan"],
+  ["发布日历", "publish_calendar"],
+  ["视频脚本", "video_script"],
+  ["美术提示词", "art_prompt"],
+  ["视频素材", "video_asset"],
+  ["剪辑成片", "edited_video"],
+  ["复盘报告", "review_report"],
+  ["投放计划", "ad_plan"],
+  ["客服记录", "cs_record"],
+] as const;
+
 function renderCenter(accountId: number | null, onSelect = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
@@ -71,18 +85,28 @@ describe("ArtifactCenter", () => {
     renderCenter(3);
     await screen.findByText("Artifact 1");
 
-    expect(screen.getByRole("option", { name: "账号体检报告" })).toHaveValue("account_inspection_report");
-    expect(screen.getByRole("option", { name: "周度复盘报告" })).toHaveValue("weekly_review");
-    expect(screen.getByRole("option", { name: "内容策略" })).toHaveValue("content_strategy");
-    expect(screen.getByRole("option", { name: "发布计划" })).toHaveValue("publish_plan");
+    const typeSelect = screen.getByLabelText("成果类型");
+    expect(Array.from((typeSelect as HTMLSelectElement).options).map((option) => option.value))
+      .toEqual(["", ...ARTIFACT_TYPE_CASES.map(([, code]) => code)]);
+    for (const [label, code] of ARTIFACT_TYPE_CASES) {
+      expect(screen.getByRole("option", { name: label })).toHaveValue(code);
+      fireEvent.change(typeSelect, { target: { value: code } });
+      await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith({
+        accountId: 3,
+        artifactType: code,
+        status: undefined,
+        page: 1,
+        pageSize: 20,
+      }));
+    }
 
-    fireEvent.change(screen.getByLabelText("成果类型"), { target: { value: "weekly_review" } });
+    fireEvent.change(typeSelect, { target: { value: "topic_plan" } });
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
-      accountId: 3, artifactType: "weekly_review", status: undefined, page: 1,
+      accountId: 3, artifactType: "topic_plan", status: undefined, page: 1,
     })));
     fireEvent.change(screen.getByLabelText("状态"), { target: { value: "accepted" } });
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
-      accountId: 3, artifactType: "weekly_review", status: "accepted", page: 1,
+      accountId: 3, artifactType: "topic_plan", status: "accepted", page: 1,
     })));
     fireEvent.change(screen.getByLabelText("创建时间（起）"), { target: { value: "2026-07-28" } });
     expect(screen.queryByText("Artifact 1")).not.toBeInTheDocument();
@@ -131,7 +155,7 @@ describe("ArtifactCenter", () => {
         <ArtifactCenter key="account-3" accountId={3} onSelect={onSelect} />
       </QueryClientProvider>,
     );
-    fireEvent.change(screen.getByLabelText("成果类型"), { target: { value: "weekly_review" } });
+    fireEvent.change(screen.getByLabelText("成果类型"), { target: { value: "topic_plan" } });
 
     rerender(
       <QueryClientProvider client={client}>

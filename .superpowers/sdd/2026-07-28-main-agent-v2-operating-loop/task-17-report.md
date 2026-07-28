@@ -23,6 +23,19 @@
 - `pnpm.cmd build` — passed.
 - `git diff --check` — passed.
 
+## Review fix round 2
+
+- Replaced the result-type selector's obsolete client-only values with the complete set of backend-allowed artifact codes: `account_inspection_report`, `positioning_strategy`, `topic_plan`, `publish_calendar`, `video_script`, `art_prompt`, `video_asset`, `edited_video`, `review_report`, `ad_plan`, and `cs_record`.
+- Each allowed code has a professional Chinese label while the select value remains the API code. Unknown returned artifact types continue to render as the safe Chinese fallback “其他成果” and cannot become a filter option.
+- Extended table-driven selector coverage to assert every displayed option and its exact `listArtifacts` request code. Acceptance and revision coverage now stubs the refreshed second list response and asserts the rendered row's status/version (`已采用 V1` and `修改中 V2`), not just a refetch call count.
+
+### Review round 2 verification
+
+- `pnpm.cmd exec vitest run src/api/brain.test.ts src/components/brain/ArtifactCard.test.tsx src/components/brain/ArtifactCenter.test.tsx src/pages/BrainHome.test.tsx` — 4 files, 80 tests passed.
+- `pnpm.cmd exec tsc --noEmit` — passed.
+- `pnpm.cmd build` — passed.
+- `git diff --check` — passed.
+
 The existing jsdom suite still emits its known React Router, Ant Design resize-observer, and pseudo-element warnings; no test failed.
 
 ## Review fix round 1

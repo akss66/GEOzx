@@ -29,9 +29,16 @@ const STATUS_OPTIONS: Array<{ value: ArtifactStatus; label: string }> = [
 
 const ARTIFACT_TYPE_OPTIONS = [
   { value: "account_inspection_report", label: "账号体检报告" },
-  { value: "weekly_review", label: "周度复盘报告" },
-  { value: "content_strategy", label: "内容策略" },
-  { value: "publish_plan", label: "发布计划" },
+  { value: "positioning_strategy", label: "账号定位策略" },
+  { value: "topic_plan", label: "选题规划" },
+  { value: "publish_calendar", label: "发布日历" },
+  { value: "video_script", label: "视频脚本" },
+  { value: "art_prompt", label: "美术提示词" },
+  { value: "video_asset", label: "视频素材" },
+  { value: "edited_video", label: "剪辑成片" },
+  { value: "review_report", label: "复盘报告" },
+  { value: "ad_plan", label: "投放计划" },
+  { value: "cs_record", label: "客服记录" },
 ];
 
 export function ArtifactCenter({

@@ -574,6 +574,15 @@ describe("BrainHome", () => {
   it("updates the selected center detail from the exact accepted response and refreshes its list", async () => {
     const accepted = { ...mocks.artifact, title: "已采用精确成果", status: "accepted" as const };
     vi.mocked(acceptArtifact).mockResolvedValueOnce(accepted);
+    vi.mocked(listArtifacts)
+      .mockResolvedValueOnce({
+        data: [mocks.artifact],
+        pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
+      })
+      .mockResolvedValueOnce({
+        data: [accepted],
+        pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
+      });
     renderBrainHome();
 
     fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
@@ -583,11 +592,23 @@ describe("BrainHome", () => {
 
     expect(await screen.findByText("已采用精确成果")).toBeInTheDocument();
     await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+    const acceptedListTitle = await screen.findByText("已采用精确成果", { selector: "strong" });
+    expect(acceptedListTitle.closest(".tz-artifact-center__row"))
+      .toHaveTextContent("V1 · 已采用");
   });
 
   it("updates the selected center detail to the exact returned revision and refreshes its list", async () => {
     const revision = { ...mocks.artifact, id: 5002, version: 2, title: "修订后精确成果", status: "revision_requested" as const };
     vi.mocked(reviseArtifact).mockResolvedValueOnce(revision);
+    vi.mocked(listArtifacts)
+      .mockResolvedValueOnce({
+        data: [mocks.artifact],
+        pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
+      })
+      .mockResolvedValueOnce({
+        data: [revision],
+        pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
+      });
     renderBrainHome();
 
     fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
@@ -599,6 +620,9 @@ describe("BrainHome", () => {
 
     expect(await screen.findByText("修订后精确成果")).toBeInTheDocument();
     await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+    const revisionListTitle = await screen.findByText("修订后精确成果", { selector: "strong" });
+    expect(revisionListTitle.closest(".tz-artifact-center__row"))
+      .toHaveTextContent("V2 · 修改中");
   });
 
   it("fails closed for a wrong-account source response and refetches the exact source on retry", async () => {
