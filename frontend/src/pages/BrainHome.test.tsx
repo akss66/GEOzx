@@ -303,6 +303,11 @@ const mocks = vi.hoisted(() => {
   };
 });
 
+const LEGACY_FAILURE_MESSAGE =
+  "褰撳墠璐﹀彿鏈粦瀹氶」鐩紝鏃х増涓撳閾捐矾鏃犳硶缁х画銆傛湰娆℃湭鐢熸垚璇婃柇鎴栫瓥鐣ャ€俙";
+const LEGACY_FAILURE_RECOVERY =
+  "浣犲彲浠ョ粦瀹氶」鐩悗閲嶈瘯锛汳ain Agent V2 鐨勮处鍙风骇涓撳閾捐矾鍚敤鍚庡皢涓嶅啀瑕佹眰椤圭洰銆俙";
+
 vi.mock("../api/shell", () => ({
   getWorkspaceContext: vi.fn(async () => ({
     clients: [],
@@ -1038,6 +1043,176 @@ describe("BrainHome", () => {
     ).toHaveLength(1);
     expect(conversation).toHaveTextContent("账号定位专家完成，下一步交给内容策略专家");
     expect(conversation).not.toHaveTextContent("RAW_EXPERT_STREAM_SHOULD_COLLAPSE");
+  });
+
+  it("shows a historical failed runtime with user-safe recovery guidance and no invented specialist", async () => {
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      status: "failed",
+      timeline: [
+        {
+          id: 501,
+          type: "brain.runtime.user_message",
+          payload: {
+            task_id: 12,
+            message: "甯垜璇婃柇鏃х増涓撳閾捐矾",
+          },
+          created_at: "2026-07-01T00:00:00Z",
+        },
+        {
+          id: 502,
+          type: "brain.runtime.failed",
+          payload: {
+            task_id: 12,
+            user_message: LEGACY_FAILURE_MESSAGE,
+            recovery_action: LEGACY_FAILURE_RECOVERY,
+            error_detail: "Traceback: provider timeout; API_KEY=sk-test-secret",
+          },
+          created_at: "2026-07-01T00:00:05Z",
+        },
+      ],
+      invocations: [],
+      tool_calls: [],
+      acceptances: [],
+      pending_permissions: [],
+      next_actions: [],
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    const conversation = await screen.findByLabelText("运营大脑对话流");
+    expect(await within(conversation).findByRole("alert")).toHaveTextContent(LEGACY_FAILURE_MESSAGE);
+    expect(conversation).toHaveTextContent(LEGACY_FAILURE_RECOVERY);
+    expect(screen.queryByText(mocks.invocation.agent_name)).not.toBeInTheDocument();
+  });
+
+  it("ignores specialist lifecycle events without invocation ids even when agent codes match", async () => {
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      timeline: [
+        ...mocks.runtime.timeline,
+        {
+          id: 601,
+          type: "brain.runtime.subagent_completed",
+          payload: {
+            task_id: 12,
+            agent_code: "01-positioning",
+            message: "STALE_RETRY_EVENT_SHOULD_BE_IGNORED",
+          },
+          created_at: "2026-07-01T00:01:05Z",
+        },
+      ],
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    const conversation = await screen.findByLabelText("运营大脑对话流");
+    await screen.findByText(mocks.invocation.agent_name);
+    expect(conversation).not.toHaveTextContent("STALE_RETRY_EVENT_SHOULD_BE_IGNORED");
+  });
+
+  it("renders specialist lifecycle details only for the exact real invocation id", async () => {
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      invocations: [
+        {
+          ...mocks.invocation,
+          id: 190,
+          status: "running",
+          output_summary: "",
+        },
+      ],
+      timeline: [
+        {
+          id: 701,
+          type: "brain.runtime.user_message",
+          payload: {
+            task_id: 12,
+            message: "鍚姩璐﹀彿瀹氫綅",
+          },
+          created_at: "2026-07-01T00:00:00Z",
+        },
+        {
+          id: 702,
+          type: "brain.runtime.subagent_started",
+          payload: {
+            task_id: 12,
+            invocation_id: 190,
+            message: "EXACT_SPECIALIST_INVOCATION_STARTED",
+          },
+          created_at: "2026-07-01T00:00:01Z",
+        },
+      ],
+      tool_calls: [],
+      acceptances: [],
+      pending_permissions: [],
+      next_actions: [],
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    const conversation = await screen.findByLabelText("运营大脑对话流");
+    expect(await screen.findByText(mocks.invocation.agent_name)).toBeInTheDocument();
+    expect(conversation).toHaveTextContent("EXACT_SPECIALIST_INVOCATION_STARTED");
+  });
+
+  it("renders failed runtime alerts without leaking technical details", async () => {
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      status: "failed",
+      timeline: [
+        {
+          id: 801,
+          type: "brain.runtime.user_message",
+          payload: {
+            task_id: 12,
+            message: "鏌ョ湅澶辫触鎻愮ず",
+          },
+          created_at: "2026-07-01T00:00:00Z",
+        },
+        {
+          id: 802,
+          type: "brain.runtime.failed",
+          payload: {
+            task_id: 12,
+            user_message: "   ",
+            message: "SAFE_FALLBACK_FAILURE_MESSAGE",
+            recovery_action: "SAFE_RECOVERY_ACTION",
+            error_detail: "Traceback: provider timeout; token=sk-live-secret",
+          },
+          created_at: "2026-07-01T00:00:03Z",
+        },
+      ],
+      invocations: [],
+      tool_calls: [],
+      acceptances: [],
+      pending_permissions: [],
+      next_actions: [],
+    });
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+
+    renderBrainHome();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("SAFE_FALLBACK_FAILURE_MESSAGE");
+    expect(alert).toHaveTextContent("SAFE_RECOVERY_ACTION");
+    expect(alert).not.toHaveTextContent("Traceback");
+    expect(alert).not.toHaveTextContent("sk-live-secret");
   });
 
   it("presents AI COO strategy, quality and reflection as readable conversation records", async () => {

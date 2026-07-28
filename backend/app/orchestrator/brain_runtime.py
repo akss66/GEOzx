@@ -1159,7 +1159,6 @@ class BrainRuntimeGraph:
         await self._check_main_turn_boundary(state)
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
-            selected = set(state.get("selected_experts", []))
             current_invocation_ids = {
                 int(item["invocation_id"])
                 for item in state.get("current_outputs", [])
@@ -1175,18 +1174,7 @@ class BrainRuntimeGraph:
             current = [
                 row
                 for row in rows
-                if (
-                    row.id in current_invocation_ids
-                    if current_invocation_ids
-                    else (
-                        _agent_code_value(row.agent_code) in selected
-                        and row.step_key
-                        == (
-                            f"round-{state.get('round_index', 1)}:"
-                            f"{_agent_code_value(row.agent_code)}"
-                        )
-                    )
-                )
+                if row.id in current_invocation_ids
             ]
             observations = list(state.get("observations", []))
             for invocation in current:
@@ -1201,18 +1189,6 @@ class BrainRuntimeGraph:
                     "invocation_id": invocation.id,
                 }
                 observations.append(observation)
-                await self._record_event(
-                    session,
-                    task,
-                    "brain.runtime.subagent_completed",
-                    {
-                        "message": f"{invocation.agent_name}已完成本轮处理。",
-                        "agent_code": code,
-                        "agent_name": invocation.agent_name,
-                        "invocation_id": invocation.id,
-                        "round_index": state.get("round_index", 1),
-                    },
-                )
         return {**state, "status": "round_observed", "observations": observations}
 
     async def _critic_review(self, state: BrainRuntimeState) -> BrainRuntimeState:
@@ -2393,6 +2369,18 @@ class BrainRuntimeGraph:
     def _route_after_permission_gate(self, state: BrainRuntimeState) -> str:
         return "waiting" if state.get("pending_permissions") else "continue"
 
+    def _subagent_lifecycle_event_type(
+        self, invocation: AgentInvocation
+    ) -> str | None:
+        if invocation.status == AgentInvocationStatus.DONE:
+            return "brain.runtime.subagent_completed"
+        if invocation.status in {
+            AgentInvocationStatus.FAILED,
+            AgentInvocationStatus.BLOCKED,
+        }:
+            return "brain.runtime.subagent_failed"
+        return None
+
     async def _record_subagent_results(
         self,
         session: AsyncSession,
@@ -2406,23 +2394,37 @@ class BrainRuntimeGraph:
                 .where(
                     AgentInvocation.task_id == task.id,
                     AgentInvocation.id.not_in(exclude_invocation_ids),
-                    AgentInvocation.status == AgentInvocationStatus.DONE,
+                    AgentInvocation.status.in_(
+                        [
+                            AgentInvocationStatus.DONE,
+                            AgentInvocationStatus.FAILED,
+                            AgentInvocationStatus.BLOCKED,
+                        ]
+                    ),
                 )
                 .order_by(AgentInvocation.id)
             )
         ).all()
         for invocation in invocations:
+            event_type = self._subagent_lifecycle_event_type(invocation)
+            if event_type is None:
+                continue
             agent_code = (
                 invocation.agent_code.value
                 if hasattr(invocation.agent_code, "value")
                 else str(invocation.agent_code)
             )
+            action = (
+                "已完成本轮处理"
+                if event_type == "brain.runtime.subagent_completed"
+                else "处理失败"
+            )
             await self._record_event(
                 session,
                 task,
-                "brain.runtime.subagent_completed",
+                event_type,
                 {
-                    "message": f"{invocation.agent_name} 已完成本轮处理。",
+                    "message": f"{invocation.agent_name} {action}。",
                     "agent_code": agent_code,
                     "agent_name": invocation.agent_name,
                     "invocation_id": invocation.id,

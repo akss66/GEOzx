@@ -834,7 +834,7 @@ async def test_legacy_pipeline_projects_only_new_completed_invocations(
     lifecycle = (
         await session.scalars(
             select(Event)
-            .where(Event.type.like("brain.runtime.subagent_%"))
+            .where(Event.type == "brain.runtime.subagent_completed")
             .order_by(Event.id)
         )
     ).all()
@@ -842,3 +842,211 @@ async def test_legacy_pipeline_projects_only_new_completed_invocations(
         "brain.runtime.subagent_completed"
     ]
     assert lifecycle[0].payload["invocation_id"] == new_invocation.id
+
+
+@pytest.mark.asyncio
+async def test_legacy_pipeline_projects_truthful_failed_and_blocked_lifecycle_events(
+    session, admin
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="legacy-failed-lifecycle-1"
+    )
+    old_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="old:01-positioning",
+        attempt=1,
+        agent_code=AgentCode.POSITIONING,
+        agent_name="鏃ц处鍙峰畾浣嶄笓瀹?",
+        status=AgentInvocationStatus.DONE,
+        input_summary="old",
+        output_summary="old result",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    done_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="new:02-content-director",
+        attempt=1,
+        agent_code=AgentCode.CONTENT_DIRECTOR,
+        agent_name="鏂板唴瀹逛笓瀹?",
+        status=AgentInvocationStatus.DONE,
+        input_summary="done",
+        output_summary="done result",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    failed_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="new:06-operator",
+        attempt=1,
+        agent_code=AgentCode.OPERATOR,
+        agent_name="澶辫触杩愯惀涓撳",
+        status=AgentInvocationStatus.FAILED,
+        input_summary="failed",
+        output_summary="",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    blocked_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="new:07-advertiser",
+        attempt=1,
+        agent_code=AgentCode.ADVERTISER,
+        agent_name="闃诲鎶曟斁涓撳",
+        status=AgentInvocationStatus.BLOCKED,
+        input_summary="blocked",
+        output_summary="",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    session.add_all(
+        [old_invocation, done_invocation, failed_invocation, blocked_invocation]
+    )
+    await session.commit()
+    await session.refresh(task, attribute_names=["brief", "plan"])
+
+    runtime = BrainRuntimeGraph()
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        await runtime._record_subagent_results(
+            session,
+            task,
+            exclude_invocation_ids={old_invocation.id},
+        )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+    lifecycle = (
+        await session.scalars(
+            select(Event)
+            .where(Event.type.like("brain.runtime.subagent_%"))
+            .order_by(Event.id)
+        )
+    ).all()
+    assert [event.type for event in lifecycle] == [
+        "brain.runtime.subagent_completed",
+        "brain.runtime.subagent_failed",
+        "brain.runtime.subagent_failed",
+    ]
+    assert [event.payload["invocation_id"] for event in lifecycle] == [
+        done_invocation.id,
+        failed_invocation.id,
+        blocked_invocation.id,
+    ]
+    assert old_invocation.id not in [
+        int(event.payload["invocation_id"]) for event in lifecycle
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observe_round_does_not_overwrite_failed_lifecycle_with_completed(
+    session, admin
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="observe-round-failed-1"
+    )
+    failed_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="round-1:01-positioning",
+        attempt=1,
+        agent_code=AgentCode.POSITIONING,
+        agent_name="璐﹀彿瀹氫綅涓撳",
+        status=AgentInvocationStatus.FAILED,
+        input_summary="failed",
+        output_summary="",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    session.add(failed_invocation)
+    await session.commit()
+    await session.refresh(task, attribute_names=["brief", "plan"])
+
+    runtime = BrainRuntimeGraph()
+    await runtime._record_event(
+        session,
+        task,
+        "brain.runtime.subagent_failed",
+        {
+            "message": "璐﹀彿瀹氫綅涓撳澶勭悊澶辫触銆?",
+            "agent_code": AgentCode.POSITIONING.value,
+            "agent_name": failed_invocation.agent_name,
+            "invocation_id": failed_invocation.id,
+        },
+    )
+
+    with brain_runtime_module.bind_runtime_session(session):
+        next_state = await runtime._observe_round(
+            _state(
+                task_id=task.id,
+                round_index=1,
+                selected_experts=[AgentCode.POSITIONING.value],
+                current_outputs=[{"invocation_id": failed_invocation.id}],
+                observations=[],
+            )
+        )
+
+    lifecycle = (
+        await session.scalars(
+            select(Event)
+            .where(Event.type.like("brain.runtime.subagent_%"))
+            .order_by(Event.id)
+        )
+    ).all()
+    assert [event.type for event in lifecycle] == ["brain.runtime.subagent_failed"]
+    assert next_state["observations"] == [
+        {
+            "agent_code": AgentCode.POSITIONING.value,
+            "agent_name": failed_invocation.agent_name,
+            "status": AgentInvocationStatus.FAILED.value,
+            "summary": failed_invocation.output_summary,
+            "invocation_id": failed_invocation.id,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observe_round_skips_specialist_lifecycle_without_real_invocation(
+    session, admin
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="observe-round-missing-invocation-1"
+    )
+    runtime = BrainRuntimeGraph()
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        with brain_runtime_module.bind_runtime_session(session):
+            next_state = await runtime._observe_round(
+                _state(
+                    task_id=task.id,
+                    round_index=1,
+                    selected_experts=[AgentCode.POSITIONING.value],
+                    current_outputs=[{"invocation_id": 999999}],
+                    observations=[],
+                )
+            )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+    lifecycle = (
+        await session.scalars(
+            select(Event)
+            .where(Event.type.like("brain.runtime.subagent_%"))
+            .order_by(Event.id)
+        )
+    ).all()
+    assert lifecycle == []
+    assert next_state["observations"] == []

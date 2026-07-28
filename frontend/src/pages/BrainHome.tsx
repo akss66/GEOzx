@@ -94,6 +94,7 @@ type ConversationItem =
       invocation: AgentInvocation;
       lifecycleMessage: string | null;
     }
+  | { kind: "failure"; id: string; content: string; recoveryAction: string }
   | { kind: "status"; id: string; content: string };
 
 export default function BrainHome() {
@@ -794,6 +795,15 @@ function ConversationStream({
       {items.map((item) => {
         if (item.kind === "user") return <UserMessage key={item.id} content={item.content} />;
         if (item.kind === "agent") return <AgentMessage key={item.id} message={item.message} />;
+        if (item.kind === "failure") {
+          return (
+            <RuntimeFailureMessage
+              key={item.id}
+              content={item.content}
+              recoveryAction={item.recoveryAction}
+            />
+          );
+        }
         if (item.kind === "status") {
           return <RuntimeStatusMessage key={item.id} content={item.content} />;
         }
@@ -1036,6 +1046,26 @@ function RuntimeStatusMessage({ content }: { content: string }) {
       <span aria-hidden="true" />
       <p>{presentOperationsBrainSystemCopy(cleanBrainCopy(content))}</p>
     </div>
+  );
+}
+
+function RuntimeFailureMessage({
+  content,
+  recoveryAction,
+}: {
+  content: string;
+  recoveryAction: string;
+}) {
+  return (
+    <article className="dy-chat-event-card" data-tone="warning" role="alert">
+      <ExclamationCircleFilled aria-hidden="true" />
+      <div>
+        <strong>{presentOperationsBrainSystemCopy(cleanBrainCopy(content))}</strong>
+        {recoveryAction ? (
+          <p>{presentOperationsBrainSystemCopy(cleanBrainCopy(recoveryAction))}</p>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -1550,10 +1580,8 @@ function conversationItems(
 ): ConversationItem[] {
   const items: ConversationItem[] = [];
   const invocationsById = new Map(runtime.invocations.map((row) => [row.id, row]));
-  const invocationsByCode = new Map(
-    runtime.invocations.map((row) => [String(row.agent_code), row]),
-  );
   const representedInvocations = new Set<number>();
+  const representedFailures = new Set<number>();
   const representedMessages = new Set<string>();
   const lifecycleByInvocation = expertLifecycleMessages(runtime);
   let hasUserMessage = false;
@@ -1582,11 +1610,34 @@ function conversationItems(
       return;
     }
 
-    if (["brain.runtime.subagent_started", "brain.runtime.subagent_completed"].includes(event.type)) {
+    if (event.type === "brain.runtime.failed") {
+      if (representedFailures.has(event.id)) return;
+      representedFailures.add(event.id);
+      const userMessage = String(payload.user_message ?? "").trim();
+      const content = userMessage || String(payload.message ?? "").trim();
+      const recoveryAction = String(payload.recovery_action ?? "").trim();
+      if (content) {
+        items.push({
+          kind: "failure",
+          id: `failure-${event.id}`,
+          content,
+          recoveryAction,
+        });
+      }
+      return;
+    }
+
+    if (
+      [
+        "brain.runtime.subagent_started",
+        "brain.runtime.subagent_completed",
+        "brain.runtime.subagent_failed",
+      ].includes(event.type)
+    ) {
       const invocationId = Number(payload.invocation_id);
-      const invocation = Number.isFinite(invocationId)
+      const invocation = Number.isInteger(invocationId) && invocationId > 0
         ? invocationsById.get(invocationId)
-        : invocationsByCode.get(String(payload.agent_code ?? ""));
+        : undefined;
       if (!invocation || representedInvocations.has(invocation.id)) return;
       representedInvocations.add(invocation.id);
       items.push({
@@ -1672,19 +1723,27 @@ function pendingAgentMessage(turn: PendingTurn): LiveRuntimeMessage {
 
 function expertLifecycleMessages(runtime: BrainRuntime) {
   const byInvocation = new Map<number, string>();
-  const invocationIdsByCode = new Map(
-    runtime.invocations.map((row) => [String(row.agent_code), row.id]),
-  );
+  const invocationIds = new Set(runtime.invocations.map((row) => row.id));
 
   runtime.timeline.forEach((event) => {
-    if (event.type !== "brain.runtime.subagent_completed") return;
+    if (
+      ![
+        "brain.runtime.subagent_started",
+        "brain.runtime.subagent_completed",
+        "brain.runtime.subagent_failed",
+      ].includes(event.type)
+    ) return;
     const payload = asRuntimePayload(event.payload) ?? {};
-    const explicitId = Number(payload.invocation_id);
-    const invocationId = Number.isFinite(explicitId)
-      ? explicitId
-      : invocationIdsByCode.get(String(payload.agent_code ?? ""));
+    const invocationId = Number(payload.invocation_id);
     const message = String(payload.message ?? "").trim();
-    if (invocationId != null && message) byInvocation.set(invocationId, message);
+    if (
+      Number.isInteger(invocationId)
+      && invocationId > 0
+      && invocationIds.has(invocationId)
+      && message
+    ) {
+      byInvocation.set(invocationId, message);
+    }
   });
 
   return byInvocation;
