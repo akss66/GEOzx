@@ -30,6 +30,7 @@ import type {
   AgentToolCall,
   BrainRuntime,
   BrainTask,
+  ConversationAgentRun,
   ConversationThread,
   DeliverableAcceptance,
 } from "../types";
@@ -327,6 +328,20 @@ const mocks = vi.hoisted(() => {
     ],
   } satisfies ConversationThread;
 
+  const completedConversationRun = {
+    id: 800,
+    org_id: 1,
+    requested_by_id: 2,
+    task_id: null,
+    thread_id: 81,
+    turn_id: 102,
+    client_message_id: "v2-turn-102",
+    status: "completed",
+    phase: "complete",
+    created_at: "2026-07-28T00:01:00Z",
+    updated_at: "2026-07-28T00:01:01Z",
+  } satisfies ConversationAgentRun;
+
   const workspace = {
     clientId: 1 as number | null,
     projectId: 2 as number | null,
@@ -352,6 +367,7 @@ const mocks = vi.hoisted(() => {
     workspace,
     contextAccounts,
     conversationThread,
+    completedConversationRun,
   };
 });
 
@@ -406,7 +422,7 @@ vi.mock("../api/brain", () => ({
   sendBrainMessage: vi.fn(async () => mocks.runtime),
   sendConversationTurn: vi.fn(async () => ({
     turn: mocks.conversationThread.turns[1],
-    run: {},
+    run: mocks.completedConversationRun,
     task_id: null,
     projections: [],
   })),
@@ -514,7 +530,7 @@ describe("BrainHome", () => {
     let resolveTurn: (() => void) | undefined;
     vi.mocked(sendConversationTurn).mockImplementationOnce(
       () => new Promise((resolve) => { resolveTurn = () => resolve({
-        turn: mocks.conversationThread.turns[1], run: {} as never, task_id: null, projections: [],
+        turn: mocks.conversationThread.turns[1], run: mocks.completedConversationRun, task_id: null, projections: [],
       }); }),
     );
 
@@ -530,6 +546,7 @@ describe("BrainHome", () => {
     }));
     expect(await screen.findByText("V2_SEND_MESSAGE")).toBeInTheDocument();
     await act(async () => resolveTurn?.());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "停止生成" })).not.toBeInTheDocument());
   });
 
   it("refreshes the active V2 Thread after a realtime lifecycle event", async () => {
@@ -573,7 +590,7 @@ describe("BrainHome", () => {
     let resolveTurn: (() => void) | undefined;
     vi.mocked(sendConversationTurn).mockImplementationOnce(
       () => new Promise((resolve) => { resolveTurn = () => resolve({
-        turn: mocks.conversationThread.turns[1], run: {} as never, task_id: null, projections: [],
+        turn: mocks.conversationThread.turns[1], run: mocks.completedConversationRun, task_id: null, projections: [],
       }); }),
     );
 
@@ -594,6 +611,53 @@ describe("BrainHome", () => {
     await act(async () => resolveTurn?.());
   });
 
+  it("keeps V2 stop available after the Turn API accepts a running AgentRun until its terminal lifecycle event", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(sendConversationTurn).mockImplementationOnce(async (_threadId, input) => ({
+      turn: mocks.conversationThread.turns[1],
+      run: {
+        id: 801,
+        org_id: 1,
+        requested_by_id: 2,
+        task_id: 212,
+        thread_id: 81,
+        turn_id: 102,
+        client_message_id: input.client_message_id,
+        status: "running",
+        phase: "runtime",
+        created_at: "2026-07-28T00:00:00Z",
+        updated_at: "2026-07-28T00:00:01Z",
+      } satisfies ConversationAgentRun,
+      task_id: 212,
+      projections: [],
+    }));
+
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      target: { value: "V2_ACCEPTED_RUNNING" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledOnce());
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0]?.[1]?.client_message_id;
+
+    fireEvent.click(await screen.findByRole("button", { name: "停止生成" }));
+    await waitFor(() => expect(stopBrainGeneration).toHaveBeenCalled());
+    expect(vi.mocked(stopBrainGeneration).mock.calls[0]?.[0]).toEqual({
+      clientMessageId,
+      taskId: 212,
+    });
+
+    await act(async () => mocks.eventHandler?.({
+      type: "brain.runtime.completed",
+      payload: { thread_id: 81, client_message_id: clientMessageId },
+    }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "停止生成" })).not.toBeInTheDocument());
+  });
+
   it("executes a V2 approval from its projected source Turn", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",
@@ -612,12 +676,16 @@ describe("BrainHome", () => {
     } as ConversationThread);
 
     renderBrainHome();
+    fireEvent.change(await screen.findByRole("textbox", { name: "Approval comment" }), {
+      target: { value: "Approve after checking the scope." },
+    });
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(approveToolCall).toHaveBeenCalled());
     expect(vi.mocked(approveToolCall).mock.calls[0]?.[0]).toEqual({
       toolCallId: 9001,
       approved: true,
+      comment: "Approve after checking the scope.",
     });
   });
 

@@ -1,15 +1,19 @@
 import type { ConversationThread, ConversationTurn, TurnProjection } from "../../types";
-import { Button } from "antd";
+import { Button, Input } from "antd";
 import type { AgentToolCall } from "../../types";
 
 export function TurnStream({
   thread,
   approvingToolCallId = null,
+  approvalComment = "",
+  onApprovalCommentChange,
   onApprove,
 }: {
   thread: ConversationThread;
   approvingToolCallId?: number | null;
-  onApprove?: (approval: AgentToolCall, approved: boolean) => void;
+  approvalComment?: string;
+  onApprovalCommentChange?: (value: string) => void;
+  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
 }) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
@@ -18,6 +22,8 @@ export function TurnStream({
           key={turn.id}
           turn={turn}
           approvingToolCallId={approvingToolCallId}
+          approvalComment={approvalComment}
+          onApprovalCommentChange={onApprovalCommentChange}
           onApprove={onApprove}
         />
       ))}
@@ -28,11 +34,15 @@ export function TurnStream({
 function TurnArticle({
   turn,
   approvingToolCallId,
+  approvalComment,
+  onApprovalCommentChange,
   onApprove,
 }: {
   turn: ConversationTurn;
   approvingToolCallId: number | null;
-  onApprove?: (approval: AgentToolCall, approved: boolean) => void;
+  approvalComment: string;
+  onApprovalCommentChange?: (value: string) => void;
+  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
 }) {
   const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
@@ -63,6 +73,8 @@ function TurnArticle({
             projection={projection}
             turnId={turn.id}
             approving={approvingToolCallId === approvalId(projection)}
+            approvalComment={approvalComment}
+            onApprovalCommentChange={onApprovalCommentChange}
             onApprove={onApprove}
           />
         ))}
@@ -90,12 +102,16 @@ function Projection({
   projection,
   turnId,
   approving,
+  approvalComment,
+  onApprovalCommentChange,
   onApprove,
 }: {
   projection: TurnProjection;
   turnId: number;
   approving: boolean;
-  onApprove?: (approval: AgentToolCall, approved: boolean) => void;
+  approvalComment: string;
+  onApprovalCommentChange?: (value: string) => void;
+  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
 }) {
   const key = projectionKey(projection, turnId);
   const shared = {
@@ -129,10 +145,34 @@ function Projection({
           Approval required: {projection.approval.tool_name || projection.approval.tool_code}
           {onApprove ? (
             <div>
-              <Button loading={approving} onClick={() => onApprove(projection.approval, true)}>
+              {onApprovalCommentChange ? (
+                <Input.TextArea
+                  aria-label="Approval comment"
+                  value={approvalComment}
+                  maxLength={500}
+                  autoSize={{ minRows: 2, maxRows: 4 }}
+                  onChange={(event) => onApprovalCommentChange(event.target.value)}
+                />
+              ) : null}
+              <Button
+                loading={approving}
+                onClick={() => {
+                  const comment = approvalComment.trim();
+                  if (comment) onApprove(projection.approval, true, comment);
+                  else onApprove(projection.approval, true);
+                }}
+              >
                 Approve
               </Button>
-              <Button danger disabled={approving} onClick={() => onApprove(projection.approval, false)}>
+              <Button
+                danger
+                disabled={approving}
+                onClick={() => {
+                  const comment = approvalComment.trim();
+                  if (comment) onApprove(projection.approval, false, comment);
+                  else onApprove(projection.approval, false);
+                }}
+              >
                 Reject
               </Button>
             </div>

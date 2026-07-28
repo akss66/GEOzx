@@ -165,6 +165,15 @@ export default function BrainHome() {
       if (activeAccount) setActiveBrainTaskId(activeAccount.id, eventTaskId);
     }
     ingestRuntimeEvent(event, setLiveMessages);
+    if (
+      activeConversationThreadId != null
+      && eventThreadId === activeConversationThreadId
+      && eventClientMessageId === pendingClientMessageId.current
+      && isTerminalConversationRuntimeEvent(event.type)
+    ) {
+      setPendingTurn((current) => current?.clientMessageId === eventClientMessageId ? null : current);
+      pendingClientMessageId.current = null;
+    }
     if (!["brain.runtime.message_start", "brain.runtime.message_delta"].includes(event.type)) {
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
       qc.invalidateQueries({ queryKey: ["brain-runtime"] });
@@ -210,8 +219,17 @@ export default function BrainHome() {
         mergeConversationTurn(current, submission),
       );
       void qc.invalidateQueries({ queryKey: ["brain-conversation", variables.threadId] });
-      setPendingTurn(null);
-      pendingClientMessageId.current = null;
+      if (isTerminalConversationRunStatus(submission.run.status)) {
+        setPendingTurn(null);
+        pendingClientMessageId.current = null;
+        return;
+      }
+      const clientMessageId = submission.run.client_message_id || variables.clientMessageId;
+      const taskId = submission.task_id ?? submission.run.task_id;
+      setPendingTurn((current) => current?.clientMessageId === variables.clientMessageId
+        ? { ...current, clientMessageId, taskId: taskId ?? current.taskId }
+        : current);
+      pendingClientMessageId.current = clientMessageId;
     },
     onError: (error) => {
       setPendingTurn((current) => {
@@ -485,7 +503,10 @@ export default function BrainHome() {
     ? presentApiError(conversationQuery.error, "Conversation history is temporarily unavailable.")
     : null;
   const isGenerating =
-    messageMutation.isPending || regenerateMutation.isPending || conversationTurnMutation.isPending;
+    messageMutation.isPending
+    || regenerateMutation.isPending
+    || conversationTurnMutation.isPending
+    || (activeConversationThreadId != null && pendingTurn != null);
 
   const startWorkflow = () => {
     if (isGenerating) return;
@@ -694,7 +715,13 @@ export default function BrainHome() {
                   approvingToolCallId={
                     approveMutation.isPending ? approveMutation.variables?.toolCallId ?? null : null
                   }
-                  onApprove={(approval, approved) => approveMutation.mutate({ toolCallId: approval.id, approved })}
+                  approvalComment={approvalComment}
+                  onApprovalCommentChange={setApprovalComment}
+                  onApprove={(approval, approved, comment) => approveMutation.mutate({
+                    toolCallId: approval.id,
+                    approved,
+                    comment,
+                  })}
                 />
                 {pendingTurn ? <PendingConversation turn={pendingTurn} /> : null}
                 {!pendingTurn ? (
@@ -1996,6 +2023,30 @@ function mergeConversationTurn(
     ? current.turns.map((turn) => turn.id === submission.turn.id ? submission.turn : turn)
     : [...current.turns, submission.turn];
   return { ...current, turns };
+}
+
+function isTerminalConversationRunStatus(status: string) {
+  return [
+    "blocked",
+    "cancelled",
+    "completed",
+    "dead_letter",
+    "failed",
+    "stopped",
+    "waiting_decision",
+    "waiting_permission",
+    "waiting_user",
+  ].includes(status);
+}
+
+function isTerminalConversationRuntimeEvent(type: string) {
+  return [
+    "brain.runtime.blocked",
+    "brain.runtime.completed",
+    "brain.runtime.failed",
+    "brain.runtime.generation_stopped",
+    "brain.runtime.turn_paused",
+  ].includes(type);
 }
 
 function createClientMessageId() {
