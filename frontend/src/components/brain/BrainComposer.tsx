@@ -126,6 +126,7 @@ export function BrainComposer({
           <>
             <CapabilityLauncher
               skills={skills}
+              disabled={disabled || loading}
               onSelectSkill={onSelectSkill}
               onAddFilesAndMaterials={onAddFilesAndMaterials}
               onAddAccountDataPackage={onAddAccountDataPackage}

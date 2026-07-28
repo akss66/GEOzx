@@ -2,7 +2,7 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PublicSkill } from "../../types";
@@ -29,6 +29,18 @@ const expertHelp: PublicSkill = {
   description: "获得运营策略建议",
   category: "expert_help",
   icon: "compass",
+  requires_account: false,
+  is_available: true,
+  unavailable_reason: null,
+};
+
+const contextSkill: PublicSkill = {
+  code: "content_reference",
+  version: 1,
+  name: "引用内容素材",
+  description: "将已有内容作为本次工作上下文",
+  category: "context",
+  icon: "file",
   requires_account: false,
   is_available: true,
   unavailable_reason: null,
@@ -101,8 +113,55 @@ describe("CapabilityLauncher", () => {
     expect(onSelectAccount).toHaveBeenCalledOnce();
   });
 
+  it("renders public context Skills before supplemental context actions and selects them by callback", () => {
+    const onSelectSkill = vi.fn();
+    render(<CapabilityLauncher skills={[contextSkill]} onSelectSkill={onSelectSkill} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "添加能力或材料" }));
+
+    const contextGroup = screen.getByRole("region", { name: "添加上下文" });
+    expect(within(contextGroup).getAllByRole("menuitem")[0]).toHaveAccessibleName(/引用内容素材/);
+    fireEvent.click(screen.getByRole("menuitem", { name: /引用内容素材/ }));
+    expect(onSelectSkill).toHaveBeenCalledWith("content_reference");
+    expect(screen.queryByText("content_reference")).not.toBeInTheDocument();
+  });
+
+  it("disables available Skills that are not connected to a selection callback", () => {
+    render(<CapabilityLauncher skills={[accountInspection]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "添加能力或材料" }));
+
+    expect(screen.getByRole("menuitem", { name: /一键账号体检/ })).toBeDisabled();
+    expect(screen.getByText("能力尚未接入")).toBeVisible();
+  });
+
+  it("opens with Space, selects menu items with Enter and Space, and closes on outside click", () => {
+    const onSelectSkill = vi.fn();
+    render(<CapabilityLauncher skills={[accountInspection]} onSelectSkill={onSelectSkill} />);
+
+    const trigger = screen.getByRole("button", { name: "添加能力或材料" });
+    fireEvent.keyDown(trigger, { key: " " });
+    const item = screen.getByRole("menuitem", { name: /一键账号体检/ });
+    fireEvent.keyDown(item, { key: "Enter" });
+    expect(onSelectSkill).toHaveBeenCalledWith("account_inspection");
+
+    fireEvent.keyDown(trigger, { key: " " });
+    fireEvent.keyDown(screen.getByRole("menuitem", { name: /一键账号体检/ }), { key: " " });
+    expect(onSelectSkill).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(trigger);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("supports arrow navigation and returns focus to the trigger after Escape", () => {
-    render(<CapabilityLauncher skills={[accountInspection]} onAddFilesAndMaterials={vi.fn()} />);
+    render(
+      <CapabilityLauncher
+        skills={[accountInspection]}
+        onSelectSkill={vi.fn()}
+        onAddFilesAndMaterials={vi.fn()}
+      />,
+    );
 
     const trigger = screen.getByRole("button", { name: "添加能力或材料" });
     trigger.focus();

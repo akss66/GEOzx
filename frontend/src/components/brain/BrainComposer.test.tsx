@@ -104,6 +104,27 @@ describe("BrainComposer", () => {
     expect(screen.getByRole("button", { name: "添加能力或材料" })).toBeInTheDocument();
   });
 
+  it("disables the capability launcher while the composer is disabled or generating", () => {
+    const props = {
+      value: "",
+      pendingPermission: null,
+      approvalComment: "",
+      approving: false,
+      skills: [accountInspectionSkill],
+      onSelectSkill: vi.fn(),
+      onChange: vi.fn(),
+      onApprovalCommentChange: vi.fn(),
+      onApprovePermission: vi.fn(),
+      onSubmit: vi.fn(),
+    };
+    const { rerender } = render(<BrainComposer {...props} disabled loading={false} />);
+
+    expect(screen.getByRole("button", { name: "添加能力或材料" })).toBeDisabled();
+
+    rerender(<BrainComposer {...props} disabled={false} loading />);
+    expect(screen.getByRole("button", { name: "添加能力或材料" })).toBeDisabled();
+  });
+
   it("keeps the single-line message composer slim and vertically centered", () => {
     const styles = readFileSync(
       join(process.cwd(), "src/styles/brain-v2.css"),

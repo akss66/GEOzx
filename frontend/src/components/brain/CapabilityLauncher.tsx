@@ -18,6 +18,7 @@ export type CapabilityLauncherContextCallbacks = {
 export type CapabilityLauncherProps = CapabilityLauncherContextCallbacks & {
   skills?: PublicSkill[];
   onSelectSkill?: (skillCode: string) => void;
+  disabled?: boolean;
 };
 
 const groupLabels = {
@@ -33,12 +34,14 @@ export function CapabilityLauncher({
   onAddAccountDataPackage,
   onAddHistoricalArtifacts,
   onSelectAccount,
+  disabled = false,
 }: CapabilityLauncherProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const quickOperations = orderedSkills(skills, "quick_operations");
+  const contextSkills = orderedSkills(skills, "context");
   const expertHelp = orderedSkills(skills, "expert_help");
   const contextActions: ContextAction[] = [
     { label: "添加文件或素材", callback: onAddFilesAndMaterials },
@@ -62,6 +65,10 @@ export function CapabilityLauncher({
     return () => document.removeEventListener("mousedown", closeOnOutsidePointer);
   }, [open]);
 
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
   const closeMenu = (returnFocus = false) => {
     setOpen(false);
     if (returnFocus) triggerRef.current?.focus();
@@ -76,7 +83,10 @@ export function CapabilityLauncher({
     items[(currentIndex + direction + items.length) % items.length]?.focus();
   };
 
-  const handleMenuKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+  const handleMenuKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    onActivate: () => void,
+  ) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       moveFocus(event.currentTarget, event.key === "ArrowDown" ? 1 : -1);
@@ -84,6 +94,10 @@ export function CapabilityLauncher({
     if (event.key === "Escape") {
       event.preventDefault();
       closeMenu(true);
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onActivate();
     }
   };
 
@@ -96,6 +110,7 @@ export function CapabilityLauncher({
         aria-label="添加能力或材料"
         aria-haspopup="menu"
         aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
@@ -113,30 +128,38 @@ export function CapabilityLauncher({
               <SkillMenuItem
                 key={skill.code}
                 skill={skill}
-                onKeyDown={handleMenuKeyDown}
                 onSelect={() => {
                   onSelectSkill?.(skill.code);
                   closeMenu();
                 }}
+                onKeyDown={handleMenuKeyDown}
+                unavailableReason={skillUnavailableReason(skill, onSelectSkill)}
               />
             ))}
           </CapabilityGroup>
           <CapabilityGroup label={groupLabels.context}>
-            {contextActions.map((action) => (
-              <button
-                key={action.label}
-                type="button"
-                role="menuitem"
-                className="dy-brain-capability-item"
-                disabled={!action.callback}
+            {contextSkills.map((skill) => (
+              <SkillMenuItem
+                key={skill.code}
+                skill={skill}
+                onSelect={() => {
+                  onSelectSkill?.(skill.code);
+                  closeMenu();
+                }}
                 onKeyDown={handleMenuKeyDown}
-                onClick={() => {
+                unavailableReason={skillUnavailableReason(skill, onSelectSkill)}
+              />
+            ))}
+            {contextActions.map((action) => (
+              <ContextMenuItem
+                key={action.label}
+                action={action}
+                onKeyDown={handleMenuKeyDown}
+                onSelect={() => {
                   action.callback?.();
                   closeMenu();
                 }}
-              >
-                {action.label}
-              </button>
+              />
             ))}
           </CapabilityGroup>
           <CapabilityGroup label={groupLabels.expert_help}>
@@ -144,11 +167,12 @@ export function CapabilityLauncher({
               <SkillMenuItem
                 key={skill.code}
                 skill={skill}
-                onKeyDown={handleMenuKeyDown}
                 onSelect={() => {
                   onSelectSkill?.(skill.code);
                   closeMenu();
                 }}
+                onKeyDown={handleMenuKeyDown}
+                unavailableReason={skillUnavailableReason(skill, onSelectSkill)}
               />
             ))}
           </CapabilityGroup>
@@ -171,25 +195,57 @@ function SkillMenuItem({
   skill,
   onSelect,
   onKeyDown,
+  unavailableReason,
 }: {
   skill: PublicSkill;
   onSelect: () => void;
-  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>, onActivate: () => void) => void;
+  unavailableReason: string | null;
 }) {
-  const unavailable = !skill.is_available;
   return (
     <button
       type="button"
       role="menuitem"
       className="dy-brain-capability-item"
-      disabled={unavailable}
+      disabled={unavailableReason != null}
       onClick={onSelect}
-      onKeyDown={onKeyDown}
+      onKeyDown={(event) => onKeyDown(event, onSelect)}
     >
       <span>{skill.name}</span>
-      <small>{unavailable ? skill.unavailable_reason || "暂不可用" : skill.description}</small>
+      <small>{unavailableReason ?? skill.description}</small>
     </button>
   );
+}
+
+function ContextMenuItem({
+  action,
+  onSelect,
+  onKeyDown,
+}: {
+  action: ContextAction;
+  onSelect: () => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>, onActivate: () => void) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      className="dy-brain-capability-item"
+      disabled={!action.callback}
+      onKeyDown={(event) => onKeyDown(event, onSelect)}
+      onClick={onSelect}
+    >
+      {action.label}
+    </button>
+  );
+}
+
+function skillUnavailableReason(
+  skill: PublicSkill,
+  onSelectSkill: CapabilityLauncherProps["onSelectSkill"],
+) {
+  if (!skill.is_available) return skill.unavailable_reason || "暂不可用";
+  return onSelectSkill ? null : "能力尚未接入";
 }
 
 function orderedSkills(
