@@ -233,7 +233,7 @@ class AgentHarness:
                 task=task,
                 user=user,
                 request=request,
-                project_id=project.id,
+                project_id=project_id,
                 account_id=account.id,
                 agent_code=code.value,
                 invocation_id=invocation.id,
@@ -333,7 +333,11 @@ class AgentHarness:
             ],
             status=DeliverableAcceptanceStatus.PENDING,
             brain_rejudge_basis=[
-                "The result is scoped to the selected project and account.",
+                (
+                    "The result is scoped to the selected project and account."
+                    if project is not None
+                    else "The result is scoped to the selected account."
+                ),
                 "It will not overwrite an approved result before human acceptance.",
             ],
         )

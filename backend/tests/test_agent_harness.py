@@ -11,9 +11,11 @@ from app.models import (
     Account,
     AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     Client,
     ContentItem,
+    Event,
     OrchestrationPlan,
     Project,
     TaskBrief,
@@ -28,8 +30,9 @@ from app.models.enums import (
     Platform,
 )
 from app.orchestrator.agent_harness import AgentHarness, AgentHarnessError
+from app.orchestrator.agent_kernel import KernelAction, SpecialistKernelDecision
 from app.orchestrator.brain_runtime import BrainRuntimeGraph, bind_runtime_session
-from app.schemas.brain import AgentInvocationOut
+from app.schemas.brain import AgentInvocationOut, RuntimeToolCall
 from app.schemas.deliverable import (
     AdPlanPayload,
     DeliverablePayload,
@@ -118,18 +121,55 @@ async def test_harness_runs_positioning_with_one_account_without_project(
 
     contexts: list[AgentContext] = []
 
-    class FakePositioningAgent(BaseAgent):
+    class ToolCallingPositioningAgent(BaseAgent):
         code = AgentCode.POSITIONING.value
         output_type = DeliverableType.POSITIONING_STRATEGY
 
         async def run(self, runtime_session, org_id, ctx: AgentContext):
+            raise AssertionError("The bounded tool loop should call kernel_decide instead")
+
+        async def kernel_decide(
+            self, runtime_session, org_id, ctx: AgentContext, *, available_tools, observations
+        ):
             contexts.append(ctx)
-            return PositioningStrategyPayload(
-                account_persona="Practical creator",
-                target_audience="Early-stage operators",
-                differentiation=["Evidence-led", "Actionable"],
-                content_pillars=["Account diagnosis", "Operating playbooks"],
+            if not observations:
+                return SpecialistKernelDecision(
+                    action=KernelAction.CALL_TOOLS,
+                    rationale="Read the selected account profile before diagnosing positioning.",
+                    tool_calls=(
+                        RuntimeToolCall(
+                            tool_code="account.profile",
+                            arguments={},
+                            purpose="Load the selected account profile.",
+                            idempotency_key="agent-run-38:account-profile",
+                        ),
+                    ),
+                )
+            assert observations[0]["result"]["account_id"] == account.id
+            return SpecialistKernelDecision(
+                action=KernelAction.FINISH,
+                rationale="The account profile is sufficient for this diagnosis.",
+                deliverable=PositioningStrategyPayload(
+                    account_persona="Practical creator",
+                    target_audience="Early-stage operators",
+                    differentiation=["Evidence-led", "Actionable"],
+                    content_pillars=["Account diagnosis", "Operating playbooks"],
+                ),
             )
+
+    async def fake_business_config(*_args, **_kwargs):
+        return {
+            "tool_permissions": {
+                "account_context": "auto",
+                "profile_snapshot": "confirm",
+                "review_metrics": "confirm",
+            },
+            "quality_gates": [],
+        }
+
+    monkeypatch.setattr(
+        "app.orchestrator.agent_harness.get_business_config", fake_business_config
+    )
 
     original = AGENT_SPECS[AgentCode.POSITIONING]
     monkeypatch.setitem(
@@ -137,7 +177,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
         AgentCode.POSITIONING,
         original.__class__(
             original.name,
-            FakePositioningAgent,
+            ToolCallingPositioningAgent,
             original.deliverable_type,
             original.deliverable_title,
             original.stage,
@@ -178,10 +218,27 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert content_item is not None
     assert content_item.project_id is None
     assert content_item.account_id == account.id
-    assert len(contexts) == 1
     assert contexts[0].project_id is None
     assert contexts[0].account_id == account.id
     assert contexts[0].upstream["tool_results"] == upstream["tool_results"]
+    tool_calls = (
+        await session.scalars(
+            select(AgentToolCall).where(AgentToolCall.task_id == task.id)
+        )
+    ).all()
+    assert len(tool_calls) == 1
+    assert tool_calls[0].tool_code == "account.profile"
+    assert tool_calls[0].status == "success"
+    tool_events = (
+        await session.scalars(
+            select(Event).where(Event.type == "agent.kernel.tool_end")
+        )
+    ).all()
+    assert len(tool_events) == 1
+    assert tool_events[0].project_id is None
+    assert result.acceptance.brain_rejudge_basis[0] == (
+        "The result is scoped to the selected account."
+    )
     invocations = (
         await session.scalars(
             select(AgentInvocation).where(AgentInvocation.task_id == task.id)
