@@ -56,6 +56,9 @@ describe("BrainComposer", () => {
     );
     expect(input).toHaveAttribute("data-autosize-min-rows", "1");
     expect(input).toHaveAttribute("data-autosize-max-rows", "6");
+    expect(screen.getByRole("button", { name: "发送给运营大脑" })).toHaveClass(
+      "dy-brain-send-button",
+    );
   });
 
   it("submits with Enter but keeps Shift+Enter for a newline", () => {

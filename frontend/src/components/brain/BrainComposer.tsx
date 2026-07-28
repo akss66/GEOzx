@@ -152,6 +152,7 @@ export function BrainComposer({
                   type="primary"
                   size="large"
                   aria-label="发送给运营大脑"
+                  className="dy-brain-send-button"
                   icon={<SendOutlined />}
                   disabled={disabled || value.trim().length === 0}
                   onClick={onSubmit}

@@ -171,8 +171,9 @@ In `frontend/src/styles/brain-v2.css`, update only the normal message-mode selec
 ```css
 .tz-brain-thread .dy-brain-composer-box:not([data-mode="permission"]) {
   position: relative;
-  padding: 7px 52px 7px 14px;
-  border-radius: 26px;
+  min-height: 64px;
+  padding: 11px 60px 11px 18px;
+  border-radius: 32px;
   box-shadow: 0 8px 24px rgba(42, 35, 27, 0.07);
 }
 
@@ -190,8 +191,8 @@ In `frontend/src/styles/brain-v2.css`, update only the normal message-mode selec
 
 .tz-brain-thread .dy-brain-composer-tools {
   position: absolute;
-  right: 7px;
-  bottom: 7px;
+  right: 12px;
+  bottom: 13px;
   padding: 0;
 }
 

@@ -237,6 +237,10 @@ body {
   border-radius: 8px !important;
 }
 
+.tz-shell :is(.dy-brain-send-button, .dy-brain-stop-button).ant-btn {
+  border-radius: 50% !important;
+}
+
 .tz-shell .ant-btn-primary {
   border-color: var(--tz-ink);
   background: var(--tz-ink);
