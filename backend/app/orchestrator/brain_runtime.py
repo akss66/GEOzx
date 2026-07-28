@@ -984,8 +984,21 @@ class BrainRuntimeGraph:
     async def _dispatch_experts(self, state: BrainRuntimeState) -> BrainRuntimeState:
         async with _session_from_state(state) as session:
             task = await _load_task(session, state["task_id"])
+            existing_invocation_ids = set(
+                (
+                    await session.scalars(
+                        select(AgentInvocation.id).where(
+                            AgentInvocation.task_id == task.id
+                        )
+                    )
+                ).all()
+            )
             await run_brain_task_pipeline(session, task)
-            await self._record_subagent_results(session, task)
+            await self._record_subagent_results(
+                session,
+                task,
+                exclude_invocation_ids=existing_invocation_ids,
+            )
         return {**state, "status": "experts_dispatched"}
 
     async def _dispatch_round(self, state: BrainRuntimeState) -> BrainRuntimeState:
@@ -2197,11 +2210,21 @@ class BrainRuntimeGraph:
     def _route_after_permission_gate(self, state: BrainRuntimeState) -> str:
         return "waiting" if state.get("pending_permissions") else "continue"
 
-    async def _record_subagent_results(self, session: AsyncSession, task: BrainTask) -> None:
+    async def _record_subagent_results(
+        self,
+        session: AsyncSession,
+        task: BrainTask,
+        *,
+        exclude_invocation_ids: set[int],
+    ) -> None:
         invocations = (
             await session.scalars(
                 select(AgentInvocation)
-                .where(AgentInvocation.task_id == task.id)
+                .where(
+                    AgentInvocation.task_id == task.id,
+                    AgentInvocation.id.not_in(exclude_invocation_ids),
+                    AgentInvocation.status == AgentInvocationStatus.DONE,
+                )
                 .order_by(AgentInvocation.id)
             )
         ).all()
@@ -2211,19 +2234,6 @@ class BrainRuntimeGraph:
                 if hasattr(invocation.agent_code, "value")
                 else str(invocation.agent_code)
             )
-            await self._record_event(
-                session,
-                task,
-                "brain.runtime.subagent_started",
-                {
-                    "message": f"{invocation.agent_name} 已开始处理。",
-                    "agent_code": agent_code,
-                    "agent_name": invocation.agent_name,
-                    "invocation_id": invocation.id,
-                },
-            )
-            if invocation.status != AgentInvocationStatus.DONE:
-                continue
             await self._record_event(
                 session,
                 task,
@@ -2274,14 +2284,32 @@ class BrainRuntimeGraph:
             for item in observations
             if item.get("invocation_id") is not None
         }
+        expert_observations_present = any(
+            item.get("invocation_id") is not None
+            or item.get("kind") in {"expert", "expert_result"}
+            or (
+                item.get("agent_code") is not None
+                and item.get("kind")
+                not in {
+                    "tool_result",
+                    "tool_permission",
+                    "permission_decision",
+                    "user_decision",
+                }
+            )
+            for item in observations
+        )
+        invocation_filters = [
+            AgentInvocation.task_id == task.id,
+            AgentInvocation.id.in_(invocation_ids),
+            AgentInvocation.status == AgentInvocationStatus.DONE,
+        ]
+        if identity is not None:
+            invocation_filters.append(AgentInvocation.run_id == identity[2])
         completed_invocations = (
             (
                 await session.scalars(
-                    select(AgentInvocation).where(
-                        AgentInvocation.task_id == task.id,
-                        AgentInvocation.id.in_(invocation_ids),
-                        AgentInvocation.status == AgentInvocationStatus.DONE,
-                    )
+                    select(AgentInvocation).where(*invocation_filters)
                 )
             ).all()
             if invocation_ids
@@ -2306,7 +2334,13 @@ class BrainRuntimeGraph:
             if (row := completed_by_id.get(int(item.get("invocation_id") or 0)))
             is not None
         ]
-        if required_codes and not completed_observations:
+        completed_codes = {
+            _agent_code_value(row.agent_code) for row in completed_invocations
+        }
+        missing_required_codes = required_codes - completed_codes
+        if missing_required_codes or (
+            expert_observations_present and not completed_observations
+        ):
             await self._stream_runtime_message(
                 session,
                 task,
@@ -2324,6 +2358,7 @@ class BrainRuntimeGraph:
                 {
                     "message": _SPECIALIST_RESULT_BLOCKED_MESSAGE,
                     "reason": "no_completed_specialist_invocation",
+                    "missing_expert_codes": sorted(missing_required_codes),
                 },
             )
             return False
@@ -2776,6 +2811,8 @@ async def _runtime_observations(
     ).all()
     observations = [
         {
+            "kind": "expert",
+            "invocation_id": row.id,
             "agent_code": _agent_code_value(row.agent_code),
             "agent_name": row.agent_name,
             "status": row.status.value if hasattr(row.status, "value") else str(row.status),

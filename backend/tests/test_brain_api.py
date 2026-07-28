@@ -1916,7 +1916,14 @@ async def test_brain_confirm_starts_visible_langgraph_runtime(client, admin):
     event_types = [event["type"] for event in runtime_body["timeline"]]
     assert "brain.runtime.started" in event_types
     assert "brain.runtime.plan_created" in event_types
-    assert "brain.runtime.subagent_started" in event_types
+    assert "brain.runtime.subagent_started" not in event_types
+    completed_lifecycle = [
+        event
+        for event in runtime_body["timeline"]
+        if event["type"] == "brain.runtime.subagent_completed"
+    ]
+    assert completed_lifecycle
+    assert all(event["payload"].get("invocation_id") for event in completed_lifecycle)
     assert "brain.runtime.permission_request" in event_types
 
 

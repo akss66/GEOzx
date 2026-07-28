@@ -567,7 +567,6 @@ async def test_summary_is_blocked_without_a_completed_specialist_invocation(
                     "summary": "untrusted diagnosis",
                 }
             ],
-            required_expert_codes=[AgentCode.POSITIONING.value],
         )
     finally:
         brain_runtime_module._runtime_event_identity.reset(token)
@@ -653,3 +652,161 @@ async def test_summary_uses_only_a_completed_specialist_invocation(
     assert str(invocation.id) in summary_input
     assert invocation.output_summary in summary_input
     assert "must not leak" not in summary_input
+
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        partial_delivered = await runtime._stream_summary_turn(
+            session,
+            task,
+            observations=[
+                {
+                    "invocation_id": invocation.id,
+                    "agent_code": AgentCode.POSITIONING.value,
+                    "summary": invocation.output_summary,
+                }
+            ],
+            required_expert_codes=[
+                AgentCode.POSITIONING.value,
+                AgentCode.OPERATOR.value,
+            ],
+        )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+    assert partial_delivered is False
+    blocked = await session.scalar(
+        select(Event)
+        .where(Event.type == "brain.runtime.summary_blocked")
+        .order_by(Event.id.desc())
+    )
+    assert blocked is not None
+    assert blocked.payload["missing_expert_codes"] == [AgentCode.OPERATOR.value]
+
+
+@pytest.mark.asyncio
+async def test_tool_only_result_can_be_reported_without_a_specialist_conclusion(
+    session, admin, monkeypatch
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="authority-tool-only-1"
+    )
+    captured_messages: list[dict] = []
+
+    async def capture_summary(
+        _session,
+        _task,
+        prompt_id,
+        _operating_context,
+        messages,
+    ):
+        assert prompt_id == "main-agent.summary"
+        captured_messages.extend(messages)
+        return None
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime._chat_main_agent",
+        capture_summary,
+    )
+    runtime = BrainRuntimeGraph()
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        delivered = await runtime._stream_summary_turn(
+            session,
+            task,
+            observations=[
+                {
+                    "kind": "tool_result",
+                    "tool_code": "account.profile",
+                    "summary": "账号授权状态正常。",
+                    "result": {"authorized": True},
+                }
+            ],
+        )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+    assert delivered is True
+    assert "账号授权状态正常" in captured_messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_pipeline_projects_only_new_completed_invocations(
+    session, admin
+) -> None:
+    account, task, run = await _runtime_retry_fixture(
+        session, admin, client_message_id="legacy-lifecycle-1"
+    )
+    old_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="old:01-positioning",
+        attempt=1,
+        agent_code=AgentCode.POSITIONING,
+        agent_name="旧账号定位专家",
+        status=AgentInvocationStatus.DONE,
+        input_summary="old",
+        output_summary="old result",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    new_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="new:02-content-director",
+        attempt=1,
+        agent_code=AgentCode.CONTENT_DIRECTOR,
+        agent_name="新内容专家",
+        status=AgentInvocationStatus.DONE,
+        input_summary="new",
+        output_summary="new result",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    failed_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        step_key="new:06-operator",
+        attempt=1,
+        agent_code=AgentCode.OPERATOR,
+        agent_name="失败运营专家",
+        status=AgentInvocationStatus.FAILED,
+        input_summary="failed",
+        output_summary="",
+        model="test",
+        token_count=1,
+        cost=Decimal("0"),
+    )
+    session.add_all([old_invocation, new_invocation, failed_invocation])
+    await session.commit()
+    await session.refresh(task, attribute_names=["brief", "plan"])
+
+    runtime = BrainRuntimeGraph()
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        await runtime._record_subagent_results(
+            session,
+            task,
+            exclude_invocation_ids={old_invocation.id},
+        )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+    lifecycle = (
+        await session.scalars(
+            select(Event)
+            .where(Event.type.like("brain.runtime.subagent_%"))
+            .order_by(Event.id)
+        )
+    ).all()
+    assert [event.type for event in lifecycle] == [
+        "brain.runtime.subagent_completed"
+    ]
+    assert lifecycle[0].payload["invocation_id"] == new_invocation.id
