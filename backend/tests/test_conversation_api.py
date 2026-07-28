@@ -176,7 +176,11 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     assert body["run"]["turn_id"] == body["turn"]["id"]
     assert body["run"]["task_id"] is None
     assert body["task_id"] is None
-    assert body["projections"] == []
+    assert body["run"]["status"] == "completed"
+    assert len(body["projections"]) == 1
+    assert body["projections"][0]["type"] == "account_data"
+    assert body["projections"][0]["account_id"] == account.id
+    assert body["turn"]["projections"] == body["projections"]
 
     run = await session.get(AgentRun, body["run"]["id"])
     assert run is not None

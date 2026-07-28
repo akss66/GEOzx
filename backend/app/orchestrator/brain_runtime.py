@@ -42,6 +42,7 @@ from app.models import (
     AgentRun,
     AgentToolCall,
     BrainTask,
+    ConversationTurn,
     Deliverable,
     DeliverableAcceptance,
     Event,
@@ -220,6 +221,123 @@ class BrainRuntimeGraph:
     @staticmethod
     def graph_config(thread_id: str) -> dict[str, dict[str, str]]:
         return {"configurable": {"thread_id": thread_id}}
+
+    async def deliver_task_free_turn(
+        self,
+        session: AsyncSession,
+        *,
+        turn: ConversationTurn,
+        run: AgentRun,
+        account_id: int,
+        route_decision: TurnRouteDecision,
+        response: str,
+        result_payload: dict[str, Any],
+        status: str = "completed",
+        error_code: str | None = None,
+        extra_events: list[tuple[str, str, dict[str, Any]]] | None = None,
+    ) -> None:
+        """Durably deliver a Turn response without creating or reading a BrainTask."""
+
+        if run.task_id is not None:
+            raise ValueError("task-free Turn delivery cannot own a BrainTask")
+        if (
+            run.turn_id != turn.id
+            or run.thread_id != turn.thread_id
+            or run.org_id != turn.org_id
+        ):
+            raise ValueError("AgentRun and ConversationTurn ownership do not match")
+        client_message_id = str(run.client_message_id or "")
+        if not client_message_id:
+            raise ValueError("task-free Turn delivery requires client_message_id")
+
+        turn.assistant_response = response
+        turn.intent = route_decision.model_dump(mode="json")
+        run.status = status
+        run.phase = status
+        run.finished_at = datetime.now(UTC)
+        run.lease_owner = None
+        run.leased_until = None
+        run.next_retry_at = None
+        run.error_code = error_code
+        run.error_detail = None
+        run.result_payload = result_payload
+
+        lineage = {
+            "task_id": None,
+            "thread_id": turn.thread_id,
+            "turn_id": turn.id,
+        }
+        event_specs: list[tuple[str, str, dict[str, Any]]] = [
+            (
+                "brain.runtime.started",
+                "turn-started",
+                {"message": "Main Agent received this conversation Turn."},
+            ),
+            (
+                "brain.runtime.intent_classified",
+                "turn-route",
+                {
+                    "message": "Main Agent selected the execution route.",
+                    "route_decision": route_decision.model_dump(mode="json"),
+                },
+            ),
+            *(extra_events or []),
+            (
+                "brain.runtime.message_done",
+                "turn-response",
+                {
+                    "message": response,
+                    "agent_code": AgentCode.DECISION.value,
+                    "model": "system",
+                },
+            ),
+            (
+                (
+                    "brain.runtime.completed"
+                    if status == "completed"
+                    else "brain.runtime.blocked"
+                ),
+                "turn-terminal",
+                {
+                    "message": (
+                        "This conversation Turn completed."
+                        if status == "completed"
+                        else "This conversation Turn needs a recoverable next step."
+                    ),
+                    **({"error_code": error_code} if error_code else {}),
+                },
+            ),
+        ]
+        broadcasts: list[tuple[Event, str]] = []
+        for event_type, semantic_key, payload in event_specs:
+            event_row, created = await record_runtime_event_once(
+                session,
+                org_id=turn.org_id,
+                account_id=account_id,
+                run_id=run.id,
+                client_message_id=client_message_id,
+                event_type=event_type,
+                semantic_key=semantic_key,
+                payload={**lineage, **payload},
+            )
+            if not created:
+                continue
+            event_row.thread_id = turn.thread_id
+            event_row.turn_id = turn.id
+            event_row.run_id = run.id
+            skill_run_id = payload.get("skill_run_id")
+            if isinstance(skill_run_id, int) and skill_run_id > 0:
+                event_row.skill_run_id = skill_run_id
+            broadcasts.append((event_row, event_type))
+
+        await session.commit()
+        for event_row, event_type in broadcasts:
+            await session.refresh(event_row)
+            await publish_realtime_event(
+                event_type,
+                dict(event_row.payload or {}),
+                event_id=event_row.id,
+            )
 
     async def refresh_observation(
         self,

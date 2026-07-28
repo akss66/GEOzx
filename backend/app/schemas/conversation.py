@@ -85,6 +85,17 @@ class TurnExecutionMode(StrEnum):
     ACTION = "action"
 
 
+class TurnExecutionResult(BaseModel):
+    """Persistable result of executing one routed conversation Turn."""
+
+    mode: TurnExecutionMode
+    status: str
+    response: str
+    task_id: int | None = None
+    projections: list[dict[str, Any]] = Field(default_factory=list)
+    error_code: str | None = None
+
+
 class TurnRouteDecision(BaseModel):
     mode: TurnExecutionMode
     intent: str

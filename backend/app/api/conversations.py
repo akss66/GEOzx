@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.auth import CurrentUser
 from app.db import get_session
-from app.models import ConversationThread, ConversationTurn
+from app.models import AgentRun, ConversationThread, ConversationTurn
 from app.schemas.conversation import (
     ConversationAgentRunOut,
     ConversationThreadOut,
@@ -24,6 +24,7 @@ from app.services.conversations import (
     create_conversation_thread,
     get_conversation_thread,
 )
+from app.services.turn_execution import execute_conversation_turn
 
 router = APIRouter(prefix="/brain", tags=["brain-conversations"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -41,11 +42,16 @@ def _require_v2_enabled() -> None:
     )
 
 
-def _turn_out(turn: ConversationTurn) -> ConversationTurnOut:
-    return ConversationTurnOut.model_validate(turn)
+def _turn_out(
+    turn: ConversationTurn,
+    projections: list[dict] | None = None,
+) -> ConversationTurnOut:
+    values = ConversationTurnOut.model_validate(turn)
+    return values.model_copy(update={"projections": projections or []})
 
 
-def _thread_out(
+async def _thread_out(
+    session: AsyncSession,
     thread: ConversationThread,
     turns: list[ConversationTurn],
 ) -> ConversationThreadOut:
@@ -57,10 +63,33 @@ def _thread_out(
         project_id=thread.project_id,
         account_id=thread.account_id,
         title=thread.title,
-        turns=[_turn_out(turn) for turn in turns],
+        turns=[
+            _turn_out(turn, await _turn_projections(session, turn))
+            for turn in turns
+        ],
         created_at=thread.created_at,
         updated_at=thread.updated_at,
     )
+
+
+async def _turn_projections(
+    session: AsyncSession,
+    turn: ConversationTurn,
+) -> list[dict]:
+    payload = await session.scalar(
+        select(AgentRun.result_payload)
+        .where(
+            AgentRun.org_id == turn.org_id,
+            AgentRun.thread_id == turn.thread_id,
+            AgentRun.turn_id == turn.id,
+        )
+        .order_by(AgentRun.id.desc())
+        .limit(1)
+    )
+    if not isinstance(payload, dict):
+        return []
+    projections = payload.get("projections")
+    return list(projections) if isinstance(projections, list) else []
 
 
 async def _ordered_turns(
@@ -93,7 +122,7 @@ async def create_thread(
     thread = await create_conversation_thread(session, user, body)
     await session.commit()
     await session.refresh(thread)
-    return _thread_out(thread, [])
+    return await _thread_out(session, thread, [])
 
 
 @router.get(
@@ -107,7 +136,11 @@ async def get_thread(
 ) -> ConversationThreadOut:
     _require_v2_enabled()
     thread = await get_conversation_thread(session, user, thread_id)
-    return _thread_out(thread, await _ordered_turns(session, thread))
+    return await _thread_out(
+        session,
+        thread,
+        await _ordered_turns(session, thread),
+    )
 
 
 @router.post(
@@ -167,12 +200,21 @@ async def submit_turn(
         if created:
             await session.rollback()
         raise
-    turn_out = _turn_out(turn)
+    result = await execute_conversation_turn(
+        session,
+        user,
+        turn,
+        run,
+        body,
+    )
+    await session.refresh(turn)
+    await session.refresh(run)
+    turn_out = _turn_out(turn, result.projections)
     return TurnSubmissionOut(
         turn=turn_out,
         run=ConversationAgentRunOut.model_validate(run),
-        task_id=None,
-        projections=turn_out.projections,
+        task_id=result.task_id,
+        projections=result.projections,
     )
 
 
@@ -198,4 +240,4 @@ async def get_turn(
             detail="Conversation turn not found",
         )
     await get_conversation_thread(session, user, turn.thread_id)
-    return _turn_out(turn)
+    return _turn_out(turn, await _turn_projections(session, turn))
