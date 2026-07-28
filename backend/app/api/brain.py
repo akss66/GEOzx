@@ -20,7 +20,11 @@ from app.core.approval_access import (
 )
 from app.core.approval_audit import add_approval_decided
 from app.core.auth import AdminUser, CurrentUser
-from app.core.runtime_failures import FailureDisposition, describe_runtime_failure
+from app.core.runtime_failures import (
+    FailureDisposition,
+    describe_runtime_failure,
+    exception_chain,
+)
 from app.core.workspace_access import (
     accessible_account_ids,
     require_project_access,
@@ -674,7 +678,15 @@ async def _send_brain_message(
             user_message=message,
             recovery_action=recovery_action,
         )
-        raise
+        response_status = next(
+            (
+                item.status_code
+                for item in exception_chain(exc)
+                if isinstance(item, HTTPException) and 400 <= item.status_code < 600
+            ),
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+        raise HTTPException(status_code=response_status, detail=message) from exc
 
     if not settings.agent_runtime_async_enabled:
         await complete_agent_run(

@@ -76,6 +76,97 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.mark.parametrize(
+    ("failure_status", "expected_status", "client_message_id", "safe_detail"),
+    [
+        (
+            409,
+            409,
+            "sync-client-safe-409",
+            "任务因业务冲突未能继续，请处理后重试",
+        ),
+        (
+            503,
+            503,
+            "sync-client-safe-503",
+            "任务暂时无法完成，请稍后重试。",
+        ),
+        (
+            None,
+            503,
+            "sync-client-safe-unknown",
+            "任务未能继续执行，请检查配置后重试。",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_sync_runtime_client_returns_only_safe_failure_detail(
+    client,
+    session,
+    admin,
+    monkeypatch,
+    failure_status,
+    expected_status,
+    client_message_id,
+    safe_detail,
+):
+    """The HTTP response cannot expose the provider exception detail."""
+
+    raw_detail = f"provider-token=secret-{expected_status}: raw provider failure"
+
+    async def fail_start(*_args, **_kwargs):
+        if failure_status is None:
+            raise RuntimeError(raw_detail)
+        raise HTTPException(status_code=failure_status, detail=raw_detail)
+
+    async def classify_sync_failure(*_args, **_kwargs):
+        return IntentDecision(
+            intent="conversation",
+            confidence=1,
+            reason="test",
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", False)
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        classify_sync_failure,
+    )
+    monkeypatch.setattr("app.api.brain.runtime_graph.start_smart", fail_start)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+
+    response = await client.post(
+        "/brain/messages",
+        headers=_auth(token),
+        json={
+            "message": "同步客户端安全失败",
+            "client_message_id": client_message_id,
+        },
+    )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == client_message_id)
+    )
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": safe_detail}
+    assert "provider-token" not in response.text
+    assert raw_detail not in response.text
+    assert run is not None
+    task = await session.get(BrainTask, run.task_id)
+    failures = [
+        event
+        for event in await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.failed")
+        )
+        if (event.payload or {}).get("agent_run_id") == run.id
+    ]
+    assert run.status == "failed"
+    assert task is not None
+    assert task.status == BrainTaskStatus.FAILED
+    assert len(failures) == 1
+
+
 @pytest.mark.asyncio
 async def test_sync_runtime_conflict_finalizes_task_with_safe_failure_event(
     session, admin, monkeypatch
