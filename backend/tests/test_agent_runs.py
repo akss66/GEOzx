@@ -124,6 +124,7 @@ async def test_terminal_failure_finalization_is_idempotent_and_closes_task(
         title="Terminal task",
         type=BrainTaskType.CONTENT_CREATION,
         status=BrainTaskStatus.RUNNING,
+        progress=67,
         current_focus="处理中",
     )
     session.add(task)
@@ -170,6 +171,7 @@ async def test_terminal_failure_finalization_is_idempotent_and_closes_task(
     assert run.next_retry_at is None
     assert run.leased_until is None
     assert task.status == BrainTaskStatus.FAILED
+    assert task.progress == 0
     assert len(failures) == 1
 
 

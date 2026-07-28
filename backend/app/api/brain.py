@@ -20,6 +20,7 @@ from app.core.approval_access import (
 )
 from app.core.approval_audit import add_approval_decided
 from app.core.auth import AdminUser, CurrentUser
+from app.core.runtime_failures import FailureDisposition, describe_runtime_failure
 from app.core.workspace_access import (
     accessible_account_ids,
     require_project_access,
@@ -101,10 +102,10 @@ from app.services.agent_runs import (
     claim_agent_run,
     complete_agent_run,
     enqueue_agent_runtime,
-    fail_agent_run,
     get_agent_run,
     mark_agent_run_queued,
     queue_agent_run_behind_task,
+    release_agent_run_failure,
     request_agent_run_cancel,
     utc_now,
 )
@@ -657,7 +658,22 @@ async def _send_brain_message(
             regeneration_source_event_id=regeneration_source_event_id,
         )
     except Exception as exc:
-        await fail_agent_run(session, run_id, exc)
+        failure = describe_runtime_failure(exc)
+        if failure.disposition is FailureDisposition.RETRYABLE:
+            message = "任务暂时无法完成，请稍后重试。"
+            recovery_action = "请稍后重新提交本次任务。"
+        else:
+            message = failure.message
+            recovery_action = failure.recovery_action
+        await release_agent_run_failure(
+            session,
+            run_id,
+            disposition=FailureDisposition.TERMINAL,
+            error_code=failure.error_code,
+            error_detail=message,
+            user_message=message,
+            recovery_action=recovery_action,
+        )
         raise
 
     if not settings.agent_runtime_async_enabled:
@@ -686,6 +702,11 @@ async def _execute_brain_message(
         if body.task_id is not None
         else None
     )
+    if task is not None:
+        run = await session.get(AgentRun, agent_run_id)
+        if run is not None:
+            run.task_id = task.id
+            await session.commit()
     existing_account_ids = list(task.brief.account_ids) if task and task.brief else []
     existing_project_id = task.brief.project_id if task and task.brief else None
 
@@ -814,6 +835,10 @@ async def _execute_brain_message(
 
     await session.commit()
     task = await _load_task(session, task.id, user.org_id)
+    run = await session.get(AgentRun, agent_run_id)
+    if run is not None:
+        run.task_id = task.id
+        await session.commit()
     if regeneration_source_event_id is None and not user_message_recorded:
         await runtime_graph.record_user_message(
             session,

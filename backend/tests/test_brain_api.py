@@ -2,13 +2,16 @@ import asyncio
 import json
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.api.brain import _send_brain_message
 from app.llm.adapters import CompletionResult
-from app.models import AgentRun, BrainTask, ContentItem, Event, GateApproval
-from app.models.enums import GateStatus, GateType, UserRole
+from app.models import AgentRun, BrainTask, ContentItem, Event, GateApproval, TaskBrief
+from app.models.enums import BrainTaskStatus, GateStatus, GateType, UserRole
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable
 from app.schemas.brain import (
+    BrainMessageRequest,
     DecisionChoice,
     DecisionRequest,
     IntentDecision,
@@ -71,6 +74,176 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_conflict_finalizes_task_with_safe_failure_event(
+    session, admin, monkeypatch
+):
+    """A sync runtime exception cannot leave its newly-created task running."""
+
+    async def fail_start(*_args, **_kwargs):
+        raise HTTPException(status_code=409, detail="provider-token=must-not-reach-event")
+
+    async def classify_sync_conflict(*_args, **_kwargs):
+        return IntentDecision(
+            intent="conversation",
+            confidence=1,
+            reason="test",
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", False)
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        classify_sync_conflict,
+    )
+    monkeypatch.setattr("app.api.brain.runtime_graph.start_smart", fail_start)
+
+    with pytest.raises(HTTPException) as raised:
+        await _send_brain_message(
+            BrainMessageRequest(
+                message="同步失败状态收口",
+                client_message_id="sync-terminal-conflict",
+            ),
+            admin,
+            session,
+        )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "sync-terminal-conflict")
+    )
+    task = await session.scalar(select(BrainTask).order_by(BrainTask.id.desc()))
+    failures = list(
+        await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.failed")
+        )
+    )
+    assert raised.value.status_code == 409
+    assert run is not None
+    assert task is not None
+    assert run.task_id == task.id
+    assert run.status == "failed"
+    assert run.error_detail == "任务因业务冲突未能继续，请处理后重试"
+    assert task.status == BrainTaskStatus.FAILED
+    assert task.progress == 0
+    assert task.current_focus == "任务因业务冲突未能继续，请处理后重试"
+    assert len(failures) == 1
+    assert failures[0].payload["error_code"] == "runtime.http_409"
+    assert "provider-token" not in str(failures[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_sync_retryable_runtime_failure_finishes_without_arq_retry(
+    session, admin, monkeypatch
+):
+    """Sync requests safely terminate transient failures because no worker owns retries."""
+
+    async def fail_start(*_args, **_kwargs):
+        raise HTTPException(status_code=503, detail="provider-token=must-not-reach-event")
+
+    async def classify_sync_failure(*_args, **_kwargs):
+        return IntentDecision(
+            intent="conversation",
+            confidence=1,
+            reason="test",
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    monkeypatch.setattr("app.config.settings.agent_runtime_async_enabled", False)
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        classify_sync_failure,
+    )
+    monkeypatch.setattr("app.api.brain.runtime_graph.start_smart", fail_start)
+
+    with pytest.raises(HTTPException) as raised:
+        await _send_brain_message(
+            BrainMessageRequest(
+                message="同步可重试失败状态收口",
+                client_message_id="sync-retryable-failure",
+            ),
+            admin,
+            session,
+        )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "sync-retryable-failure")
+    )
+    task = await session.scalar(select(BrainTask).order_by(BrainTask.id.desc()))
+    failures = list(
+        await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.failed")
+        )
+    )
+    assert raised.value.status_code == 503
+    assert run is not None
+    assert task is not None
+    assert run.status == "failed"
+    assert run.next_retry_at is None
+    assert task.status == BrainTaskStatus.FAILED
+    assert task.progress == 0
+    assert len(failures) == 1
+    assert failures[0].payload["message"] == "任务暂时无法完成，请稍后重试。"
+    assert "provider-token" not in str(failures[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_sync_pre_runtime_conflict_closes_the_existing_task(
+    session, admin
+):
+    """A validation conflict before runtime start also closes the bound task."""
+
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="已有同步任务",
+        type="content_creation",
+        status=BrainTaskStatus.RUNNING,
+        progress=48,
+    )
+    task.brief = TaskBrief(
+        goal="已有目标",
+        platforms=["douyin"],
+        account_ids=[1001],
+        cycle="current",
+        content_goal="conversation",
+        risk_constraints=[],
+        expected_outputs=[],
+        confirmation_actions=[],
+    )
+    session.add(task)
+    await session.commit()
+
+    with pytest.raises(HTTPException) as raised:
+        await _send_brain_message(
+            BrainMessageRequest(
+                message="切换到其他账号",
+                client_message_id="sync-pre-runtime-conflict",
+                task_id=task.id,
+                account_id=1002,
+            ),
+            admin,
+            session,
+        )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "sync-pre-runtime-conflict")
+    )
+    failures = list(
+        await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.failed")
+        )
+    )
+    assert raised.value.status_code == 409
+    assert run is not None
+    assert run.task_id == task.id
+    assert run.status == "failed"
+    assert task.status == BrainTaskStatus.FAILED
+    assert task.progress == 0
+    assert len(failures) == 1
 
 
 async def _project_bound_douyin_account(

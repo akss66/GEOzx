@@ -325,6 +325,7 @@ async def release_agent_run_failure(
         if task is not None:
             message = user_message or "任务未能继续执行，请检查配置后重试。"
             task.status = BrainTaskStatus.FAILED
+            task.progress = 0
             task.current_focus = message[:500]
             session.add(
                 Event(
