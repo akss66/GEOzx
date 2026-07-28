@@ -19,8 +19,8 @@ class ContentItem(Base, TimestampMixin):
     __tablename__ = "content_items"
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
-    project_id: Mapped[int] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
@@ -40,7 +40,7 @@ class ContentItem(Base, TimestampMixin):
         nullable=False,
     )
 
-    project: Mapped["Project"] = relationship(back_populates="content_items")  # noqa: F821
+    project: Mapped["Project | None"] = relationship(back_populates="content_items")  # noqa: F821
     deliverables: Mapped[list["Deliverable"]] = relationship(
         back_populates="content_item", cascade="all, delete-orphan"
     )

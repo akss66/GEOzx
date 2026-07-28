@@ -78,8 +78,89 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_conversation_foundation() -> None:
-    assert get_head_revision() == "20260728_0100"
+def test_migration_head_is_account_scoped_content() -> None:
+    assert get_head_revision() == "20260728_0150"
+
+
+def test_account_scoped_content_migration_is_reversible_only_without_unscoped_rows(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260728_0150_account_scoped_content"
+    )
+
+    assert migration.down_revision == "20260728_0100"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    projects = sa.Table("projects", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    accounts = sa.Table("accounts", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    content_items = sa.Table(
+        "content_items",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column(
+            "project_id",
+            sa.Integer,
+            sa.ForeignKey("projects.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "account_id",
+            sa.Integer,
+            sa.ForeignKey("accounts.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+        sa.Column("title", sa.String(length=300), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(projects.insert(), [{"id": 1}])
+        connection.execute(accounts.insert(), [{"id": 1}])
+        connection.execute(
+            content_items.insert(),
+            [{"id": 1, "project_id": 1, "account_id": 1, "title": "legacy content"}],
+        )
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+
+        migration.upgrade()
+        columns = {
+            column["name"]: column
+            for column in sa.inspect(connection).get_columns("content_items")
+        }
+        assert columns["project_id"]["nullable"] is True
+
+        connection.execute(
+            sa.text(
+                "INSERT INTO content_items (id, project_id, account_id, title) "
+                "VALUES (2, NULL, 1, 'account-only content')"
+            )
+        )
+        with pytest.raises(RuntimeError, match="project_id IS NULL"):
+            migration.downgrade()
+        assert connection.execute(
+            sa.text("SELECT count(*) FROM content_items WHERE project_id IS NULL")
+        ).scalar_one() == 1
+
+        connection.execute(sa.text("DELETE FROM content_items WHERE id = 2"))
+        migration.downgrade()
+        columns = {
+            column["name"]: column
+            for column in sa.inspect(connection).get_columns("content_items")
+        }
+        assert columns["project_id"]["nullable"] is False
+        assert connection.execute(
+            sa.text("SELECT project_id, account_id, title FROM content_items WHERE id = 1")
+        ).one() == (1, 1, "legacy content")
+
+        migration.upgrade()
+        columns = {
+            column["name"]: column
+            for column in sa.inspect(connection).get_columns("content_items")
+        }
+        assert columns["project_id"]["nullable"] is True
 
 
 def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) -> None:
