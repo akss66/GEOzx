@@ -1,6 +1,7 @@
 import importlib
 import inspect
 
+import pytest
 import sqlalchemy as sa
 from alembic.config import Config
 from alembic.migration import MigrationContext
@@ -77,8 +78,256 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_ai_coo_runtime() -> None:
-    assert get_head_revision() == "20260727_0300"
+def test_migration_head_is_conversation_foundation() -> None:
+    assert get_head_revision() == "20260728_0100"
+
+
+def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260728_0100_conversation_foundation"
+    )
+    assert migration.down_revision == "20260727_0300"
+
+    engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    metadata = sa.MetaData()
+    orgs = sa.Table(
+        "orgs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    users = sa.Table(
+        "users",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, sa.ForeignKey("orgs.id"), nullable=False),
+    )
+    sa.Table(
+        "clients",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, sa.ForeignKey("orgs.id"), nullable=False),
+    )
+    sa.Table(
+        "projects",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, sa.ForeignKey("orgs.id"), nullable=False),
+    )
+    accounts = sa.Table(
+        "accounts",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, sa.ForeignKey("orgs.id"), nullable=False),
+    )
+    brain_tasks = sa.Table(
+        "brain_tasks",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, sa.ForeignKey("orgs.id"), nullable=False),
+        sa.Column("title", sa.String(length=300), nullable=False),
+    )
+    agent_runs = sa.Table(
+        "agent_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, sa.ForeignKey("orgs.id"), nullable=False),
+        sa.Column("requested_by_id", sa.Integer, sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("task_id", sa.Integer, sa.ForeignKey("brain_tasks.id"), nullable=True),
+        sa.Column("client_message_id", sa.String(length=128), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(orgs.insert(), [{"id": 1}, {"id": 2}])
+        connection.execute(users.insert(), [{"id": 10, "org_id": 1}])
+        connection.execute(
+            brain_tasks.insert(),
+            [{"id": 20, "org_id": 1, "title": "迁移前旧任务"}],
+        )
+        connection.execute(
+            agent_runs.insert(),
+            [
+                {
+                    "id": 30,
+                    "org_id": 1,
+                    "requested_by_id": 10,
+                    "task_id": 20,
+                    "client_message_id": "legacy-message",
+                }
+            ],
+        )
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("conversation_threads") is True
+        assert inspector.has_table("conversation_turns") is True
+        thread_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("conversation_threads")
+        }
+        turn_columns = {
+            column["name"] for column in inspector.get_columns("conversation_turns")
+        }
+        assert thread_columns["account_id"]["nullable"] is False
+        assert {"assistant_response", "intent"} <= turn_columns
+        turn_uniques = {
+            item["name"]: tuple(item["column_names"])
+            for item in inspector.get_unique_constraints("conversation_turns")
+        }
+        assert ("thread_id", "client_message_id") in turn_uniques.values()
+        assert turn_uniques["uq_conversation_turn_thread_client_message"] == (
+            "thread_id",
+            "client_message_id",
+        )
+        assert turn_uniques["uq_conversation_turn_id_thread_org"] == (
+            "id",
+            "thread_id",
+            "org_id",
+        )
+        thread_uniques = {
+            item["name"]: tuple(item["column_names"])
+            for item in inspector.get_unique_constraints("conversation_threads")
+        }
+        assert thread_uniques["uq_conversation_thread_id_org"] == ("id", "org_id")
+        turn_foreign_keys = {
+            item["name"]: (
+                tuple(item["constrained_columns"]),
+                item["referred_table"],
+                tuple(item["referred_columns"]),
+            )
+            for item in inspector.get_foreign_keys("conversation_turns")
+        }
+        assert turn_foreign_keys["fk_conversation_turn_thread_org"] == (
+            ("thread_id", "org_id"),
+            "conversation_threads",
+            ("id", "org_id"),
+        )
+        agent_run_columns = {
+            column["name"] for column in inspector.get_columns("agent_runs")
+        }
+        assert {"thread_id", "turn_id"} <= agent_run_columns
+        agent_run_foreign_keys = {
+            item["name"]: (
+                tuple(item["constrained_columns"]),
+                item["referred_table"],
+                tuple(item["referred_columns"]),
+            )
+            for item in inspector.get_foreign_keys("agent_runs")
+        }
+        assert agent_run_foreign_keys["fk_agent_runs_thread_org"] == (
+            ("thread_id", "org_id"),
+            "conversation_threads",
+            ("id", "org_id"),
+        )
+        assert agent_run_foreign_keys["fk_agent_runs_turn_thread_org"] == (
+            ("turn_id", "thread_id", "org_id"),
+            "conversation_turns",
+            ("id", "thread_id", "org_id"),
+        )
+        assert {
+            item["name"] for item in inspector.get_check_constraints("agent_runs")
+        } >= {"ck_agent_runs_turn_requires_thread"}
+
+        legacy_run = connection.execute(
+            sa.text(
+                "SELECT task_id, thread_id, turn_id FROM agent_runs WHERE id = 30"
+            )
+        ).one()
+        assert legacy_run == (20, None, None)
+
+        connection.execute(
+            accounts.insert(),
+            [{"id": 35, "org_id": 1}],
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO conversation_threads "
+                "(id, org_id, created_by_id, account_id, title) "
+                "VALUES (40, 1, 10, 35, '新对话')"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO conversation_turns "
+                "(id, thread_id, org_id, created_by_id, client_message_id, user_input) "
+                "VALUES "
+                "(50, 40, 1, 10, 'message-1', '查看最近七天数据'), "
+                "(51, 40, 1, 10, 'message-2', '制定下周内容策略')"
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO conversation_turns "
+                    "(id, thread_id, org_id, created_by_id, client_message_id, user_input) "
+                    "VALUES (52, 40, 2, 10, 'wrong-org-message', '跨组织消息')"
+                )
+            )
+        connection.execute(
+            sa.text(
+                "INSERT INTO conversation_threads "
+                "(id, org_id, created_by_id, account_id, title) "
+                "VALUES (41, 1, 10, 35, '第二个对话')"
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE agent_runs SET turn_id = 51 WHERE id = 30")
+            )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE agent_runs SET org_id = 2, thread_id = 40 WHERE id = 30")
+            )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "UPDATE agent_runs SET thread_id = 41, turn_id = 51 WHERE id = 30"
+                )
+            )
+        connection.execute(
+            sa.text(
+                "UPDATE agent_runs SET thread_id = 40, turn_id = 51 WHERE id = 30"
+            )
+        )
+        inputs = connection.execute(
+            sa.text(
+                "SELECT user_input FROM conversation_turns "
+                "WHERE thread_id = 40 ORDER BY id"
+            )
+        ).scalars()
+        assert list(inputs) == ["查看最近七天数据", "制定下周内容策略"]
+
+        migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("conversation_threads") is False
+        assert inspector.has_table("conversation_turns") is False
+        downgraded_columns = {
+            column["name"] for column in inspector.get_columns("agent_runs")
+        }
+        assert "thread_id" not in downgraded_columns
+        assert "turn_id" not in downgraded_columns
+        assert connection.execute(
+            sa.text("SELECT task_id FROM agent_runs WHERE id = 30")
+        ).scalar_one() == 20
+
+        migration.upgrade()
+        reupgraded_columns = {
+            column["name"] for column in sa.inspect(connection).get_columns("agent_runs")
+        }
+        assert {"thread_id", "turn_id"} <= reupgraded_columns
+        reupgraded_run = connection.execute(
+            sa.text(
+                "SELECT task_id, thread_id, turn_id FROM agent_runs WHERE id = 30"
+            )
+        ).one()
+        assert reupgraded_run == (20, None, None)
 
 
 def test_ai_coo_runtime_migration_is_additive_and_reversible() -> None:
