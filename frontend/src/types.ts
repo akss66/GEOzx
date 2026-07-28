@@ -468,6 +468,25 @@ export interface ConversationAgentRun {
   updated_at: string;
 }
 
+export interface SkillRun {
+  id: number;
+  org_id: number;
+  thread_id: number;
+  turn_id: number;
+  run_id: number;
+  task_id: number | null;
+  idempotency_key: string;
+  skill_code: string;
+  skill_version: number;
+  status: string;
+  input_snapshot: Record<string, unknown>;
+  output_snapshot: Record<string, unknown>;
+  quality_score: number | string | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ArtifactSection {
   key: string;
   title: string;
