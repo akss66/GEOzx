@@ -11,6 +11,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentToolCall } from "../../types";
 import { BrainComposer } from "./BrainComposer";
 
+const accountInspectionSkill = {
+  code: "account_inspection",
+  version: 1,
+  name: "一键账号体检",
+  description: "快速了解账号现状与优化重点",
+  category: "quick_operations" as const,
+  icon: "activity",
+  requires_account: true,
+  is_available: true,
+  unavailable_reason: null,
+};
+
 afterEach(cleanup);
 
 const permission: AgentToolCall = {
@@ -38,6 +50,60 @@ const permission: AgentToolCall = {
 };
 
 describe("BrainComposer", () => {
+  it("places the capability launcher at the left of the composer and hides it for permission confirmation", () => {
+    const { rerender } = render(
+      <BrainComposer
+        value=""
+        disabled={false}
+        loading={false}
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        skills={[accountInspectionSkill]}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "添加能力或材料" })).toBeInTheDocument();
+
+    rerender(
+      <BrainComposer
+        value=""
+        disabled={false}
+        loading={false}
+        pendingPermission={permission}
+        approvalComment=""
+        approving={false}
+        skills={[accountInspectionSkill]}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "添加能力或材料" })).not.toBeInTheDocument();
+
+    rerender(
+      <BrainComposer
+        value=""
+        disabled={false}
+        loading={false}
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        skills={[accountInspectionSkill]}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "添加能力或材料" })).toBeInTheDocument();
+  });
+
   it("keeps the single-line message composer slim and vertically centered", () => {
     const styles = readFileSync(
       join(process.cwd(), "src/styles/brain-v2.css"),

@@ -8,8 +8,12 @@ import {
 import { Button, Input } from "antd";
 import { useEffect, useState } from "react";
 
-import type { AgentToolCall } from "../../types";
+import type { AgentToolCall, PublicSkill } from "../../types";
 import { presentOperationsBrainSystemCopy } from "../../utils/operationsBrainCopy";
+import {
+  CapabilityLauncher,
+  type CapabilityLauncherContextCallbacks,
+} from "./CapabilityLauncher";
 
 export function BrainComposer({
   value,
@@ -19,6 +23,12 @@ export function BrainComposer({
   approvalComment,
   approving,
   promptChips = [],
+  skills = [],
+  onSelectSkill,
+  onAddFilesAndMaterials,
+  onAddAccountDataPackage,
+  onAddHistoricalArtifacts,
+  onSelectAccount,
   onChange,
   onApprovalCommentChange,
   onApprovePermission,
@@ -32,6 +42,12 @@ export function BrainComposer({
   approvalComment: string;
   approving: boolean;
   promptChips?: string[];
+  skills?: PublicSkill[];
+  onSelectSkill?: (skillCode: string) => void;
+  onAddFilesAndMaterials?: CapabilityLauncherContextCallbacks["onAddFilesAndMaterials"];
+  onAddAccountDataPackage?: CapabilityLauncherContextCallbacks["onAddAccountDataPackage"];
+  onAddHistoricalArtifacts?: CapabilityLauncherContextCallbacks["onAddHistoricalArtifacts"];
+  onSelectAccount?: CapabilityLauncherContextCallbacks["onSelectAccount"];
   onChange: (value: string) => void;
   onApprovalCommentChange: (value: string) => void;
   onApprovePermission: (toolCallId: number, approved: boolean, comment?: string) => void;
@@ -108,6 +124,14 @@ export function BrainComposer({
           </div>
         ) : (
           <>
+            <CapabilityLauncher
+              skills={skills}
+              onSelectSkill={onSelectSkill}
+              onAddFilesAndMaterials={onAddFilesAndMaterials}
+              onAddAccountDataPackage={onAddAccountDataPackage}
+              onAddHistoricalArtifacts={onAddHistoricalArtifacts}
+              onSelectAccount={onSelectAccount}
+            />
             <Input.TextArea
               aria-label="运营大脑消息"
               value={value}
