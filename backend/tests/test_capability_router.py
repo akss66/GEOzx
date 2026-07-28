@@ -62,6 +62,9 @@ def test_account_skill_without_account_requests_clarification(registry: SkillReg
 
     assert decision is not None
     assert decision.mode == TurnExecutionMode.CLARIFY
+    assert decision.skill_code == "account_inspection"
+    assert decision.requires_account_context is True
+    assert decision.requires_operation_task is False
     assert decision.missing_field == "account_id"
     assert decision.clarifying_question == "请先选择需要操作的账号。"
 
@@ -181,3 +184,14 @@ def test_query_route_can_keep_skill_and_account_context() -> None:
     )
 
     assert decision.mode == TurnExecutionMode.QUERY
+
+
+def test_query_route_rejects_operation_task_without_clarification_fields() -> None:
+    with pytest.raises(ValidationError, match="QUERY routes cannot require an operation task"):
+        TurnRouteDecision(
+            mode=TurnExecutionMode.QUERY,
+            intent="account_data_query",
+            confidence=1,
+            reason="test",
+            requires_operation_task=True,
+        )
