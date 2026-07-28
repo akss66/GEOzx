@@ -653,8 +653,40 @@ async def test_summary_uses_only_a_completed_specialist_invocation(
     assert invocation.output_summary in summary_input
     assert "must not leak" not in summary_input
 
+    resume_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        client_message_id="permission-resume-authority-completed-1",
+        request_payload={"operation": "resume_permission"},
+        result_payload={},
+    )
+    session.add(resume_run)
+    await session.commit()
+    await session.refresh(task, attribute_names=["brief", "plan"])
     token = brain_runtime_module._runtime_event_identity.set(
-        (task.org_id, account.id, run.id, run.client_message_id)
+        (task.org_id, account.id, resume_run.id, resume_run.client_message_id)
+    )
+    try:
+        resumed_delivered = await runtime._stream_summary_turn(
+            session,
+            task,
+            observations=[
+                {
+                    "invocation_id": invocation.id,
+                    "agent_code": AgentCode.POSITIONING.value,
+                    "summary": invocation.output_summary,
+                }
+            ],
+            required_expert_codes=[AgentCode.POSITIONING.value],
+        )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(token)
+
+    assert resumed_delivered is True
+
+    token = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, resume_run.id, resume_run.client_message_id)
     )
     try:
         partial_delivered = await runtime._stream_summary_turn(

@@ -2304,8 +2304,18 @@ class BrainRuntimeGraph:
             AgentInvocation.id.in_(invocation_ids),
             AgentInvocation.status == AgentInvocationStatus.DONE,
         ]
-        if identity is not None:
-            invocation_filters.append(AgentInvocation.run_id == identity[2])
+        latest_invocation_run_id = await session.scalar(
+            select(AgentInvocation.run_id)
+            .where(AgentInvocation.task_id == task.id)
+            .order_by(AgentInvocation.id.desc())
+            .limit(1)
+        )
+        if latest_invocation_run_id is None:
+            invocation_filters.append(AgentInvocation.run_id.is_(None))
+        else:
+            invocation_filters.append(
+                AgentInvocation.run_id == latest_invocation_run_id
+            )
         completed_invocations = (
             (
                 await session.scalars(
@@ -2802,10 +2812,24 @@ async def _runtime_observations(
     session: AsyncSession,
     task_id: int,
 ) -> list[dict[str, Any]]:
+    latest_invocation_run_id = await session.scalar(
+        select(AgentInvocation.run_id)
+        .where(AgentInvocation.task_id == task_id)
+        .order_by(AgentInvocation.id.desc())
+        .limit(1)
+    )
+    invocation_run_filter = (
+        AgentInvocation.run_id.is_(None)
+        if latest_invocation_run_id is None
+        else AgentInvocation.run_id == latest_invocation_run_id
+    )
     rows = (
         await session.scalars(
             select(AgentInvocation)
-            .where(AgentInvocation.task_id == task_id)
+            .where(
+                AgentInvocation.task_id == task_id,
+                invocation_run_filter,
+            )
             .order_by(AgentInvocation.id)
         )
     ).all()
