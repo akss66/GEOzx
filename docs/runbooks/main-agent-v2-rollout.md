@@ -9,14 +9,14 @@
 
 ## Confirmed Facts
 
-- `main_agent_v2_enabled` is a global backend setting in [backend/app/config.py](/abs/path/C:/Users/AKSSINA/Desktop/Workplace/GEOzx/backend/app/config.py:20).
+- `main_agent_v2_enabled` is a global backend setting in `backend/app/config.py`.
 - Disabled mode returns typed `503 MAIN_AGENT_V2_DISABLED` from the new Turn endpoint and does not disable legacy `POST /brain/messages`.
-- Completed Turn diagnostics now emit one allowlisted log event named `main_agent_turn_completed`.
+- Enabled mode still restricts the new Conversation and Turn endpoints to `UserRole.ADMIN`; non-admin callers receive typed `403 MAIN_AGENT_V2_ROLLOUT_RESTRICTED`.
+- Completed Turn diagnostics now emit one allowlisted JSON log event named `main_agent_turn_completed`.
 - The diagnostic log only carries `thread_id`, `turn_id`, `run_id`, `mode`, `skill_run_id`, `task_id`, `artifact_ids`, and `status`.
 
 ## Assumptions
 
-- Admin-only rollout is enforced operationally because this task does not add a per-user or per-org flag. Only administrators should be given the new frontend entrypoint or API exercise instructions while the global flag is on.
 - Database backup, migration apply, and deploy/restart commands vary by environment and must use the existing release pipeline.
 
 ## Preflight
@@ -45,12 +45,13 @@
 
 1. Turn `main_agent_v2_enabled=true` only in the target environment used by administrators.
 2. Limit first traffic slice to one administrator and one authorized account.
-3. Keep non-admin users on the legacy frontend path until the checks below stay healthy for the agreed soak window.
-4. Widen traffic only after route mix, failures, approvals, and provenance all stay within threshold.
+3. Keep non-admin users on the legacy frontend path; the backend now enforces this during rollout.
+4. Widening beyond administrators requires a separate approved code or configuration change. Do not treat the current rollout guard as something to bypass operationally.
+5. Widen traffic only after route mix, failures, approvals, and provenance all stay within threshold.
 
 ## Observability Checks
 
-Filter logs by `event=main_agent_turn_completed`.
+Filter logs by the JSON message field containing `"event":"main_agent_turn_completed"`.
 
 - Route distribution:
   - Verify every sampled new Turn has exactly one completion log.
@@ -73,7 +74,7 @@ Filter logs by `event=main_agent_turn_completed`.
 ## Frontend Fallback
 
 1. Keep the legacy BrainTask projection path available during rollout.
-2. If the new Turn endpoint returns `503 MAIN_AGENT_V2_DISABLED`, the frontend must fall back to the legacy `POST /brain/messages` flow and render the legacy BrainTask projection.
+2. If the new Turn endpoint returns `503 MAIN_AGENT_V2_DISABLED` or `403 MAIN_AGENT_V2_ROLLOUT_RESTRICTED`, the frontend must fall back to the legacy `POST /brain/messages` flow and render the legacy BrainTask projection.
 3. After disabling the flag, verify the frontend no longer attempts new Turn creation and that legacy BrainTask history remains readable.
 
 ## Disable And Rollback

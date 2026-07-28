@@ -10,6 +10,7 @@ from app.config import settings
 from app.core.auth import CurrentUser
 from app.db import get_session
 from app.models import AgentRun, ConversationThread, ConversationTurn
+from app.models.enums import UserRole
 from app.schemas.conversation import (
     ConversationAgentRunOut,
     ConversationThreadOut,
@@ -32,6 +33,10 @@ _MAIN_AGENT_V2_DISABLED_DETAIL = {
     "code": "MAIN_AGENT_V2_DISABLED",
     "message": "Main Agent V2 is disabled",
 }
+_MAIN_AGENT_V2_ROLLOUT_RESTRICTED_DETAIL = {
+    "code": "MAIN_AGENT_V2_ROLLOUT_RESTRICTED",
+    "message": "Main Agent V2 rollout is restricted to administrators",
+}
 
 
 def _require_v2_enabled() -> None:
@@ -40,6 +45,16 @@ def _require_v2_enabled() -> None:
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail=_MAIN_AGENT_V2_DISABLED_DETAIL,
+    )
+
+
+def _require_v2_rollout_access(user: CurrentUser) -> None:
+    _require_v2_enabled()
+    if user.role is UserRole.ADMIN:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=_MAIN_AGENT_V2_ROLLOUT_RESTRICTED_DETAIL,
     )
 
 
@@ -119,7 +134,7 @@ async def create_thread(
     user: CurrentUser,
     session: SessionDep,
 ) -> ConversationThreadOut:
-    _require_v2_enabled()
+    _require_v2_rollout_access(user)
     thread = await create_conversation_thread(session, user, body)
     await session.commit()
     await session.refresh(thread)
@@ -135,7 +150,7 @@ async def get_thread(
     user: CurrentUser,
     session: SessionDep,
 ) -> ConversationThreadOut:
-    _require_v2_enabled()
+    _require_v2_rollout_access(user)
     thread = await get_conversation_thread(session, user, thread_id)
     return await _thread_out(
         session,
@@ -155,7 +170,7 @@ async def submit_turn(
     user: CurrentUser,
     session: SessionDep,
 ) -> TurnSubmissionOut:
-    _require_v2_enabled()
+    _require_v2_rollout_access(user)
     thread = await get_conversation_thread(session, user, thread_id)
     existing_run = await get_agent_run(
         session,
@@ -228,7 +243,7 @@ async def get_turn(
     user: CurrentUser,
     session: SessionDep,
 ) -> ConversationTurnOut:
-    _require_v2_enabled()
+    _require_v2_rollout_access(user)
     turn = await session.scalar(
         select(ConversationTurn).where(
             ConversationTurn.id == turn_id,

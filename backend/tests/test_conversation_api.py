@@ -1,5 +1,6 @@
 """Additive, account-scoped main-Agent conversation API contracts."""
 
+import json
 import logging
 
 import pytest
@@ -389,7 +390,10 @@ async def test_account_scoped_member_cannot_enumerate_or_append_thread_or_turn(
         ),
     ]
 
-    assert [response.status_code for response in responses] == [404, 404, 404]
+    assert [response.status_code for response in responses] == [403, 403, 403]
+    assert {
+        response.json()["detail"]["code"] for response in responses
+    } == {"MAIN_AGENT_V2_ROLLOUT_RESTRICTED"}
     assert (
         await session.scalar(
             select(func.count(ConversationTurn.id)).where(
@@ -556,3 +560,120 @@ async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
     assert "查看近七天数据" not in serialized
     assert "request_payload" not in record.__dict__
     assert "result_payload" not in record.__dict__
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_enabled_is_admin_only_and_legacy_messages_remain_reachable(
+    client, session, admin, member, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "feature-flag-admin-rollout")
+    thread = await _create_thread(client, admin, account)
+
+    admin_turn = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="feature-flag-admin-turn",
+        message="admin access only",
+    )
+    member_create = await client.post(
+        "/brain/conversations",
+        headers=_auth(member),
+        json={"account_id": account.id, "title": "blocked"},
+    )
+    member_get_thread = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(member),
+    )
+    member_submit_turn = await _submit_turn(
+        client,
+        member,
+        thread["id"],
+        client_message_id="feature-flag-member-turn",
+        message="user must stay on legacy route",
+    )
+    member_get_turn = await client.get(
+        f"/brain/turns/{admin_turn.json()['turn']['id']}",
+        headers=_auth(member),
+    )
+    legacy_response = await client.post(
+        "/brain/messages",
+        headers=_auth(member),
+        json={},
+    )
+
+    assert admin_turn.status_code == 202
+    assert [
+        member_create.status_code,
+        member_get_thread.status_code,
+        member_submit_turn.status_code,
+        member_get_turn.status_code,
+    ] == [403, 403, 403, 403]
+    assert {
+        response.json()["detail"]["code"]
+        for response in (
+            member_create,
+            member_get_thread,
+            member_submit_turn,
+            member_get_turn,
+        )
+    } == {"MAIN_AGENT_V2_ROLLOUT_RESTRICTED"}
+    assert legacy_response.status_code == 422
+    assert legacy_response.json()["detail"] != member_create.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_turn_submission_emits_json_route_diagnostics(
+    client, session, admin, monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "feature-flag-json-diagnostics")
+    thread = await _create_thread(client, admin, account)
+
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="dyflow.main_agent_v2")
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="feature-flag-json-log",
+        message="sensitive rollout prompt that must not be logged",
+        requested_skill_code="account_data_query",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    skill_run_id = body["projections"][0]["skill_run_id"]
+    record = next(
+        entry
+        for entry in caplog.records
+        if "main_agent_turn_completed" in entry.getMessage()
+    )
+    payload = json.loads(record.getMessage())
+
+    assert set(payload) == {
+        "artifact_ids",
+        "event",
+        "mode",
+        "run_id",
+        "skill_run_id",
+        "status",
+        "task_id",
+        "thread_id",
+        "turn_id",
+    }
+    assert payload == {
+        "artifact_ids": [],
+        "event": "main_agent_turn_completed",
+        "mode": "query",
+        "run_id": body["run"]["id"],
+        "skill_run_id": skill_run_id,
+        "status": "completed",
+        "task_id": None,
+        "thread_id": thread["id"],
+        "turn_id": body["turn"]["id"],
+    }
+    assert "sensitive rollout prompt that must not be logged" not in record.getMessage()
+    assert "request_payload" not in record.getMessage()
+    assert "result_payload" not in record.getMessage()

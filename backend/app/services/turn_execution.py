@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from decimal import Decimal
 from typing import Any
@@ -386,19 +387,20 @@ def _log_turn_completion(
 ) -> None:
     """Emit allowlisted rollout diagnostics for one finalized Turn."""
 
+    payload = {
+        "event": "main_agent_turn_completed",
+        "thread_id": turn.thread_id,
+        "turn_id": turn.id,
+        "run_id": run.id,
+        "mode": result.mode.value,
+        "skill_run_id": _first_projection_id(result.projections, "skill_run_id"),
+        "task_id": result.task_id,
+        "artifact_ids": _projection_ids(result.projections, "artifact_id"),
+        "status": result.status,
+    }
     log.info(
-        "main_agent_turn_completed",
-        extra={
-            "event": "main_agent_turn_completed",
-            "thread_id": turn.thread_id,
-            "turn_id": turn.id,
-            "run_id": run.id,
-            "mode": result.mode.value,
-            "skill_run_id": _first_projection_id(result.projections, "skill_run_id"),
-            "task_id": result.task_id,
-            "artifact_ids": _projection_ids(result.projections, "artifact_id"),
-            "status": result.status,
-        },
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        extra=payload,
     )
 
 
