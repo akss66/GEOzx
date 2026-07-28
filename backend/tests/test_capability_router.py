@@ -128,3 +128,56 @@ def test_route_decision_rejects_incomplete_mode_contract(
 ) -> None:
     with pytest.raises(ValidationError):
         TurnRouteDecision(mode=mode, intent="test", confidence=1, reason="test", **fields)
+
+
+@pytest.mark.parametrize(
+    ("mode", "fields"),
+    [
+        (
+            TurnExecutionMode.SKILL,
+            {
+                "skill_code": "account_inspection",
+                "requires_account_context": False,
+                "requires_operation_task": True,
+            },
+        ),
+        (
+            TurnExecutionMode.SKILL,
+            {
+                "skill_code": "account_inspection",
+                "requires_account_context": True,
+                "requires_operation_task": False,
+            },
+        ),
+        (
+            TurnExecutionMode.CLARIFY,
+            {
+                "missing_field": "account_id",
+                "clarifying_question": "请选择账号。",
+                "requires_operation_task": True,
+            },
+        ),
+        (TurnExecutionMode.ANSWER, {"skill_code": "account_inspection"}),
+        (TurnExecutionMode.QUERY, {"clarifying_question": "请选择账号。"}),
+        (TurnExecutionMode.TASK, {"requires_operation_task": False}),
+        (TurnExecutionMode.ACTION, {"requires_operation_task": False}),
+    ],
+)
+def test_route_decision_rejects_mode_specific_invalid_state(
+    mode: TurnExecutionMode, fields: dict[str, str | bool]
+) -> None:
+    with pytest.raises(ValidationError):
+        TurnRouteDecision(mode=mode, intent="test", confidence=1, reason="test", **fields)
+
+
+def test_query_route_can_keep_skill_and_account_context() -> None:
+    decision = TurnRouteDecision(
+        mode=TurnExecutionMode.QUERY,
+        intent="account_data_query",
+        confidence=1,
+        reason="test",
+        skill_code="account_inspection",
+        requires_account_context=True,
+    )
+
+    assert decision.mode == TurnExecutionMode.QUERY

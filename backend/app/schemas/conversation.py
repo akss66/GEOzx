@@ -29,11 +29,33 @@ class TurnRouteDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_mode_requirements(self) -> TurnRouteDecision:
-        if self.mode is TurnExecutionMode.SKILL and not self.skill_code:
-            raise ValueError("SKILL routes require skill_code")
+        if self.mode is not TurnExecutionMode.CLARIFY and (
+            self.missing_field or self.clarifying_question
+        ):
+            raise ValueError("only CLARIFY routes may include clarification fields")
+
+        if self.mode is TurnExecutionMode.SKILL:
+            if not self.skill_code:
+                raise ValueError("SKILL routes require skill_code")
+            if not self.requires_account_context:
+                raise ValueError("SKILL routes require account context")
+            if not self.requires_operation_task:
+                raise ValueError("SKILL routes require an operation task")
         if self.mode is TurnExecutionMode.CLARIFY:
             if not self.missing_field:
                 raise ValueError("CLARIFY routes require missing_field")
             if not self.clarifying_question:
                 raise ValueError("CLARIFY routes require clarifying_question")
+            if self.requires_operation_task:
+                raise ValueError("CLARIFY routes cannot require an operation task")
+        if self.mode is TurnExecutionMode.ANSWER:
+            if self.requires_account_context or self.requires_operation_task or self.skill_code:
+                raise ValueError(
+                    "ANSWER routes cannot include account, operation, or Skill context"
+                )
+        if self.mode is TurnExecutionMode.QUERY and self.requires_operation_task:
+            raise ValueError("QUERY routes cannot require an operation task")
+        if self.mode in {TurnExecutionMode.TASK, TurnExecutionMode.ACTION}:
+            if not self.requires_operation_task:
+                raise ValueError("TASK and ACTION routes require an operation task")
         return self

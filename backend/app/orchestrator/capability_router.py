@@ -49,7 +49,7 @@ def route_explicit_request(
             reason="explicit_skill_requires_account_context",
             skill_code=requested_skill_code,
             requires_account_context=True,
-            requires_operation_task=True,
+            requires_operation_task=False,
             missing_field="account_id",
             clarifying_question="请先选择需要操作的账号。",
         )
