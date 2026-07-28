@@ -9,6 +9,12 @@ from pydantic import BaseModel, ConfigDict
 _SKILL_CODE_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 
 
+def validate_skill_version(version: object) -> int:
+    if type(version) is not int or version < 1:
+        raise ValueError("Skill version must be a positive integer")
+    return version
+
+
 @dataclass(frozen=True)
 class SkillDefinition:
     code: str
@@ -27,8 +33,7 @@ class SkillDefinition:
     def __post_init__(self) -> None:
         if not _SKILL_CODE_PATTERN.fullmatch(self.code):
             raise ValueError("Skill code must be a stable snake_case string")
-        if type(self.version) is not int or self.version < 1:
-            raise ValueError("Skill version must be a positive integer")
+        validate_skill_version(self.version)
 
         object.__setattr__(self, "supported_platforms", frozenset(self.supported_platforms))
         object.__setattr__(self, "expert_codes", tuple(self.expert_codes))

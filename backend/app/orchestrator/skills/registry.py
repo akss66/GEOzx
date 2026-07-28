@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from app.schemas.skills import SkillCatalogItem, SkillDefinition
+from app.schemas.skills import SkillCatalogItem, SkillDefinition, validate_skill_version
 
 
 class SkillRegistry:
@@ -16,6 +16,7 @@ class SkillRegistry:
 
     def get(self, code: str, version: int | None = None) -> SkillDefinition:
         if version is not None:
+            validate_skill_version(version)
             try:
                 return self._definitions[(code, version)]
             except KeyError as error:

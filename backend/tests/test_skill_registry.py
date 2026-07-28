@@ -67,6 +67,14 @@ def test_registry_gets_latest_by_default_and_an_exact_requested_version() -> Non
         registry.get("account_inspection", version=3)
 
 
+@pytest.mark.parametrize("version", [True, "1", 0, -1])
+def test_registry_rejects_invalid_explicit_versions(version: object) -> None:
+    registry = SkillRegistry([_definition()])
+
+    with pytest.raises(ValueError, match="positive integer"):
+        registry.get("account_inspection", version=version)
+
+
 def test_registry_rejects_duplicate_code_and_version() -> None:
     definition = _definition()
 
