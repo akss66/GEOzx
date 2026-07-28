@@ -12,10 +12,12 @@ import {
   approveDeliverableAcceptance,
   approveToolCall,
   acceptArtifact,
+  createConversation,
   getConversation,
   getBrainTaskRuntime,
   listArtifacts,
   listBrainTasks,
+  listComposerSkills,
   rejectDeliverableAcceptance,
   reviseArtifact,
   regenerateBrainMessage,
@@ -37,6 +39,7 @@ import type {
   ConversationThread,
   DeliverableAcceptance,
   Artifact,
+  PublicSkill,
 } from "../types";
 import BrainHome from "./BrainHome";
 
@@ -420,6 +423,12 @@ vi.mock("../api/brain", () => ({
   acceptArtifact: vi.fn(async () => ({ ...mocks.artifact, status: "accepted" })),
   approveDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "approved" })),
   approveToolCall: vi.fn(async () => mocks.toolCall),
+  createConversation: vi.fn(async () => ({
+    ...mocks.conversationThread,
+    id: 82,
+    account_id: 3,
+    turns: [],
+  })),
   getArtifact: vi.fn(async () => mocks.artifact),
   getConversation: vi.fn(async () => mocks.conversationThread),
   getBrainTaskRuntime: vi.fn(async () => mocks.runtime),
@@ -428,6 +437,7 @@ vi.mock("../api/brain", () => ({
     pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
   })),
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
+  listComposerSkills: vi.fn(async () => []),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
   reviseArtifact: vi.fn(async () => ({ ...mocks.artifact, status: "revision_requested", version: 2 })),
   regenerateBrainMessage: vi.fn(async () => mocks.runtime),
@@ -511,6 +521,235 @@ describe("BrainHome", () => {
     mocks.runtime.timeline[0].payload.message = "分析当前账号定位，生成下周内容计划";
     mocks.runtime.timeline[1].payload.agent_name = "主 Agent";
     mocks.runtime.timeline[1].payload.content = "好的，我先理解目标，然后调用账号定位专家。";
+  });
+
+  it("loads the public catalog and launches an inspection as one persisted account Turn", async () => {
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([
+      {
+        code: "account_inspection",
+        version: 1,
+        name: "一键账号体检",
+        description: "检查账号当前状态",
+        category: "quick_operations",
+        icon: "inspection",
+        requires_account: true,
+        is_available: true,
+        unavailable_reason: null,
+      },
+    ]);
+
+    renderBrainHome();
+
+    await waitFor(() => expect(listComposerSkills).toHaveBeenCalledWith("douyin"));
+    fireEvent.click(screen.getByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+
+    await waitFor(() => expect(createConversation).toHaveBeenCalledWith({ account_id: 3 }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(82, {
+      client_message_id: expect.any(String),
+      message: "一键账号体检",
+      requested_skill_code: "account_inspection",
+      execution_preference: "AUTO",
+      attachment_ids: [],
+    }));
+    expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads"))
+      .toContain('"3":82');
+    expect(screen.getByLabelText("运营大脑消息")).not.toHaveValue("account_inspection");
+  });
+
+  it("reuses only the selected account Thread for a launcher Skill", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81, 4: 82 } }),
+    );
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([
+      {
+        code: "account_inspection",
+        version: 1,
+        name: "一键账号体检",
+        description: "检查账号当前状态",
+        category: "quick_operations",
+        icon: "inspection",
+        requires_account: true,
+        is_available: true,
+        unavailable_reason: null,
+      },
+    ]);
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, expect.objectContaining({
+      requested_skill_code: "account_inspection",
+    })));
+    expect(createConversation).not.toHaveBeenCalled();
+  });
+
+  it("requests the explicit global account selector without a request when a launcher Skill has no account", async () => {
+    mocks.workspace.accountId = null;
+    const accountSelector = document.createElement("button");
+    accountSelector.setAttribute("aria-label", "当前账号");
+    document.body.append(accountSelector);
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([inspectionSkill()]);
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+
+    expect(accountSelector).toHaveFocus();
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(sendConversationTurn).not.toHaveBeenCalled();
+    accountSelector.remove();
+  });
+
+  it("blocks an unauthorized account before creating a launcher Thread", async () => {
+    mocks.account.auth_status = "unauthorized";
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([inspectionSkill()]);
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+
+    expect(await screen.findByText("当前账号尚未完成授权，请先完成账号授权后再执行")).toBeInTheDocument();
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(sendConversationTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not request an unavailable or absent public launcher Skill", async () => {
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([
+      inspectionSkill({ is_available: false, unavailable_reason: "暂不可用" }),
+    ]);
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    expect(await screen.findByRole("menuitem", { name: /一键账号体检/ })).toBeDisabled();
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(sendConversationTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not bind a newly-created launcher Thread after the account changes", async () => {
+    let resolveThread: ((thread: ConversationThread) => void) | undefined;
+    vi.mocked(createConversation).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveThread = resolve;
+    }));
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([inspectionSkill()]);
+    const view = renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+    await waitFor(() => expect(createConversation).toHaveBeenCalledWith({ account_id: 3 }));
+
+    mocks.workspace.accountId = 4;
+    mocks.contextAccounts.push({ ...mocks.account, id: 4, nickname: "账号 B" });
+    view.rerender(brainHomeTree());
+    await act(async () => resolveThread?.({
+      ...mocks.conversationThread,
+      id: 82,
+      account_id: 3,
+      turns: [],
+    }));
+
+    await waitFor(() => expect(sendConversationTurn).not.toHaveBeenCalled());
+    expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads") ?? "")
+      .not.toContain('"3":82');
+  });
+
+  it("does not restore launcher pending state under a new account after Turn submission", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    let resolveSubmission: ((value: {
+      turn: ConversationThread["turns"][number];
+      run: ConversationAgentRun;
+      task_id: null;
+      projections: [];
+    }) => void) | undefined;
+    vi.mocked(sendConversationTurn).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSubmission = resolve;
+    }));
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([inspectionSkill()]);
+    const view = renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, expect.any(Object)));
+
+    mocks.workspace.accountId = 4;
+    mocks.contextAccounts.push({ ...mocks.account, id: 4, nickname: "账号 B" });
+    view.rerender(brainHomeTree());
+    await act(async () => resolveSubmission?.({
+      turn: mocks.conversationThread.turns[1],
+      run: mocks.completedConversationRun,
+      task_id: null,
+      projections: [],
+    }));
+
+    await waitFor(() => expect(screen.getByText("账号 B")).toBeInTheDocument());
+    expect(screen.queryByText("一键账号体检")).not.toBeInTheDocument();
+  });
+
+  it("keeps natural-language inspection and launcher inspection on the same account Thread path", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([inspectionSkill()]);
+    renderBrainHome();
+
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
+    fireEvent.change(input, { target: { value: "体检这个账号" } });
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, expect.objectContaining({
+      message: "体检这个账号",
+    })));
+
+    fireEvent.click(screen.getByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenLastCalledWith(81, expect.objectContaining({
+      message: "一键账号体检",
+      requested_skill_code: "account_inspection",
+    })));
+  });
+
+  it("accepts only one launcher request while its Thread is being created", async () => {
+    let resolveThread: ((thread: ConversationThread) => void) | undefined;
+    vi.mocked(createConversation).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveThread = resolve;
+    }));
+    vi.mocked(listComposerSkills).mockResolvedValueOnce([inspectionSkill()]);
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    const inspection = await screen.findByRole("menuitem", { name: /一键账号体检/ });
+    fireEvent.click(inspection);
+    fireEvent.click(inspection);
+    await waitFor(() => expect(createConversation).toHaveBeenCalledTimes(1));
+    await act(async () => resolveThread?.({
+      ...mocks.conversationThread,
+      id: 82,
+      account_id: 3,
+      turns: [],
+    }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledTimes(1));
+  });
+
+  it("wires launcher context actions to real results and honest unavailable states", async () => {
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "添加历史产物" }));
+    expect(await screen.findByLabelText("成果中心")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "对话视图" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加能力或材料" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "添加文件或素材" }));
+    expect(await screen.findByText("尚未接入文件或素材附件")).toBeInTheDocument();
   });
 
   it("renders an active V2 Thread by source Turn instead of task-global legacy Artifacts", async () => {
@@ -2248,6 +2487,21 @@ function renderBrainHome() {
   });
 
   return render(brainHomeTree(client));
+}
+
+function inspectionSkill(overrides: Partial<PublicSkill> = {}): PublicSkill {
+  return {
+    code: "account_inspection",
+    version: 1,
+    name: "一键账号体检",
+    description: "检查账号当前状态",
+    category: "quick_operations",
+    icon: "inspection",
+    requires_account: true,
+    is_available: true,
+    unavailable_reason: null,
+    ...overrides,
+  };
 }
 
 function brainHomeTree(client = new QueryClient({

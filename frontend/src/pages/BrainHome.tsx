@@ -23,9 +23,11 @@ import {
   acceptArtifact,
   approveDeliverableAcceptance,
   approveToolCall,
+  createConversation,
   getConversation,
   getBrainTaskRuntime,
   listBrainTasks,
+  listComposerSkills,
   rejectDeliverableAcceptance,
   reviseArtifact,
   regenerateBrainMessage,
@@ -125,6 +127,7 @@ export default function BrainHome() {
   const [activeConversationThreadId, setActiveConversationThreadId] = useState<number | null>(null);
   const [liveMessages, setLiveMessages] = useState<LiveRuntimeMessage[]>([]);
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
+  const [launcherPending, setLauncherPending] = useState(false);
   const [approvalComment, setApprovalComment] = useState("");
   const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
   const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
@@ -136,6 +139,8 @@ export default function BrainHome() {
   const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
+  const launcherRequestInFlight = useRef(false);
+  const effectiveAccountIdRef = useRef<number | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
   const followLatestMessage = useRef(true);
   const { clientId, projectId, platform, accountId } = useCurrentWorkspace();
@@ -157,10 +162,15 @@ export default function BrainHome() {
     () => resolveWorkspaceAccount(contextQuery.data?.accounts ?? [], platform, accountId),
     [accountId, contextQuery.data?.accounts, platform],
   );
+  effectiveAccountIdRef.current = activeAccount?.id ?? null;
   const tasksQuery = useQuery({
     queryKey: ["brain-tasks"],
     queryFn: listBrainTasks,
     enabled: Boolean(activeAccount),
+  });
+  const composerSkillsQuery = useQuery({
+    queryKey: ["composer-skills", "douyin"],
+    queryFn: () => listComposerSkills("douyin"),
   });
 
   const { connectionState } = useEventStream((event) => {
@@ -232,19 +242,36 @@ export default function BrainHome() {
   }, [effectiveAccount?.id]);
 
   const conversationTurnMutation = useMutation({
-    mutationFn: ({ threadId, message, clientMessageId }: {
+    mutationFn: ({
+      threadId,
+      message,
+      clientMessageId,
+      requestedSkillCode = null,
+    }: {
       threadId: number;
       message: string;
       clientMessageId: string;
-    }) => sendConversationTurn(threadId, {
+      requestedSkillCode?: string | null;
+      accountId?: number;
+    }) => sendConversationTurn(threadId, requestedSkillCode == null ? {
       client_message_id: clientMessageId,
       message,
+    } : {
+      client_message_id: clientMessageId,
+      message,
+      requested_skill_code: requestedSkillCode,
+      execution_preference: "AUTO",
+      attachment_ids: [],
     }),
     onSuccess: (submission, variables) => {
       qc.setQueryData<ConversationThread>(["brain-conversation", variables.threadId], (current) =>
         mergeConversationTurn(current, submission),
       );
       void qc.invalidateQueries({ queryKey: ["brain-conversation", variables.threadId] });
+      if (
+        variables.accountId != null
+        && effectiveAccountIdRef.current !== variables.accountId
+      ) return;
       if (isTerminalConversationRunStatus(submission.run.status)) {
         setPendingTurn(null);
         pendingClientMessageId.current = null;
@@ -257,7 +284,11 @@ export default function BrainHome() {
         : current);
       pendingClientMessageId.current = clientMessageId;
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (
+        variables.accountId != null
+        && effectiveAccountIdRef.current !== variables.accountId
+      ) return;
       setPendingTurn((current) => {
         if (current) setGoal((value) => value || current.content);
         return null;
@@ -629,6 +660,7 @@ export default function BrainHome() {
     messageMutation.isPending
     || regenerateMutation.isPending
     || conversationTurnMutation.isPending
+    || launcherPending
     || (activeConversationThreadId != null && pendingTurn != null);
 
   const startWorkflow = () => {
@@ -674,6 +706,80 @@ export default function BrainHome() {
       platform: "douyin",
     });
   };
+
+  const requestAccountSelection = useCallback(() => {
+    const selector = document.querySelector<HTMLButtonElement>('[aria-label="当前账号"]');
+    if (selector) {
+      selector.focus();
+      selector.click();
+      return;
+    }
+    message.info("请在顶部选择抖音账号");
+  }, [message]);
+
+  const launchComposerSkill = useCallback(async (skillCode: string) => {
+    if (launcherRequestInFlight.current || isGenerating) return;
+    const skill = composerSkillsQuery.data?.find((item) => item.code === skillCode);
+    if (!skill || !skill.is_available) return;
+    const account = effectiveAccount;
+    if (!account) {
+      requestAccountSelection();
+      return;
+    }
+    if (!accountReady) {
+      message.warning("当前账号尚未完成授权，请先完成账号授权后再执行");
+      return;
+    }
+
+    launcherRequestInFlight.current = true;
+    setLauncherPending(true);
+    const clientMessageId = createClientMessageId();
+    try {
+      const savedThreadId = getActiveConversationThreadId(account.id);
+      const thread = savedThreadId != null
+        ? { id: savedThreadId, account_id: account.id }
+        : await createConversation({ account_id: account.id });
+      if (
+        thread.account_id !== account.id
+        || effectiveAccountIdRef.current !== account.id
+      ) return;
+
+      if (savedThreadId == null) {
+        persistActiveConversationThreadId(account.id, thread.id);
+        setActiveConversationThreadId(thread.id);
+      }
+      followLatestMessage.current = true;
+      pendingClientMessageId.current = clientMessageId;
+      setPendingTurn({
+        clientMessageId,
+        content: skill.name,
+        taskId: null,
+        showUser: true,
+      });
+      await conversationTurnMutation.mutateAsync({
+        threadId: thread.id,
+        message: skill.name,
+        clientMessageId,
+        requestedSkillCode: skill.code,
+        accountId: account.id,
+      });
+    } catch (error) {
+      setPendingTurn((current) => current?.clientMessageId === clientMessageId ? null : current);
+      pendingClientMessageId.current = null;
+      message.error(presentApiError(error, "启动能力失败，请稍后重试。").message);
+    } finally {
+      launcherRequestInFlight.current = false;
+      setLauncherPending(false);
+    }
+  }, [
+    accountReady,
+    composerSkillsQuery.data,
+    conversationTurnMutation,
+    effectiveAccount,
+    isGenerating,
+    message,
+    requestAccountSelection,
+  ]);
 
   const stopGeneration = () => {
     if (!pendingTurn || stopMutation.isPending) return;
@@ -1005,11 +1111,16 @@ export default function BrainHome() {
           {workspaceMode === "conversation" ? <BrainComposer
             value={goal}
             disabled={
-              !accountReady
-              || isGenerating
+              isGenerating
               || (activeConversationThreadId == null && (tasksQuery.isError || runtimeQuery.isError))
             }
             loading={isGenerating}
+            skills={composerSkillsQuery.data ?? []}
+            onSelectSkill={launchComposerSkill}
+            onAddFilesAndMaterials={() => message.info("尚未接入文件或素材附件")}
+            onAddAccountDataPackage={() => message.info("尚未接入账号数据包附件")}
+            onAddHistoricalArtifacts={() => setWorkspaceMode("results")}
+            onSelectAccount={requestAccountSelection}
             pendingPermission={pendingPermission}
             approvalComment={approvalComment}
             approving={approveMutation.isPending}
