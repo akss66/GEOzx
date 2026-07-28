@@ -33,7 +33,8 @@ class SkillRegistry:
 
     def list_for(self, platform: str) -> list[SkillCatalogItem]:
         latest_by_code = {
-            definition.code: self.get(definition.code) for definition in self._definitions.values()
+            definition.code: self.get(definition.code)
+            for definition in self._definitions.values()
         }
         compatible = [
             SkillCatalogItem.from_definition(definition)
@@ -41,3 +42,12 @@ class SkillRegistry:
             if platform in definition.supported_platforms
         ]
         return sorted(compatible, key=lambda item: (item.name, item.code))
+
+
+from app.orchestrator.skills.account_inspection import (  # noqa: E402
+    ACCOUNT_INSPECTION_SKILL,
+)
+
+skill_registry = SkillRegistry([ACCOUNT_INSPECTION_SKILL])
+
+__all__ = ["SkillRegistry", "skill_registry"]

@@ -70,9 +70,10 @@ class AgentStepInProgress(AgentHarnessError):
 class AgentHarnessResult:
     task: BrainTask
     invocation: AgentInvocation
-    deliverable: Deliverable
-    acceptance: DeliverableAcceptance
+    deliverable: Deliverable | None
+    acceptance: DeliverableAcceptance | None
     knowledge_sources: list[KnowledgeEntry]
+    output: dict
 
 
 @dataclass(frozen=True)
@@ -108,9 +109,15 @@ class AgentHarness:
         step_key: str | None,
         attempt: int = 0,
         upstream: dict | None = None,
+        skill_run_id: int | None = None,
+        thread_id: int | None = None,
+        turn_id: int | None = None,
+        trace_only: bool = False,
     ) -> AgentHarnessResult:
         if task.org_id != user.org_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+            )
         spec = get_agent_spec(code)
         project_id, account_id = self._task_scope(task)
         project, account = await self._require_scope(
@@ -145,6 +152,8 @@ class AgentHarness:
                 attempt=attempt,
             )
             if existing is not None:
+                if trace_only:
+                    return self._existing_trace_result(task, existing)
                 await self._repair_successful_tool_projections(
                     session,
                     task=task,
@@ -156,6 +165,9 @@ class AgentHarness:
         invocation = AgentInvocation(
             task_id=task.id,
             run_id=run_id,
+            skill_run_id=skill_run_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
             step_key=step_key,
             attempt=attempt,
             agent_code=code,
@@ -261,11 +273,15 @@ class AgentHarness:
         runtime_capabilities = {
             str(item["code"]): item for item in runtime_tool_capabilities(user)
         }
-        available_tools = [
-            runtime_capabilities[tool_code]
-            for tool_code in sorted(tool_allowlist)
-            if tool_code in runtime_capabilities
-        ]
+        available_tools = (
+            []
+            if trace_only
+            else [
+                runtime_capabilities[tool_code]
+                for tool_code in sorted(tool_allowlist)
+                if tool_code in runtime_capabilities
+            ]
+        )
         tool_executor = DurableToolExecutor(build_runtime_tool_adapter())
 
         async def execute_tool(request: RuntimeToolCall) -> dict:
@@ -280,8 +296,7 @@ class AgentHarness:
             )
             if outcome.status != "success" or outcome.result is None:
                 raise SpecialistKernelBlocked(
-                    f"tool {request.tool_code} requires main-Agent intervention: "
-                    f"{outcome.status}"
+                    f"tool {request.tool_code} requires main-Agent intervention: {outcome.status}"
                 )
             await self._project_successful_tool_call(
                 session,
@@ -322,7 +337,9 @@ class AgentHarness:
                     content_item_id=content_item.id,
                     task_id=task.id,
                     invocation_id=invocation.id,
-                    trace_id=f"agent-run:{run_id}" if run_id is not None else task.thread_id,
+                    trace_id=f"agent-run:{run_id}"
+                    if run_id is not None
+                    else task.thread_id,
                     project_id=project_id,
                     account_id=account.id,
                     request=purpose,
@@ -363,6 +380,59 @@ class AgentHarness:
             raise AgentHarnessError(f"{spec.name} execution failed") from exc
 
         payload_dict = payload.model_dump(mode="json")
+        if trace_only:
+            summary = self._payload_summary(payload_dict)
+            invocation.status = AgentInvocationStatus.DONE
+            invocation.output_summary = summary
+            invocation.upstream = [
+                *(invocation.upstream or []),
+                {"trace_only_output": payload_dict},
+            ]
+            invocation.finished_at = datetime.now(UTC)
+            completed_lifecycle = await self._record_runtime_lifecycle(
+                session,
+                task=task,
+                account_id=account.id,
+                run_id=run_id,
+                invocation=invocation,
+                event_type="brain.runtime.subagent_completed",
+                payload={
+                    "message": f"{spec.name}已完成本轮处理。",
+                    "agent_code": code.value,
+                    "agent_name": spec.name,
+                    "invocation_id": invocation.id,
+                    "summary": summary,
+                    "trace_only": True,
+                },
+                semantic_suffix="completed",
+            )
+            session.add(
+                Event(
+                    type="agent.harness.completed",
+                    content_item_id=content_item.id,
+                    project_id=project_id,
+                    payload={
+                        "task_id": task.id,
+                        "run_id": run_id,
+                        "invocation_id": invocation.id,
+                        "agent_code": code.value,
+                        "trace_only": True,
+                        "kernel_rounds": kernel_result.rounds,
+                        "kernel_tool_calls": kernel_result.tool_calls,
+                    },
+                )
+            )
+            await session.commit()
+            await self._publish_runtime_lifecycle(completed_lifecycle)
+            return AgentHarnessResult(
+                task=task,
+                invocation=invocation,
+                deliverable=None,
+                acceptance=None,
+                knowledge_sources=knowledge_rows,
+                output=payload_dict,
+            )
+
         version = await self._next_version(session, content_item.id, spec)
         deliverable = Deliverable(
             content_item_id=content_item.id,
@@ -473,6 +543,7 @@ class AgentHarness:
             deliverable=deliverable,
             acceptance=acceptance,
             knowledge_sources=knowledge_rows,
+            output=payload_dict,
         )
 
     @staticmethod
@@ -602,9 +673,7 @@ class AgentHarness:
                 "tool_permissions"
             ].items()
             if permission_mode == "auto"
-            and (
-                runtime_code := _MANAGEMENT_TO_RUNTIME_TOOL.get(management_code)
-            )
+            and (runtime_code := _MANAGEMENT_TO_RUNTIME_TOOL.get(management_code))
             is not None
         }
 
@@ -626,7 +695,9 @@ class AgentHarness:
         project_id: int | None,
         account_id: int,
     ) -> tuple[Project | None, Account]:
-        account = await require_account_access(session, user, account_id, roles=_OPERATING_ROLES)
+        account = await require_account_access(
+            session, user, account_id, roles=_OPERATING_ROLES
+        )
         if account.status != AccountStatus.ACTIVE:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -640,7 +711,9 @@ class AgentHarness:
         if project_id is None:
             return None, account
 
-        project = await require_project_access(session, user, project_id, roles=_OPERATING_ROLES)
+        project = await require_project_access(
+            session, user, project_id, roles=_OPERATING_ROLES
+        )
         linked_id = await session.scalar(
             select(ProjectAccount.id).where(
                 ProjectAccount.project_id == project.id,
@@ -687,9 +760,7 @@ class AgentHarness:
         return current
 
     @staticmethod
-    def _account_scoped_upstream(
-        upstream: dict | None, *, account_id: int
-    ) -> dict:
+    def _account_scoped_upstream(upstream: dict | None, *, account_id: int) -> dict:
         if not upstream:
             return {}
         packet = dict(upstream)
@@ -752,10 +823,38 @@ class AgentHarness:
         deliverable = await session.get(Deliverable, acceptance.deliverable_id)
         if deliverable is None:
             raise AgentHarnessError("Completed invocation has no deliverable")
-        return AgentHarnessResult(task, invocation, deliverable, acceptance, [])
+        return AgentHarnessResult(
+            task,
+            invocation,
+            deliverable,
+            acceptance,
+            [],
+            dict(deliverable.payload or {}),
+        )
 
     @staticmethod
-    async def _next_version(session: AsyncSession, content_item_id: int, spec: AgentSpec) -> int:
+    def _existing_trace_result(
+        task: BrainTask,
+        invocation: AgentInvocation,
+    ) -> AgentHarnessResult:
+        for item in reversed(invocation.upstream or []):
+            if isinstance(item, dict) and isinstance(
+                item.get("trace_only_output"), dict
+            ):
+                return AgentHarnessResult(
+                    task=task,
+                    invocation=invocation,
+                    deliverable=None,
+                    acceptance=None,
+                    knowledge_sources=[],
+                    output=dict(item["trace_only_output"]),
+                )
+        raise AgentHarnessError("trace-only specialist result is incomplete")
+
+    @staticmethod
+    async def _next_version(
+        session: AsyncSession, content_item_id: int, spec: AgentSpec
+    ) -> int:
         latest = await session.scalar(
             select(func.max(Deliverable.version)).where(
                 Deliverable.content_item_id == content_item_id,

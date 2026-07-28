@@ -28,7 +28,9 @@ from app.models.enums import (
 
 
 async def _token(client, email: str, password: str) -> str:
-    response = await client.post("/auth/login", json={"email": email, "password": password})
+    response = await client.post(
+        "/auth/login", json={"email": email, "password": password}
+    )
     assert response.status_code == 200
     return response.json()["access_token"]
 
@@ -65,6 +67,7 @@ async def _seed_artifact(
     version: int = 1,
     status: DeliverableStatus = DeliverableStatus.PENDING_REVIEW,
     payload: dict | None = None,
+    skill_code: str = "account_review",
 ):
     project = Project(org_id=admin.org_id, name=f"{account_name}项目")
     session.add(project)
@@ -133,7 +136,7 @@ async def _seed_artifact(
         run_id=run.id,
         task_id=task.id,
         idempotency_key=f"skill-{account_name}-{version}",
-        skill_code="account_review",
+        skill_code=skill_code,
         skill_version=1,
         status="completed",
         quality_score=Decimal("0.91"),
@@ -174,6 +177,75 @@ async def _seed_artifact(
     session.add(quality)
     await session.commit()
     return project, account, content, thread, turn, task, run, skill_run, deliverable
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_uses_verified_business_artifact_type(
+    client, session, admin
+) -> None:
+    payload = {
+        **_review_payload(summary="账号体检已完成"),
+        "artifact_type": "forged_type_is_ignored",
+        "data_sufficiency": "partial",
+        "missing_data": ["缺少转化数据"],
+        "findings": ["已有内容播放证据"],
+        "recommendations": ["补齐转化数据"],
+        "next_action": "导入最近30天转化数据",
+        "participating_experts": [
+            "06-operator",
+            "01-positioning",
+            "02-content-director",
+        ],
+        "critic": {
+            "passed": True,
+            "score": 91,
+            "raw_tool_log": {"secret": "must not escape"},
+        },
+    }
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="体检账号",
+        payload=payload,
+        skill_code="account_inspection",
+    )
+    account, deliverable = seeded[1], seeded[8]
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+
+    listing = await client.get(
+        f"/artifacts?account_id={account.id}&artifact_type=account_inspection_report",
+        headers=headers,
+    )
+    detail = await client.get(f"/artifacts/{deliverable.id}", headers=headers)
+    legacy_filter = await client.get(
+        f"/artifacts?account_id={account.id}&artifact_type=review_report",
+        headers=headers,
+    )
+    unknown = await client.get(
+        f"/artifacts?account_id={account.id}&artifact_type=unknown_report",
+        headers=headers,
+    )
+
+    assert listing.status_code == 200
+    assert detail.status_code == 200
+    projected = listing.json()["data"][0]
+    assert detail.json() == projected
+    assert projected["artifact_type"] == "account_inspection_report"
+    assert {section["key"] for section in projected["sections"]} >= {
+        "data_sufficiency",
+        "missing_data",
+        "findings",
+        "recommendations",
+        "next_action",
+        "participating_experts",
+        "critic",
+    }
+    assert "raw_tool_log" not in str(projected)
+    assert legacy_filter.status_code == 200
+    assert legacy_filter.json()["pagination"]["total"] == 0
+    assert unknown.status_code == 422
+    assert "unknown_report" not in unknown.text
 
 
 @pytest.mark.asyncio
@@ -296,7 +368,9 @@ async def test_artifact_queries_and_actions_are_isolated_by_account(
     assert second_page.status_code == 200
     assert [row["id"] for row in second_page.json()["data"]] == [account_a[8].id]
     hidden = await client.get(f"/artifacts/{account_b[8].id}", headers=headers)
-    assert hidden.status_code == 200  # admin can view it only as its own account-scoped identity
+    assert (
+        hidden.status_code == 200
+    )  # admin can view it only as its own account-scoped identity
     assert hidden.json()["account_id"] == account_b[1].id
     legacy_detail = await client.get(f"/artifacts/{legacy.id}", headers=headers)
     assert legacy_detail.status_code == 404
@@ -361,7 +435,11 @@ async def test_artifact_revision_increments_version_and_rejects_stale_source(
     created = await client.post(
         "/artifact-revisions",
         headers=headers,
-        json={"artifact_id": source.id, "payload": revised_payload, "note": "补充转化数据"},
+        json={
+            "artifact_id": source.id,
+            "payload": revised_payload,
+            "note": "补充转化数据",
+        },
     )
 
     assert created.status_code == 201
@@ -460,7 +538,9 @@ async def test_artifact_acceptance_is_idempotent_and_supersedes_other_active_ver
 
 
 @pytest.mark.asyncio
-async def test_reviewer_cannot_revise_or_accept_artifact(client, session, admin, member):
+async def test_reviewer_cannot_revise_or_accept_artifact(
+    client, session, admin, member
+):
     seeded = await _seed_artifact(session, admin, account_name="只读账号")
     session.add(
         ProjectMembership(
@@ -674,7 +754,9 @@ async def test_artifact_projection_recursively_removes_internal_data_but_keeps_a
         assert private_value not in review_serialized
 
     assert art.status_code == 200
-    art_sections = {section["key"]: section["content"] for section in art.json()["sections"]}
+    art_sections = {
+        section["key"]: section["content"] for section in art.json()["sections"]
+    }
     assert art_sections["prompts"] == [
         "sunlit glass office",
         "close-up installation detail",
@@ -702,7 +784,9 @@ async def test_every_deliverable_status_maps_and_filters_to_business_status(
         (DeliverableStatus.SUPERSEDED, "superseded"),
     ]
     artifacts = {DeliverableStatus.DRAFT: seeded[8]}
-    for version, (internal_status, _business_status) in enumerate(statuses[1:], start=2):
+    for version, (internal_status, _business_status) in enumerate(
+        statuses[1:], start=2
+    ):
         row = Deliverable(
             content_item_id=seeded[2].id,
             thread_id=seeded[3].id,
@@ -742,7 +826,10 @@ async def test_invalid_revision_does_not_supersede_source(client, session, admin
     response = await client.post(
         "/artifact-revisions",
         headers=headers,
-        json={"artifact_id": source.id, "payload": {"period": "missing required fields"}},
+        json={
+            "artifact_id": source.id,
+            "payload": {"period": "missing required fields"},
+        },
     )
 
     assert response.status_code == 422
@@ -778,25 +865,30 @@ async def test_revision_integrity_race_rolls_back_without_duplicate_version(
             and row.version == 2
             for row in session.new
         ):
-            raise IntegrityError("INSERT deliverables", {}, Exception("unique collision"))
+            raise IntegrityError(
+                "INSERT deliverables", {}, Exception("unique collision")
+            )
         return await original_flush(objects)
 
     monkeypatch.setattr(session, "flush", collide_on_revision)
     response = await client.post(
         "/artifact-revisions",
         headers=headers,
-        json={"artifact_id": source.id, "payload": _review_payload(summary="race loser")},
+        json={
+            "artifact_id": source.id,
+            "payload": _review_payload(summary="race loser"),
+        },
     )
 
     assert response.status_code == 409
     await session.refresh(source)
     assert source.status == DeliverableStatus.PENDING_REVIEW
     versions = list(
-            await session.scalars(
-                select(Deliverable).where(
-                    Deliverable.content_item_id == content_item_id,
-                    Deliverable.type == DeliverableType.REVIEW_REPORT,
-                )
+        await session.scalars(
+            select(Deliverable).where(
+                Deliverable.content_item_id == content_item_id,
+                Deliverable.type == DeliverableType.REVIEW_REPORT,
+            )
         )
     )
     assert [row.version for row in versions] == [1]

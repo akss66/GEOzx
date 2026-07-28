@@ -426,7 +426,7 @@ async def test_unavailable_skill_is_structured_blocked_without_artifact(
     async def classify(*_args, **_kwargs):
         return _decision(
             TurnExecutionMode.SKILL,
-            skill_code="account_inspection",
+            skill_code="not_implemented_skill",
         )
 
     monkeypatch.setattr(

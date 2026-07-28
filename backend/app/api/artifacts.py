@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.db import get_session
-from app.models.enums import DeliverableType
 from app.schemas.artifacts import (
     ArtifactAcceptanceRequest,
     ArtifactOut,
@@ -31,7 +30,7 @@ async def artifact_center(
     user: CurrentUser,
     session: SessionDep,
     account_id: Annotated[int, Query(gt=0)],
-    artifact_type: Annotated[DeliverableType | None, Query()] = None,
+    artifact_type: Annotated[str | None, Query(max_length=120)] = None,
     artifact_status: Annotated[ArtifactStatus | None, Query(alias="status")] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,

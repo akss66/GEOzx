@@ -16,6 +16,7 @@ from app.models import (
     Client,
     ContentItem,
     Deliverable,
+    DeliverableAcceptance,
     Event,
     OrchestrationPlan,
     Project,
@@ -39,6 +40,114 @@ from app.schemas.deliverable import (
     DeliverablePayload,
     PositioningStrategyPayload,
 )
+
+
+@pytest.mark.asyncio
+async def test_trace_only_harness_persists_output_without_public_deliverable(
+    session, admin, monkeypatch
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Trace-only account",
+        auth={"auth_status": "authorized"},
+    )
+    session.add(account)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Trace-only diagnosis",
+        type=BrainTaskType.ACCOUNT_DIAGNOSIS,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="skill",
+    )
+    task.brief = TaskBrief(
+        goal="Diagnose without publishing an intermediate artifact",
+        project_id=None,
+        platforms=[Platform.DOUYIN.value],
+        account_ids=[account.id],
+        cycle="current",
+        content_goal="diagnosis",
+        risk_constraints=[],
+        expected_outputs=["trace"],
+        confirmation_actions=[],
+    )
+    session.add(task)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        client_message_id="trace-only-run",
+        request_payload={},
+    )
+    session.add(run)
+    await session.commit()
+
+    class TracePositioningAgent(BaseAgent):
+        code = AgentCode.POSITIONING.value
+        output_type = DeliverableType.POSITIONING_STRATEGY
+
+        async def run(self, runtime_session, org_id, ctx):
+            return PositioningStrategyPayload(
+                account_persona="Evidence-led operator",
+                target_audience="Small business owners",
+                differentiation=["Account scoped", "Evidence based"],
+                content_pillars=["Diagnosis", "Practical optimization"],
+            )
+
+    async def fake_business_config(*_args, **_kwargs):
+        return {"tool_permissions": {}, "quality_gates": []}
+
+    original = AGENT_SPECS[AgentCode.POSITIONING]
+    monkeypatch.setitem(
+        AGENT_SPECS,
+        AgentCode.POSITIONING,
+        original.__class__(
+            original.name,
+            TracePositioningAgent,
+            original.deliverable_type,
+            original.deliverable_title,
+            original.stage,
+            original.task_type,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.agent_harness.get_business_config",
+        fake_business_config,
+    )
+
+    result = await AgentHarness().execute(
+        session,
+        user=admin,
+        task=task,
+        code=AgentCode.POSITIONING,
+        purpose="Trace-only account inspection step",
+        evidence_refs=[],
+        run_id=run.id,
+        step_key="account-inspection:positioning",
+        trace_only=True,
+    )
+    duplicate = await AgentHarness().execute(
+        session,
+        user=admin,
+        task=task,
+        code=AgentCode.POSITIONING,
+        purpose="Trace-only account inspection step",
+        evidence_refs=[],
+        run_id=run.id,
+        step_key="account-inspection:positioning",
+        trace_only=True,
+    )
+
+    assert result.deliverable is None
+    assert result.acceptance is None
+    assert result.output["account_persona"] == "Evidence-led operator"
+    assert duplicate.invocation.id == result.invocation.id
+    assert duplicate.output == result.output
+    assert await session.scalar(select(func.count(Deliverable.id))) == 0
+    assert await session.scalar(select(func.count(DeliverableAcceptance.id))) == 0
 
 
 def test_agent_registry_contains_every_specialist() -> None:
@@ -152,10 +261,18 @@ async def test_harness_runs_positioning_with_one_account_without_project(
         output_type = DeliverableType.POSITIONING_STRATEGY
 
         async def run(self, runtime_session, org_id, ctx: AgentContext):
-            raise AssertionError("The bounded tool loop should call kernel_decide instead")
+            raise AssertionError(
+                "The bounded tool loop should call kernel_decide instead"
+            )
 
         async def kernel_decide(
-            self, runtime_session, org_id, ctx: AgentContext, *, available_tools, observations
+            self,
+            runtime_session,
+            org_id,
+            ctx: AgentContext,
+            *,
+            available_tools,
+            observations,
         ):
             contexts.append(ctx)
             if not observations:
@@ -323,14 +440,16 @@ async def test_harness_runs_positioning_with_one_account_without_project(
         event
         for event in (
             await session.scalars(
-                select(Event).where(
+                select(Event)
+                .where(
                     Event.type.in_(
                         [
                             "brain.runtime.subagent_started",
                             "brain.runtime.subagent_completed",
                         ]
                     )
-                ).order_by(Event.id)
+                )
+                .order_by(Event.id)
             )
         ).all()
         if event.payload is not None
@@ -340,7 +459,10 @@ async def test_harness_runs_positioning_with_one_account_without_project(
         "brain.runtime.subagent_started",
         "brain.runtime.subagent_completed",
     ]
-    assert all(event.payload["invocation_id"] == result.invocation.id for event in lifecycle_events)
+    assert all(
+        event.payload["invocation_id"] == result.invocation.id
+        for event in lifecycle_events
+    )
     assert all(event.idempotency_key is not None for event in lifecycle_events)
     invocations = (
         await session.scalars(
@@ -699,7 +821,9 @@ async def test_runtime_dispatches_growth_expert_through_the_shared_harness(
     async def fake_execute(runtime_session, **kwargs):
         captured.append(kwargs)
 
-    monkeypatch.setattr("app.orchestrator.brain_runtime.agent_harness.execute", fake_execute)
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.agent_harness.execute", fake_execute
+    )
     runtime = BrainRuntimeGraph()
     with bind_runtime_session(session):
         state = await runtime._dispatch_round(
@@ -717,7 +841,10 @@ async def test_runtime_dispatches_growth_expert_through_the_shared_harness(
                         "tool_call_id": 7,
                         "tool_code": "account.profile",
                         "summary": "profile loaded",
-                        "result": {"account_id": account.id, "nickname": account.nickname},
+                        "result": {
+                            "account_id": account.id,
+                            "nickname": account.nickname,
+                        },
                     },
                     {
                         "kind": "tool_result",

@@ -53,6 +53,17 @@ _STATUS_TO_ARTIFACT: dict[DeliverableStatus, ArtifactStatus] = {
     DeliverableStatus.SUPERSEDED: "superseded",
 }
 _ARTIFACT_TO_STATUS = {value: key for key, value in _STATUS_TO_ARTIFACT.items()}
+_ACCOUNT_INSPECTION_ARTIFACT_TYPE = "account_inspection_report"
+_DELIVERABLE_ARTIFACT_TYPES = {item.value: item for item in DeliverableType}
+_ACCOUNT_INSPECTION_FIELDS = {
+    "data_sufficiency",
+    "missing_data",
+    "findings",
+    "recommendations",
+    "next_action",
+    "participating_experts",
+    "critic",
+}
 
 _SECTION_TITLES = {
     "period": "复盘周期",
@@ -99,6 +110,17 @@ _SECTION_TITLES = {
     "response_guidelines": "回复指引",
     "content_opportunities": "内容机会",
 }
+_SECTION_TITLES.update(
+    {
+        "data_sufficiency": "数据充分度",
+        "missing_data": "缺失数据",
+        "findings": "体检发现",
+        "recommendations": "优化建议",
+        "next_action": "下一步行动",
+        "participating_experts": "参与专家",
+        "critic": "质量审核",
+    }
+)
 _NON_SECTION_KEYS = {"title", "summary", "evidence_refs"}
 _INTERNAL_KEY_MARKERS = {
     "acceptance",
@@ -144,12 +166,47 @@ class _ArtifactProvenance:
     task_id: int | None
 
 
+def _normalize_artifact_type(
+    artifact_type: str | DeliverableType | None,
+) -> str | None:
+    if artifact_type is None:
+        return None
+    value = (
+        artifact_type.value
+        if isinstance(artifact_type, DeliverableType)
+        else artifact_type
+    )
+    if (
+        value == _ACCOUNT_INSPECTION_ARTIFACT_TYPE
+        or value in _DELIVERABLE_ARTIFACT_TYPES
+    ):
+        return value
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail="Unsupported artifact type",
+    )
+
+
+async def _business_artifact_type(
+    session: AsyncSession,
+    deliverable: Deliverable,
+) -> str:
+    if (
+        deliverable.type == DeliverableType.REVIEW_REPORT
+        and deliverable.skill_run_id is not None
+    ):
+        skill_run = await session.get(SkillRun, deliverable.skill_run_id)
+        if skill_run is not None and skill_run.skill_code == "account_inspection":
+            return _ACCOUNT_INSPECTION_ARTIFACT_TYPE
+    return deliverable.type.value
+
+
 async def list_artifacts(
     session: AsyncSession,
     user: User,
     *,
     account_id: int,
-    artifact_type: DeliverableType | None,
+    artifact_type: str | DeliverableType | None,
     artifact_status: ArtifactStatus | None,
     page: int,
     page_size: int,
@@ -157,8 +214,14 @@ async def list_artifacts(
     """List only artifacts whose ContentItem is explicitly bound to the selected account."""
     account = await require_account_access(session, user, account_id)
     filters = [ContentItem.account_id == account_id]
-    if artifact_type is not None:
-        filters.append(Deliverable.type == artifact_type)
+    requested_artifact_type = _normalize_artifact_type(artifact_type)
+    if requested_artifact_type is not None:
+        database_type = (
+            DeliverableType.REVIEW_REPORT
+            if requested_artifact_type == _ACCOUNT_INSPECTION_ARTIFACT_TYPE
+            else _DELIVERABLE_ARTIFACT_TYPES[requested_artifact_type]
+        )
+        filters.append(Deliverable.type == database_type)
     if artifact_status is not None:
         filters.append(Deliverable.status == _ARTIFACT_TO_STATUS[artifact_status])
 
@@ -182,7 +245,12 @@ async def list_artifacts(
             expected_account_id=account.id,
         )
         if provenance is not None:
-            valid.append((deliverable, content, provenance))
+            projected_type = await _business_artifact_type(session, deliverable)
+            if (
+                requested_artifact_type is None
+                or projected_type == requested_artifact_type
+            ):
+                valid.append((deliverable, content, provenance))
 
     total = len(valid)
     start = (page - 1) * page_size
@@ -222,7 +290,9 @@ async def get_artifact(
     content = await session.get(ContentItem, deliverable.content_item_id)
     if content is None or content.account_id is None:
         raise _artifact_not_found()
-    account = await require_account_access(session, user, content.account_id, roles=roles)
+    account = await require_account_access(
+        session, user, content.account_id, roles=roles
+    )
     provenance = await _load_valid_provenance(
         session,
         deliverable,
@@ -271,7 +341,10 @@ async def create_artifact_revision(
             )
         )
     ) or 0
-    if source.status == DeliverableStatus.SUPERSEDED or source.version != latest_version:
+    if (
+        source.status == DeliverableStatus.SUPERSEDED
+        or source.version != latest_version
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="成果版本已更新，请刷新后重试",
@@ -390,7 +463,12 @@ async def project_artifact(
     quality = provenance.quality
 
     raw_payload = deliverable.payload if isinstance(deliverable.payload, dict) else {}
-    payload = _safe_payload(deliverable.type, raw_payload)
+    business_artifact_type = await _business_artifact_type(session, deliverable)
+    payload = _safe_payload(
+        deliverable.type,
+        raw_payload,
+        business_artifact_type=business_artifact_type,
+    )
     quality_issues = (
         _safe_business_value(list(quality.issues or [])) if quality is not None else []
     )
@@ -402,12 +480,16 @@ async def project_artifact(
         run_id=deliverable.run_id,
         skill_run_id=deliverable.skill_run_id,
         task_id=provenance.task_id,
-        artifact_type=deliverable.type.value,
+        artifact_type=business_artifact_type,
         title=_artifact_title(payload, content),
         version=deliverable.version,
         status=_STATUS_TO_ARTIFACT[deliverable.status],
         summary=_artifact_summary(payload, content),
-        sections=_artifact_sections(deliverable.type, payload),
+        sections=_artifact_sections(
+            deliverable.type,
+            payload,
+            business_artifact_type=business_artifact_type,
+        ),
         evidence_refs=_evidence_refs(payload, quality),
         quality=(
             ArtifactQuality(
@@ -435,7 +517,9 @@ def _validate_revision_payload(
         key: payload[key] for key in schema.model_fields if key in payload
     }
     try:
-        return validate_payload(deliverable_type, business_payload).model_dump(mode="json")
+        return validate_payload(deliverable_type, business_payload).model_dump(
+            mode="json"
+        )
     except (KeyError, ValidationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -526,7 +610,9 @@ async def _load_valid_provenance(
             or not _optional_link_matches(quality.thread_id, deliverable.thread_id)
             or not _optional_link_matches(quality.turn_id, deliverable.turn_id)
             or not _optional_link_matches(quality.run_id, deliverable.run_id)
-            or not _optional_link_matches(quality.skill_run_id, deliverable.skill_run_id)
+            or not _optional_link_matches(
+                quality.skill_run_id, deliverable.skill_run_id
+            )
         ):
             return None
         task_ids.add(quality.task_id)
@@ -535,7 +621,9 @@ async def _load_valid_provenance(
             if (
                 invocation is None
                 or invocation.task_id != quality.task_id
-                or not _optional_link_matches(invocation.thread_id, deliverable.thread_id)
+                or not _optional_link_matches(
+                    invocation.thread_id, deliverable.thread_id
+                )
                 or not _optional_link_matches(invocation.turn_id, deliverable.turn_id)
                 or not _optional_link_matches(invocation.run_id, deliverable.run_id)
                 or not _optional_link_matches(
@@ -587,10 +675,15 @@ def _artifact_summary(payload: dict[str, Any], content: ContentItem) -> str:
 
 
 def _safe_payload(
-    deliverable_type: DeliverableType, payload: dict[str, Any]
+    deliverable_type: DeliverableType,
+    payload: dict[str, Any],
+    *,
+    business_artifact_type: str,
 ) -> dict[str, Any]:
     schema = get_schema(deliverable_type)
     allowed_fields = set(schema.model_fields) if schema is not None else set()
+    if business_artifact_type == _ACCOUNT_INSPECTION_ARTIFACT_TYPE:
+        allowed_fields.update(_ACCOUNT_INSPECTION_FIELDS)
     safe: dict[str, Any] = {}
     for key in allowed_fields:
         if key not in payload:
@@ -604,10 +697,15 @@ def _safe_payload(
 
 
 def _artifact_sections(
-    deliverable_type: DeliverableType, payload: dict[str, Any]
+    deliverable_type: DeliverableType,
+    payload: dict[str, Any],
+    *,
+    business_artifact_type: str,
 ) -> list[ArtifactSection]:
     schema = get_schema(deliverable_type)
     allowed_fields = set(schema.model_fields) if schema is not None else set()
+    if business_artifact_type == _ACCOUNT_INSPECTION_ARTIFACT_TYPE:
+        allowed_fields.update(_ACCOUNT_INSPECTION_FIELDS)
     sections: list[ArtifactSection] = []
     for key, value in payload.items():
         if key not in allowed_fields or key in _NON_SECTION_KEYS or value is None:
@@ -681,17 +779,17 @@ def _evidence_refs(
             evidence_id = int(raw_id)
         except (TypeError, ValueError):
             continue
-        if (
-            not isinstance(kind, str)
-            or not kind.strip()
-            or _is_internal_key(kind)
-        ):
+        if not isinstance(kind, str) or not kind.strip() or _is_internal_key(kind):
             continue
         identity = (kind, evidence_id)
         if identity in seen:
             continue
         seen.add(identity)
-        label = candidate.get("label") or candidate.get("metric") or f"{kind} #{evidence_id}"
+        label = (
+            candidate.get("label")
+            or candidate.get("metric")
+            or f"{kind} #{evidence_id}"
+        )
         safe_label = str(label)
         if _looks_like_internal_confirmation(safe_label):
             safe_label = f"{kind} #{evidence_id}"

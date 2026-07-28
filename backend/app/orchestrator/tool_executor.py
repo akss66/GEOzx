@@ -46,6 +46,9 @@ class DurableToolExecutor:
         account_id: int | None = None,
         agent_code: str = "00-decision",
         invocation_id: int | None = None,
+        skill_run_id: int | None = None,
+        thread_id: int | None = None,
+        turn_id: int | None = None,
         approved: bool = False,
     ) -> ToolExecutionOutcome:
         if task.org_id != user.org_id:
@@ -84,6 +87,14 @@ class DurableToolExecutor:
                 raise ToolIdempotencyConflict(
                     "idempotency key was already used with different arguments"
                 )
+            if (
+                (skill_run_id is not None and row.skill_run_id != skill_run_id)
+                or (thread_id is not None and row.thread_id != thread_id)
+                or (turn_id is not None and row.turn_id != turn_id)
+            ):
+                raise ToolIdempotencyConflict(
+                    "idempotent tool call provenance does not match"
+                )
             if row.status == "success":
                 return ToolExecutionOutcome(
                     status="success",
@@ -97,6 +108,9 @@ class DurableToolExecutor:
                 org_id=task.org_id,
                 task_id=task.id,
                 invocation_id=invocation_id,
+                skill_run_id=skill_run_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
                 module="brain",
                 agent_code=agent_code,
                 tool_code=request.tool_code,

@@ -1,0 +1,665 @@
+"""Contract tests for the bounded one-click account-inspection Skill."""
+
+from types import SimpleNamespace
+
+import pytest
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+
+from app.models import (
+    Account,
+    AgentInvocation,
+    AgentQualityScore,
+    AgentRun,
+    AgentToolCall,
+    BrainTask,
+    ContentItem,
+    ConversationThread,
+    ConversationTurn,
+    Deliverable,
+    SkillRun,
+    StrategyPlan,
+)
+from app.models.enums import (
+    AccountStatus,
+    AgentCode,
+    AgentInvocationStatus,
+    BrainTaskStatus,
+    Platform,
+    UserRole,
+)
+from app.orchestrator.skill_runtime import SkillExecutionResult, SkillRuntime
+from app.orchestrator.skills.account_inspection import (
+    ACCOUNT_INSPECTION_SKILL,
+    AccountInspectionReport,
+)
+from app.orchestrator.tool_executor import DurableToolExecutor
+from app.schemas.conversation import (
+    CreateConversationTurnRequest,
+    TurnExecutionMode,
+    TurnRouteDecision,
+)
+from app.services.turn_execution import execute_conversation_turn
+from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
+
+
+async def _conversation_scope(session, admin, *, key: str):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname=f"account-{key}",
+        status=AccountStatus.ACTIVE,
+        auth={"auth_status": "authorized", "data_sync_status": "ready"},
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title=f"thread-{key}",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=key,
+        user_input="请帮我做一次账号体检",
+    )
+    session.add(turn)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        client_message_id=key,
+        status="claimed",
+        request_payload={"message": turn.user_input},
+    )
+    session.add(run)
+    await session.commit()
+    return account, thread, turn, run
+
+
+class _FakeTools:
+    def __init__(self, *, sufficient: bool) -> None:
+        self.sufficient = sufficient
+        self.calls: list[str] = []
+        sufficient_flag = sufficient
+        calls = self.calls
+
+        class _EmptyParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+        class _DaysParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            days: int = 30
+
+        async def profile(_params: _EmptyParams, context: ToolExecutionContext) -> dict:
+            calls.append("account.profile")
+            return {
+                "account_id": context.account_id,
+                "nickname": "测试账号",
+                "platform": "douyin",
+                "status": "active",
+                "auth_status": "authorized",
+                "data_sync_status": "ready",
+            }
+
+        async def data_context(
+            _params: _DaysParams, context: ToolExecutionContext
+        ) -> dict:
+            calls.append("account.data_context")
+            return {
+                "account_id": context.account_id,
+                "period": {"days": 30, "start": "2026-06-29", "end": "2026-07-28"},
+                "coverage": {
+                    "content_metrics": "available" if sufficient_flag else "missing"
+                },
+                "metrics": (
+                    {
+                        "play": {
+                            "value": 1200,
+                            "evidence_refs": [{"kind": "data_import_batch", "id": 7}],
+                        },
+                        "like_count": {
+                            "value": 86,
+                            "evidence_refs": [{"kind": "data_import_batch", "id": 7}],
+                        },
+                        "comment_count": {
+                            "value": 12,
+                            "evidence_refs": [{"kind": "data_import_batch", "id": 7}],
+                        },
+                    }
+                    if sufficient_flag
+                    else {}
+                ),
+                "sources": (
+                    [{"batch_id": 7, "source_kind": "platform_export"}]
+                    if sufficient_flag
+                    else []
+                ),
+                "content_snapshot_count": 3 if sufficient_flag else 0,
+                "account_snapshot_count": 1 if sufficient_flag else 0,
+            }
+
+        self._executor = DurableToolExecutor(
+            ToolAdapter(
+                [
+                    ToolSpec(
+                        name="account.profile",
+                        handler=profile,
+                        params_model=_EmptyParams,
+                        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+                    ),
+                    ToolSpec(
+                        name="account.data_context",
+                        handler=data_context,
+                        params_model=_DaysParams,
+                        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+                    ),
+                ]
+            )
+        )
+
+    async def execute(self, **kwargs):
+        return await self._executor.execute(**kwargs)
+
+
+class _FakeHarness:
+    def __init__(self) -> None:
+        self.calls: list[AgentCode] = []
+
+    async def execute(self, *args, **kwargs):
+        self.calls.append(kwargs["code"])
+        session = args[0]
+        invocation = AgentInvocation(
+            task_id=kwargs["task"].id,
+            run_id=kwargs["run_id"],
+            skill_run_id=kwargs["skill_run_id"],
+            thread_id=kwargs["thread_id"],
+            turn_id=kwargs["turn_id"],
+            step_key=kwargs["step_key"],
+            attempt=kwargs["attempt"],
+            agent_code=kwargs["code"],
+            agent_name=kwargs["code"].value,
+            status=AgentInvocationStatus.DONE,
+            output_summary=f"{kwargs['code'].value} output",
+            upstream=[{"trace_only_output": {"summary": "output"}}],
+        )
+        session.add(invocation)
+        await session.commit()
+        await session.refresh(invocation)
+        return SimpleNamespace(
+            invocation=invocation,
+            deliverable=None,
+            output={"summary": f"{kwargs['code'].value} output"},
+        )
+
+
+class _PassingCritic:
+    def __init__(self, outcomes: list[bool] | None = None) -> None:
+        self.outcomes = list(outcomes or [True])
+        self.calls = 0
+
+    async def review(self, **_kwargs):
+        passed = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
+        iteration = _kwargs["iteration"]
+        invocation = _kwargs["invocation"]
+        task = _kwargs["task"]
+        session = _kwargs["session"]
+        score = AgentQualityScore(
+            org_id=task.org_id,
+            task_id=task.id,
+            run_id=invocation.run_id,
+            thread_id=invocation.thread_id,
+            turn_id=invocation.turn_id,
+            skill_run_id=invocation.skill_run_id,
+            invocation_id=invocation.id,
+            deliverable_id=None,
+            score=92 if passed else 60,
+            dimensions={"factual_accuracy": 92 if passed else 60},
+            issues=[] if passed else ["建议缺少证据"],
+            suggestions=[] if passed else ["按证据修订建议"],
+            passed=passed,
+            iteration=iteration,
+            evidence_refs=list(_kwargs["evidence_refs"]),
+        )
+        session.add(score)
+        await session.commit()
+        self.calls += 1
+        return SimpleNamespace(
+            passed=passed,
+            score=score.score,
+            issues=score.issues,
+            suggestions=score.suggestions,
+        )
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_reports_missing_data_without_fabricated_metrics(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-missing"
+    )
+    runtime = SkillRuntime(
+        tool_executor=_FakeTools(sufficient=False),
+        harness=_FakeHarness(),
+        critic=_PassingCritic(),
+    )
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+        days=30,
+    )
+
+    report = AccountInspectionReport.model_validate(result.report)
+    assert report.data_sufficiency == "insufficient"
+    assert report.missing_data
+    assert report.key_metrics == []
+    assert "无法" in report.summary
+    assert report.account_id == account.id
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_runs_bounded_graph_and_persists_one_artifact(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-complete"
+    )
+    tools = _FakeTools(sufficient=True)
+    harness = _FakeHarness()
+    runtime = SkillRuntime(
+        tool_executor=tools,
+        harness=harness,
+        critic=_PassingCritic(),
+    )
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+        days=30,
+    )
+
+    assert result.status == "completed"
+    assert result.artifact_type == "account_inspection_report"
+    assert tools.calls == ["account.profile", "account.data_context"]
+    assert harness.calls == [
+        AgentCode.OPERATOR,
+        AgentCode.POSITIONING,
+        AgentCode.CONTENT_DIRECTOR,
+    ]
+    assert await session.scalar(select(func.count(SkillRun.id))) == 1
+    assert await session.scalar(select(func.count(AgentToolCall.id))) == 2
+    assert await session.scalar(select(func.count(AgentInvocation.id))) == 3
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
+    assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
+    persisted = await session.scalar(select(Deliverable))
+    assert persisted is not None
+    content = await session.get(ContentItem, persisted.content_item_id)
+    assert content is not None
+    assert content.account_id == account.id
+    assert persisted.thread_id == thread.id
+    assert persisted.turn_id == turn.id
+    assert persisted.run_id == run.id
+    assert persisted.skill_run_id == result.skill_run_id
+    assert persisted.payload["artifact_type"] == "account_inspection_report"
+    assert persisted.payload["data_sufficiency"] == "sufficient"
+    assert persisted.payload["next_action"]
+    assert persisted.payload["evidence_refs"] == [
+        {"kind": "data_import_batch", "id": 7}
+    ]
+    assert (
+        await session.scalar(
+            select(func.count(AgentQualityScore.id)).where(
+                AgentQualityScore.deliverable_id == persisted.id
+            )
+        )
+        == 1
+    )
+    for model in (AgentToolCall, AgentInvocation, AgentQualityScore):
+        rows = list(await session.scalars(select(model)))
+        assert {row.skill_run_id for row in rows} == {result.skill_run_id}
+        assert {row.thread_id for row in rows} == {thread.id}
+        assert {row.turn_id for row in rows} == {turn.id}
+
+
+def test_account_inspection_definition_freezes_one_explicit_graph() -> None:
+    assert ACCOUNT_INSPECTION_SKILL.code == "account_inspection"
+    assert ACCOUNT_INSPECTION_SKILL.version > 0
+    assert ACCOUNT_INSPECTION_SKILL.tool_codes == (
+        "account.profile",
+        "account.data_context",
+    )
+    assert ACCOUNT_INSPECTION_SKILL.expert_codes == (
+        "06-operator",
+        "01-positioning",
+        "02-content-director",
+    )
+    assert ACCOUNT_INSPECTION_SKILL.artifact_type == "account_inspection_report"
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_critic_retry_budget_blocks_without_artifact(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-critic-blocked"
+    )
+    critic = _PassingCritic([False, False, False])
+    harness = _FakeHarness()
+    runtime = SkillRuntime(
+        tool_executor=_FakeTools(sufficient=True),
+        harness=harness,
+        critic=critic,
+    )
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+        days=30,
+    )
+
+    assert result.status == "blocked"
+    assert result.error_code == "CRITIC_RETRY_EXHAUSTED"
+    assert critic.calls == 3
+    assert harness.calls == [
+        AgentCode.OPERATOR,
+        AgentCode.POSITIONING,
+        AgentCode.CONTENT_DIRECTOR,
+        AgentCode.CONTENT_DIRECTOR,
+        AgentCode.CONTENT_DIRECTOR,
+    ]
+    assert await session.scalar(select(func.count(AgentQualityScore.id))) == 3
+    assert await session.scalar(select(func.count(Deliverable.id))) == 0
+    assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_duplicate_execution_reuses_terminal_skill_run(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-idempotent"
+    )
+    tools = _FakeTools(sufficient=True)
+    harness = _FakeHarness()
+    critic = _PassingCritic()
+    runtime = SkillRuntime(tool_executor=tools, harness=harness, critic=critic)
+
+    first = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+    duplicate = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+
+    assert duplicate == first
+    assert tools.calls == ["account.profile", "account.data_context"]
+    assert len(harness.calls) == 3
+    assert critic.calls == 1
+    assert await session.scalar(select(func.count(SkillRun.id))) == 1
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_concurrent_creator_reuses_unique_winner(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-concurrent-winner"
+    )
+    tools = _FakeTools(sufficient=True)
+    harness = _FakeHarness()
+    critic = _PassingCritic()
+    runtime = SkillRuntime(tool_executor=tools, harness=harness, critic=critic)
+    original_commit = session.commit
+    injected = False
+    account_id = thread.account_id
+
+    async def commit_with_concurrent_winner():
+        nonlocal injected
+        pending = next(
+            (item for item in session.new if isinstance(item, SkillRun)),
+            None,
+        )
+        if pending is None or injected:
+            return await original_commit()
+        injected = True
+        values = {
+            "org_id": pending.org_id,
+            "thread_id": pending.thread_id,
+            "turn_id": pending.turn_id,
+            "run_id": pending.run_id,
+            "task_id": pending.task_id,
+            "idempotency_key": pending.idempotency_key,
+            "skill_code": pending.skill_code,
+            "skill_version": pending.skill_version,
+        }
+        await session.rollback()
+        session.add(
+            SkillRun(
+                **values,
+                status="completed",
+                input_snapshot={"account_id": account_id, "days": 30},
+                output_snapshot={
+                    "status": "completed",
+                    "task_id": values["task_id"],
+                    "artifact_id": 501,
+                    "artifact_type": "account_inspection_report",
+                    "report": {"summary": "winner"},
+                    "response": "并发执行已由唯一 winner 完成",
+                },
+            )
+        )
+        await original_commit()
+        raise IntegrityError("INSERT skill_runs", {}, RuntimeError("unique"))
+
+    monkeypatch.setattr(session, "commit", commit_with_concurrent_winner)
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+
+    assert result.status == "completed"
+    assert result.artifact_id == 501
+    assert result.report == {"summary": "winner"}
+    assert tools.calls == []
+    assert harness.calls == []
+    assert critic.calls == 0
+    winners = list(await session.scalars(select(SkillRun)))
+    assert len(winners) == 1
+    assert winners[0].skill_version == ACCOUNT_INSPECTION_SKILL.version
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_blocks_tool_result_from_another_account(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-scope-mismatch"
+    )
+    tools = _FakeTools(sufficient=True)
+    original_execute = tools.execute
+
+    async def execute_with_wrong_scope(**kwargs):
+        outcome = await original_execute(**kwargs)
+        if kwargs["request"].tool_code == "account.data_context":
+            return SimpleNamespace(
+                status=outcome.status,
+                tool_call=outcome.tool_call,
+                result={**outcome.result, "account_id": thread.account_id + 999},
+            )
+        return outcome
+
+    tools.execute = execute_with_wrong_scope
+    harness = _FakeHarness()
+    result = await SkillRuntime(
+        tool_executor=tools,
+        harness=harness,
+        critic=_PassingCritic(),
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+
+    assert result.status == "blocked"
+    assert result.error_code == "TOOL_RESULT_SCOPE_MISMATCH"
+    assert harness.calls == []
+    assert await session.scalar(select(func.count(Deliverable.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_and_natural_language_requests_use_same_skill_executor(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    contexts = [
+        await _conversation_scope(session, admin, key="inspection-explicit"),
+        await _conversation_scope(session, admin, key="inspection-natural"),
+    ]
+    calls: list[dict] = []
+
+    async def fake_execute(
+        runtime_session,
+        *,
+        user,
+        thread,
+        turn,
+        run,
+        skill_code,
+        days,
+    ):
+        content = ContentItem(
+            account_id=thread.account_id,
+            created_by_id=user.id,
+            title="账号体检",
+        )
+        runtime_session.add(content)
+        await runtime_session.flush()
+        task = BrainTask(
+            org_id=user.org_id,
+            created_by_id=user.id,
+            content_item_id=content.id,
+            title="账号体检",
+            status=BrainTaskStatus.COMPLETED,
+            runtime_mode="skill",
+        )
+        runtime_session.add(task)
+        await runtime_session.flush()
+        run.task_id = task.id
+        await runtime_session.commit()
+        calls.append(
+            {
+                "skill_code": skill_code,
+                "days": days,
+                "account_id": thread.account_id,
+            }
+        )
+        return SkillExecutionResult(
+            status="completed",
+            skill_run_id=100 + len(calls),
+            task_id=task.id,
+            artifact_id=200 + len(calls),
+            artifact_type="account_inspection_report",
+            report={"summary": "完成"},
+            response="账号体检已完成",
+        )
+
+    async def classify(*_args, **_kwargs):
+        return TurnRouteDecision(
+            mode=TurnExecutionMode.SKILL,
+            intent="account_inspection",
+            confidence=0.99,
+            reason="natural language account inspection",
+            skill_code="account_inspection",
+            requires_account_context=True,
+            requires_operation_task=True,
+        )
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", fake_execute
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn", classify
+    )
+    explicit = await execute_conversation_turn(
+        session,
+        admin,
+        contexts[0][2],
+        contexts[0][3],
+        CreateConversationTurnRequest(
+            client_message_id="inspection-explicit",
+            message="请帮我做一次账号体检",
+            requested_skill_code="account_inspection",
+            execution_preference="FORMAL_TASK",
+        ),
+    )
+    natural = await execute_conversation_turn(
+        session,
+        admin,
+        contexts[1][2],
+        contexts[1][3],
+        CreateConversationTurnRequest(
+            client_message_id="inspection-natural",
+            message="请帮我做一次账号体检",
+        ),
+    )
+
+    assert explicit.mode is TurnExecutionMode.SKILL
+    assert natural.mode is TurnExecutionMode.SKILL
+    assert [item["skill_code"] for item in calls] == [
+        "account_inspection",
+        "account_inspection",
+    ]
+    assert [item["days"] for item in calls] == [30, 30]
+    assert {
+        explicit.projections[0]["artifact_type"],
+        natural.projections[0]["artifact_type"],
+    } == {"account_inspection_report"}

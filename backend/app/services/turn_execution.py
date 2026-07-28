@@ -26,6 +26,7 @@ from app.orchestrator.brain_intelligence import (
 )
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
+from app.orchestrator.skill_runtime import skill_runtime
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
@@ -100,15 +101,11 @@ async def execute_conversation_turn(
             error_code="INTELLIGENCE_UNAVAILABLE",
         )
 
-    if (
-        request.execution_preference == "DISCUSS_ONLY"
-        and decision.mode
-        in {
-            TurnExecutionMode.SKILL,
-            TurnExecutionMode.TASK,
-            TurnExecutionMode.ACTION,
-        }
-    ):
+    if request.execution_preference == "DISCUSS_ONLY" and decision.mode in {
+        TurnExecutionMode.SKILL,
+        TurnExecutionMode.TASK,
+        TurnExecutionMode.ACTION,
+    }:
         return await _deliver_task_free(
             session,
             turn=turn,
@@ -117,10 +114,10 @@ async def execute_conversation_turn(
             decision=decision,
             response="已按“仅讨论”处理：本轮未执行能力、未创建正式任务，也未触发外部动作。你确认后我再继续。",
         )
-    if (
-        request.execution_preference == "FORMAL_TASK"
-        and decision.mode is not TurnExecutionMode.CLARIFY
-    ):
+    if request.execution_preference == "FORMAL_TASK" and decision.mode not in {
+        TurnExecutionMode.CLARIFY,
+        TurnExecutionMode.SKILL,
+    }:
         decision = TurnRouteDecision(
             mode=TurnExecutionMode.TASK,
             intent=decision.intent,
@@ -170,6 +167,15 @@ async def execute_conversation_turn(
             decision=decision,
         )
     if decision.mode is TurnExecutionMode.SKILL:
+        if decision.skill_code == "account_inspection":
+            return await _execute_composite_skill(
+                session,
+                user=user,
+                thread=thread,
+                turn=turn,
+                run=run,
+                decision=decision,
+            )
         return await _block_unavailable_skill(
             session,
             thread=thread,
@@ -185,6 +191,86 @@ async def execute_conversation_turn(
         run=run,
         decision=decision,
     )
+
+
+async def _execute_composite_skill(
+    session: AsyncSession,
+    *,
+    user: User,
+    thread: ConversationThread,
+    turn: ConversationTurn,
+    run: AgentRun,
+    decision: TurnRouteDecision,
+) -> TurnExecutionResult:
+    executed = await skill_runtime.execute(
+        session,
+        user=user,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code=decision.skill_code or "",
+        days=30,
+    )
+    projections: list[dict[str, Any]] = []
+    if executed.artifact_id is not None:
+        projections.append(
+            {
+                "type": "artifact",
+                "artifact_id": executed.artifact_id,
+                "artifact_type": executed.artifact_type,
+                "skill_run_id": executed.skill_run_id,
+                "account_id": thread.account_id,
+                "report": executed.report,
+            }
+        )
+    elif executed.error_code is not None:
+        projections.append(
+            {
+                "type": "execution_blocked",
+                "artifact_type": executed.artifact_type,
+                "skill_run_id": executed.skill_run_id,
+                "account_id": thread.account_id,
+                "code": executed.error_code,
+            }
+        )
+    result = TurnExecutionResult(
+        mode=TurnExecutionMode.SKILL,
+        status=executed.status,
+        response=executed.response,
+        task_id=executed.task_id,
+        projections=projections,
+        error_code=executed.error_code,
+    )
+    task = (
+        await session.get(BrainTask, executed.task_id)
+        if executed.task_id is not None
+        else None
+    )
+    if task is None:
+        raise RuntimeError("composite Skill did not persist its compatibility task")
+    task_status = (
+        BrainTaskStatus.COMPLETED
+        if executed.status == "completed"
+        else (
+            BrainTaskStatus.FAILED
+            if executed.status in {"blocked", "failed", "stopped"}
+            else BrainTaskStatus.RUNNING
+        )
+    )
+    await runtime_graph.deliver_operation_turn_state(
+        session,
+        task=task,
+        turn=turn,
+        run=run,
+        account_id=thread.account_id,
+        project_id=thread.project_id,
+        response=executed.response,
+        result_payload=result.model_dump(mode="json"),
+        run_status=executed.status,
+        task_status=task_status,
+        error_code=executed.error_code,
+    )
+    return result
 
 
 def _require_owned_request(
@@ -423,11 +509,7 @@ async def _close_query_failure(
         persisted_turn = await session.get(ConversationTurn, turn_id)
         persisted_run = await session.get(AgentRun, run_id)
         persisted_skill_run = await session.get(SkillRun, skill_run_id)
-    if (
-        persisted_turn is None
-        or persisted_run is None
-        or persisted_skill_run is None
-    ):
+    if persisted_turn is None or persisted_run is None or persisted_skill_run is None:
         raise RuntimeError("query execution ownership disappeared")
     persisted_skill_run.status = "failed"
     persisted_skill_run.output_snapshot = {
