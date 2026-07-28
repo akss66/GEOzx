@@ -16,7 +16,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -44,7 +44,8 @@ import { OperationalState } from "../components/ui";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import { DecisionRequest } from "../components/brain/DecisionRequest";
 import { TurnStream } from "../components/brain/TurnStream";
-import { businessArtifactTitle, type ArtifactAction } from "../components/brain/ArtifactCard";
+import { ArtifactCard, businessArtifactTitle, type ArtifactAction } from "../components/brain/ArtifactCard";
+import { ArtifactCenter } from "../components/brain/ArtifactCenter";
 import {
   useEventStream,
   type DyEvent,
@@ -55,6 +56,7 @@ import {
   clearActiveConversationThreadId,
   getActiveConversationThreadId,
   getActiveBrainTaskId,
+  setActiveConversationThreadId as persistActiveConversationThreadId,
   setActiveBrainTaskId,
 } from "../stores/brainConversation";
 import { useAuth } from "../stores/auth";
@@ -96,6 +98,12 @@ interface PendingTurn {
   showUser: boolean;
 }
 
+interface SourceReturnTarget {
+  accountId: number;
+  threadId: number;
+  turnId: number;
+}
+
 type ConversationItem =
   | { kind: "user"; id: string; content: string }
   | { kind: "agent"; id: string; message: LiveRuntimeMessage }
@@ -122,6 +130,10 @@ export default function BrainHome() {
   const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
   const [artifactSourceOverrides, setArtifactSourceOverrides] = useState<Record<number, Artifact>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<"conversation" | "results">("conversation");
+  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+  const [sourceReturnTarget, setSourceReturnTarget] = useState<SourceReturnTarget | null>(null);
+  const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
   const isAdmin = useAuth((state) => state.user?.role === "admin");
   const pendingClientMessageId = useRef<string | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
@@ -203,6 +215,10 @@ export default function BrainHome() {
     effectiveAccount &&
     (effectiveAccount.auth_status === "authorized" || effectiveAccount.auth_status === "manual"),
   );
+  const selectCenterArtifact = useCallback((artifact: Artifact | null) => {
+    setSourceReturnError(null);
+    setSelectedArtifact(artifact && artifact.account_id === effectiveAccount?.id ? artifact : null);
+  }, [effectiveAccount?.id]);
 
   useEffect(() => {
     setActiveConversationThreadId(
@@ -210,6 +226,9 @@ export default function BrainHome() {
     );
     setLiveMessages([]);
     setPendingTurn(null);
+    setSelectedArtifact(null);
+    setSourceReturnTarget(null);
+    setSourceReturnError(null);
   }, [effectiveAccount?.id]);
 
   const conversationTurnMutation = useMutation({
@@ -396,6 +415,7 @@ export default function BrainHome() {
       }
       setArtifactRevisionChains((current) => updateExistingArtifactChain(current, accepted));
       setArtifactRefreshKey((value) => value + 1);
+      void qc.invalidateQueries({ queryKey: ["account-artifacts", input.sourceArtifact.account_id] });
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
       }
@@ -424,6 +444,7 @@ export default function BrainHome() {
       setArtifactRevisionChains((current) => appendArtifactRevision(current, input.sourceArtifact, revision));
       setArtifactSourceOverrides((current) => supersedeRootArtifact(current, input.sourceArtifact));
       setArtifactRefreshKey((value) => value + 1);
+      void qc.invalidateQueries({ queryKey: ["account-artifacts", input.sourceArtifact.account_id] });
       if (activeConversationThreadId != null) {
         void qc.invalidateQueries({ queryKey: ["brain-conversation", activeConversationThreadId] });
       }
@@ -556,6 +577,37 @@ export default function BrainHome() {
   const conversationError = conversationQuery.isError
     ? presentApiError(conversationQuery.error, "Conversation history is temporarily unavailable.")
     : null;
+
+  useEffect(() => {
+    if (!sourceReturnTarget) return;
+    if (conversationQuery.isError) {
+      setSourceReturnError("The source conversation could not be loaded. Retry from the result center.");
+      setSourceReturnTarget(null);
+      return;
+    }
+    const source = conversationQuery.data;
+    if (!source || source.id !== sourceReturnTarget.threadId || source.account_id !== sourceReturnTarget.accountId) return;
+    if (!source.turns.some((turn) => turn.id === sourceReturnTarget.turnId)) {
+      setSourceReturnError("The source turn is unavailable. Retry from the result center.");
+      setSourceReturnTarget(null);
+      return;
+    }
+    setWorkspaceMode("conversation");
+  }, [conversationQuery.data, conversationQuery.isError, sourceReturnTarget]);
+
+  useEffect(() => {
+    if (
+      workspaceMode !== "conversation"
+      || !sourceReturnTarget
+      || activeConversation?.id !== sourceReturnTarget.threadId
+    ) return;
+    const node = document.querySelector<HTMLElement>(`[data-turn-id="${sourceReturnTarget.turnId}"]`);
+    if (!node) return;
+    node.setAttribute("tabindex", "-1");
+    node.scrollIntoView({ block: "center" });
+    node.focus({ preventScroll: true });
+    setSourceReturnTarget(null);
+  }, [activeConversation, sourceReturnTarget, workspaceMode]);
   const isGenerating =
     messageMutation.isPending
     || regenerateMutation.isPending
@@ -660,6 +712,27 @@ export default function BrainHome() {
     setApprovalComment("");
     setGoal("");
     setDetailsOpen(false);
+    setSourceReturnTarget(null);
+    setSourceReturnError(null);
+  };
+
+  const returnToArtifactSource = () => {
+    if (
+      !selectedArtifact
+      || !effectiveAccount
+      || selectedArtifact.account_id !== effectiveAccount.id
+      || selectedArtifact.thread_id == null
+      || selectedArtifact.turn_id == null
+    ) return;
+    setSourceReturnError(null);
+    setSourceReturnTarget({
+      accountId: effectiveAccount.id,
+      threadId: selectedArtifact.thread_id,
+      turnId: selectedArtifact.turn_id,
+    });
+    persistActiveConversationThreadId(effectiveAccount.id, selectedArtifact.thread_id);
+    setActiveConversationThreadId(selectedArtifact.thread_id);
+    if (conversationQuery.isError) void conversationQuery.refetch();
   };
 
   const hasConversation = Boolean(activeTask || activeConversationThreadId || pendingTurn);
@@ -703,7 +776,7 @@ export default function BrainHome() {
   };
 
   return (
-    <div className={`tz-brain-page${hasConversation ? " has-conversation" : " is-empty"}`}>
+    <div className={`tz-brain-page${hasConversation ? " has-conversation" : " is-empty"}${workspaceMode === "results" ? " is-results" : ""}`}>
       {hasConversation ? <header className="tz-brain-toolbar">
         <div className="tz-brain-identity">
           <AgentAvatar code="00-decision" className="tz-brain-wordmark" />
@@ -736,6 +809,8 @@ export default function BrainHome() {
           <ContextStrip
             account={effectiveAccount}
             loading={contextQuery.isLoading}
+            workspaceMode={workspaceMode}
+            onWorkspaceModeChange={setWorkspaceMode}
           />
 
           <section
@@ -744,7 +819,41 @@ export default function BrainHome() {
             aria-label="运营大脑对话流"
             onScroll={handleConversationScroll}
           >
-            {visibleTasksError ? (
+            {workspaceMode === "results" ? (
+              <div className="tz-artifact-center-panel">
+                <ArtifactCenter
+                  accountId={effectiveAccount?.id ?? null}
+                  onSelect={selectCenterArtifact}
+                />
+                {sourceReturnError ? (
+                  <div className="tz-artifact-center__error" role="alert">
+                    <p>{sourceReturnError}</p>
+                    <Button onClick={returnToArtifactSource}>Retry source conversation</Button>
+                  </div>
+                ) : null}
+                {selectedArtifact && selectedArtifact.account_id === effectiveAccount?.id ? (
+                  <section className="tz-artifact-center__detail" aria-label="Artifact detail">
+                    <ArtifactCard
+                      artifact={selectedArtifact}
+                      revisionPending={
+                        formalArtifactRevisionMutation.isPending
+                        && formalArtifactRevisionMutation.variables?.sourceArtifact.id === selectedArtifact.id
+                      }
+                      onAction={(action) => handleArtifactAction(
+                        action,
+                        formalArtifactAcceptMutation.mutate,
+                        formalArtifactRevisionMutation.mutate,
+                      )}
+                    />
+                    {selectedArtifact.thread_id != null && selectedArtifact.turn_id != null ? (
+                      <Button onClick={returnToArtifactSource} aria-label="Return to source conversation">
+                        Return to source conversation
+                      </Button>
+                    ) : null}
+                  </section>
+                ) : null}
+              </div>
+            ) : visibleTasksError ? (
               <OperationalState
                 kind="error"
                 title="任务记录加载失败"
@@ -868,7 +977,7 @@ export default function BrainHome() {
             )}
           </section>
 
-          <BrainComposer
+          {workspaceMode === "conversation" ? <BrainComposer
             value={goal}
             disabled={
               !accountReady
@@ -886,7 +995,7 @@ export default function BrainHome() {
             }
             onSubmit={startWorkflow}
             onStop={stopGeneration}
-          />
+          /> : null}
         </div>}
       </main>
 
@@ -918,9 +1027,13 @@ export default function BrainHome() {
 function ContextStrip({
   account,
   loading,
+  workspaceMode,
+  onWorkspaceModeChange,
 }: {
   account: Account | null;
   loading: boolean;
+  workspaceMode: "conversation" | "results";
+  onWorkspaceModeChange: (mode: "conversation" | "results") => void;
 }) {
   return (
     <section className="dy-brain-context-strip">
@@ -933,6 +1046,24 @@ function ContextStrip({
         )}
       </div>
       <div className="dy-brain-context-actions">
+        <div className="tz-brain-mode-switch" aria-label="Brain workspace mode">
+          <Button
+            type={workspaceMode === "conversation" ? "primary" : "text"}
+            size="small"
+            onClick={() => onWorkspaceModeChange("conversation")}
+            aria-label="Conversation view"
+          >
+            Conversation
+          </Button>
+          <Button
+            type={workspaceMode === "results" ? "primary" : "text"}
+            size="small"
+            onClick={() => onWorkspaceModeChange("results")}
+            aria-label="Results view"
+          >
+            Results
+          </Button>
+        </div>
         <Tag style={{ marginInlineEnd: 0 }}>抖音</Tag>
         {account && <Tag style={{ marginInlineEnd: 0 }}>{syncLabel(account.data_sync_status)}</Tag>}
       </div>

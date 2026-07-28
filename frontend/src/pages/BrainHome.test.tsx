@@ -14,6 +14,7 @@ import {
   acceptArtifact,
   getConversation,
   getBrainTaskRuntime,
+  listArtifacts,
   listBrainTasks,
   rejectDeliverableAcceptance,
   reviseArtifact,
@@ -422,6 +423,10 @@ vi.mock("../api/brain", () => ({
   getArtifact: vi.fn(async () => mocks.artifact),
   getConversation: vi.fn(async () => mocks.conversationThread),
   getBrainTaskRuntime: vi.fn(async () => mocks.runtime),
+  listArtifacts: vi.fn(async () => ({
+    data: [mocks.artifact],
+    pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
+  })),
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
   reviseArtifact: vi.fn(async () => ({ ...mocks.artifact, status: "revision_requested", version: 2 })),
@@ -523,6 +528,47 @@ describe("BrainHome", () => {
     expect(sourceTurn).toHaveTextContent("账号体检报告");
     expect(greetingTurn).not.toHaveTextContent("账号体检报告");
     expect(screen.queryByText(mocks.acceptance.title)).not.toBeInTheDocument();
+  });
+
+  it("opens the account Artifact center with the shared card and returns to its exact source Turn", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "Results view" }));
+    expect(await screen.findByText(mocks.artifact.title)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: `Open ${mocks.artifact.title}` }));
+    await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Return to source conversation" }));
+
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith(81));
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    expect(document.activeElement).toHaveAttribute("data-turn-id", "101");
+    expect(listArtifacts).toHaveBeenCalledWith(expect.objectContaining({ accountId: 3 }));
+  });
+
+  it("keeps the user in results and retries the exact source conversation when it cannot load", async () => {
+    vi.mocked(getConversation).mockRejectedValueOnce(new Error("network"));
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "Results view" }));
+    await screen.findByText(mocks.artifact.title);
+    fireEvent.click(screen.getByRole("button", { name: `Open ${mocks.artifact.title}` }));
+    await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Return to source conversation" }));
+
+    expect(await screen.findByText("The source conversation could not be loaded. Retry from the result center.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Artifact center")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry source conversation" }));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId("conversation-turn-101")).toBeInTheDocument();
   });
 
   it("runs Artifact actions against the exact source Artifact and never the legacy task acceptance", async () => {
