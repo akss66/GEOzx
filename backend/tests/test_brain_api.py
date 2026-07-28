@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.llm.adapters import CompletionResult
 from app.models import AgentRun, BrainTask, ContentItem, Event, GateApproval
 from app.models.enums import GateStatus, GateType, UserRole
+from app.orchestrator.brain_intelligence import IntelligenceUnavailable
 from app.schemas.brain import (
     DecisionChoice,
     DecisionRequest,
@@ -949,6 +950,126 @@ async def test_brain_runtime_cannot_replace_required_expert_with_direct_response
     assert not any(
         event["type"] == "brain.runtime.message_done"
         and event["payload"].get("content") == "The main agent should not publish this analysis."
+        for event in runtime["timeline"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_brain_runtime_recovers_invalid_controller_decision_with_dynamic_plan(
+    client,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    project_id, account_id = await _project_bound_douyin_account(client, headers)
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.98,
+            reason="Account positioning requires the positioning expert.",
+            suggested_expert_codes=["01-positioning"],
+            requires_account_context=True,
+        )
+
+    decisions = iter(
+        [
+            IntelligenceUnavailable("运营大脑暂时无法决定可靠的下一步"),
+            RuntimeNextStep(
+                action="finish",
+                rationale="The expert result is now available.",
+                handoff_message="The main agent may now summarize the expert result.",
+            ),
+        ]
+    )
+
+    async def fake_decide_next(*args, **kwargs):
+        decision = next(decisions)
+        if isinstance(decision, Exception):
+            raise decision
+        return decision
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "Run an account positioning diagnosis.",
+            "project_id": project_id,
+            "account_id": account_id,
+            "platform": "douyin",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    runtime = response.json()
+    assert [row["agent_code"] for row in runtime["invocations"]] == ["01-positioning"]
+    assert any(
+        event["type"] == "brain.runtime.decision_recovered"
+        and event["payload"]["expert_codes"] == ["01-positioning"]
+        for event in runtime["timeline"]
+    )
+    assert not any(
+        event["type"] == "brain.runtime.message_error"
+        for event in runtime["timeline"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_brain_runtime_never_completes_an_unrecoverable_controller_error(
+    client,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="analysis",
+            confidence=0.93,
+            reason="This request does not require a specialist.",
+            suggested_expert_codes=[],
+            requires_account_context=False,
+        )
+
+    async def fake_decide_next(*args, **kwargs):
+        raise IntelligenceUnavailable("运营大脑暂时无法决定可靠的下一步")
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={"message": "Tell me the next reliable step.", "platform": "douyin"},
+    )
+
+    assert response.status_code == 201, response.text
+    runtime = response.json()
+    assert runtime["status"] == "failed"
+    assert any(
+        event["type"] == "brain.runtime.message_error"
+        and event["payload"]["retryable"] is True
+        for event in runtime["timeline"]
+    )
+    assert not any(
+        event["type"] == "brain.runtime.completed"
         for event in runtime["timeline"]
     )
 

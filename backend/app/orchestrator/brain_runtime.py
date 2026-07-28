@@ -68,7 +68,12 @@ from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLim
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.prompts import prompt_registry
-from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeToolCall
+from app.schemas.brain import (
+    DecisionRequest,
+    IntentDecision,
+    RuntimeNextStep,
+    RuntimeToolCall,
+)
 from app.services.ai_coo_evidence import build_account_situation
 from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.runtime_memory import runtime_memory_service
@@ -1523,6 +1528,15 @@ class BrainRuntimeGraph:
             if user is None or user.org_id != task.org_id:
                 raise PermissionError("brain task creator is unavailable")
             capabilities = await runtime_capabilities(session, user)
+            required_expert_codes = _required_expert_codes(state, task)
+            successful_expert_codes = _successful_expert_codes(
+                state.get("observations", [])
+            )
+            available_expert_codes = {
+                str(item["code"])
+                for item in capabilities
+                if item.get("kind") == "expert"
+            }
             try:
                 step = await brain_intelligence.decide_next(
                     session,
@@ -1533,32 +1547,64 @@ class BrainRuntimeGraph:
                     state.get("round_index", 1),
                 )
             except IntelligenceUnavailable as exc:
-                await self._record_event(
-                    session,
-                    task,
-                    "brain.runtime.message_error",
-                    {
-                        "agent_code": AgentCode.DECISION.value,
-                        "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
-                        "message": str(exc),
-                        "error": str(exc),
-                    },
-                )
-                return {
-                    **state,
-                    "status": "finish",
-                    "kernel_route": MainKernelRoute.FINISH.value,
-                }
+                pending_expert_codes = [
+                    code
+                    for code in required_expert_codes
+                    if code in available_expert_codes
+                    and code not in successful_expert_codes
+                ][:3]
+                if pending_expert_codes:
+                    step = RuntimeNextStep(
+                        action="dispatch_experts",
+                        expert_codes=[
+                            AgentCode(code) for code in pending_expert_codes
+                        ],
+                        rationale=(
+                            "本轮结构化控制决策未通过校验，"
+                            "按运营大脑已经生成的动态任务计划继续执行必要专家步骤。"
+                        ),
+                        handoff_message=(
+                            "我按刚刚制定的计划继续推进，"
+                            "先把这一步交给对应专家处理。"
+                        ),
+                        purpose="恢复动态计划中的必要专家步骤",
+                        evidence_refs=["dynamic-plan-recovery"],
+                    )
+                    await self._record_event(
+                        session,
+                        task,
+                        "brain.runtime.decision_recovered",
+                        {
+                            "message": (
+                                "结构化决策已安全恢复，"
+                                "继续执行动态计划中的必要专家步骤。"
+                            ),
+                            "reason": str(exc),
+                            "expert_codes": pending_expert_codes,
+                        },
+                    )
+                else:
+                    task.status = BrainTaskStatus.FAILED
+                    task.current_focus = "运营大脑决策未通过校验，请重试本轮任务"
+                    await self._record_event(
+                        session,
+                        task,
+                        "brain.runtime.message_error",
+                        {
+                            "agent_code": AgentCode.DECISION.value,
+                            "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
+                            "message": str(exc),
+                            "error": str(exc),
+                            "retryable": True,
+                        },
+                    )
+                    return {
+                        **state,
+                        "status": "waiting_user",
+                        "kernel_route": MainKernelRoute.WAITING.value,
+                        "termination_reason": "controller_decision_invalid",
+                    }
 
-            required_expert_codes = _required_expert_codes(state, task)
-            successful_expert_codes = _successful_expert_codes(
-                state.get("observations", [])
-            )
-            available_expert_codes = {
-                str(item["code"])
-                for item in capabilities
-                if item.get("kind") == "expert"
-            }
             if (
                 step.action in {"respond", "finish"}
                 and required_expert_codes

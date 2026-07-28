@@ -152,30 +152,61 @@ class BrainIntelligence:
                     )
                 },
             )
+            messages = [
+                {
+                    "role": "system",
+                    "content": with_operations_brain_public_identity(prompt.content),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"目标：{goal}\n"
+                        f"当前轮次：{round_index}\n"
+                        f"专家观察：{observations}"
+                    ),
+                },
+            ]
             result, _cost = await _structured_chat(
                 session,
                 org_id,
                 prompt,
-                [
-                    {
-                        "role": "system",
-                        "content": with_operations_brain_public_identity(prompt.content),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"目标：{goal}\n"
-                            f"当前轮次：{round_index}\n"
-                            f"专家观察：{observations}"
-                        ),
-                    },
-                ],
+                messages,
             )
-            step = RuntimeNextStep.model_validate(extract_json(result.content))
-        except (ValidationError, ValueError, TypeError, KeyError) as exc:
-            raise IntelligenceUnavailable("运营大脑暂时无法决定可靠的下一步") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
             raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
+
+        try:
+            step = RuntimeNextStep.model_validate(extract_json(result.content))
+        except (ValidationError, ValueError, TypeError, KeyError) as first_exc:
+            repair_instruction = (
+                "上一次输出未通过 runtime-next-step/v1 结构化校验："
+                f"{str(first_exc)[:600]}。"
+                "请严格遵循系统消息中的字段、枚举和条件约束，"
+                "仅输出修正后的唯一 JSON 对象，不要解释，不要使用 Markdown。"
+            )
+            try:
+                repaired_result, _cost = await _structured_chat(
+                    session,
+                    org_id,
+                    prompt,
+                    [
+                        *messages,
+                        {
+                            "role": "assistant",
+                            "content": str(result.content)[:8000],
+                        },
+                        {"role": "user", "content": repair_instruction},
+                    ],
+                )
+                step = RuntimeNextStep.model_validate(
+                    extract_json(repaired_result.content)
+                )
+            except (ValidationError, ValueError, TypeError, KeyError) as exc:
+                raise IntelligenceUnavailable(
+                    "运营大脑暂时无法决定可靠的下一步"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
+                raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
 
         filtered_experts = [
             code for code in step.expert_codes if code.value in allowed_experts

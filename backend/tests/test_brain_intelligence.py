@@ -157,3 +157,41 @@ async def test_next_step_can_request_scoped_tool_calls(monkeypatch):
     assert system_prompts[0].startswith("# 同舟行主 Agent：受控 ReAct 下一步")
     assert "面向用户时统一使用“运营大脑”" in system_prompts[0]
     assert "account.metrics_summary" in system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_next_step_repairs_one_invalid_structured_response(monkeypatch):
+    calls: list[list[dict]] = []
+    payload = {
+        "action": "dispatch_experts",
+        "expert_codes": ["01-positioning"],
+        "tool_calls": [],
+        "rationale": "账号定位需要交给定位专家。",
+        "handoff_message": "我先请账号定位专家完成诊断。",
+        "decision_request": None,
+        "purpose": "完成账号定位诊断",
+        "evidence_refs": ["selected-account"],
+    }
+
+    async def fake_chat(_self, _session, _org_id, _agent_code, messages):
+        calls.append(messages)
+        content = "not-json" if len(calls) == 1 else json.dumps(payload)
+        return CompletionResult(content, "test-model", 4, 8, 12), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+
+    step = await BrainIntelligence().decide_next(
+        None,
+        1,
+        "完成账号定位诊断",
+        [],
+        ["01-positioning"],
+        1,
+    )
+
+    assert step.action == "dispatch_experts"
+    assert [code.value for code in step.expert_codes] == ["01-positioning"]
+    assert len(calls) == 2
+    assert calls[1][-2]["role"] == "assistant"
+    assert calls[1][-2]["content"] == "not-json"
+    assert "仅输出修正后的唯一 JSON 对象" in calls[1][-1]["content"]

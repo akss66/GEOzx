@@ -1305,6 +1305,8 @@ function ExecutionDetails({
 }
 
 function ModelCallAudit({ runtime }: { runtime: BrainRuntime }) {
+  const isSuccessfulCall = (status: string) =>
+    ["ok", "success"].includes(status.trim().toLowerCase());
   const promptContracts = [
     runtime.strategy?.prompt_id
       ? {
@@ -1352,26 +1354,29 @@ function ModelCallAudit({ runtime }: { runtime: BrainRuntime }) {
 
       {(runtime.llm_calls ?? []).length > 0 ? (
         <div className="tz-model-audit__calls">
-          {(runtime.llm_calls ?? []).map((call) => (
-            <article key={call.id}>
-              <div className="tz-model-audit__call-head">
-                <div>
-                  <strong>{call.agent_code ?? "runtime"} · {call.model}</strong>
-                  <span>{call.provider}</span>
+          {(runtime.llm_calls ?? []).map((call) => {
+            const isSuccessful = isSuccessfulCall(call.status);
+            return (
+              <article key={call.id}>
+                <div className="tz-model-audit__call-head">
+                  <div>
+                    <strong>{call.agent_code ?? "runtime"} · {call.model}</strong>
+                    <span>{call.provider}</span>
+                  </div>
+                  <Tag color={isSuccessful ? "success" : "error"}>
+                    {isSuccessful ? "成功" : "异常"}
+                  </Tag>
                 </div>
-                <Tag color={call.status === "success" ? "success" : "error"}>
-                  {call.status === "success" ? "成功" : "异常"}
-                </Tag>
-              </div>
-              <p>{call.prompt_id ?? "未记录 Prompt"} · {call.prompt_version ?? "未标记版本"}</p>
-              <div className="tz-model-audit__metrics">
-                <span>{call.total_tokens} Token</span>
-                <span>${Number(call.cost_usd).toFixed(4)}</span>
-                <span>{call.latency_ms} ms</span>
-              </div>
-              {call.error ? <div className="tz-model-audit__error">{call.error}</div> : null}
-            </article>
-          ))}
+                <p>{call.prompt_id ?? "未记录 Prompt"} · {call.prompt_version ?? "未标记版本"}</p>
+                <div className="tz-model-audit__metrics">
+                  <span>{call.total_tokens} Token</span>
+                  <span>${Number(call.cost_usd).toFixed(4)}</span>
+                  <span>{call.latency_ms} ms</span>
+                </div>
+                {call.error ? <div className="tz-model-audit__error">{call.error}</div> : null}
+              </article>
+            );
+          })}
         </div>
       ) : (
         <p className="tz-model-audit__empty">本任务暂未记录模型调用。</p>

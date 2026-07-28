@@ -1281,6 +1281,26 @@ describe("BrainHome", () => {
           error: "上游超时",
           created_at: "2026-07-27T08:00:00Z",
         },
+        {
+          id: 52,
+          invocation_id: null,
+          trace_id: "trace-52",
+          agent_code: "00-decision",
+          prompt_id: "main-agent.acknowledgement",
+          prompt_version: "1.0.0",
+          prompt_hash: "acknowledgement-hash",
+          prompt_schema_version: null,
+          provider: "deepseek",
+          model: "deepseek-v4-pro",
+          prompt_tokens: 42,
+          completion_tokens: 20,
+          total_tokens: 62,
+          cost_usd: 0,
+          latency_ms: 4123,
+          status: "ok",
+          error: null,
+          created_at: "2026-07-27T08:01:00Z",
+        },
       ],
     });
     localStorage.setItem(
@@ -1303,6 +1323,7 @@ describe("BrainHome", () => {
     expect(screen.getByText("200 Token")).toBeInTheDocument();
     expect(screen.getByText("$0.0120")).toBeInTheDocument();
     expect(screen.getByText("上游超时")).toBeInTheDocument();
+    expect(screen.getByText("成功")).toBeInTheDocument();
 
     cleanup();
     useAuth.setState({
