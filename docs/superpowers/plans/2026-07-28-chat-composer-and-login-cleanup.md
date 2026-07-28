@@ -303,3 +303,14 @@ Expected:
 - [x] Progressively publish clarification, direct-response, and runtime follow-up copy while retaining the durable completion event.
 - [x] Remove the visible composer placeholder, add an accessible input name, and reduce the ordinary composer radius to 18px.
 - [ ] Run complete frontend and affected backend suites, build the production bundle, deploy, and verify health.
+
+### Task 5: Slim and vertically center the composer
+
+**Files:**
+- Modify: `frontend/src/components/brain/BrainComposer.test.tsx`
+- Modify: `frontend/src/styles/brain-v2.css`
+
+- [x] Add a failing stylesheet contract test for a 56px message composer, centered content, and a centered send/stop control.
+- [x] Change only message mode: set `min-height: 56px`, center the grid content, remove textarea vertical padding, and position the action at `top: 50%` with `translateY(-50%)`.
+- [ ] Run focused composer tests and the complete frontend test/build suite.
+- [ ] Verify single-line and multiline behavior in a real browser, then deploy the exact commit and recheck production health.

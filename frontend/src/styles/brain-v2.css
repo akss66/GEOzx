@@ -634,8 +634,9 @@
 
 .tz-brain-thread .dy-brain-composer-box[data-mode="message"] {
   position: relative;
-  min-height: 64px;
-  padding: 11px 60px 11px 18px;
+  min-height: 56px;
+  align-items: center;
+  padding: 8px 58px 8px 16px;
   border-radius: 18px;
   box-shadow: 0 8px 24px rgba(42, 35, 27, 0.07);
 }
@@ -870,7 +871,7 @@
   width: 100%;
   min-height: 24px;
   max-height: 144px;
-  padding: 5px 0;
+  padding: 0;
   border: 0;
   background: transparent !important;
   box-shadow: none;
@@ -889,9 +890,10 @@
 
 .tz-brain-thread .dy-brain-composer-box[data-mode="message"] .dy-brain-composer-tools {
   position: absolute;
+  top: 50%;
   right: 12px;
-  bottom: 13px;
   padding: 0;
+  transform: translateY(-50%);
 }
 
 .tz-brain-thread .dy-brain-prompts {

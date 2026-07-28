@@ -2,6 +2,9 @@
 
 import "@testing-library/jest-dom/vitest";
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -35,6 +38,23 @@ const permission: AgentToolCall = {
 };
 
 describe("BrainComposer", () => {
+  it("keeps the single-line message composer slim and vertically centered", () => {
+    const styles = readFileSync(
+      join(process.cwd(), "src/styles/brain-v2.css"),
+      "utf8",
+    );
+
+    expect(styles).toMatch(
+      /\.dy-brain-composer-box\[data-mode="message"\]\s*{[^}]*min-height:\s*56px;[^}]*align-items:\s*center;/s,
+    );
+    expect(styles).toMatch(
+      /\.dy-brain-composer-box\[data-mode="message"\]\s+\.dy-brain-composer-tools\s*{[^}]*top:\s*50%;[^}]*transform:\s*translateY\(-50%\);/s,
+    );
+    expect(styles).toMatch(
+      /\.dy-brain-input textarea\.ant-input\s*{[^}]*padding:\s*0;/s,
+    );
+  });
+
   it("starts compact and grows through six rows", () => {
     render(
       <BrainComposer
