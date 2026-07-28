@@ -514,6 +514,96 @@ async def test_account_inspection_concurrent_creator_reuses_unique_winner(
 
 
 @pytest.mark.asyncio
+async def test_account_inspection_reuses_running_winner_without_reexecution(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-running-winner"
+    )
+    content = ContentItem(
+        account_id=thread.account_id,
+        created_by_id=admin.id,
+        title="正在执行的账号体检",
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="正在执行的账号体检",
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="skill",
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    winner = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=(
+            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
+        ),
+        skill_code="account_inspection",
+        skill_version=ACCOUNT_INSPECTION_SKILL.version,
+        status="running",
+        input_snapshot={"account_id": thread.account_id, "days": 30},
+        output_snapshot={},
+    )
+    session.add(winner)
+    await session.flush()
+    running_tool = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        skill_run_id=winner.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        tool_code="account.profile",
+        tool_name="Account profile",
+        idempotency_key=f"{winner.id}:account.profile",
+        status="running",
+    )
+    session.add(running_tool)
+    await session.commit()
+    winner_id = winner.id
+    tool_id = running_tool.id
+    tools = _FakeTools(sufficient=True)
+    harness = _FakeHarness()
+    critic = _PassingCritic()
+
+    result = await SkillRuntime(
+        tool_executor=tools,
+        harness=harness,
+        critic=critic,
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+
+    assert result.status == "running"
+    assert result.skill_run_id == winner_id
+    assert result.response == "账号体检正在执行中，请稍候。"
+    assert tools.calls == []
+    assert harness.calls == []
+    assert critic.calls == 0
+    persisted_winner = await session.get(SkillRun, winner_id)
+    persisted_tool = await session.get(AgentToolCall, tool_id)
+    assert persisted_winner is not None
+    assert persisted_winner.status == "running"
+    assert persisted_winner.error_code is None
+    assert persisted_tool is not None
+    assert persisted_tool.status == "running"
+
+
+@pytest.mark.asyncio
 async def test_account_inspection_blocks_tool_result_from_another_account(
     session,
     admin,

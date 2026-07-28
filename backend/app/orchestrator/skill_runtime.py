@@ -118,6 +118,7 @@ class SkillRuntime:
             "blocked",
             "completed",
             "failed",
+            "running",
             "stopped",
             "waiting_permission",
             "waiting_user",
