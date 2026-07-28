@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -16,6 +16,9 @@ class ConversationThread(Base, TimestampMixin):
     """A durable conversation scoped to the user's active account context."""
 
     __tablename__ = "conversation_threads"
+    __table_args__ = (
+        UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -38,8 +41,12 @@ class ConversationThread(Base, TimestampMixin):
     turns: Mapped[list["ConversationTurn"]] = relationship(
         back_populates="thread",
         cascade="all, delete-orphan",
+        foreign_keys="ConversationTurn.thread_id",
     )
-    agent_runs: Mapped[list["AgentRun"]] = relationship(back_populates="thread")
+    agent_runs: Mapped[list["AgentRun"]] = relationship(
+        back_populates="thread",
+        foreign_keys="AgentRun.thread_id",
+    )
 
 
 class ConversationTurn(Base, TimestampMixin):
@@ -51,6 +58,17 @@ class ConversationTurn(Base, TimestampMixin):
             "thread_id",
             "client_message_id",
             name="uq_conversation_turn_thread_client_message",
+        ),
+        UniqueConstraint(
+            "id",
+            "thread_id",
+            "org_id",
+            name="uq_conversation_turn_id_thread_org",
+        ),
+        ForeignKeyConstraint(
+            ["thread_id", "org_id"],
+            ["conversation_threads.id", "conversation_threads.org_id"],
+            name="fk_conversation_turn_thread_org",
         ),
     )
 
@@ -71,5 +89,11 @@ class ConversationTurn(Base, TimestampMixin):
     assistant_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     intent: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
-    thread: Mapped[ConversationThread] = relationship(back_populates="turns")
-    agent_runs: Mapped[list["AgentRun"]] = relationship(back_populates="turn")
+    thread: Mapped[ConversationThread] = relationship(
+        back_populates="turns",
+        foreign_keys=[thread_id],
+    )
+    agent_runs: Mapped[list["AgentRun"]] = relationship(
+        back_populates="turn",
+        foreign_keys="AgentRun.turn_id",
+    )

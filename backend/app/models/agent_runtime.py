@@ -3,7 +3,16 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -23,6 +32,24 @@ class AgentRun(Base, TimestampMixin):
             "requested_by_id",
             "client_message_id",
             name="uq_agent_run_request",
+        ),
+        ForeignKeyConstraint(
+            ["thread_id", "org_id"],
+            ["conversation_threads.id", "conversation_threads.org_id"],
+            name="fk_agent_runs_thread_org",
+        ),
+        ForeignKeyConstraint(
+            ["turn_id", "thread_id", "org_id"],
+            [
+                "conversation_turns.id",
+                "conversation_turns.thread_id",
+                "conversation_turns.org_id",
+            ],
+            name="fk_agent_runs_turn_thread_org",
+        ),
+        CheckConstraint(
+            "turn_id IS NULL OR thread_id IS NOT NULL",
+            name="ck_agent_runs_turn_requires_thread",
         ),
     )
 
@@ -71,5 +98,11 @@ class AgentRun(Base, TimestampMixin):
     request_payload: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     result_payload: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
 
-    thread: Mapped["ConversationThread | None"] = relationship(back_populates="agent_runs")
-    turn: Mapped["ConversationTurn | None"] = relationship(back_populates="agent_runs")
+    thread: Mapped["ConversationThread | None"] = relationship(
+        back_populates="agent_runs",
+        foreign_keys=[thread_id],
+    )
+    turn: Mapped["ConversationTurn | None"] = relationship(
+        back_populates="agent_runs",
+        foreign_keys=[turn_id],
+    )
