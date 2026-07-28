@@ -292,11 +292,10 @@ class BrainRuntimeGraph:
                 },
             ),
             (
-                (
-                    "brain.runtime.completed"
-                    if status == "completed"
-                    else "brain.runtime.blocked"
-                ),
+                {
+                    "completed": "brain.runtime.completed",
+                    "failed": "brain.runtime.failed",
+                }.get(status, "brain.runtime.blocked"),
                 "turn-terminal",
                 {
                     "message": (
@@ -336,6 +335,89 @@ class BrainRuntimeGraph:
             await publish_realtime_event(
                 event_type,
                 dict(event_row.payload or {}),
+                event_id=event_row.id,
+            )
+
+    async def deliver_operation_turn_state(
+        self,
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        turn: ConversationTurn,
+        run: AgentRun,
+        account_id: int,
+        project_id: int | None,
+        response: str,
+        result_payload: dict[str, Any],
+        run_status: str,
+        task_status: BrainTaskStatus,
+        error_code: str | None = None,
+    ) -> None:
+        """Persist one routed operation's visible terminal or paused state."""
+
+        if run.task_id != task.id:
+            raise ValueError("operation AgentRun does not own the BrainTask")
+        if (
+            run.turn_id != turn.id
+            or run.thread_id != turn.thread_id
+            or run.org_id != turn.org_id
+            or task.org_id != turn.org_id
+        ):
+            raise ValueError("operation Task, Run, and Turn ownership do not match")
+
+        turn.assistant_response = response
+        task.status = task_status
+        task.current_focus = response[:500]
+        if task_status is BrainTaskStatus.COMPLETED:
+            task.progress = 100
+        elif task_status is BrainTaskStatus.FAILED:
+            task.progress = 0
+        run.status = run_status
+        run.phase = run_status
+        run.finished_at = datetime.now(UTC)
+        run.lease_owner = None
+        run.leased_until = None
+        run.next_retry_at = None
+        run.error_code = error_code
+        run.error_detail = None
+        run.result_payload = result_payload
+
+        event_type = {
+            "completed": "brain.runtime.completed",
+            "failed": "brain.runtime.failed",
+            "stopped": "brain.runtime.generation_stopped",
+        }.get(run_status, "brain.runtime.turn_paused")
+        event_row, created = await record_runtime_event_once(
+            session,
+            org_id=turn.org_id,
+            account_id=account_id,
+            run_id=run.id,
+            client_message_id=run.client_message_id,
+            event_type=event_type,
+            semantic_key="operation-turn-state",
+            payload={
+                "task_id": task.id,
+                "thread_id": turn.thread_id,
+                "turn_id": turn.id,
+                "message": response,
+                "status": run_status,
+                **({"error_code": error_code} if error_code else {}),
+            },
+            content_item_id=task.content_item_id,
+            project_id=project_id,
+        )
+        if created:
+            event_row.thread_id = turn.thread_id
+            event_row.turn_id = turn.id
+            event_row.run_id = run.id
+        await session.commit()
+        if created:
+            await session.refresh(event_row)
+            await publish_realtime_event(
+                event_type,
+                dict(event_row.payload or {}),
+                content_item_id=task.content_item_id,
+                project_id=project_id,
                 event_id=event_row.id,
             )
 

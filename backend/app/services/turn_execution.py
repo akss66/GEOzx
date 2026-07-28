@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -41,6 +40,10 @@ _TERMINAL_RUN_STATUSES = {
     "completed",
     "dead_letter",
     "failed",
+    "stopped",
+    "waiting_decision",
+    "waiting_permission",
+    "waiting_user",
 }
 _QUERY_SKILL_CODES = {"account_data_query", "account.data_context"}
 _QUERY_SKILL_CODE = "account_data_query"
@@ -72,12 +75,60 @@ async def execute_conversation_turn(
     if thread is None:
         raise PermissionError("conversation Thread is unavailable")
     account = await require_account_access(session, user, thread.account_id)
-    decision = await _route_turn(
-        session,
-        user,
-        request,
-        platform=account.platform.value,
-    )
+    try:
+        decision = await _route_turn(
+            session,
+            user,
+            request,
+            platform=account.platform.value,
+        )
+    except IntelligenceUnavailable:
+        unavailable = TurnRouteDecision(
+            mode=TurnExecutionMode.ANSWER,
+            intent="intelligence_unavailable",
+            confidence=0,
+            reason="Intent intelligence is temporarily unavailable.",
+        )
+        return await _deliver_task_free(
+            session,
+            turn=turn,
+            run=run,
+            account_id=account.id,
+            decision=unavailable,
+            response="我暂时无法可靠判断这条请求应如何执行。请稍后重试，或明确说明只查询数据还是创建正式任务。",
+            status="blocked",
+            error_code="INTELLIGENCE_UNAVAILABLE",
+        )
+
+    if (
+        request.execution_preference == "DISCUSS_ONLY"
+        and decision.mode
+        in {
+            TurnExecutionMode.SKILL,
+            TurnExecutionMode.TASK,
+            TurnExecutionMode.ACTION,
+        }
+    ):
+        return await _deliver_task_free(
+            session,
+            turn=turn,
+            run=run,
+            account_id=account.id,
+            decision=decision,
+            response="已按“仅讨论”处理：本轮未执行能力、未创建正式任务，也未触发外部动作。你确认后我再继续。",
+        )
+    if (
+        request.execution_preference == "FORMAL_TASK"
+        and decision.mode is not TurnExecutionMode.CLARIFY
+    ):
+        decision = TurnRouteDecision(
+            mode=TurnExecutionMode.TASK,
+            intent=decision.intent,
+            confidence=decision.confidence,
+            reason=f"Formal task requested. {decision.reason}",
+            requires_account_context=True,
+            requires_operation_task=True,
+        )
 
     if decision.mode is TurnExecutionMode.ANSWER:
         return await _deliver_task_free(
@@ -193,23 +244,13 @@ async def _route_turn(
             requires_account_context=True,
             requires_operation_task=True,
         )
-    try:
-        return await brain_intelligence.classify_turn(
-            session,
-            user.org_id,
-            request.message,
-            has_account=True,
-            platform=platform,
-        )
-    except IntelligenceUnavailable:
-        # A provider outage must not force ordinary conversation into an
-        # OperationTask. Keep the response task-free and make no business claim.
-        return TurnRouteDecision(
-            mode=TurnExecutionMode.ANSWER,
-            intent="conversation",
-            confidence=0,
-            reason="Intent service unavailable; safe task-free response.",
-        )
+    return await brain_intelligence.classify_turn(
+        session,
+        user.org_id,
+        request.message,
+        has_account=True,
+        platform=platform,
+    )
 
 
 async def _deliver_task_free(
@@ -283,19 +324,47 @@ async def _execute_query(
             session.add(skill_run)
             await session.commit()
             await session.refresh(skill_run)
-        result = await build_runtime_tool_adapter().invoke(
-            "account.data_context",
-            {"days": 30},
-            ToolExecutionContext(
-                session=session,
-                user=user,
-                project_id=thread.project_id,
+        try:
+            result = await build_runtime_tool_adapter().invoke(
+                "account.data_context",
+                {"days": 30},
+                ToolExecutionContext(
+                    session=session,
+                    user=user,
+                    project_id=thread.project_id,
+                    account_id=thread.account_id,
+                    task_id=None,
+                    invocation_id=None,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - provider details must not escape
+            return await _close_query_failure(
+                session,
                 account_id=thread.account_id,
-                task_id=None,
-                invocation_id=None,
-            ),
-        )
+                turn=turn,
+                run=run,
+                skill_run=skill_run,
+                decision=decision,
+                error_code="QUERY_TOOL_UNAVAILABLE",
+                response="账号数据暂时无法读取。请检查账号授权和数据同步状态后重试。",
+            )
         data = dict(result)
+        result_account_id = data.get("account_id")
+        if (
+            isinstance(result_account_id, bool)
+            or not isinstance(result_account_id, int)
+            or result_account_id != thread.account_id
+        ):
+            return await _close_query_failure(
+                session,
+                account_id=thread.account_id,
+                turn=turn,
+                run=run,
+                skill_run=skill_run,
+                decision=decision,
+                error_code="TOOL_RESULT_SCOPE_MISMATCH",
+                response="账号数据返回范围与当前对话账号不一致，本轮已停止。请刷新账号后重试。",
+            )
         skill_run.status = "completed"
         skill_run.output_snapshot = data
         skill_run.error_code = None
@@ -325,6 +394,65 @@ async def _execute_query(
                     "tool_code": "account.data_context",
                     "skill_run_id": skill_run.id,
                     "result": data,
+                },
+            )
+        ],
+    )
+
+
+async def _close_query_failure(
+    session: AsyncSession,
+    *,
+    account_id: int,
+    turn: ConversationTurn,
+    run: AgentRun,
+    skill_run: SkillRun,
+    decision: TurnRouteDecision,
+    error_code: str,
+    response: str,
+) -> TurnExecutionResult:
+    turn_id = turn.id
+    run_id = run.id
+    skill_run_id = skill_run.id
+    if session.sync_session.is_active:
+        persisted_turn = turn
+        persisted_run = run
+        persisted_skill_run = skill_run
+    else:
+        await session.rollback()
+        persisted_turn = await session.get(ConversationTurn, turn_id)
+        persisted_run = await session.get(AgentRun, run_id)
+        persisted_skill_run = await session.get(SkillRun, skill_run_id)
+    if (
+        persisted_turn is None
+        or persisted_run is None
+        or persisted_skill_run is None
+    ):
+        raise RuntimeError("query execution ownership disappeared")
+    persisted_skill_run.status = "failed"
+    persisted_skill_run.output_snapshot = {
+        "code": error_code,
+        "message": response,
+    }
+    persisted_skill_run.error_code = error_code
+    return await _deliver_task_free(
+        session,
+        turn=persisted_turn,
+        run=persisted_run,
+        account_id=account_id,
+        decision=decision,
+        response=response,
+        status="failed",
+        error_code=error_code,
+        extra_events=[
+            (
+                "brain.runtime.tool_failed",
+                "account-data-context",
+                {
+                    "message": response,
+                    "tool_code": "account.data_context",
+                    "skill_run_id": persisted_skill_run.id,
+                    "error_code": error_code,
                 },
             )
         ],
@@ -445,33 +573,125 @@ async def _execute_operation_task(
         run.phase = "runtime"
         await session.commit()
 
-    await runtime_graph.start_routed(
+    task_id = task.id
+    turn_id = turn.id
+    run_id = run.id
+    account_id = thread.account_id
+    project_id = thread.project_id
+    try:
+        await runtime_graph.start_routed(
+            session,
+            task,
+            route_decision=decision,
+            client_message_id=run.client_message_id,
+            agent_run_id=run.id,
+            agent_run_attempt=run.attempt,
+        )
+        task_state = await runtime_status(session, task)
+    except Exception as exc:  # noqa: BLE001 - persist only a safe operation failure
+        await session.rollback()
+        task = await session.get(BrainTask, task_id)
+        turn = await session.get(ConversationTurn, turn_id)
+        run = await session.get(AgentRun, run_id)
+        if task is None or turn is None or run is None:
+            raise RuntimeError("operation execution ownership disappeared") from exc
+        task_state = "failed"
+
+    return await _close_operation_state(
         session,
-        task,
-        route_decision=decision,
-        client_message_id=run.client_message_id,
-        agent_run_id=run.id,
-        agent_run_attempt=run.attempt,
+        account_id=account_id,
+        project_id=project_id,
+        turn=turn,
+        run=run,
+        task=task,
+        decision=decision,
+        runtime_state=task_state,
     )
-    task_state = await runtime_status(session, task)
-    response = task.current_focus or "本轮运营任务已完成。"
+
+
+async def _close_operation_state(
+    session: AsyncSession,
+    *,
+    account_id: int,
+    project_id: int | None,
+    turn: ConversationTurn,
+    run: AgentRun,
+    task: BrainTask,
+    decision: TurnRouteDecision,
+    runtime_state: str,
+) -> TurnExecutionResult:
+    states: dict[str, tuple[str, BrainTaskStatus, str | None, str]] = {
+        "completed": (
+            "completed",
+            BrainTaskStatus.COMPLETED,
+            None,
+            task.current_focus or "本轮运营任务已完成。",
+        ),
+        "waiting_permission": (
+            "waiting_permission",
+            BrainTaskStatus.PENDING_CONFIRMATION,
+            None,
+            "任务已暂停，正在等待你确认受控工具或外部动作。",
+        ),
+        "waiting_decision": (
+            "waiting_decision",
+            BrainTaskStatus.PENDING_CONFIRMATION,
+            None,
+            "任务已暂停，正在等待你选择下一步方案。",
+        ),
+        "waiting_user": (
+            "waiting_user",
+            BrainTaskStatus.PENDING_CONFIRMATION,
+            None,
+            "任务已暂停，正在等待你补充必要信息。",
+        ),
+        "failed": (
+            "failed",
+            BrainTaskStatus.FAILED,
+            "OPERATION_RUNTIME_FAILED",
+            "正式任务未能完成。请检查账号授权、数据范围和专家配置后重试。",
+        ),
+        "stopped": (
+            "stopped",
+            BrainTaskStatus.PENDING_CONFIRMATION,
+            "OPERATION_STOPPED",
+            "本轮生成已停止。你可以调整要求后重新发起。",
+        ),
+    }
+    run_status, task_status, error_code, response = states.get(
+        runtime_state,
+        (
+            "failed",
+            BrainTaskStatus.FAILED,
+            "OPERATION_RUNTIME_INCOMPLETE",
+            "正式任务没有形成可确认的结束状态，本轮已安全停止。请重试。",
+        ),
+    )
     result = TurnExecutionResult(
         mode=decision.mode,
-        status="completed",
+        status=run_status,
         response=response,
         task_id=task.id,
         projections=[],
+        error_code=error_code,
     )
     turn.intent = decision.model_dump(mode="json")
-    turn.assistant_response = response
-    run.status = "completed"
-    run.phase = "complete"
-    run.finished_at = datetime.now(UTC)
-    run.result_payload = {
-        **result.model_dump(mode="json"),
-        "task_status": task_state,
-    }
-    await session.commit()
+    await runtime_graph.deliver_operation_turn_state(
+        session,
+        task=task,
+        turn=turn,
+        run=run,
+        account_id=account_id,
+        project_id=project_id,
+        response=response,
+        result_payload={
+            **result.model_dump(mode="json"),
+            "task_status": runtime_state,
+        },
+        run_status=run_status,
+        task_status=task_status,
+        error_code=error_code,
+    )
     return result
 
 
