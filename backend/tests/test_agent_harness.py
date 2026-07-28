@@ -121,6 +121,31 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     await session.commit()
 
     contexts: list[AgentContext] = []
+    realtime_events: list[dict] = []
+
+    async def capture_realtime_event(
+        event_type,
+        payload=None,
+        content_item_id=None,
+        project_id=None,
+        *,
+        event_id=None,
+    ):
+        realtime_events.append(
+            {
+                "type": event_type,
+                "payload": payload,
+                "content_item_id": content_item_id,
+                "project_id": project_id,
+                "event_id": event_id,
+                "in_transaction": session.in_transaction(),
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.agent_harness.publish_realtime_event",
+        capture_realtime_event,
+    )
 
     class ToolCallingPositioningAgent(BaseAgent):
         code = AgentCode.POSITIONING.value
@@ -230,6 +255,33 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert len(tool_calls) == 1
     assert tool_calls[0].tool_code == "account.profile"
     assert tool_calls[0].status == "success"
+    runtime_tool_events = (
+        await session.scalars(
+            select(Event).where(
+                Event.type == "brain.runtime.tool_completed",
+                Event.payload["task_id"].as_integer() == task.id,
+            )
+        )
+    ).all()
+    assert len(runtime_tool_events) == 1
+    runtime_tool_payload = runtime_tool_events[0].payload
+    assert runtime_tool_payload is not None
+    assert runtime_tool_payload["invocation_id"] == result.invocation.id
+    assert runtime_tool_payload["tool_call_id"] == tool_calls[0].id
+    assert runtime_tool_payload["tool_code"] == "account.profile"
+    assert runtime_tool_payload["summary"] == tool_calls[0].output_summary
+    assert runtime_tool_payload["result"]["account_id"] == account.id
+    assert runtime_tool_payload["task_id"] == task.id
+    assert runtime_tool_payload["run_id"] == run.id
+    assert runtime_tool_payload["account_id"] == account.id
+    published_tool_events = [
+        event
+        for event in realtime_events
+        if event["type"] == "brain.runtime.tool_completed"
+    ]
+    assert len(published_tool_events) == 1
+    assert published_tool_events[0]["event_id"] == runtime_tool_events[0].id
+    assert published_tool_events[0]["in_transaction"] is False
     tool_events = (
         await session.scalars(
             select(Event).where(Event.type == "agent.kernel.tool_end")
@@ -296,6 +348,69 @@ async def test_harness_runs_positioning_with_one_account_without_project(
         )
     ).all()
     assert [invocation.id for invocation in invocations] == [result.invocation.id]
+
+    realtime_events.clear()
+    duplicate_retry = await AgentHarness().execute(
+        session,
+        user=admin,
+        task=task,
+        code=AgentCode.POSITIONING,
+        purpose="Diagnosis only",
+        evidence_refs=["account-profile:38", "account-data-context:38"],
+        upstream=upstream,
+        run_id=run.id,
+        step_key="round-1:01-positioning",
+    )
+    assert duplicate_retry.invocation.id == result.invocation.id
+    assert len(contexts) == 2
+    assert not [
+        event
+        for event in realtime_events
+        if event["type"] == "brain.runtime.tool_completed"
+    ]
+
+    await session.delete(runtime_tool_events[0])
+    await session.commit()
+    realtime_events.clear()
+
+    retry = await AgentHarness().execute(
+        session,
+        user=admin,
+        task=task,
+        code=AgentCode.POSITIONING,
+        purpose="Diagnosis only",
+        evidence_refs=["account-profile:38", "account-data-context:38"],
+        upstream=upstream,
+        run_id=run.id,
+        step_key="round-1:01-positioning",
+    )
+
+    assert retry.invocation.id == result.invocation.id
+    assert len(contexts) == 2
+    replay_tool_calls = (
+        await session.scalars(
+            select(AgentToolCall).where(AgentToolCall.task_id == task.id)
+        )
+    ).all()
+    assert [tool_call.id for tool_call in replay_tool_calls] == [tool_calls[0].id]
+    repaired_tool_events = (
+        await session.scalars(
+            select(Event).where(
+                Event.type == "brain.runtime.tool_completed",
+                Event.payload["task_id"].as_integer() == task.id,
+            )
+        )
+    ).all()
+    assert len(repaired_tool_events) == 1
+    assert repaired_tool_events[0].payload is not None
+    assert repaired_tool_events[0].payload["tool_call_id"] == tool_calls[0].id
+    replay_publications = [
+        event
+        for event in realtime_events
+        if event["type"] == "brain.runtime.tool_completed"
+    ]
+    assert len(replay_publications) == 1
+    assert replay_publications[0]["in_transaction"] is False
 
 
 @pytest.mark.asyncio

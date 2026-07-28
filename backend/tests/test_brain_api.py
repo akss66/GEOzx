@@ -11,6 +11,7 @@ from app.models import (
     Account,
     AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ContentItem,
     Event,
@@ -18,7 +19,14 @@ from app.models import (
     StrategyPlan,
     TaskBrief,
 )
-from app.models.enums import BrainTaskStatus, GateStatus, GateType, Platform, UserRole
+from app.models.enums import (
+    AgentInvocationStatus,
+    BrainTaskStatus,
+    GateStatus,
+    GateType,
+    Platform,
+    UserRole,
+)
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable
 from app.schemas.brain import (
     BrainMessageRequest,
@@ -453,6 +461,58 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
         "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
         classify,
     )
+
+    async def diagnostic_chat(self, session, org_id, agent_code, messages):
+        if (
+            agent_code == "00-decision"
+            and '"expert":' in messages[-1]["content"]
+            and '"deliverable":' in messages[-1]["content"]
+        ):
+            content = json.dumps(
+                {
+                    "dimensions": {
+                        "brand_consistency": 90,
+                        "user_value": 90,
+                        "propagation_ability": 90,
+                        "commercial_conversion": 90,
+                        "factual_accuracy": 90,
+                    },
+                    "issues": [],
+                    "suggestions": [],
+                }
+            )
+        elif agent_code != "01-positioning":
+            content = _SCRIPT_JSON
+        elif '"tool_observations": []' in messages[-1]["content"]:
+            content = json.dumps(
+                {
+                    "action": "call_tools",
+                    "rationale": "Load the selected account evidence before diagnosis.",
+                    "tool_calls": [
+                        {
+                            "tool_code": "account.profile",
+                            "arguments": {},
+                            "purpose": "Load the selected account profile.",
+                        },
+                        {
+                            "tool_code": "account.data_context",
+                            "arguments": {"days": 30},
+                            "purpose": "Load the selected account data context.",
+                        },
+                    ],
+                }
+            )
+        else:
+            content = json.dumps(
+                {
+                    "action": "finish",
+                    "rationale": "The account evidence supports the diagnosis.",
+                    "deliverable": json.loads(_POSITIONING_JSON),
+                }
+            )
+        return CompletionResult(content, "deepseek-chat", 10, 20, 30), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", diagnostic_chat)
     response = await client.post(
         "/brain/messages",
         headers=headers,
@@ -466,14 +526,66 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
     assert response.status_code == 201, response.text
     runtime = response.json()
     assert runtime["strategy"] is None
+    task_id = runtime["task"]["id"]
+    task_events = [
+        event
+        for event in (await session.scalars(select(Event).order_by(Event.id))).all()
+        if (event.payload or {}).get("task_id") == task_id
+    ]
+    completed_tool_events = [
+        event for event in task_events if event.type == "brain.runtime.tool_completed"
+    ]
+    completed_tool_codes = [
+        event.payload["tool_code"]
+        for event in completed_tool_events
+        if event.payload is not None
+    ]
+    persisted_tool_calls = (
+        (
+            await session.scalars(
+                select(AgentToolCall).where(AgentToolCall.task_id == task_id)
+            )
+        ).all()
+    )
+    assert len(completed_tool_events) == 2, {
+        "task_event_types": [event.type for event in task_events],
+        "tool_calls": [
+            {
+                "id": call.id,
+                "invocation_id": call.invocation_id,
+                "tool_code": call.tool_code,
+                "status": call.status,
+            }
+            for call in persisted_tool_calls
+        ],
+    }
+    assert sorted(completed_tool_codes) == ["account.data_context", "account.profile"]
+    assert len(persisted_tool_calls) == 2
+    tool_call_codes = sorted(call.tool_code for call in persisted_tool_calls)
+    assert tool_call_codes == ["account.data_context", "account.profile"]
+    assert all(call.status == "success" for call in persisted_tool_calls)
+    persisted_tool_call_ids = {call.id for call in persisted_tool_calls}
+    assert all(call.invocation_id is not None for call in persisted_tool_calls)
+    assert {
+        event.payload["tool_call_id"]
+        for event in completed_tool_events
+        if event.payload is not None
+    } == persisted_tool_call_ids
+    assert all(
+        isinstance(event.payload.get("invocation_id"), int)
+        and event.payload["invocation_id"] > 0
+        for event in completed_tool_events
+        if event.payload is not None
+    )
+
     invocations = (
         await session.scalars(
-            select(AgentInvocation).where(
-                AgentInvocation.task_id == runtime["task"]["id"]
-            )
+            select(AgentInvocation).where(AgentInvocation.task_id == task_id)
         )
     ).all()
+    assert len(invocations) == 1
     assert [invocation.agent_code for invocation in invocations] == ["01-positioning"]
+    assert invocations[0].status == AgentInvocationStatus.DONE
     assert await session.scalar(select(func.count()).select_from(StrategyPlan)) == 0
     run = await session.scalar(
         select(AgentRun).where(
@@ -481,7 +593,55 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
         )
     )
     assert run is not None
+    assert run.task_id == task_id
     assert run.request_payload["route_decision"] == route.model_dump(mode="json")
+    assert run.attempt == 1
+    assert run.status == "completed", {
+        "response_runtime_status": runtime["status"],
+        "response_task_status": runtime["task"]["status"],
+        "run_phase": run.phase,
+        "run_result_payload": run.result_payload,
+    }
+    assert run.next_retry_at is None
+    assert run.error_code is None
+    assert run.error_detail is None
+    task = await session.get(BrainTask, task_id)
+    assert task is not None
+    assert task.status == BrainTaskStatus.COMPLETED
+
+    ack_events = [
+        event
+        for event in task_events
+        if event.type == "brain.runtime.message_done"
+        and (event.payload or {}).get("semantic_key")
+        == "00-decision:main-agent.acknowledgement"
+    ]
+    assert len(ack_events) == 1
+    specialist_completed = [
+        event
+        for event in task_events
+        if event.type == "brain.runtime.subagent_completed"
+    ]
+    assert len(specialist_completed) == 1
+    assert specialist_completed[0].payload is not None
+    assert specialist_completed[0].payload.get("invocation_id") == invocations[0].id
+    lifecycle_events = [
+        event
+        for event in task_events
+        if event.type
+        in {
+            "brain.runtime.subagent_started",
+            "brain.runtime.subagent_completed",
+            "brain.runtime.subagent_failed",
+        }
+        and event.payload is not None
+    ]
+    assert lifecycle_events
+    assert all(
+        isinstance(event.payload.get("invocation_id"), int)
+        and event.payload["invocation_id"] > 0
+        for event in lifecycle_events
+    )
 
 
 @pytest.mark.asyncio

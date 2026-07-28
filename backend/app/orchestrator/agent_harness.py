@@ -18,6 +18,7 @@ from app.models import (
     Account,
     AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ContentItem,
     Deliverable,
@@ -144,6 +145,12 @@ class AgentHarness:
                 attempt=attempt,
             )
             if existing is not None:
+                await self._repair_successful_tool_projections(
+                    session,
+                    task=task,
+                    account_id=account.id,
+                    invocation=existing,
+                )
                 return await self._existing_result(session, task, existing)
 
         invocation = AgentInvocation(
@@ -177,6 +184,12 @@ class AgentHarness:
             )
             if existing is None:
                 raise
+            await self._repair_successful_tool_projections(
+                session,
+                task=task,
+                account_id=account.id,
+                invocation=existing,
+            )
             return await self._existing_result(session, task, existing)
         invocation_id = invocation.id
         started_lifecycle = await self._record_runtime_lifecycle(
@@ -270,6 +283,13 @@ class AgentHarness:
                     f"tool {request.tool_code} requires main-Agent intervention: "
                     f"{outcome.status}"
                 )
+            await self._project_successful_tool_call(
+                session,
+                task=task,
+                account_id=account.id,
+                invocation=invocation,
+                tool_call=outcome.tool_call,
+            )
             return outcome.result
 
         async def emit_kernel_event(
@@ -507,6 +527,67 @@ class AgentHarness:
             project_id=lifecycle.project_id,
             event_id=lifecycle.event_id,
         )
+
+    async def _project_successful_tool_call(
+        self,
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        account_id: int,
+        invocation: AgentInvocation,
+        tool_call: AgentToolCall,
+    ) -> None:
+        if tool_call.status != "success":
+            return
+        result = dict((tool_call.meta or {}).get("result") or {})
+        broadcast = await self._record_runtime_lifecycle(
+            session,
+            task=task,
+            account_id=account_id,
+            run_id=invocation.run_id,
+            invocation=invocation,
+            event_type="brain.runtime.tool_completed",
+            payload={
+                "message": f"{tool_call.tool_name} completed.",
+                "invocation_id": invocation.id,
+                "tool_call_id": tool_call.id,
+                "tool_code": tool_call.tool_code,
+                "summary": tool_call.output_summary,
+                "result": result,
+            },
+            semantic_suffix=f"tool_call:{tool_call.id}:completed",
+        )
+        if broadcast is None:
+            return
+        await session.commit()
+        await self._publish_runtime_lifecycle(broadcast)
+
+    async def _repair_successful_tool_projections(
+        self,
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        account_id: int,
+        invocation: AgentInvocation,
+    ) -> None:
+        tool_calls = (
+            await session.scalars(
+                select(AgentToolCall)
+                .where(
+                    AgentToolCall.invocation_id == invocation.id,
+                    AgentToolCall.status == "success",
+                )
+                .order_by(AgentToolCall.id)
+            )
+        ).all()
+        for tool_call in tool_calls:
+            await self._project_successful_tool_call(
+                session,
+                task=task,
+                account_id=account_id,
+                invocation=invocation,
+                tool_call=tool_call,
+            )
 
     @staticmethod
     def _autonomous_runtime_tool_codes(management: dict) -> set[str]:
