@@ -18,6 +18,7 @@ from app.api import (
     accounts,
     agents,
     approvals,
+    artifacts,
     auth,
     brain,
     clients,
@@ -88,6 +89,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(approvals.router)
+app.include_router(artifacts.router)
 app.include_router(users.router)
 app.include_router(clients.router)
 app.include_router(workspace_context.router)
