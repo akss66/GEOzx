@@ -793,6 +793,73 @@ describe("BrainHome", () => {
     expect(listArtifacts).toHaveBeenCalledWith(expect.objectContaining({ accountId: 3 }));
   });
 
+  it("keeps the completed Artifact on its source Turn after returning and greeting again", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    let resolveTurn: (() => void) | undefined;
+    const followUpTurn = {
+      ...mocks.conversationThread.turns[1],
+      id: 103,
+      client_message_id: "v2-turn-103",
+      user_input: "V2_LATER_GREETING_FROM_SOURCE",
+      assistant_response: "V2_LATER_GREETING_FROM_SOURCE_RESPONSE",
+    };
+
+    vi.mocked(sendConversationTurn).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveTurn = () => {
+          vi.mocked(getConversation).mockResolvedValue({
+            ...mocks.conversationThread,
+            turns: [...mocks.conversationThread.turns, followUpTurn],
+          });
+          resolve({
+            turn: followUpTurn,
+            run: { ...mocks.completedConversationRun, id: 801, turn_id: 103 },
+            task_id: null,
+            projections: [],
+          });
+        };
+      }),
+    );
+
+    renderBrainHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
+    await screen.findByText(mocks.artifact.title);
+    fireEvent.click(screen.getByRole("button", { name: `打开成果：${mocks.artifact.title}` }));
+    await waitFor(() => expect(document.querySelector('[aria-label^="Artifact:"]')).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "返回来源对话" }));
+    await waitFor(() => expect(document.activeElement).toHaveAttribute("data-turn-id", "101"));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      target: { value: "V2_LATER_GREETING_FROM_SOURCE" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, {
+      client_message_id: expect.any(String),
+      message: "V2_LATER_GREETING_FROM_SOURCE",
+    }));
+    await act(async () => resolveTurn?.());
+    expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads"))
+      .toContain("\"3\":81");
+    expect(await screen.findByText("V2_LATER_GREETING_FROM_SOURCE")).toBeInTheDocument();
+    const sourceTurn = await screen.findByTestId("conversation-turn-101");
+    const laterTurn = await screen.findByTestId("conversation-turn-103");
+    expect(sourceTurn).toHaveTextContent(mocks.artifact.title);
+    expect(laterTurn).not.toHaveTextContent(mocks.artifact.title);
+    expect(within(sourceTurn).getByRole("article", {
+      name: `Artifact: ${mocks.artifact.title}`,
+    })).toBeInTheDocument();
+    vi.mocked(getConversation).mockResolvedValue(mocks.conversationThread);
+  });
+
   it("keeps the user in results and retries the exact source conversation when it cannot load", async () => {
     vi.mocked(getConversation).mockRejectedValueOnce(new Error("network"));
     renderBrainHome();
