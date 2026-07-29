@@ -350,12 +350,12 @@ class BrainRuntimeGraph:
                     "brain.runtime.message_start",
                     stream_payload,
                 )
-                for delta in _realtime_text_chunks(response):
+                for delta in _realtime_text_chunks(response, size=2):
                     await publish_realtime_event(
                         "brain.runtime.message_delta",
                         {**stream_payload, "delta": delta},
                     )
-                    await asyncio.sleep(0.018)
+                    await asyncio.sleep(0.035)
             await publish_realtime_event(
                 event_type,
                 payload,

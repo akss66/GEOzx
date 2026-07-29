@@ -254,10 +254,15 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     ]
     assert response_events[0][0] == "brain.runtime.message_start"
     assert response_events[-1][0] == "brain.runtime.message_done"
-    assert "".join(
+    response_deltas = [
         payload["delta"]
         for event_type, payload in response_events
         if event_type == "brain.runtime.message_delta"
+    ]
+    assert response_deltas
+    assert all(len(delta) <= 2 for delta in response_deltas)
+    assert "".join(
+        response_deltas
     ) == response_text
     assert all(
         payload["client_message_id"] == "task-free-stream-1"
