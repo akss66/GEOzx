@@ -28,6 +28,8 @@ from app.models import (
 from app.models.enums import (
     AgentCode,
     AgentInvocationStatus,
+    DeliverableStatus,
+    DeliverableType,
     Platform,
     UserRole,
     WorkspaceRole,
@@ -247,25 +249,63 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    admin_headers = _auth(admin)
+    member_headers = _auth(member)
     account = await _account(session, admin, "永久删除账号")
+    account_id = account.id
+    admin_id = admin.id
     thread = await _create_thread(client, admin, account)
     submitted = await _submit_turn(
         client,
         admin,
         thread["id"],
         client_message_id="delete-history-1",
-        message="读取账号数据",
-        requested_skill_code="account_data_query",
+        message="体检这个账号",
+        requested_skill_code="account_inspection",
     )
     assert submitted.status_code == 202
+    run = await session.get(AgentRun, submitted.json()["run"]["id"])
+    assert run is not None
+    assert run.task_id is not None
+    skill_run = await session.scalar(
+        select(SkillRun).where(SkillRun.thread_id == thread["id"])
+    )
+    assert skill_run is not None
+    content_item = ContentItem(
+        account_id=account_id,
+        created_by_id=admin_id,
+        title="Preserved account inspection",
+    )
+    session.add(content_item)
+    await session.flush()
+    task = await session.get(BrainTask, run.task_id)
+    assert task is not None
+    task.content_item_id = content_item.id
+    deliverable = Deliverable(
+        content_item_id=content_item.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+        agent_code=AgentCode.OPERATOR.value,
+        type=DeliverableType.REVIEW_REPORT,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"artifact_type": "account_inspection_report"},
+    )
+    session.add(deliverable)
+    await session.flush()
+    content_item_id = content_item.id
+    deliverable_id = deliverable.id
+    await session.commit()
 
     denied = await client.delete(
         f"/brain/conversations/{thread['id']}",
-        headers=_auth(member),
+        headers=member_headers,
     )
     deleted = await client.delete(
         f"/brain/conversations/{thread['id']}",
-        headers=_auth(admin),
+        headers=admin_headers,
     )
 
     assert denied.status_code == 404
@@ -279,6 +319,15 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         )
         == 0
     )
+    assert await session.get(BrainTask, run.task_id) is None
+    preserved_content = await session.get(ContentItem, content_item_id)
+    preserved_deliverable = await session.get(Deliverable, deliverable_id)
+    assert preserved_content is not None
+    assert preserved_deliverable is not None
+    assert preserved_deliverable.thread_id is None
+    assert preserved_deliverable.turn_id is None
+    assert preserved_deliverable.run_id is None
+    assert preserved_deliverable.skill_run_id is None
     assert (
         await session.scalar(
             select(func.count(AgentRun.id)).where(

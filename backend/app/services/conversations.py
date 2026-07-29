@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -13,7 +13,6 @@ from app.core.workspace_access import require_account_access
 from app.models import (
     AgentRun,
     BrainTask,
-    ContentItem,
     ConversationThread,
     ConversationTurn,
     Deliverable,
@@ -244,7 +243,14 @@ async def delete_conversation_thread(
         )
     )
     await session.execute(
-        delete(Deliverable).where(Deliverable.thread_id == thread.id)
+        update(Deliverable)
+        .where(Deliverable.thread_id == thread.id)
+        .values(
+            thread_id=None,
+            turn_id=None,
+            run_id=None,
+            skill_run_id=None,
+        )
     )
     await session.execute(delete(SkillRun).where(SkillRun.thread_id == thread.id))
     await session.execute(delete(AgentRun).where(AgentRun.thread_id == thread.id))
@@ -254,10 +260,6 @@ async def delete_conversation_thread(
                 BrainTask.id.in_(task_ids),
                 BrainTask.org_id == user.org_id,
             )
-        )
-    if content_ids:
-        await session.execute(
-            delete(ContentItem).where(ContentItem.id.in_(content_ids))
         )
     await session.delete(thread)
     await session.commit()
