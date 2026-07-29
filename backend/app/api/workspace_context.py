@@ -38,15 +38,15 @@ async def get_workspace_context(
     project_id: Annotated[int | None, Query()] = None,
 ) -> WorkspaceContextOut:
     client_ids = await accessible_client_ids(session, user)
-    clients = []
+    clients: list[Client] = []
     if client_ids:
-        clients = (
+        clients = list(
             await session.scalars(
                 select(Client)
                 .where(Client.id.in_(client_ids), Client.status == ClientStatus.ACTIVE)
                 .order_by(Client.id)
             )
-        ).all()
+        )
     selected_client = None
     projects: list[Project] = []
     selected_project = None
@@ -90,23 +90,31 @@ async def get_workspace_context(
         )
     ).all()
 
-    project_rows = []
+    project_rows: list[tuple[int, int]] = []
     if accounts:
-        project_rows = await session.execute(
-            select(ProjectAccount.account_id, ProjectAccount.project_id).where(
-                ProjectAccount.account_id.in_([account.id for account in accounts])
-            )
+        project_rows = list(
+            (
+                await session.execute(
+                    select(ProjectAccount.account_id, ProjectAccount.project_id).where(
+                        ProjectAccount.account_id.in_([account.id for account in accounts])
+                    )
+                )
+            ).tuples()
         )
     project_ids_by_account: dict[int, list[int]] = {}
     for account_id_value, project_id_value in project_rows:
         project_ids_by_account.setdefault(account_id_value, []).append(project_id_value)
 
-    client_rows = []
+    client_rows: list[tuple[int, int]] = []
     if accounts:
-        client_rows = await session.execute(
-            select(AccountClient.account_id, AccountClient.client_id).where(
-                AccountClient.account_id.in_([account.id for account in accounts])
-            )
+        client_rows = list(
+            (
+                await session.execute(
+                    select(AccountClient.account_id, AccountClient.client_id).where(
+                        AccountClient.account_id.in_([account.id for account in accounts])
+                    )
+                )
+            ).tuples()
         )
     client_ids_by_account: dict[int, list[int]] = {}
     for account_id_value, client_id_value in client_rows:

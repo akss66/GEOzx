@@ -118,24 +118,28 @@ async def get_access_catalog(session: AsyncSession, org_id: int) -> UserAccessCa
             select(Account).where(Account.org_id == org_id).order_by(Account.nickname, Account.id)
         )
     )
-    project_rows = []
-    client_rows = []
+    project_rows: list[tuple[int, int]] = []
+    client_rows: list[tuple[int, int]] = []
     if accounts:
         account_ids = [account.id for account in accounts]
-        project_rows = (
-            await session.execute(
-                select(ProjectAccount.account_id, ProjectAccount.project_id).where(
-                    ProjectAccount.account_id.in_(account_ids)
+        project_rows = list(
+            (
+                await session.execute(
+                    select(ProjectAccount.account_id, ProjectAccount.project_id).where(
+                        ProjectAccount.account_id.in_(account_ids)
+                    )
                 )
-            )
-        ).all()
-        client_rows = (
-            await session.execute(
-                select(AccountClient.account_id, AccountClient.client_id).where(
-                    AccountClient.account_id.in_(account_ids)
+            ).tuples()
+        )
+        client_rows = list(
+            (
+                await session.execute(
+                    select(AccountClient.account_id, AccountClient.client_id).where(
+                        AccountClient.account_id.in_(account_ids)
+                    )
                 )
-            )
-        ).all()
+            ).tuples()
+        )
     project_ids_by_account: dict[int, set[int]] = {}
     for account_id, project_id in project_rows:
         project_ids_by_account.setdefault(account_id, set()).add(project_id)
@@ -375,21 +379,23 @@ async def replace_user_access(
         delete(AccountMembership).where(AccountMembership.user_id == target.id)
     )
     target.account_scope_mode = body.account_scope_mode
-    memberships = [
+    memberships: list[ClientMembership | ProjectMembership | AccountMembership] = []
+    memberships.extend(
         ClientMembership(
             client_id=item.client_id,
             user_id=target.id,
             role=item.role,
         )
         for item in body.clients
-    ] + [
+    )
+    memberships.extend(
         ProjectMembership(
             project_id=item.project_id,
             user_id=target.id,
             role=item.role,
         )
         for item in body.projects
-    ]
+    )
     if body.account_scope_mode == "selected":
         memberships.extend(
             AccountMembership(user_id=target.id, account_id=account_id)

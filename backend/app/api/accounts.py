@@ -4,6 +4,7 @@
 所有操作同时按当前用户 org 隔离。
 """
 
+from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -135,6 +136,8 @@ async def _validate_content_item(
     )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
+    if item.project_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
     await require_project_access(session, user, item.project_id)
 
 
@@ -172,7 +175,7 @@ async def _client_ids_by_account(
 
 async def _account_operational_context(
     session: AsyncSession,
-    accounts: list[Account],
+    accounts: Sequence[Account],
     org_id: int,
 ) -> dict[int, dict]:
     """Assemble the real operational state shown by every account-matrix view."""
@@ -288,7 +291,7 @@ async def _load_distribution_accounts(
 ) -> list[Account]:
     unique_ids = sorted(set(account_ids))
     accessible_accounts = await accessible_account_clause(session, user)
-    accounts = (
+    accounts = list(
         await session.scalars(
             select(Account).where(
                 Account.org_id == user.org_id,
@@ -296,7 +299,7 @@ async def _load_distribution_accounts(
                 accessible_accounts,
             )
         )
-    ).all()
+    )
     if len(accounts) != len(unique_ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
     if any(account.status != AccountStatus.ACTIVE for account in accounts):
@@ -562,7 +565,7 @@ async def batch_update_accounts(
                 ProjectAccount.project_id == project.id,
             )
         )
-        existing_links = set(rows)
+        existing_links = set(rows.tuples())
 
     for account in accounts:
         if "group_id" in fields:
@@ -638,27 +641,27 @@ async def replace_account_assignments(
     account = await _get_owned_account(session, account_id, admin.org_id)
     clients: list[Client] = []
     if body.client_ids:
-        clients = (
+        clients = list(
             await session.scalars(
                 select(Client).where(
                     Client.org_id == admin.org_id,
                     Client.id.in_(body.client_ids),
                 )
             )
-        ).all()
+        )
         if len(clients) != len(body.client_ids):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="客户不存在")
 
     projects: list[Project] = []
     if body.project_ids:
-        projects = (
+        projects = list(
             await session.scalars(
                 select(Project).where(
                     Project.org_id == admin.org_id,
                     Project.id.in_(body.project_ids),
                 )
             )
-        ).all()
+        )
         if len(projects) != len(body.project_ids):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
 

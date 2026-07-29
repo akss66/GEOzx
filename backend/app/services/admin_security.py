@@ -53,24 +53,32 @@ async def set_secondary_password(
         "failed_attempts": 0,
         "locked_until": None,
     }
+    update_values = {key: value for key, value in values.items() if key != "user_id"}
     dialect_name = session.bind.dialect.name
     if dialect_name == "postgresql":
-        insert = postgresql_insert
+        credential = await session.scalar(
+            postgresql_insert(AdminSecurityCredential)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=[AdminSecurityCredential.user_id],
+                set_=update_values,
+            )
+            .returning(AdminSecurityCredential)
+        )
     elif dialect_name == "sqlite":
-        insert = sqlite_insert
+        credential = await session.scalar(
+            sqlite_insert(AdminSecurityCredential)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=[AdminSecurityCredential.user_id],
+                set_=update_values,
+            )
+            .returning(AdminSecurityCredential)
+        )
     else:
         raise RuntimeError(
             f"Unsupported database dialect for admin security credentials: {dialect_name}"
         )
-    credential = await session.scalar(
-        insert(AdminSecurityCredential)
-        .values(**values)
-        .on_conflict_do_update(
-            index_elements=[AdminSecurityCredential.user_id],
-            set_={key: value for key, value in values.items() if key != "user_id"},
-        )
-        .returning(AdminSecurityCredential)
-    )
     await session.commit()
     assert credential is not None
     await session.refresh(credential)

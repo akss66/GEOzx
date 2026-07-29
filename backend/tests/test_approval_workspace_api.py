@@ -1,6 +1,7 @@
 import pytest
 from sqlalchemy import select
 
+from app.core.approval_access import task_project_ids
 from app.models import (
     Account,
     AgentToolCall,
@@ -37,6 +38,39 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.asyncio
+async def test_task_project_ids_fall_back_to_account_scope_when_content_has_no_project(
+    session, admin
+) -> None:
+    client = Client(org_id=admin.org_id, name="Fallback client")
+    project = Project(org_id=admin.org_id, client=client, name="Fallback project")
+    account = Account(
+        org_id=admin.org_id,
+        client=client,
+        project=project,
+        platform=Platform.DOUYIN,
+        nickname="Fallback account",
+    )
+    session.add_all([client, project, account])
+    await session.flush()
+    content = ContentItem(
+        project_id=None,
+        account_id=account.id,
+        title="Account-scoped approval content",
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        content_item_id=content.id,
+        title="Approval task without direct project binding",
+    )
+    session.add(task)
+    await session.commit()
+
+    assert await task_project_ids(session, task) == {project.id}
 
 
 async def _approval_data(admin, member, session):

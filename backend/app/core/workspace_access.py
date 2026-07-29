@@ -188,14 +188,14 @@ async def require_content_scope(
         return None, account
 
     project = await require_project_access(session, user, project_id)
-    account = (
+    linked_account: Account | None = (
         await require_account_access(session, user, account_id)
         if account_id is not None
         else None
     )
     if roles is not None:
         await require_project_access(session, user, project_id, roles=roles)
-    return project, account
+    return project, linked_account
 
 
 async def require_client_access(

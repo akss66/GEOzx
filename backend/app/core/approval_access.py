@@ -12,19 +12,25 @@ APPROVAL_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.REVIEWER}
 
 
 async def task_project_ids(session: AsyncSession, task: BrainTask) -> set[int]:
+    explicit_project_ids: set[int] = set()
+    account_ids: set[int] = set()
     if task.content_item_id is not None:
         content_item = await session.get(ContentItem, task.content_item_id)
         if content_item is not None:
-            return {content_item.project_id}
+            if content_item.project_id is not None:
+                explicit_project_ids.add(content_item.project_id)
+            if content_item.account_id is not None:
+                account_ids.add(content_item.account_id)
 
     brief = await session.scalar(select(TaskBrief).where(TaskBrief.task_id == task.id))
-    if brief is None:
-        return set()
-    if brief.project_id is not None:
-        return {brief.project_id}
+    if brief is not None:
+        if brief.project_id is not None:
+            explicit_project_ids.add(brief.project_id)
+        account_ids.update(value for value in brief.account_ids if isinstance(value, int))
+    if explicit_project_ids:
+        return explicit_project_ids
 
     project_ids: set[int] = set()
-    account_ids = [value for value in brief.account_ids if isinstance(value, int)]
     if account_ids:
         project_ids.update(
             await session.scalars(
