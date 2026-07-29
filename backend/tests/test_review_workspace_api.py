@@ -324,6 +324,7 @@ async def test_legacy_review_endpoints_and_suggestions_respect_project_scope(
 async def test_review_workspace_uses_account_level_imports_when_content_attribution_is_missing(
     client, admin, session
 ):
+    today = date.today()
     _project, account = await _review_account(session, admin, nickname="Only daily play")
     last_sync_at = datetime(2026, 7, 21, 7, 45, tzinfo=UTC)
     session.add(
@@ -344,9 +345,9 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
         status=ImportBatchStatus.COMMITTED,
         template_code="douyin_daily_play_v1",
         content_sha256="6" * 64,
-        period_start=date.today() - timedelta(days=6),
-        period_end=date.today(),
-        committed_at=datetime.now(UTC),
+        period_start=today - timedelta(days=6),
+        period_end=today,
+        committed_at=datetime.combine(today, datetime.min.time(), tzinfo=UTC),
     )
     session.add(batch)
     await session.flush()
@@ -356,7 +357,7 @@ async def test_review_workspace_uses_account_level_imports_when_content_attribut
             account_id=account.id,
             import_batch_id=batch.id,
             source_kind=DataSourceKind.PLATFORM_EXPORT,
-            stat_date=date.today(),
+            stat_date=today,
             total_play=81,
         )
     )
