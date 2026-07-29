@@ -1,6 +1,9 @@
 """Client-scoped knowledge, agent suggestions, and usage citations."""
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,6 +11,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin, pg_enum
 from app.models.enums import KnowledgeCategory
+
+if TYPE_CHECKING:
+    from app.models.client import Client, Project
+    from app.models.identity import Org
 
 
 class KnowledgeEntry(Base, TimestampMixin):
@@ -41,10 +48,10 @@ class KnowledgeEntry(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    client: Mapped["Client"] = relationship()  # noqa: F821
-    project: Mapped["Project | None"] = relationship()  # noqa: F821
-    citations: Mapped[list["KnowledgeCitation"]] = relationship(
+    org: Mapped[Org] = relationship()  # noqa: F821
+    client: Mapped[Client] = relationship()  # noqa: F821
+    project: Mapped[Project | None] = relationship()  # noqa: F821
+    citations: Mapped[list[KnowledgeCitation]] = relationship(
         back_populates="entry", cascade="all, delete-orphan"
     )
 

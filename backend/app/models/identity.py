@@ -1,6 +1,9 @@
 """身份域：组织、用户（RBAC 两级角色）。"""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,6 +11,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import BigIntPK, TimestampMixin, pg_enum
 from app.models.enums import UserRole
+
+if TYPE_CHECKING:
+    from app.models.client import AccountMembership, Client, ClientMembership, ProjectMembership
 
 
 class Org(Base, TimestampMixin):
@@ -18,8 +24,8 @@ class Org(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
 
-    users: Mapped[list["User"]] = relationship(back_populates="org", cascade="all, delete-orphan")
-    clients: Mapped[list["Client"]] = relationship(  # noqa: F821
+    users: Mapped[list[User]] = relationship(back_populates="org", cascade="all, delete-orphan")
+    clients: Mapped[list[Client]] = relationship(  # noqa: F821
         back_populates="org", cascade="all, delete-orphan"
     )
 
@@ -44,17 +50,17 @@ class User(Base, TimestampMixin):
         String(32), default="all_accessible", server_default="all_accessible", nullable=False
     )
 
-    org: Mapped["Org"] = relationship(back_populates="users")
-    client_memberships: Mapped[list["ClientMembership"]] = relationship(  # noqa: F821
+    org: Mapped[Org] = relationship(back_populates="users")
+    client_memberships: Mapped[list[ClientMembership]] = relationship(  # noqa: F821
         back_populates="user", cascade="all, delete-orphan"
     )
-    project_memberships: Mapped[list["ProjectMembership"]] = relationship(  # noqa: F821
+    project_memberships: Mapped[list[ProjectMembership]] = relationship(  # noqa: F821
         back_populates="user", cascade="all, delete-orphan"
     )
-    account_memberships: Mapped[list["AccountMembership"]] = relationship(  # noqa: F821
+    account_memberships: Mapped[list[AccountMembership]] = relationship(  # noqa: F821
         back_populates="user", cascade="all, delete-orphan"
     )
-    admin_security_credential: Mapped["AdminSecurityCredential | None"] = relationship(
+    admin_security_credential: Mapped[AdminSecurityCredential | None] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
     )
 
@@ -80,7 +86,7 @@ class AdminSecurityCredential(Base):
     )
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    user: Mapped["User"] = relationship(back_populates="admin_security_credential")
+    user: Mapped[User] = relationship(back_populates="admin_security_credential")
 
 
 class UserDeletionPreviewReservation(Base):

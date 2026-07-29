@@ -1,11 +1,18 @@
 """合规域：ComplianceCheck（脚本合规预检记录，关联 Gate3 脚本合规门）。"""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sqlalchemy import ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin, pg_enum
 from app.models.enums import ComplianceRisk
+
+if TYPE_CHECKING:
+    from app.models.content import ContentItem
 
 
 class ComplianceCheck(Base, TimestampMixin):
@@ -30,4 +37,4 @@ class ComplianceCheck(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(String(500), nullable=False)
     findings: Mapped[list | None] = mapped_column(JSONVariant, nullable=True)
 
-    content_item: Mapped["ContentItem"] = relationship()  # noqa: F821
+    content_item: Mapped[ContentItem] = relationship()  # noqa: F821

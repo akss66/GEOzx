@@ -1,6 +1,9 @@
 """配置域：per-Agent 模型配置、外部集成凭证配置。"""
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -18,6 +21,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.identity import Org, User
 
 
 class ModelProvider(Base, TimestampMixin):
@@ -61,9 +67,9 @@ class ModelProvider(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    created_by: Mapped["User"] = relationship(foreign_keys=[created_by_id])  # noqa: F821
-    updated_by: Mapped["User"] = relationship(foreign_keys=[updated_by_id])  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
+    created_by: Mapped[User] = relationship(foreign_keys=[created_by_id])  # noqa: F821
+    updated_by: Mapped[User] = relationship(foreign_keys=[updated_by_id])  # noqa: F821
 
 
 class ModelConfig(Base, TimestampMixin):
@@ -97,8 +103,8 @@ class ModelConfig(Base, TimestampMixin):
     fallback_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     params: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    primary_provider: Mapped["ModelProvider | None"] = relationship(
+    org: Mapped[Org] = relationship()  # noqa: F821
+    primary_provider: Mapped[ModelProvider | None] = relationship(
         primaryjoin=lambda: and_(
             ModelConfig.org_id == ModelProvider.org_id,
             ModelConfig.primary_provider_id == ModelProvider.id,
@@ -106,7 +112,7 @@ class ModelConfig(Base, TimestampMixin):
         foreign_keys=lambda: [ModelConfig.org_id, ModelConfig.primary_provider_id],
         viewonly=True,
     )
-    fallback_provider: Mapped["ModelProvider | None"] = relationship(
+    fallback_provider: Mapped[ModelProvider | None] = relationship(
         primaryjoin=lambda: and_(
             ModelConfig.org_id == ModelProvider.org_id,
             ModelConfig.fallback_provider_id == ModelProvider.id,
@@ -130,4 +136,4 @@ class IntegrationConfig(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     credentials: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821

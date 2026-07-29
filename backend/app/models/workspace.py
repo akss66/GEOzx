@@ -1,6 +1,9 @@
 """工作区域：运营项目、账号矩阵（AccountGroup / Account 一等模型）。"""
 
+from __future__ import annotations
+
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,6 +11,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin, pg_enum
 from app.models.enums import AccountStatus, GroupDimension, Platform, ProjectStatus
+
+if TYPE_CHECKING:
+    from app.models.client import Client, ProjectMembership
+    from app.models.content import ContentItem
+    from app.models.identity import Org
 
 
 class Project(Base, TimestampMixin):
@@ -33,20 +41,20 @@ class Project(Base, TimestampMixin):
         nullable=False,
     )
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    client: Mapped["Client | None"] = relationship(back_populates="projects")  # noqa: F821
-    content_items: Mapped[list["ContentItem"]] = relationship(  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
+    client: Mapped[Client | None] = relationship(back_populates="projects")  # noqa: F821
+    content_items: Mapped[list[ContentItem]] = relationship(  # noqa: F821
         back_populates="project", cascade="all, delete-orphan"
     )
-    accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
+    accounts: Mapped[list[Account]] = relationship(  # noqa: F821
         secondary="project_accounts",
         back_populates="projects",
         overlaps="account,project",
     )
-    memberships: Mapped[list["ProjectMembership"]] = relationship(  # noqa: F821
+    memberships: Mapped[list[ProjectMembership]] = relationship(  # noqa: F821
         back_populates="project", cascade="all, delete-orphan"
     )
-    legacy_accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
+    legacy_accounts: Mapped[list[Account]] = relationship(  # noqa: F821
         back_populates="project", foreign_keys="Account.project_id"
     )
 
@@ -67,8 +75,8 @@ class AccountGroup(Base, TimestampMixin):
         nullable=False,
     )
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    accounts: Mapped[list["Account"]] = relationship(back_populates="group")
+    org: Mapped[Org] = relationship()  # noqa: F821
+    accounts: Mapped[list[Account]] = relationship(back_populates="group")
 
 
 class Account(Base, TimestampMixin):
@@ -100,21 +108,21 @@ class Account(Base, TimestampMixin):
     )
     auth: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    client: Mapped["Client | None"] = relationship(back_populates="accounts")  # noqa: F821
-    clients: Mapped[list["Client"]] = relationship(  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
+    client: Mapped[Client | None] = relationship(back_populates="accounts")  # noqa: F821
+    clients: Mapped[list[Client]] = relationship(  # noqa: F821
         secondary="account_clients",
         overlaps="account,client,linked_accounts",
     )
-    project: Mapped["Project | None"] = relationship(  # noqa: F821
+    project: Mapped[Project | None] = relationship(  # noqa: F821
         back_populates="legacy_accounts", foreign_keys=[project_id]
     )
-    projects: Mapped[list["Project"]] = relationship(  # noqa: F821
+    projects: Mapped[list[Project]] = relationship(  # noqa: F821
         secondary="project_accounts",
         back_populates="accounts",
         overlaps="account,project",
     )
-    group: Mapped["AccountGroup | None"] = relationship(back_populates="accounts")
+    group: Mapped[AccountGroup | None] = relationship(back_populates="accounts")
 
     @property
     def integration_status(self) -> str:

@@ -1,6 +1,9 @@
 """Client and project access boundaries for agency workspaces."""
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,6 +11,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import BigIntPK, TimestampMixin, pg_enum
 from app.models.enums import ClientStatus, WorkspaceRole
+
+if TYPE_CHECKING:
+    from app.models.identity import Org, User
+    from app.models.workspace import Account, Project
 
 
 class Client(Base, TimestampMixin):
@@ -24,14 +31,14 @@ class Client(Base, TimestampMixin):
         nullable=False,
     )
 
-    org: Mapped["Org"] = relationship(back_populates="clients")  # noqa: F821
-    projects: Mapped[list["Project"]] = relationship(back_populates="client")  # noqa: F821
-    accounts: Mapped[list["Account"]] = relationship(back_populates="client")  # noqa: F821
-    linked_accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
+    org: Mapped[Org] = relationship(back_populates="clients")  # noqa: F821
+    projects: Mapped[list[Project]] = relationship(back_populates="client")  # noqa: F821
+    accounts: Mapped[list[Account]] = relationship(back_populates="client")  # noqa: F821
+    linked_accounts: Mapped[list[Account]] = relationship(  # noqa: F821
         secondary="account_clients",
         overlaps="account,client,clients",
     )
-    memberships: Mapped[list["ClientMembership"]] = relationship(
+    memberships: Mapped[list[ClientMembership]] = relationship(
         back_populates="client", cascade="all, delete-orphan"
     )
 
@@ -51,8 +58,8 @@ class ClientMembership(Base, TimestampMixin):
         pg_enum(WorkspaceRole, "workspace_role"), nullable=False
     )
 
-    client: Mapped["Client"] = relationship(back_populates="memberships")
-    user: Mapped["User"] = relationship(back_populates="client_memberships")  # noqa: F821
+    client: Mapped[Client] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship(back_populates="client_memberships")  # noqa: F821
 
 
 class ProjectMembership(Base, TimestampMixin):
@@ -70,8 +77,8 @@ class ProjectMembership(Base, TimestampMixin):
         pg_enum(WorkspaceRole, "workspace_role"), nullable=False
     )
 
-    project: Mapped["Project"] = relationship(back_populates="memberships")  # noqa: F821
-    user: Mapped["User"] = relationship(back_populates="project_memberships")  # noqa: F821
+    project: Mapped[Project] = relationship(back_populates="memberships")  # noqa: F821
+    user: Mapped[User] = relationship(back_populates="project_memberships")  # noqa: F821
 
 
 class ProjectAccount(Base, TimestampMixin):
@@ -86,8 +93,8 @@ class ProjectAccount(Base, TimestampMixin):
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
     )
 
-    project: Mapped["Project"] = relationship(overlaps="accounts,projects")  # noqa: F821
-    account: Mapped["Account"] = relationship(overlaps="accounts,projects")  # noqa: F821
+    project: Mapped[Project] = relationship(overlaps="accounts,projects")  # noqa: F821
+    account: Mapped[Account] = relationship(overlaps="accounts,projects")  # noqa: F821
 
 
 class AccountClient(Base, TimestampMixin):
@@ -108,8 +115,8 @@ class AccountClient(Base, TimestampMixin):
         ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=False
     )
 
-    account: Mapped["Account"] = relationship(overlaps="clients,linked_accounts")  # noqa: F821
-    client: Mapped["Client"] = relationship(overlaps="clients,linked_accounts")
+    account: Mapped[Account] = relationship(overlaps="clients,linked_accounts")  # noqa: F821
+    client: Mapped[Client] = relationship(overlaps="clients,linked_accounts")
 
 
 class AccountMembership(Base):
@@ -124,8 +131,8 @@ class AccountMembership(Base):
         ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
 
-    user: Mapped["User"] = relationship(back_populates="account_memberships")  # noqa: F821
-    account: Mapped["Account"] = relationship()  # noqa: F821
+    user: Mapped[User] = relationship(back_populates="account_memberships")  # noqa: F821
+    account: Mapped[Account] = relationship()  # noqa: F821
 
 
 class Notification(Base, TimestampMixin):
@@ -144,4 +151,4 @@ class Notification(Base, TimestampMixin):
     path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    user: Mapped["User"] = relationship()  # noqa: F821
+    user: Mapped[User] = relationship()  # noqa: F821

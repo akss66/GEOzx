@@ -1,6 +1,9 @@
 """闭环反馈域：运营复盘建议的采纳与验证追踪。"""
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,6 +11,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import BigIntPK, TimestampMixin, pg_enum
 from app.models.enums import OptimizationSuggestionStatus
+
+if TYPE_CHECKING:
+    from app.models.content import ContentItem, Deliverable
+    from app.models.identity import Org
 
 
 class OptimizationSuggestion(Base, TimestampMixin):
@@ -44,6 +51,6 @@ class OptimizationSuggestion(Base, TimestampMixin):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    content_item: Mapped["ContentItem"] = relationship()  # noqa: F821
-    source_deliverable: Mapped["Deliverable"] = relationship()  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
+    content_item: Mapped[ContentItem] = relationship()  # noqa: F821
+    source_deliverable: Mapped[Deliverable] = relationship()  # noqa: F821

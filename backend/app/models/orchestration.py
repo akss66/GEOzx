@@ -1,6 +1,9 @@
 """编排域：AgentTask（任务状态机）、Event（事件溯源）、GateApproval（质量门审批）。"""
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,6 +11,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin, pg_enum
 from app.models.enums import AgentTaskStatus, ContentStage, GateStatus, GateType
+
+if TYPE_CHECKING:
+    from app.models.content import ContentItem
 
 
 class AgentTask(Base, TimestampMixin):
@@ -34,7 +40,7 @@ class AgentTask(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    content_item: Mapped["ContentItem"] = relationship(back_populates="tasks")  # noqa: F821
+    content_item: Mapped[ContentItem] = relationship(back_populates="tasks")  # noqa: F821
 
 
 class Event(Base):

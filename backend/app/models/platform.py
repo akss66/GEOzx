@@ -1,12 +1,19 @@
 """Formal platform integration models."""
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.identity import Org
+    from app.models.workspace import Account
 
 
 class PlatformIntegration(Base, TimestampMixin):
@@ -37,7 +44,7 @@ class PlatformIntegration(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
 
     @property
     def client_secret_configured(self) -> bool:
@@ -79,8 +86,8 @@ class PlatformAccountAuth(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_profile: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    account: Mapped["Account"] = relationship()  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
+    account: Mapped[Account] = relationship()  # noqa: F821
 
     @property
     def token_configured(self) -> bool:

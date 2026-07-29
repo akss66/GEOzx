@@ -1,11 +1,18 @@
 """素材域：MaterialAsset（生成/上传的视频等素材，落本地卷归档）。"""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import BigIntPK, TimestampMixin, pg_enum
 from app.models.enums import MaterialStatus
+
+if TYPE_CHECKING:
+    from app.models.identity import Org
 
 
 class MaterialAsset(Base, TimestampMixin):
@@ -41,4 +48,4 @@ class MaterialAsset(Base, TimestampMixin):
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821

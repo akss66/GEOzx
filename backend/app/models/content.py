@@ -1,5 +1,9 @@
 """内容域：ContentItem（贯穿全链路的内容实例）、Deliverable（多态交付物，版本化）。"""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,6 +15,10 @@ from app.models.enums import (
     DeliverableStatus,
     DeliverableType,
 )
+
+if TYPE_CHECKING:
+    from app.models.client import Project
+    from app.models.orchestration import AgentTask
 
 
 class ContentItem(Base, TimestampMixin):
@@ -40,11 +48,11 @@ class ContentItem(Base, TimestampMixin):
         nullable=False,
     )
 
-    project: Mapped["Project | None"] = relationship(back_populates="content_items")  # noqa: F821
-    deliverables: Mapped[list["Deliverable"]] = relationship(
+    project: Mapped[Project | None] = relationship(back_populates="content_items")  # noqa: F821
+    deliverables: Mapped[list[Deliverable]] = relationship(
         back_populates="content_item", cascade="all, delete-orphan"
     )
-    tasks: Mapped[list["AgentTask"]] = relationship(  # noqa: F821
+    tasks: Mapped[list[AgentTask]] = relationship(  # noqa: F821
         back_populates="content_item", cascade="all, delete-orphan"
     )
 
@@ -98,4 +106,4 @@ class Deliverable(Base, TimestampMixin):
     payload: Mapped[dict] = mapped_column(JSONVariant, nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    content_item: Mapped["ContentItem"] = relationship(back_populates="deliverables")
+    content_item: Mapped[ContentItem] = relationship(back_populates="deliverables")

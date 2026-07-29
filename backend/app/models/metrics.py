@@ -1,6 +1,9 @@
 """数据指标域：MetricSnapshot（各平台内容数据快照，复盘看板的数据源）。"""
 
+from __future__ import annotations
+
 from datetime import date
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
@@ -19,6 +22,9 @@ from app.db import Base
 from app.models.account_data import DataImportBatch, PlatformContentRecord
 from app.models.base import BigIntPK, TimestampMixin, pg_enum
 from app.models.enums import MetricSource
+
+if TYPE_CHECKING:
+    from app.models.identity import Org
 
 
 class MetricSnapshot(Base, TimestampMixin):
@@ -101,8 +107,8 @@ class MetricSnapshot(Base, TimestampMixin):
     bounce_rate_2s: Mapped[float | None] = mapped_column(Float, nullable=True)
     profile_visit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    org: Mapped["Org"] = relationship()  # noqa: F821
-    import_batch: Mapped["DataImportBatch | None"] = relationship(  # noqa: F821
+    org: Mapped[Org] = relationship()  # noqa: F821
+    import_batch: Mapped[DataImportBatch | None] = relationship(  # noqa: F821
         primaryjoin=lambda: and_(
             MetricSnapshot.org_id == DataImportBatch.org_id,  # noqa: F821
             MetricSnapshot.account_id == DataImportBatch.account_id,  # noqa: F821
@@ -115,7 +121,7 @@ class MetricSnapshot(Base, TimestampMixin):
         ],
         viewonly=True,
     )
-    platform_content_record: Mapped["PlatformContentRecord | None"] = relationship(  # noqa: F821
+    platform_content_record: Mapped[PlatformContentRecord | None] = relationship(  # noqa: F821
         primaryjoin=lambda: and_(
             MetricSnapshot.org_id == PlatformContentRecord.org_id,  # noqa: F821
             MetricSnapshot.account_id == PlatformContentRecord.account_id,  # noqa: F821
