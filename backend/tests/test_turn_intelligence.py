@@ -64,6 +64,48 @@ async def _classify(
 
 
 @pytest.mark.asyncio
+async def test_answer_turn_uses_operating_context_and_conversation_history(
+    monkeypatch,
+):
+    captured: list[dict] = []
+
+    async def fake_chat(_self, _session, _org_id, _agent_code, messages):
+        captured.extend(messages)
+        return (
+            CompletionResult(
+                "基于上一轮目标，我们可以继续拆解内容方向。",
+                "test-model",
+                4,
+                8,
+                12,
+            ),
+            0.0,
+        )
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+
+    answer = await BrainIntelligence().answer_turn(
+        TEST_SESSION,
+        1,
+        "继续",
+        operating_context="当前账号：测试账号。",
+        history=[
+            {"role": "user", "content": "我要提升咨询量"},
+            {"role": "assistant", "content": "先分析高咨询内容。"},
+        ],
+        scope={"account_id": 3, "thread_id": 8, "turn_id": 12},
+    )
+
+    assert answer == "基于上一轮目标，我们可以继续拆解内容方向。"
+    assert "当前账号：测试账号。" in captured[0]["content"]
+    assert captured[-3:] == [
+        {"role": "user", "content": "我要提升咨询量"},
+        {"role": "assistant", "content": "先分析高咨询内容。"},
+        {"role": "user", "content": "继续"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_account_data_question_routes_to_query(monkeypatch):
     payload = {
         "mode": "query",

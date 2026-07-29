@@ -73,6 +73,67 @@ _AVAILABLE_EXPERTS = [
 
 
 class BrainIntelligence:
+    async def answer_turn(
+        self,
+        session: AsyncSession | None,
+        org_id: int,
+        message: str,
+        *,
+        operating_context: str,
+        history: Sequence[dict[str, str]],
+        scope: dict[str, Any],
+    ) -> str:
+        """Answer one conversational Turn with the real main-Agent model."""
+
+        if session is None:
+            raise IntelligenceUnavailable("运营大脑需要有效的会话上下文")
+        try:
+            prompt = prompt_registry.render(
+                "main-agent.conversation",
+                variables={"operating_context": operating_context},
+            )
+            messages = [
+                {
+                    "role": "system",
+                    "content": with_operations_brain_public_identity(prompt.content),
+                },
+                *[
+                    {
+                        "role": str(item["role"]),
+                        "content": str(item["content"]),
+                    }
+                    for item in history[-12:]
+                    if item.get("role") in {"user", "assistant"}
+                    and str(item.get("content") or "").strip()
+                ],
+                {"role": "user", "content": message},
+            ]
+            context = LLMCallContext(
+                trace_id=f"conversation-thread-{scope.get('thread_id')}",
+                prompt_id=prompt.spec.id,
+                prompt_version=prompt.spec.version,
+                prompt_hash=prompt.content_hash,
+                prompt_schema_version=prompt.spec.schema_version,
+                scope={"org_id": org_id, **scope},
+            )
+            token = set_stream_observer(None)
+            try:
+                with bind_llm_call_context(context):
+                    result, _cost = await gateway.chat(
+                        session,
+                        org_id,
+                        AgentCode.DECISION.value,
+                        messages,
+                    )
+            finally:
+                reset_stream_observer(token)
+        except Exception as exc:  # noqa: BLE001 - provider details must not escape
+            raise IntelligenceUnavailable("运营大脑暂时无法生成回复") from exc
+        answer = result.content.strip()
+        if not answer:
+            raise IntelligenceUnavailable("运营大脑返回了空回复")
+        return answer
+
     async def classify_turn(
         self,
         session: AsyncSession | None,

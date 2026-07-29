@@ -166,13 +166,41 @@ async def execute_conversation_turn(
         )
 
     if decision.mode is TurnExecutionMode.ANSWER:
+        try:
+            answer = await brain_intelligence.answer_turn(
+                session,
+                user.org_id,
+                request.message,
+                operating_context=_conversation_operating_context(account),
+                history=await _conversation_history(
+                    session,
+                    thread_id=thread.id,
+                    before_turn_id=turn.id,
+                ),
+                scope={
+                    "account_id": account.id,
+                    "thread_id": thread.id,
+                    "turn_id": turn.id,
+                },
+            )
+        except IntelligenceUnavailable:
+            return await _deliver_task_free(
+                session,
+                turn=turn,
+                run=run,
+                account_id=account.id,
+                decision=decision,
+                response="运营大脑暂时无法生成这条回复，请稍后重试。",
+                status="blocked",
+                error_code="ANSWER_MODEL_UNAVAILABLE",
+            )
         return await _deliver_task_free(
             session,
             turn=turn,
             run=run,
             account_id=account.id,
             decision=decision,
-            response=_direct_answer(request.message),
+            response=answer,
         )
     if decision.mode is TurnExecutionMode.CLARIFY:
         return await _deliver_task_free(
@@ -658,7 +686,7 @@ async def _execute_query(
         run=run,
         account_id=thread.account_id,
         decision=decision,
-        response="已读取当前账号的数据概览，可继续告诉我你想分析的指标。",
+        response=_format_account_data_summary(data),
         projections=[projection],
         extra_events=[
             (
@@ -1013,8 +1041,91 @@ async def _close_operation_state(
     return result
 
 
-def _direct_answer(message: str) -> str:
-    normalized = message.strip().lower()
-    if normalized in {"谢谢", "感謝", "thanks", "thank you"}:
-        return "不客气。你可以继续告诉我账号运营中想解决的问题。"
-    return "你好，我在。你可以直接告诉我账号运营目标、数据问题或想推进的工作。"
+async def _conversation_history(
+    session: AsyncSession,
+    *,
+    thread_id: int,
+    before_turn_id: int,
+) -> list[dict[str, str]]:
+    rows = list(
+        await session.scalars(
+            select(ConversationTurn)
+            .where(
+                ConversationTurn.thread_id == thread_id,
+                ConversationTurn.id < before_turn_id,
+            )
+            .order_by(ConversationTurn.id.desc())
+            .limit(6)
+        )
+    )
+    messages: list[dict[str, str]] = []
+    for row in reversed(rows):
+        messages.append({"role": "user", "content": row.user_input})
+        if row.assistant_response:
+            messages.append(
+                {"role": "assistant", "content": row.assistant_response}
+            )
+    return messages
+
+
+def _conversation_operating_context(account: Any) -> str:
+    platform = {
+        "douyin": "抖音",
+        "xiaohongshu": "小红书",
+        "wechat_channels": "视频号",
+    }.get(account.platform.value, account.platform.value)
+    return (
+        f"当前平台：{platform}；当前账号：{account.nickname}（账号 ID {account.id}）；"
+        "当前项目：未选择项目。"
+    )
+
+
+def _format_account_data_summary(data: dict[str, Any]) -> str:
+    period = data.get("period")
+    days = period.get("days") if isinstance(period, dict) else None
+    period_text = f"近 {days} 天" if isinstance(days, int) and days > 0 else "当前周期"
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+    labels = {
+        "play": "播放量",
+        "play_count": "播放量",
+        "views": "播放量",
+        "content_count": "发布内容",
+        "posts": "发布内容",
+        "follower_count": "粉丝数",
+        "followers": "粉丝数",
+        "new_followers": "新增粉丝",
+        "like_count": "点赞数",
+        "likes": "点赞数",
+        "comment_count": "评论数",
+        "comments": "评论数",
+        "share_count": "分享数",
+        "shares": "分享数",
+        "engagement_rate": "互动率",
+    }
+    rendered: list[str] = []
+    used_labels: set[str] = set()
+    for key, label in labels.items():
+        if label in used_labels or key not in metrics:
+            continue
+        raw = metrics[key]
+        value = raw.get("value") if isinstance(raw, dict) else raw
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if key == "engagement_rate":
+            formatted = f"{value * 100:.2f}%" if value <= 1 else f"{value:.2f}%"
+        elif isinstance(value, float) and not value.is_integer():
+            formatted = f"{value:,.2f}"
+        else:
+            formatted = f"{int(value):,}"
+        rendered.append(f"{label}：{formatted}")
+        used_labels.add(label)
+        if len(rendered) == 6:
+            break
+    if rendered:
+        return f"已读取{period_text}的账号数据：{'；'.join(rendered)}。"
+    return (
+        f"已读取{period_text}的账号数据，但当前数据源尚未提供播放、互动或粉丝等"
+        "核心指标。建议先检查数据同步状态。"
+    )

@@ -114,9 +114,12 @@ def _decision(mode: TurnExecutionMode, **updates) -> TurnRouteDecision:
 
 @pytest.mark.asyncio
 async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
-    _account, _thread, turn, run = await _turn_context(
+    account, thread, turn, run = await _turn_context(
         session, admin, key="answer-1"
     )
+    turn.user_input = "你能做什么？"
+    await session.commit()
+    answer_calls: list[dict] = []
 
     async def classify(*_args, **_kwargs):
         return _decision(
@@ -124,18 +127,40 @@ async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
             requires_account_context=False,
         )
 
+    async def answer(*_args, **kwargs):
+        answer_calls.append(kwargs)
+        return "我是运营大脑。你可以问我账号数据、内容策划或运营执行问题。"
+
     monkeypatch.setattr(
         "app.services.turn_execution.brain_intelligence.classify_turn", classify
     )
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.answer_turn", answer
+    )
     result = await execute_conversation_turn(
-        session, admin, turn, run, _request("answer-1")
+        session, admin, turn, run, _request("answer-1", "你能做什么？")
     )
 
     assert result.mode is TurnExecutionMode.ANSWER
     assert result.task_id is None
     assert result.status == "completed"
-    assert turn.assistant_response
+    assert result.response == "我是运营大脑。你可以问我账号数据、内容策划或运营执行问题。"
+    assert turn.assistant_response == result.response
     assert run.status == "completed"
+    assert answer_calls == [
+        {
+            "operating_context": (
+                f"当前平台：抖音；当前账号：{account.nickname}（账号 ID {account.id}）；"
+                "当前项目：未选择项目。"
+            ),
+            "history": [],
+            "scope": {
+                "account_id": account.id,
+                "thread_id": thread.id,
+                "turn_id": turn.id,
+            },
+        }
+    ]
     for model in (BrainTask, StrategyPlan, AgentInvocation, AgentToolCall):
         assert await session.scalar(select(func.count(model.id))) == 0
 
@@ -239,6 +264,10 @@ async def test_query_uses_authorized_account_and_records_one_skill_run(
     assert skill_run.skill_version == 1
     assert skill_run.input_snapshot == {"account_id": account.id, "days": 30}
     assert skill_run.output_snapshot["account_id"] == account.id
+    assert "近 30 天" in result.response
+    assert "播放量：42" in result.response
+    assert "account_id" not in result.response
+    assert "{'" not in result.response
     assert await session.scalar(select(func.count(BrainTask.id))) == 0
     assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
     assert await session.scalar(select(func.count(AgentInvocation.id))) == 0
@@ -817,6 +846,9 @@ async def test_task_free_events_have_turn_lineage_and_publish_after_commit(
             requires_account_context=False,
         )
 
+    async def answer(*_args, **_kwargs):
+        return "这是一个可追踪的流式回复。"
+
     async def publish(_event_type, _payload, **kwargs):
         event_id = kwargs["event_id"]
         row = await session.get(Event, event_id)
@@ -827,6 +859,9 @@ async def test_task_free_events_have_turn_lineage_and_publish_after_commit(
 
     monkeypatch.setattr(
         "app.services.turn_execution.brain_intelligence.classify_turn", classify
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.answer_turn", answer
     )
     monkeypatch.setattr(
         "app.orchestrator.brain_runtime.publish_realtime_event", publish
@@ -842,7 +877,8 @@ async def test_task_free_events_have_turn_lineage_and_publish_after_commit(
             .order_by(Event.id)
         )
     )
-    assert published == [event.id for event in events]
+    assert set(published) == {event.id for event in events}
+    assert len(published) > len(events)
     assert events
     for event in events:
         payload = event.payload
