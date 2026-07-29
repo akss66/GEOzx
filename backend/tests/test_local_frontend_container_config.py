@@ -22,5 +22,6 @@ def test_production_frontend_keeps_https_certificate_mount() -> None:
     nginx_config = (REPO_ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
 
     assert "/opt/dyflow/certs:/etc/nginx/ssl:ro" in compose
+    assert "backend:\n        condition: service_healthy" in compose
     assert "listen 443 ssl;" in nginx_config
     assert "ssl_certificate /etc/nginx/ssl/tzxai.top.pem;" in nginx_config
