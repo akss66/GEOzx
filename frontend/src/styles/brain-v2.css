@@ -318,43 +318,27 @@
   white-space: pre-wrap;
 }
 
-.tz-conversation-turn__user {
-  justify-self: end;
-  max-width: min(82%, 680px);
-  padding: 11px 14px;
-  border-radius: 14px 14px 4px 14px;
-  background: var(--tz-surface-soft);
-  font-weight: var(--tz-weight-medium);
-}
-
-.tz-conversation-turn__assistant,
 .tz-turn-projection {
   padding: 10px 12px;
   border-radius: 10px;
   background: var(--tz-surface-soft);
 }
 
+.tz-conversation-turn__user,
 .tz-conversation-turn__assistant {
-  display: grid;
-  justify-self: start;
-  max-width: min(88%, 760px);
-  gap: 4px;
-  border-radius: 4px 14px 14px;
-  background: var(--tz-surface);
-}
-
-.tz-conversation-turn__speaker {
-  color: var(--tz-brand);
-  font-size: 12px;
+  min-width: 0;
 }
 
 .tz-conversation-turn__projections {
   display: grid;
+  width: min(calc(100% - 50px), 760px);
+  margin-left: 50px;
   gap: 8px;
 }
 
 .tz-conversation-turn__technical {
   justify-self: start;
+  margin-left: 50px;
   color: var(--tz-muted);
   font-size: 12px;
 }

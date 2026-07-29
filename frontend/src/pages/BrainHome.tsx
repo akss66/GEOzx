@@ -1032,8 +1032,13 @@ export default function BrainHome() {
                 />
                 {pendingTurn ? <PendingConversation turn={pendingTurn} /> : null}
                 {!pendingTurn ? (
-                  <Button aria-label="Regenerate V2 turn" type="text" onClick={regenerateLastTurn}>
-                    Regenerate
+                  <Button
+                    aria-label="重新生成"
+                    icon={<RedoOutlined />}
+                    type="text"
+                    onClick={regenerateLastTurn}
+                  >
+                    重新生成
                   </Button>
                 ) : null}
               </>

@@ -111,6 +111,21 @@ describe("TurnStream", () => {
     vi.mocked(getArtifact).mockResolvedValue(artifact);
   });
 
+  it("uses the established chat anatomy for persisted user and operations-brain messages", () => {
+    render(<TurnStream thread={thread} />);
+
+    const sourceTurn = screen.getByTestId("conversation-turn-101");
+    const userMessage = within(sourceTurn).getByLabelText("User message");
+    const assistantMessage = within(sourceTurn).getByLabelText("Assistant response");
+
+    expect(userMessage).toHaveClass("dy-chat-message", "dy-chat-message-user");
+    expect(userMessage.querySelector(".dy-chat-bubble")).not.toBeNull();
+    expect(assistantMessage).toHaveClass("dy-chat-message", "dy-chat-message-agent");
+    expect(within(assistantMessage).getByRole("img", { name: "运营大脑" })).toBeInTheDocument();
+    expect(within(assistantMessage).getByText("运营大脑")).toBeInTheDocument();
+    expect(assistantMessage.querySelector(".dy-chat-bubble")).not.toBeNull();
+  });
+
   it("keeps the exact persisted Artifact in its source Turn when later greetings and retries arrive", async () => {
     render(<TurnStream thread={thread} />);
 

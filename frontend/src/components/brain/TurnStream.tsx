@@ -1,6 +1,7 @@
 import type { Artifact, ConversationThread, ConversationTurn, TurnProjection } from "../../types";
-import { Button, Input } from "antd";
+import { Button, Input, Tag, Typography } from "antd";
 import type { AgentToolCall } from "../../types";
+import { AgentAvatar } from "../agents/AgentAvatar";
 import type { ArtifactAction } from "./ArtifactCard";
 import { TurnArtifact } from "./TurnArtifact";
 
@@ -79,6 +80,7 @@ function TurnArticle({
 }) {
   const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
+  const executionBlocked = projections.some((projection) => projection.type === "execution_blocked");
 
   return (
     <article
@@ -87,13 +89,31 @@ function TurnArticle({
       data-turn-id={turn.id}
       data-turn-key={`turn-${turn.id}`}
     >
-      <section className="tz-conversation-turn__user" aria-label="User message">
-        {turn.user_input}
+      <section
+        className="dy-chat-message dy-chat-message-user tz-conversation-turn__user"
+        aria-label="User message"
+      >
+        <div className="dy-chat-bubble">
+          <Typography.Paragraph style={{ color: "inherit", margin: 0, whiteSpace: "pre-wrap" }}>
+            {turn.user_input}
+          </Typography.Paragraph>
+        </div>
       </section>
       {turn.assistant_response ? (
-        <section className="tz-conversation-turn__assistant" aria-label="Assistant response">
-          <strong className="tz-conversation-turn__speaker">运营大脑</strong>
-          {turn.assistant_response}
+        <section
+          className="dy-chat-message dy-chat-message-agent tz-conversation-turn__assistant"
+          aria-label="Assistant response"
+        >
+          <AgentAvatar code="00-decision" className="dy-chat-avatar" />
+          <div className="dy-chat-bubble">
+            <div className="dy-chat-title-line">
+              <span>运营大脑</span>
+              <Tag style={{ marginInlineEnd: 0 }}>{executionBlocked ? "需处理" : "完成"}</Tag>
+            </div>
+            <Typography.Paragraph style={{ color: "inherit", margin: 0, whiteSpace: "pre-wrap" }}>
+              {turn.assistant_response}
+            </Typography.Paragraph>
+          </div>
         </section>
       ) : null}
       <div className="tz-conversation-turn__projections">

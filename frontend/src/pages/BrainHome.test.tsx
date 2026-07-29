@@ -1256,7 +1256,7 @@ describe("BrainHome", () => {
     renderBrainHome();
     await screen.findByTestId("conversation-turn-102");
 
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate V2 turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
 
     await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(81, {
       client_message_id: expect.any(String),
