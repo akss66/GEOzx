@@ -86,6 +86,7 @@ import type {
 interface LiveRuntimeMessage {
   id: string;
   taskId: number;
+  clientMessageId?: string;
   agentCode: string;
   agentName: string;
   model?: string;
@@ -1030,7 +1031,12 @@ export default function BrainHome() {
                     formalArtifactRevisionMutation.mutate,
                   )}
                 />
-                {pendingTurn ? <PendingConversation turn={pendingTurn} /> : null}
+                {pendingTurn ? (
+                  <PendingConversation
+                    turn={pendingTurn}
+                    message={liveMessageForPending(liveMessages, pendingTurn)}
+                  />
+                ) : null}
                 {!pendingTurn ? (
                   <Button
                     aria-label="重新生成"
@@ -1107,7 +1113,10 @@ export default function BrainHome() {
                 onRegenerate={regenerateLastTurn}
               />
             ) : pendingTurn ? (
-              <PendingConversation turn={pendingTurn} />
+              <PendingConversation
+                turn={pendingTurn}
+                message={liveMessageForPending(liveMessages, pendingTurn)}
+              />
             ) : (
               <ConversationEmpty account={effectiveAccount} loading={contextQuery.isLoading} />
             )}
@@ -1574,11 +1583,21 @@ function AICOOConversationRecord({ runtime }: { runtime: BrainRuntime }) {
   );
 }
 
-function PendingConversation({ turn }: { turn: PendingTurn }) {
+function PendingConversation({
+  turn,
+  message,
+}: {
+  turn: PendingTurn;
+  message?: LiveRuntimeMessage;
+}) {
   return (
-    <div className="dy-brain-message-stack" aria-live="polite">
+    <div
+      className="tz-turn-stream tz-pending-conversation"
+      data-testid="pending-conversation"
+      aria-live="polite"
+    >
       {turn.showUser && <UserMessage content={turn.content} />}
-      <AgentMessage message={pendingAgentMessage(turn)} />
+      <AgentMessage message={message ?? pendingAgentMessage(turn)} />
     </div>
   );
 }
@@ -2308,6 +2327,7 @@ function pendingAgentMessage(turn: PendingTurn): LiveRuntimeMessage {
   return {
     id: `${turn.clientMessageId}:pending`,
     taskId: turn.taskId ?? -1,
+    clientMessageId: turn.clientMessageId,
     agentCode: "00-decision",
     agentName: OPERATIONS_BRAIN_DISPLAY_NAME,
     content: "",
@@ -2348,6 +2368,9 @@ function runtimeMessageFromEvent(runtime: BrainRuntime, event: BrainRuntime["tim
   return {
     id: String(payload.message_id ?? event.id),
     taskId: runtime.task.id,
+    clientMessageId: typeof payload.client_message_id === "string"
+      ? payload.client_message_id
+      : undefined,
     agentCode: String(payload.agent_code ?? ""),
     agentName: presentOperationsBrainSystemCopy(String(payload.agent_name ?? "Agent")),
     model: typeof payload.model === "string" ? payload.model : undefined,
@@ -2361,14 +2384,17 @@ function ingestRuntimeEvent(
   setLiveMessages: Dispatch<SetStateAction<LiveRuntimeMessage[]>>,
 ) {
   const payload = asRuntimePayload(event.payload);
-  if (!payload || payload.task_id == null) return;
+  if (!payload) return;
+  const clientMessageId = typeof payload.client_message_id === "string"
+    ? payload.client_message_id
+    : undefined;
+  if (payload.task_id == null && !clientMessageId) return;
 
   if (event.type === "brain.runtime.generation_stopped") {
-    const taskId = Number(payload.task_id);
-    const clientMessageId = String(payload.client_message_id ?? "");
+    const taskId = payload.task_id == null ? -1 : Number(payload.task_id);
     if (!clientMessageId) return;
     setLiveMessages((prev) => prev.map((item) =>
-      item.taskId === taskId && item.id.startsWith(clientMessageId)
+      item.taskId === taskId && item.clientMessageId === clientMessageId
         ? { ...item, status: "stopped" }
         : item
     ));
@@ -2377,17 +2403,25 @@ function ingestRuntimeEvent(
 
   if (!payload.message_id) return;
 
-  const taskId = Number(payload.task_id);
+  const taskId = payload.task_id == null ? -1 : Number(payload.task_id);
   const id = String(payload.message_id);
   const agentCode = String(payload.agent_code ?? "");
   const agentName = presentOperationsBrainSystemCopy(
     String(payload.agent_name ?? (agentCode || "Agent")),
   );
   const model = typeof payload.model === "string" ? payload.model : undefined;
+  const messageBase = {
+    id,
+    taskId,
+    clientMessageId,
+    agentCode,
+    agentName,
+    model,
+  };
 
   if (event.type === "brain.runtime.message_start") {
     setLiveMessages((prev) =>
-      upsertMessage(prev, { id, taskId, agentCode, agentName, model, content: "", status: "streaming" }),
+      upsertMessage(prev, { ...messageBase, content: "", status: "streaming" }),
     );
   }
 
@@ -2396,7 +2430,7 @@ function ingestRuntimeEvent(
     setLiveMessages((prev) =>
       upsertMessage(
         prev,
-        { id, taskId, agentCode, agentName, model, content: delta, status: "streaming" },
+        { ...messageBase, content: delta, status: "streaming" },
         true,
       ),
     );
@@ -2405,16 +2439,32 @@ function ingestRuntimeEvent(
   if (event.type === "brain.runtime.message_done") {
     const content = String(payload.content ?? payload.message ?? "");
     setLiveMessages((prev) =>
-      upsertMessage(prev, { id, taskId, agentCode, agentName, model, content, status: "done" }),
+      upsertMessage(prev, { ...messageBase, content, status: "done" }),
     );
   }
 
   if (event.type === "brain.runtime.message_error") {
     const content = String(payload.error ?? payload.message ?? "模型调用失败");
     setLiveMessages((prev) =>
-      upsertMessage(prev, { id, taskId, agentCode, agentName, model, content, status: "error" }),
+      upsertMessage(prev, { ...messageBase, content, status: "error" }),
     );
   }
+}
+
+function liveMessageForPending(
+  messages: LiveRuntimeMessage[],
+  turn: PendingTurn,
+): LiveRuntimeMessage | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message.clientMessageId === turn.clientMessageId
+      && message.agentCode === "00-decision"
+    ) {
+      return message;
+    }
+  }
+  return undefined;
 }
 
 function upsertMessage(

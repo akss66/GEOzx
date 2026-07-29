@@ -288,7 +288,13 @@ class BrainRuntimeGraph:
                 "turn-response",
                 {
                     "message": response,
+                    "content": response,
+                    "message_id": _runtime_message_id(
+                        client_message_id,
+                        AgentCode.DECISION.value,
+                    ),
                     "agent_code": AgentCode.DECISION.value,
+                    "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                     "model": "system",
                 },
             ),
@@ -333,9 +339,26 @@ class BrainRuntimeGraph:
         await session.commit()
         for event_row, event_type in broadcasts:
             await session.refresh(event_row)
+            payload = dict(event_row.payload or {})
+            if event_type == "brain.runtime.message_done":
+                stream_payload = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"content", "message"}
+                }
+                await publish_realtime_event(
+                    "brain.runtime.message_start",
+                    stream_payload,
+                )
+                for delta in _realtime_text_chunks(response):
+                    await publish_realtime_event(
+                        "brain.runtime.message_delta",
+                        {**stream_payload, "delta": delta},
+                    )
+                    await asyncio.sleep(0.018)
             await publish_realtime_event(
                 event_type,
-                dict(event_row.payload or {}),
+                payload,
                 event_id=event_row.id,
             )
 

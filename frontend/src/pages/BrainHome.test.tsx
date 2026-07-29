@@ -1231,6 +1231,90 @@ describe("BrainHome", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "停止生成" })).not.toBeInTheDocument());
   });
 
+  it("keeps the pending V2 Turn on the same horizontal baseline as persisted Turns", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(sendConversationTurn).mockImplementationOnce(() => new Promise(() => undefined));
+
+    renderBrainHome();
+    const persistedStream = await screen.findByLabelText("Conversation turns");
+    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      target: { value: "保持对齐" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+
+    const pendingConversation = await screen.findByTestId("pending-conversation");
+    expect(persistedStream).toHaveClass("tz-turn-stream");
+    expect(pendingConversation).toHaveClass("tz-turn-stream");
+    expect(pendingConversation).not.toHaveClass("dy-brain-message-stack");
+  });
+
+  it("renders task-free V2 message deltas inside the pending Turn", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(sendConversationTurn).mockImplementationOnce(() => new Promise(() => undefined));
+
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      target: { value: "流式回答我" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledOnce());
+    const request = vi.mocked(sendConversationTurn).mock.calls[0]?.[1] as {
+      client_message_id: string;
+    };
+    const messageId = `${request.client_message_id}:00-decision:1`;
+
+    await act(async () => {
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_start",
+        payload: {
+          task_id: null,
+          thread_id: 81,
+          client_message_id: request.client_message_id,
+          message_id: messageId,
+          agent_code: "00-decision",
+          agent_name: "运营大脑",
+          model: "system",
+        },
+      });
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_delta",
+        payload: {
+          task_id: null,
+          thread_id: 81,
+          client_message_id: request.client_message_id,
+          message_id: messageId,
+          agent_code: "00-decision",
+          agent_name: "运营大脑",
+          model: "system",
+          delta: "这是",
+        },
+      });
+      mocks.eventHandler?.({
+        type: "brain.runtime.message_delta",
+        payload: {
+          task_id: null,
+          thread_id: 81,
+          client_message_id: request.client_message_id,
+          message_id: messageId,
+          agent_code: "00-decision",
+          agent_name: "运营大脑",
+          model: "system",
+          delta: "流式输出",
+        },
+      });
+    });
+
+    expect(await screen.findByText("这是流式输出")).toBeInTheDocument();
+    expect(screen.getByText("正在输出")).toBeInTheDocument();
+  });
+
   it("refreshes the active V2 Thread after a realtime lifecycle event", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",

@@ -216,6 +216,58 @@ async def test_submit_turn_claims_one_owned_run_without_task(
 
 
 @pytest.mark.asyncio
+async def test_task_free_turn_broadcasts_incremental_response_events(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "流式普通问答账号")
+    thread = await _create_thread(client, admin, account)
+    realtime_events: list[tuple[str, dict]] = []
+
+    async def capture_realtime_event(event_type: str, payload: dict, **_kwargs) -> None:
+        realtime_events.append((event_type, payload))
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event",
+        capture_realtime_event,
+    )
+
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="task-free-stream-1",
+        message="你好",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    response_text = body["turn"]["assistant_response"]
+    response_events = [
+        (event_type, payload)
+        for event_type, payload in realtime_events
+        if event_type in {
+            "brain.runtime.message_start",
+            "brain.runtime.message_delta",
+            "brain.runtime.message_done",
+        }
+    ]
+    assert response_events[0][0] == "brain.runtime.message_start"
+    assert response_events[-1][0] == "brain.runtime.message_done"
+    assert "".join(
+        payload["delta"]
+        for event_type, payload in response_events
+        if event_type == "brain.runtime.message_delta"
+    ) == response_text
+    assert all(
+        payload["client_message_id"] == "task-free-stream-1"
+        and payload["thread_id"] == thread["id"]
+        and payload["message_id"] == "task-free-stream-1:00-decision:1"
+        for _, payload in response_events
+    )
+
+
+@pytest.mark.asyncio
 async def test_unknown_explicit_skill_returns_blocked_turn_without_formal_records(
     client,
     session,
