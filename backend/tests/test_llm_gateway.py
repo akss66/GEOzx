@@ -52,6 +52,22 @@ def _gw(adapter: FakeAdapter) -> LLMGateway:
 MSG = [{"role": "user", "content": "hi"}]
 
 
+@pytest.mark.parametrize(
+    ("model", "prompt_tokens", "completion_tokens", "expected"),
+    [
+        ("deepseek-v4-pro", 1_000_000, 1_000_000, 1.305),
+        ("deepseek-v4-flash", 1_000_000, 1_000_000, 0.42),
+    ],
+)
+def test_compute_cost_supports_current_deepseek_v4_models(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    expected: float,
+) -> None:
+    assert compute_cost(model, prompt_tokens, completion_tokens) == pytest.approx(expected)
+
+
 @pytest.fixture
 def encryption_key(monkeypatch):
     monkeypatch.setattr(
@@ -86,7 +102,7 @@ def _provider(
 
 
 def test_compute_cost() -> None:
-    assert round(compute_cost("deepseek-chat", 1_000_000, 1_000_000), 4) == 1.37
+    assert round(compute_cost("deepseek-chat", 1_000_000, 1_000_000), 4) == 0.42
     assert compute_cost("unknown-model", 100, 100) == 0.0
 
 

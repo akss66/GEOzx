@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workspace_access import (
@@ -43,6 +43,7 @@ from app.schemas.costs import (
     TechnicalModelRow,
     TechnicalProviderRow,
 )
+from app.services.model_infrastructure import AGENT_NAMES
 
 FAILED_AGENT_STATUSES = {
     AgentInvocationStatus.FAILED,
@@ -53,6 +54,10 @@ FAILED_TOOL_STATUSES = {"failed", "error", "blocked", "rejected"}
 
 def _cost(value: Decimal | float | int | None) -> float:
     return round(float(value or 0), 4)
+
+
+def _raw_cost(value: Decimal | float | int | None) -> float:
+    return float(value or 0)
 
 
 def _budget_metrics(budget: Decimal | float | None, actual: float):
@@ -96,9 +101,47 @@ async def business_cost_overview(
     period_end = datetime.now(UTC)
     period_start = period_end - timedelta(days=days)
 
+    task_rows: list[tuple[BrainTask, TaskBrief]] = []
+    if project_ids:
+        has_period_activity = or_(
+            BrainTask.invocations.any(AgentInvocation.created_at >= period_start),
+            BrainTask.tool_calls.any(AgentToolCall.created_at >= period_start),
+            exists(
+                select(LLMCall.id).where(
+                    LLMCall.org_id == user.org_id,
+                    LLMCall.task_id == BrainTask.id,
+                    LLMCall.created_at >= period_start,
+                )
+            ),
+        )
+        task_rows = list(
+            (
+                await session.execute(
+                    select(BrainTask, TaskBrief)
+                    .join(TaskBrief, TaskBrief.task_id == BrainTask.id)
+                    .where(
+                        BrainTask.org_id == user.org_id,
+                        TaskBrief.project_id.in_(project_ids),
+                        has_period_activity,
+                    )
+                )
+            ).tuples()
+        )
+
+    visible_account_ids = await accessible_account_ids(session, user)
+    if visible_account_ids is not None:
+        task_rows = [
+            row
+            for row in task_rows
+            if not row[1].account_ids
+            or bool(set(row[1].account_ids) & visible_account_ids)
+        ]
+
     invocation_rows: list[tuple[AgentInvocation, BrainTask, TaskBrief]] = []
     tool_rows: list[tuple[AgentToolCall, BrainTask, TaskBrief]] = []
-    if project_ids:
+    llm_calls: list[LLMCall] = []
+    task_ids = {task.id for task, _brief in task_rows}
+    if task_ids:
         invocation_rows = list(
             (
                 await session.execute(
@@ -106,8 +149,7 @@ async def business_cost_overview(
                     .join(BrainTask, BrainTask.id == AgentInvocation.task_id)
                     .join(TaskBrief, TaskBrief.task_id == BrainTask.id)
                     .where(
-                        BrainTask.org_id == user.org_id,
-                        TaskBrief.project_id.in_(project_ids),
+                        AgentInvocation.task_id.in_(task_ids),
                         AgentInvocation.created_at >= period_start,
                     )
                 )
@@ -120,39 +162,51 @@ async def business_cost_overview(
                     .join(BrainTask, BrainTask.id == AgentToolCall.task_id)
                     .join(TaskBrief, TaskBrief.task_id == BrainTask.id)
                     .where(
-                        BrainTask.org_id == user.org_id,
-                        TaskBrief.project_id.in_(project_ids),
+                        AgentToolCall.task_id.in_(task_ids),
                         AgentToolCall.created_at >= period_start,
                     )
                 )
             ).tuples()
         )
-
-    visible_account_ids = await accessible_account_ids(session, user)
-    if visible_account_ids is not None:
-        invocation_rows = [
-            row
-            for row in invocation_rows
-            if not row[2].account_ids
-            or bool(set(row[2].account_ids) & visible_account_ids)
-        ]
-        tool_rows = [
-            row
-            for row in tool_rows
-            if not row[2].account_ids
-            or bool(set(row[2].account_ids) & visible_account_ids)
-        ]
+        llm_calls = list(
+            await session.scalars(
+                select(LLMCall)
+                .where(
+                    LLMCall.org_id == user.org_id,
+                    LLMCall.task_id.in_(task_ids),
+                    LLMCall.created_at >= period_start,
+                )
+                .order_by(LLMCall.created_at)
+            )
+        )
 
     task_rollups: dict[int, dict[str, Any]] = {}
     agent_rollups: dict[tuple[str, str], dict[str, Any]] = {}
+    unlinked_agent_tasks: dict[tuple[str, str], set[int]] = defaultdict(set)
+    failed_unlinked_agent_tasks: dict[tuple[str, str], set[int]] = defaultdict(set)
     tool_rollups: dict[tuple[str, str], dict[str, Any]] = {}
     project_costs: dict[int, float] = defaultdict(float)
     project_tasks: dict[int, set[int]] = defaultdict(set)
     daily_costs: dict[Any, float] = defaultdict(float)
+    invocation_context = {
+        invocation.id: (invocation, task, brief)
+        for invocation, task, brief in invocation_rows
+    }
+    task_context = {task.id: (task, brief) for task, brief in task_rows}
+    metered_invocation_ids = {
+        call.invocation_id for call in llm_calls if call.invocation_id is not None
+    }
 
     for invocation, task, brief in invocation_rows:
-        project_key = int(brief.project_id)
-        value = _cost(invocation.cost)
+        project_id = brief.project_id
+        if project_id is None:
+            continue
+        project_key = project_id
+        value = (
+            0.0
+            if invocation.id in metered_invocation_ids
+            else _raw_cost(invocation.cost)
+        )
         failed = invocation.status in FAILED_AGENT_STATUSES
         rollup = task_rollups.setdefault(
             task.id,
@@ -174,9 +228,66 @@ async def business_cost_overview(
         project_tasks[project_key].add(task.id)
         daily_costs[invocation.created_at.date()] += value
 
+    for call in llm_calls:
+        context = (
+            invocation_context.get(call.invocation_id)
+            if call.invocation_id is not None
+            else None
+        )
+        if context is not None:
+            invocation, task, brief = context
+            agent_key = (invocation.agent_code.value, invocation.agent_name)
+        else:
+            task_id = call.task_id
+            if task_id is None:
+                continue
+            task_brief = task_context.get(task_id)
+            if task_brief is None:
+                continue
+            task, brief = task_brief
+            agent_code = call.agent_code or "unassigned"
+            agent_key = (agent_code, AGENT_NAMES.get(agent_code, "系统调用"))
+
+        project_id = brief.project_id
+        if project_id is None:
+            continue
+        project_key = project_id
+        value = _raw_cost(call.cost_usd)
+        rollup = task_rollups.setdefault(
+            task.id,
+            {
+                "task": task,
+                "agent_calls": 0,
+                "tool_calls": 0,
+                "cost": 0.0,
+            },
+        )
+        rollup["cost"] += value
+        agent = agent_rollups.setdefault(
+            agent_key,
+            {"calls": 0, "cost": 0.0, "failed": 0},
+        )
+        if context is None:
+            if task.id not in unlinked_agent_tasks[agent_key]:
+                unlinked_agent_tasks[agent_key].add(task.id)
+                agent["calls"] += 1
+            if (
+                call.status != "ok"
+                and task.id not in failed_unlinked_agent_tasks[agent_key]
+            ):
+                failed_unlinked_agent_tasks[agent_key].add(task.id)
+                agent["failed"] += 1
+        agent["cost"] += value
+        project_costs[project_key] += value
+        project_tasks[project_key].add(task.id)
+        daily_costs[call.created_at.date()] += value
+
     for tool, task, brief in tool_rows:
-        project_key = int(brief.project_id)
-        value = _cost(tool.cost)
+        project_id = brief.project_id
+        if project_id is None:
+            continue
+        project_key = project_id
+        value = _raw_cost(tool.cost)
         failed = tool.status in FAILED_TOOL_STATUSES
         rollup = task_rollups.setdefault(
             task.id,
