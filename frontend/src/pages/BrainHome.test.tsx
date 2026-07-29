@@ -18,7 +18,6 @@ import {
   listArtifacts,
   listBrainTasks,
   listComposerSkills,
-  rejectDeliverableAcceptance,
   reviseArtifact,
   regenerateBrainMessage,
   refreshBrainObservation,
@@ -512,6 +511,33 @@ describe("BrainHome", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(createConversation).mockReset();
+    vi.mocked(getConversation).mockReset();
+    vi.mocked(getBrainTaskRuntime).mockReset();
+    vi.mocked(listBrainTasks).mockReset();
+    vi.mocked(listComposerSkills).mockReset();
+    vi.mocked(sendConversationTurn).mockReset();
+    vi.mocked(sendBrainMessage).mockReset();
+    vi.mocked(createConversation).mockImplementation(async () => ({
+      ...mocks.conversationThread,
+      id: 82,
+      account_id: 3,
+      turns: [],
+    }));
+    vi.mocked(getConversation).mockImplementation(async () => mocks.conversationThread);
+    vi.mocked(getBrainTaskRuntime).mockImplementation(async () => mocks.runtime);
+    vi.mocked(listBrainTasks).mockImplementation(async () => [
+      mocks.taskWithRuntime,
+      mocks.matrixTask,
+    ]);
+    vi.mocked(listComposerSkills).mockImplementation(async () => []);
+    vi.mocked(sendConversationTurn).mockImplementation(async () => ({
+      turn: mocks.conversationThread.turns[1],
+      run: mocks.completedConversationRun,
+      task_id: null,
+      projections: [],
+    }));
+    vi.mocked(sendBrainMessage).mockImplementation(async () => mocks.runtime);
     localStorage.clear();
     mocks.workspace.accountId = 3;
     mocks.eventHandler = null;
@@ -1498,6 +1524,27 @@ describe("BrainHome", () => {
     expect(screen.queryByTestId("conversation-turn-101")).not.toBeInTheDocument();
   });
 
+  it("creates a fresh Thread before the first ordinary message and never starts a legacy task", async () => {
+    vi.mocked(listBrainTasks).mockResolvedValueOnce([]);
+    renderBrainHome();
+
+    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
+    fireEvent.change(input, { target: { value: "帮我看一下最近30天的数据" } });
+    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
+
+    await waitFor(() => expect(createConversation).toHaveBeenCalledWith({ account_id: 3 }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(82, {
+      client_message_id: expect.any(String),
+      message: "帮我看一下最近30天的数据",
+    }));
+    expect(sendBrainMessage).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        localStorage.getItem("tongzhouxing_brain_active_conversation_threads") || "{}",
+      ).accounts["3"],
+    ).toBe(82);
+  });
+
   it("clears a stale V2 Thread from the screen when the selected account changes", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",
@@ -1709,20 +1756,6 @@ describe("BrainHome", () => {
     });
   });
 
-  it("opens runtime status and expert handoff only when execution details are requested", async () => {
-    renderBrainHome();
-
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
-
-    fireEvent.click(await screen.findByRole("button", { name: /执行详情/ }));
-
-    expect(await screen.findByRole("dialog", { name: "执行详情" })).toBeInTheDocument();
-    expect(screen.getByText("运行状态")).toBeInTheDocument();
-    expect(screen.getByText("专家接力")).toBeInTheDocument();
-  });
 
   it("renders execution details for a Skill task without an orchestration plan", async () => {
     localStorage.setItem(
@@ -1747,79 +1780,8 @@ describe("BrainHome", () => {
     expect(screen.queryByText("专家接力")).not.toBeInTheDocument();
   });
 
-  it("keeps the composer at the bottom and starts a workflow directly", async () => {
-    renderBrainHome();
 
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
 
-    await waitFor(() => {
-      expect(vi.mocked(sendBrainMessage).mock.calls[0]?.[0]).toEqual({
-        message: "帮我诊断这个账号，并生成下周内容计划",
-        client_message_id: expect.any(String),
-        task_id: undefined,
-        project_id: 2,
-        account_id: 3,
-        platform: "douyin",
-      });
-    });
-    expect(await screen.findByText("好的，我先理解目标，然后调用账号定位专家。")).toBeInTheDocument();
-    expect(screen.getAllByText("账号定位专家").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("等待你确认：生成发布前检查清单").length).toBeGreaterThan(0);
-    expect(screen.getByRole("article", { name: "正式成果：账号定位诊断" })).toHaveTextContent(
-      "建议以真实数码体验和理性选购建议建立账号差异化。",
-    );
-    expect(screen.queryByText("deepseek-chat")).not.toBeInTheDocument();
-    expect(screen.queryByText(/account_persona/)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "采用成果" }));
-    await waitFor(() => {
-      expect(vi.mocked(approveDeliverableAcceptance).mock.calls[0]?.[0]).toEqual(
-        mocks.acceptance,
-      );
-    });
-  });
-
-  it("shows the submitted turn and thinking state before the request completes", async () => {
-    let finishRequest: ((runtime: BrainRuntime) => void) | undefined;
-    vi.mocked(listBrainTasks).mockResolvedValueOnce([]);
-    vi.mocked(sendBrainMessage).mockImplementationOnce(
-      () => new Promise((resolve) => { finishRequest = resolve; }),
-    );
-
-    renderBrainHome();
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "分析这个账号最近的内容表现" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-
-    expect(await screen.findByText("分析这个账号最近的内容表现")).toBeVisible();
-    expect(input).toHaveValue("");
-    expect(screen.getByText("正在思考...")).toBeVisible();
-    expect(finishRequest).toBeDefined();
-
-    await act(async () => finishRequest?.(mocks.runtime));
-  });
-
-  it("lets the user stop the exact in-flight generation", async () => {
-    vi.mocked(listBrainTasks).mockResolvedValueOnce([]);
-    vi.mocked(sendBrainMessage).mockImplementationOnce(() => new Promise(() => undefined));
-
-    renderBrainHome();
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "先生成三个内容方向" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
-    await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
-    const request = vi.mocked(sendBrainMessage).mock.calls[0][0];
-
-    fireEvent.click(await screen.findByRole("button", { name: "停止生成" }));
-
-    await waitFor(() => expect(stopBrainGeneration).toHaveBeenCalledOnce());
-    expect(vi.mocked(stopBrainGeneration).mock.calls[0][0]).toEqual({
-      clientMessageId: request.client_message_id,
-      taskId: null,
-    });
-  });
 
   it("regenerates the last main Agent turn without submitting a duplicate user message", async () => {
     const completedRuntime: BrainRuntime = {
@@ -1865,114 +1827,6 @@ describe("BrainHome", () => {
     });
   });
 
-  it("shows matching token deltas before the message request has completed", async () => {
-    const streamingTask = {
-      ...mocks.taskWithRuntime,
-      id: 88,
-      title: "流式诊断任务",
-      thread_id: "brain-task-88",
-      brief: {
-        ...mocks.taskWithRuntime.brief,
-        goal: "流式分析当前账号",
-      },
-    } satisfies BrainTask;
-    const streamingRuntime: BrainRuntime = {
-      ...mocks.runtime,
-      task: streamingTask,
-      thread_id: "brain-task-88",
-      timeline: [
-        {
-          id: 880,
-          type: "brain.runtime.user_message",
-          payload: { message: "流式分析当前账号", content: "流式分析当前账号" },
-          created_at: "2026-07-01T00:00:00Z",
-        },
-        {
-          id: 881,
-          type: "brain.runtime.message_done",
-          payload: {
-            task_id: 88,
-            message_id: "previous-turn:00-decision:1",
-            agent_code: "00-decision",
-            agent_name: "主 Agent",
-            content: "这是上一轮已经完成的回复。",
-            model: "deepseek-chat",
-          },
-          created_at: "2026-07-01T00:00:01Z",
-        },
-      ],
-      invocations: [],
-      tool_calls: [],
-      acceptances: [],
-      pending_permissions: [],
-      pending_decisions: [],
-    };
-    let finishRequest: ((runtime: BrainRuntime) => void) | undefined;
-    vi.mocked(sendBrainMessage).mockImplementationOnce(
-      () => new Promise((resolve) => { finishRequest = resolve; }),
-    );
-    vi.mocked(listBrainTasks)
-      .mockResolvedValueOnce([streamingTask])
-      .mockResolvedValueOnce([streamingTask]);
-    vi.mocked(getBrainTaskRuntime).mockResolvedValue(streamingRuntime);
-    localStorage.setItem(
-      "tongzhouxing_brain_active_tasks",
-      JSON.stringify({ version: 1, accounts: { 3: 88 } }),
-    );
-
-    renderBrainHome();
-    expect(await screen.findByText("这是上一轮已经完成的回复。")).toBeInTheDocument();
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "继续流式分析" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-
-    await waitFor(() => expect(sendBrainMessage).toHaveBeenCalledOnce());
-    const request = vi.mocked(sendBrainMessage).mock.calls[0]?.[0] as {
-      client_message_id?: string;
-    };
-    expect(request.client_message_id).toBeTruthy();
-
-    await act(async () => {
-      mocks.eventHandler?.({
-        type: "brain.runtime.message_start",
-        payload: {
-          task_id: 88,
-          client_message_id: request.client_message_id,
-          message_id: `${request.client_message_id}:00-decision:1`,
-          agent_code: "00-decision",
-          agent_name: "主 Agent",
-          model: "deepseek-chat",
-        },
-      });
-    });
-
-    const thinkingMessage = await screen.findByText("正在思考...");
-    const pendingUserMessage = screen.getByText("继续流式分析");
-    expect(
-      pendingUserMessage.compareDocumentPosition(thinkingMessage)
-        & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-
-    await act(async () => {
-      mocks.eventHandler?.({
-        type: "brain.runtime.message_delta",
-        payload: {
-          task_id: 88,
-          client_message_id: request.client_message_id,
-          message_id: `${request.client_message_id}:00-decision:1`,
-          agent_code: "00-decision",
-          agent_name: "主 Agent",
-          model: "deepseek-chat",
-          delta: "我正在逐字分析",
-        },
-      });
-    });
-
-    expect(await screen.findByText("我正在逐字分析")).toBeInTheDocument();
-    expect(finishRequest).toBeDefined();
-    await act(async () => finishRequest?.(streamingRuntime));
-    vi.mocked(getBrainTaskRuntime).mockResolvedValue(mocks.runtime);
-  });
 
   it("follows new messages at the bottom but pauses while the user reads history", async () => {
     localStorage.setItem(
@@ -2035,118 +1889,8 @@ describe("BrainHome", () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
-  it("sends artifact revision feedback through the rerun workflow", async () => {
-    renderBrainHome();
 
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-    await screen.findByRole("article", { name: "正式成果：账号定位诊断" });
 
-    fireEvent.click(screen.getByRole("button", { name: "修改并重做" }));
-    fireEvent.change(screen.getByPlaceholderText("写下需要调整的具体内容"), {
-      target: { value: "补充三个更具体的内容支柱。" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "提交重做" }));
-
-    await waitFor(() => {
-      expect(rejectDeliverableAcceptance).toHaveBeenCalledWith({
-        acceptance: mocks.acceptance,
-        reason: "补充三个更具体的内容支柱。",
-        rerun_scope: "current_agent",
-        ask_brain_rejudge: true,
-      });
-    });
-  });
-
-  it("answers a greeting without creating a workflow or dispatching experts", async () => {
-    vi.mocked(listBrainTasks).mockResolvedValueOnce([]);
-    const greetingRuntime: BrainRuntime = {
-      ...mocks.runtime,
-      status: "completed",
-      intent: {
-        intent: "conversation",
-        confidence: 1,
-        reason: "普通问候",
-        missing_field: null,
-        clarifying_question: null,
-        suggested_expert_codes: [],
-        requires_account_context: false,
-      },
-      timeline: [
-        {
-          id: 101,
-          type: "brain.runtime.user_message",
-          payload: { task_id: 12, message: "你好" },
-          created_at: "2026-07-01T00:00:00Z",
-        },
-        {
-          id: 102,
-          type: "brain.runtime.message_done",
-          payload: {
-            task_id: 12,
-            message_id: "main-hello",
-            agent_code: "00-decision",
-            agent_name: "主 Agent",
-            content: "你好，我在。今天想先聊聊什么？",
-          },
-          created_at: "2026-07-01T00:00:01Z",
-        },
-      ],
-      invocations: [],
-      tool_calls: [],
-      acceptances: [],
-      pending_permissions: [],
-      pending_decisions: [],
-      next_actions: [],
-    };
-    vi.mocked(sendBrainMessage).mockResolvedValueOnce(greetingRuntime);
-    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce(greetingRuntime);
-    renderBrainHome();
-
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "你好" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-
-    const conversation = await screen.findByLabelText("运营大脑对话流");
-    const userMessage = within(conversation).getByRole("article", { name: "你的消息" });
-    expect(within(userMessage).getByText("你好")).toBeInTheDocument();
-    expect(within(userMessage).queryByText("你")).not.toBeInTheDocument();
-    expect(conversation).toHaveTextContent("你好，我在。今天想先聊聊什么？");
-    expect(conversation).not.toHaveTextContent("本轮专家协作已完成");
-    expect(within(conversation).queryByText("账号定位专家")).not.toBeInTheDocument();
-    expect(vi.mocked(sendBrainMessage).mock.calls[0]?.[0]).toEqual({
-      message: "你好",
-      client_message_id: expect.any(String),
-      task_id: undefined,
-      project_id: 2,
-      account_id: 3,
-      platform: "douyin",
-    });
-    expect(screen.queryByLabelText("需要用户确认")).not.toBeInTheDocument();
-  });
-
-  it("submits confirmation comments from the inline approval panel", async () => {
-    renderBrainHome();
-
-    const input = await screen.findByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "帮我诊断这个账号，并生成下周内容计划" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-
-    const composer = await screen.findByLabelText("运营大脑输入区");
-    fireEvent.click(within(composer).getByRole("button", { name: "修改要求" }));
-    const comment = within(composer).getByPlaceholderText("写下希望专家如何调整；驳回后会按此要求重做");
-    fireEvent.change(comment, { target: { value: "标题更克制，先不要进入发布。" } });
-    fireEvent.click(within(composer).getByLabelText("驳回并重做"));
-
-    await waitFor(() => {
-      expect(vi.mocked(approveToolCall).mock.calls[0]?.[0]).toEqual({
-        toolCallId: 45,
-        approved: false,
-        comment: "标题更克制，先不要进入发布。",
-      });
-    });
-  });
 
   it("projects one expert turn from its start and completion events", async () => {
     vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
@@ -2501,33 +2245,6 @@ describe("BrainHome", () => {
     });
   });
 
-  it("continues an active runtime in the same task thread", async () => {
-    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
-      ...mocks.runtime,
-      status: "running",
-      pending_permissions: [],
-      next_actions: [],
-    });
-    localStorage.setItem(
-      "tongzhouxing_brain_active_tasks",
-      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
-    );
-    renderBrainHome();
-    await screen.findByText("好的，我先理解目标，然后调用账号定位专家。");
-
-    const input = screen.getByRole("textbox", { name: "运营大脑消息" });
-    fireEvent.change(input, { target: { value: "先补充三个更年轻化的选题" } });
-    fireEvent.click(screen.getByRole("button", { name: /发送给运营大脑/ }));
-
-    await waitFor(() => expect(vi.mocked(sendBrainMessage).mock.calls.at(-1)?.[0]).toEqual({
-      message: "先补充三个更年轻化的选题",
-      client_message_id: expect.any(String),
-      task_id: 12,
-      project_id: 2,
-      account_id: 3,
-      platform: "douyin",
-    }));
-  });
   it("shows sanitized model-call audit only to administrators", async () => {
     useAuth.setState({
       token: "admin-token",

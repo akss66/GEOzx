@@ -34,7 +34,6 @@ import {
   refreshBrainObservation,
   reviseBrainDecision,
   selectBrainDecision,
-  sendBrainMessage,
   sendConversationTurn,
   stopBrainGeneration,
   verifyBrainExperienceCandidate,
@@ -296,37 +295,6 @@ export default function BrainHome() {
       });
       pendingClientMessageId.current = null;
       message.error(presentApiError(error, "Conversation turn failed.").message);
-    },
-  });
-
-  const messageMutation = useMutation({
-    mutationFn: sendBrainMessage,
-    onSuccess: (nextRuntime) => {
-      const completedClientMessageId = pendingClientMessageId.current;
-      const task = nextRuntime.task;
-      const taskAccountId = task.brief.account_ids[0] ?? effectiveAccount?.id;
-      if (taskAccountId != null) setActiveBrainTaskId(taskAccountId, task.id);
-      setLocalTasks((prev) => [task, ...prev.filter((item) => item.id !== task.id)]);
-      setActiveRuntimeTaskId(task.id);
-      qc.setQueryData(["brain-runtime", task.id], nextRuntime);
-      qc.invalidateQueries({ queryKey: ["brain-tasks"] });
-      if (nextRuntime.status === "stopped" && completedClientMessageId) {
-        setLiveMessages((prev) => prev.map((item) =>
-          item.id.startsWith(completedClientMessageId)
-            ? { ...item, status: "stopped" }
-            : item
-        ));
-      }
-      setPendingTurn(null);
-      pendingClientMessageId.current = null;
-    },
-    onError: (error) => {
-      setPendingTurn((current) => {
-        if (current) setGoal((value) => value || current.content);
-        return null;
-      });
-      pendingClientMessageId.current = null;
-      message.error(presentApiError(error, "任务启动失败，请稍后重试。").message);
     },
   });
 
@@ -658,14 +626,13 @@ export default function BrainHome() {
     setSourceReturnTarget(null);
   }, [activeConversation, sourceReturnTarget, workspaceMode]);
   const isGenerating =
-    messageMutation.isPending
-    || regenerateMutation.isPending
+    regenerateMutation.isPending
     || conversationTurnMutation.isPending
     || launcherPending
     || (activeConversationThreadId != null && pendingTurn != null);
 
-  const startWorkflow = () => {
-    if (isGenerating) return;
+  const startWorkflow = async () => {
+    if (launcherRequestInFlight.current || isGenerating) return;
     const trimmed = goal.trim();
     if (!trimmed) {
       message.warning("先写下要交给运营大脑的运营目标");
@@ -680,32 +647,56 @@ export default function BrainHome() {
       return;
     }
 
+    launcherRequestInFlight.current = true;
+    setLauncherPending(true);
     const clientMessageId = createClientMessageId();
-    followLatestMessage.current = true;
-    pendingClientMessageId.current = clientMessageId;
-    setPendingTurn({
-      clientMessageId,
-      content: trimmed,
-      taskId: activeConversationThreadId == null ? activeTask?.id ?? null : null,
-      showUser: true,
-    });
-    setGoal("");
-    if (activeConversationThreadId != null) {
-      conversationTurnMutation.mutate({
-        threadId: activeConversationThreadId,
+    try {
+      const account = effectiveAccount;
+      const savedThreadId =
+        activeConversationThreadId ?? getActiveConversationThreadId(account.id);
+      const thread = savedThreadId != null
+        ? { id: savedThreadId, account_id: account.id }
+        : await createConversation({ account_id: account.id });
+      if (
+        thread.account_id !== account.id
+        || effectiveAccountIdRef.current !== account.id
+      ) return;
+
+      if (savedThreadId == null) {
+        clearActiveBrainTaskId(account.id);
+        setActiveRuntimeTaskId(null);
+        persistActiveConversationThreadId(account.id, thread.id);
+        setActiveConversationThreadId(thread.id);
+      }
+      followLatestMessage.current = true;
+      pendingClientMessageId.current = clientMessageId;
+      setPendingTurn({
+        clientMessageId,
+        content: trimmed,
+        taskId: null,
+        showUser: true,
+      });
+      setGoal("");
+      await conversationTurnMutation.mutateAsync({
+        threadId: thread.id,
         message: trimmed,
         clientMessageId,
+        accountId: account.id,
       });
-      return;
+    } catch (error) {
+      setPendingTurn((current) => {
+        if (current?.clientMessageId === clientMessageId) {
+          setGoal((value) => value || current.content);
+          return null;
+        }
+        return current;
+      });
+      pendingClientMessageId.current = null;
+      message.error(presentApiError(error, "消息发送失败，请稍后重试。").message);
+    } finally {
+      launcherRequestInFlight.current = false;
+      setLauncherPending(false);
     }
-    messageMutation.mutate({
-      message: trimmed,
-      client_message_id: clientMessageId,
-      task_id: activeTask?.id,
-      project_id: projectId,
-      account_id: effectiveAccount.id,
-      platform: "douyin",
-    });
   };
 
   const requestAccountSelection = useCallback(() => {
