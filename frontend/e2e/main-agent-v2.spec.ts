@@ -234,6 +234,45 @@ test("main agent v2 preserves the completed Artifact on its source Turn after la
   ).toEqual([]);
 });
 
+test("main agent v2 remains usable with runtime details at responsive widths", async ({
+  page,
+}) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+
+  await installBrowserState(page);
+  const unexpectedApiCalls = await mockApi(page);
+  await loginAsAdmin(page);
+
+  await page.locator(".tz-account-trigger").click();
+  await page.locator(".tz-account-panel button", { hasText: account.nickname }).click();
+  await page.locator(".dy-brain-capability-trigger").click();
+  await page.getByRole("menuitem", { name: new RegExp(inspectionSkill.name) }).click();
+
+  const sourceTurn = page.locator(`[data-turn-id="${sourceTurnId}"]`);
+  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.title);
+
+  for (const width of [320, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.locator(".tz-brain-toolbar-actions button").nth(1).click();
+
+    const detailsDrawer = page.locator(".tz-brain-details-drawer");
+    await expect(detailsDrawer).toContainText(expertInvocation.agent_name);
+    await expect(detailsDrawer).toBeInViewport();
+    await detailsDrawer.locator(".ant-drawer-close").click();
+
+    await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
+  }
+
+  expect(unexpectedApiCalls).toEqual([]);
+  expect(
+    consoleErrors.filter((message) => !message.includes("There may be circular references")),
+  ).toEqual([]);
+});
+
 async function loginAsAdmin(page: Page) {
   await page.goto("/login");
   await page.locator('input[autocomplete="email"]').fill(user.email);
