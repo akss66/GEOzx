@@ -191,6 +191,8 @@ class AgentHarness:
             await session.flush()
         except IntegrityError:
             await session.rollback()
+            await session.refresh(task)
+            await session.refresh(task, attribute_names=["brief"])
             if run_id is None or not step_key:
                 raise
             existing = await self._find_invocation(
@@ -204,7 +206,7 @@ class AgentHarness:
             await self._repair_successful_tool_projections(
                 session,
                 task=task,
-                account_id=account.id,
+                account_id=account_id,
                 invocation=existing,
             )
             return await self._existing_result(session, task, existing)
@@ -360,6 +362,8 @@ class AgentHarness:
             payload = kernel_result.payload
         except Exception as exc:  # noqa: BLE001 - persist the durable failure ledger
             await session.rollback()
+            await session.refresh(task)
+            await session.refresh(task, attribute_names=["brief"])
             failed = await session.get(AgentInvocation, invocation_id)
             if failed is not None:
                 failed.status = AgentInvocationStatus.FAILED
@@ -368,7 +372,7 @@ class AgentHarness:
                 failed_lifecycle = await self._record_runtime_lifecycle(
                     session,
                     task=task,
-                    account_id=account.id,
+                    account_id=account_id,
                     run_id=run_id,
                     invocation=failed,
                     event_type="brain.runtime.subagent_failed",

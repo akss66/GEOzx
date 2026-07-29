@@ -35,7 +35,7 @@ class AgentContext(BaseModel):
     project_id: int | None = None
     account_id: int | None = None
     request: str | None = None
-    upstream: dict[str, dict] = Field(default_factory=dict)
+    upstream: dict[str, Any] = Field(default_factory=dict)
     knowledge: dict[str, list[dict]] = Field(default_factory=dict)
     optimization_suggestions: list[dict] = Field(default_factory=list)
     budget: dict = Field(default_factory=dict)

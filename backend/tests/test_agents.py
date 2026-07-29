@@ -155,6 +155,22 @@ async def test_llm_agent_valid_json(monkeypatch):
     assert call_context.response_format == {"type": "json_object"}
 
 
+def test_agent_context_accepts_ordered_expert_outputs() -> None:
+    context = AgentContext(
+        content_item_id=1,
+        upstream={
+            "expert_outputs": [
+                {
+                    "agent_code": "06-operator",
+                    "output": {"summary": "运营诊断"},
+                }
+            ]
+        },
+    )
+
+    assert context.upstream["expert_outputs"][0]["agent_code"] == "06-operator"
+
+
 @pytest.mark.asyncio
 async def test_llm_agent_kernel_accepts_legacy_direct_deliverable() -> None:
     import json
