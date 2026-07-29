@@ -130,12 +130,13 @@ async def test_create_preview_persists_durable_artifact_and_resolution_candidate
     session.add(existing)
     await session.commit()
 
+    workbook_payload = _workbook_payload()
     batch = await create_preview(
         session,
         user=admin,
         account=account,
         filename="..\\works.xlsx",
-        content=_workbook_payload(),
+        content=workbook_payload,
     )
 
     artifact = batch.artifacts[0]
@@ -149,7 +150,7 @@ async def test_create_preview_persists_durable_artifact_and_resolution_candidate
         artifact.storage_key
         == f"account-data/{admin.org_id}/{account.id}/{batch.id}/{artifact.sha256}.xlsx"
     )
-    assert (tmp_path / artifact.storage_key).read_bytes() == _workbook_payload()
+    assert (tmp_path / artifact.storage_key).read_bytes() == workbook_payload
     assert row.status is ImportRowStatus.NEEDS_RESOLUTION
     assert row.platform_content_record_id is None
     assert row.candidate_content_ids == [existing.id]

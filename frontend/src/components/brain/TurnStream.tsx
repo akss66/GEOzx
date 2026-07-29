@@ -146,6 +146,9 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
   const { intent } = turn;
   const route = readableIntent(intent, "mode");
   const status = readableIntent(intent, "status");
+  const execution = turn.projections.find(
+    (projection) => projection.type === "execution_summary",
+  );
 
   return (
     <details className="tz-conversation-turn__technical">
@@ -153,6 +156,22 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
       <div>消息编号：{turn.id}</div>
       {route ? <div>路由：{route}</div> : null}
       {status ? <div>状态：{status}</div> : null}
+      {execution?.type === "execution_summary" ? (
+        <>
+          {execution.skill_code ? <div>Skill：{execution.skill_code}</div> : null}
+          {execution.skill_run_id ? <div>Skill Run：{execution.skill_run_id}</div> : null}
+          {execution.experts.map((expert) => (
+            <div key={expert.id}>
+              Expert #{expert.id} · {expert.agent_code} · {expert.status}
+            </div>
+          ))}
+          {execution.tools.map((tool) => (
+            <div key={tool.id}>
+              Tool #{tool.id} · {tool.tool_code} · {tool.status}
+            </div>
+          ))}
+        </>
+      ) : null}
     </details>
   );
 }
@@ -210,6 +229,20 @@ function Projection({
       return (
         <section {...shared} aria-label="Expert update">
           {projection.invocation.agent_name}: {projection.invocation.status}
+        </section>
+      );
+    case "execution_summary":
+      return (
+        <section {...shared} aria-label="Execution summary">
+          <strong>调用专家</strong>
+          <div>
+            {projection.experts.length > 0
+              ? projection.experts.map((expert) => expert.agent_name).join("、")
+              : "本次未调用专家"}
+          </div>
+          {projection.quality_score != null ? (
+            <div>质量评分：{Math.round(projection.quality_score * 100)} 分</div>
+          ) : null}
         </section>
       );
     case "approval":
@@ -303,6 +336,7 @@ function isKnownProjection(projection: TurnProjection): projection is TurnProjec
     "answer",
     "progress",
     "expert",
+    "execution_summary",
     "approval",
     "artifact",
     "account_data",
@@ -318,6 +352,8 @@ function projectionKey(projection: TurnProjection, turnId: number) {
       return `progress-${projection.skill_run_id}`;
     case "expert":
       return `expert-${projection.invocation.id}`;
+    case "execution_summary":
+      return `execution-summary-${projection.skill_run_id ?? turnId}`;
     case "approval":
       return `approval-${projection.approval.id}`;
     case "artifact":

@@ -11,6 +11,7 @@ from app.core.security import create_access_token
 from app.models import (
     Account,
     AccountMembership,
+    AgentInvocation,
     AgentRun,
     BrainTask,
     Client,
@@ -24,7 +25,13 @@ from app.models import (
     SkillRun,
     User,
 )
-from app.models.enums import Platform, UserRole, WorkspaceRole
+from app.models.enums import (
+    AgentCode,
+    AgentInvocationStatus,
+    Platform,
+    UserRole,
+    WorkspaceRole,
+)
 
 
 def _auth(user: User) -> dict[str, str]:
@@ -483,6 +490,52 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
         )
         == 1
     )
+    skill_run = await session.scalar(
+        select(SkillRun).where(SkillRun.thread_id == thread["id"])
+    )
+    assert skill_run is not None
+    run = await session.get(AgentRun, skill_run.run_id)
+    assert run is not None
+    run.result_payload = {
+        "projections": [
+            {
+                "type": "artifact",
+                "artifact_id": 9001,
+                "artifact_type": "account_inspection_report",
+                "skill_run_id": skill_run.id,
+                "account_id": account.id,
+                "report": {},
+            }
+        ]
+    }
+    session.add(
+        AgentInvocation(
+            task_id=skill_run.task_id,
+            run_id=skill_run.run_id,
+            skill_run_id=skill_run.id,
+            thread_id=skill_run.thread_id,
+            turn_id=skill_run.turn_id,
+            step_key="test-positioning",
+            agent_code=AgentCode.POSITIONING,
+            agent_name="账号定位专家",
+            status=AgentInvocationStatus.DONE,
+        )
+    )
+    await session.commit()
+    history_response = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+    assert history_response.status_code == 200
+    execution = next(
+        projection
+        for projection in history_response.json()["turns"][0]["projections"]
+        if projection["type"] == "execution_summary"
+    )
+    assert execution["skill_code"] == "account_inspection"
+    assert execution["experts"]
+    assert all(expert["agent_name"] for expert in execution["experts"])
+    assert all("input_summary" not in expert for expert in execution["experts"])
 
 
 @pytest.mark.asyncio

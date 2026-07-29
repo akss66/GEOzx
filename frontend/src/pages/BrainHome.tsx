@@ -43,6 +43,7 @@ import { getWorkspaceContext } from "../api/shell";
 import { AgentAvatar } from "../components/agents/AgentAvatar";
 import { OperationalState } from "../components/ui";
 import { BrainComposer } from "../components/brain/BrainComposer";
+import { ConversationHistoryDrawer } from "../components/brain/ConversationHistoryDrawer";
 import { DecisionRequest } from "../components/brain/DecisionRequest";
 import { TurnStream } from "../components/brain/TurnStream";
 import { ArtifactCard, businessArtifactTitle, type ArtifactAction } from "../components/brain/ArtifactCard";
@@ -133,6 +134,7 @@ export default function BrainHome() {
   const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
   const [artifactSourceOverrides, setArtifactSourceOverrides] = useState<Record<number, Artifact>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<"conversation" | "results">("conversation");
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [sourceReturnTarget, setSourceReturnTarget] = useState<SourceReturnTarget | null>(null);
@@ -831,6 +833,27 @@ export default function BrainHome() {
     setSourceReturnError(null);
   };
 
+  const selectConversation = (threadId: number) => {
+    if (!effectiveAccount) return;
+    clearActiveBrainTaskId(effectiveAccount.id);
+    persistActiveConversationThreadId(effectiveAccount.id, threadId);
+    setActiveRuntimeTaskId(null);
+    setActiveConversationThreadId(threadId);
+    setLiveMessages([]);
+    setPendingTurn(null);
+    setWorkspaceMode("conversation");
+    followLatestMessage.current = true;
+  };
+
+  const handleConversationDeleted = (threadId: number) => {
+    if (threadId !== activeConversationThreadId || !effectiveAccount) return;
+    clearActiveConversationThreadId(effectiveAccount.id);
+    setActiveConversationThreadId(null);
+    setLiveMessages([]);
+    setPendingTurn(null);
+    setGoal("");
+  };
+
   const returnToArtifactSource = (retry = false) => {
     if (
       !selectedArtifact
@@ -911,11 +934,24 @@ export default function BrainHome() {
           <Button icon={<PlusOutlined />} onClick={resetConversation}>
             新对话
           </Button>
-          <Button icon={<HistoryOutlined />} onClick={() => setDetailsOpen(true)}>
+          <Button icon={<HistoryOutlined />} onClick={() => setHistoryOpen(true)}>
+            历史会话
+          </Button>
+          <Button icon={<FileTextOutlined />} onClick={() => setDetailsOpen(true)}>
             执行详情
           </Button>
         </div>
-      </header> : null}
+      </header> : (
+        <div className="tz-brain-empty-actions">
+          <Button
+            icon={<HistoryOutlined />}
+            disabled={!effectiveAccount}
+            onClick={() => setHistoryOpen(true)}
+          >
+            历史会话
+          </Button>
+        </div>
+      )}
 
       <main className="tz-brain-stage">
         {contextError ? (
@@ -1161,6 +1197,14 @@ export default function BrainHome() {
           onVerifyCandidate={(input) => verifyExperienceMutation.mutate(input)}
         />
       </Drawer>
+      <ConversationHistoryDrawer
+        accountId={effectiveAccount?.id ?? null}
+        activeThreadId={activeConversationThreadId}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onSelect={selectConversation}
+        onDeleted={handleConversationDeleted}
+      />
     </div>
   );
 }

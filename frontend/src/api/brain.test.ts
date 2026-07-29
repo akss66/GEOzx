@@ -7,6 +7,7 @@ import {
   closeTaskMemory,
   confirmBrainTask,
   createConversation,
+  deleteConversation,
   draftBrainTask,
   getConversation,
   getArtifact,
@@ -14,6 +15,7 @@ import {
   listArtifacts,
   listBrainTasks,
   listComposerSkills,
+  listConversations,
   listDeliverableAcceptances,
   listPendingToolCallApprovals,
   listTaskInvocations,
@@ -45,11 +47,13 @@ vi.mock("./client", () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
 const apiGet = api.get as unknown as Mock;
 const apiPost = api.post as unknown as Mock;
+const apiDelete = api.delete as unknown as Mock;
 
 const task = {
   id: 12,
@@ -204,6 +208,28 @@ describe("brain api", () => {
       },
     );
     expect(apiGet).toHaveBeenCalledWith("/brain/conversations/21");
+  });
+
+  it("lists and permanently deletes owned conversation history", async () => {
+    const conversations = [{
+      id: 21,
+      account_id: 3,
+      title: "账号体检",
+      turn_count: 2,
+      last_message: "帮我体检账号",
+      created_at: "2026-07-29T00:00:00Z",
+      updated_at: "2026-07-29T00:01:00Z",
+    }];
+    apiGet.mockResolvedValueOnce({ data: { data: conversations } });
+    apiDelete.mockResolvedValueOnce({ data: null });
+
+    await expect(listConversations(3)).resolves.toEqual(conversations);
+    await expect(deleteConversation(21)).resolves.toBeUndefined();
+
+    expect(apiGet).toHaveBeenCalledWith("/brain/conversations", {
+      params: { account_id: 3 },
+    });
+    expect(apiDelete).toHaveBeenCalledWith("/brain/conversations/21");
   });
 
   it("lists only public composer Skills and paginated account artifacts", async () => {

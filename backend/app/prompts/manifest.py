@@ -194,7 +194,7 @@ PRODUCTION_PROMPTS: tuple[PromptSpec, ...] = (
         "main-agent.conversation",
         "1.0.0",
         "main-agent/conversation/v1.md",
-        "455727f71dd7e1a1de91a6268d4a8a683e12240ef99036448d27934e85c4370e",
+        "2888dd07039971049fe7924a1a251e3f07ee0799cd0dcaeb79c5e2249257d43c",
         "natural-language/v1",
     ),
     PromptSpec(

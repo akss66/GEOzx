@@ -126,6 +126,47 @@ describe("TurnStream", () => {
     expect(assistantMessage.querySelector(".dy-chat-bubble")).not.toBeNull();
   });
 
+  it("shows called experts professionally and keeps technical identifiers collapsed", () => {
+    const executionThread: ConversationThread = {
+      ...thread,
+      turns: [{
+        ...thread.turns[1],
+        projections: [{
+          type: "execution_summary",
+          turn_id: 102,
+          skill_code: "account_inspection",
+          skill_run_id: 4002,
+          status: "completed",
+          quality_score: 0.91,
+          experts: [{
+            id: 7001,
+            agent_code: "01-positioning",
+            agent_name: "账号定位专家",
+            status: "completed",
+          }],
+          tools: [{
+            id: 8001,
+            tool_code: "account.data_context",
+            tool_name: "账号数据上下文",
+            status: "completed",
+          }],
+        }],
+      }],
+    };
+
+    render(<TurnStream thread={executionThread} />);
+
+    expect(screen.getByText("调用专家")).toBeInTheDocument();
+    expect(screen.getByText("账号定位专家")).toBeInTheDocument();
+    expect(screen.getByText("质量评分：91 分")).toBeInTheDocument();
+    const technicalSummary = screen.getByText("技术日志");
+    expect(technicalSummary.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(technicalSummary);
+    expect(technicalSummary.closest("details")).toHaveAttribute("open");
+    expect(screen.getByText("Skill Run：4002")).toBeInTheDocument();
+    expect(screen.getByText(/Tool #8001/)).toBeInTheDocument();
+  });
+
   it("keeps the exact persisted Artifact in its source Turn when later greetings and retries arrive", async () => {
     render(<TurnStream thread={thread} />);
 

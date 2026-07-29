@@ -8,6 +8,7 @@ import type {
   Artifact,
   ArtifactStatus,
   ConversationThread,
+  ConversationThreadSummary,
   CreateConversationInput,
   DeliverableAcceptance,
   DraftBrainTaskInput,
@@ -51,6 +52,20 @@ export async function getConversation(threadId: number): Promise<ConversationThr
     `/brain/conversations/${threadId}`,
   );
   return data;
+}
+
+export async function listConversations(
+  accountId: number,
+): Promise<ConversationThreadSummary[]> {
+  const { data } = await api.get<{ data: ConversationThreadSummary[] }>(
+    "/brain/conversations",
+    { params: { account_id: accountId } },
+  );
+  return data.data;
+}
+
+export async function deleteConversation(threadId: number): Promise<void> {
+  await api.delete(`/brain/conversations/${threadId}`);
 }
 
 export async function listComposerSkills(

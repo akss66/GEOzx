@@ -428,6 +428,7 @@ vi.mock("../api/brain", () => ({
     account_id: 3,
     turns: [],
   })),
+  deleteConversation: vi.fn(async () => undefined),
   getArtifact: vi.fn(async () => mocks.artifact),
   getConversation: vi.fn(async () => mocks.conversationThread),
   getBrainTaskRuntime: vi.fn(async () => mocks.runtime),
@@ -437,6 +438,7 @@ vi.mock("../api/brain", () => ({
   })),
   listBrainTasks: vi.fn(async () => [mocks.taskWithRuntime, mocks.matrixTask]),
   listComposerSkills: vi.fn(async () => []),
+  listConversations: vi.fn(async () => []),
   rejectDeliverableAcceptance: vi.fn(async () => ({ ...mocks.acceptance, status: "rerun_requested" })),
   reviseArtifact: vi.fn(async () => ({ ...mocks.artifact, status: "revision_requested", version: 2 })),
   regenerateBrainMessage: vi.fn(async () => mocks.runtime),
@@ -2380,6 +2382,13 @@ describe("BrainHome", () => {
     expect(screen.queryByText("模型调用审计")).not.toBeInTheDocument();
 
     useAuth.setState({ token: null, user: null });
+  });
+
+  it("keeps owned conversation history accessible from the empty workspace", async () => {
+    renderBrainHome();
+
+    const historyButton = await screen.findByRole("button", { name: /历史会话/ });
+    await waitFor(() => expect(historyButton).toBeEnabled());
   });
 });
 

@@ -9,7 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.auth import CurrentUser
 from app.db import get_session
-from app.models import AgentRun, ConversationThread, ConversationTurn
+from app.models import (
+    AgentInvocation,
+    AgentRun,
+    AgentToolCall,
+    ConversationThread,
+    ConversationTurn,
+    SkillRun,
+)
 from app.schemas.conversation import (
     ConversationAgentRunOut,
     ConversationThreadListOut,
@@ -106,10 +113,89 @@ async def _turn_projections(
         .order_by(AgentRun.id.desc())
         .limit(1)
     )
-    if not isinstance(payload, dict):
-        return []
-    projections = payload.get("projections")
-    return list(projections) if isinstance(projections, list) else []
+    projections = (
+        list(payload.get("projections", []))
+        if isinstance(payload, dict) and isinstance(payload.get("projections"), list)
+        else []
+    )
+    if any(
+        isinstance(projection, dict) and projection.get("type") == "artifact"
+        for projection in projections
+    ):
+        execution_summary = await _execution_summary_projection(session, turn)
+        if execution_summary is not None:
+            projections.append(execution_summary)
+    return projections
+
+
+async def _execution_summary_projection(
+    session: AsyncSession,
+    turn: ConversationTurn,
+) -> dict | None:
+    """Expose business provenance while keeping raw execution traces collapsed."""
+
+    skill_run = await session.scalar(
+        select(SkillRun)
+        .where(
+            SkillRun.org_id == turn.org_id,
+            SkillRun.thread_id == turn.thread_id,
+            SkillRun.turn_id == turn.id,
+        )
+        .order_by(SkillRun.id.desc())
+        .limit(1)
+    )
+    invocations = list(
+        await session.scalars(
+            select(AgentInvocation)
+            .where(
+                AgentInvocation.thread_id == turn.thread_id,
+                AgentInvocation.turn_id == turn.id,
+            )
+            .order_by(AgentInvocation.id)
+        )
+    )
+    tool_calls = list(
+        await session.scalars(
+            select(AgentToolCall)
+            .where(
+                AgentToolCall.org_id == turn.org_id,
+                AgentToolCall.thread_id == turn.thread_id,
+                AgentToolCall.turn_id == turn.id,
+            )
+            .order_by(AgentToolCall.id)
+        )
+    )
+    if not invocations:
+        return None
+    return {
+        "type": "execution_summary",
+        "skill_code": skill_run.skill_code if skill_run is not None else None,
+        "skill_run_id": skill_run.id if skill_run is not None else None,
+        "status": skill_run.status if skill_run is not None else None,
+        "quality_score": (
+            float(skill_run.quality_score)
+            if skill_run is not None and skill_run.quality_score is not None
+            else None
+        ),
+        "experts": [
+            {
+                "id": invocation.id,
+                "agent_code": invocation.agent_code.value,
+                "agent_name": invocation.agent_name,
+                "status": invocation.status.value,
+            }
+            for invocation in invocations
+        ],
+        "tools": [
+            {
+                "id": tool_call.id,
+                "tool_code": tool_call.tool_code,
+                "tool_name": tool_call.tool_name,
+                "status": tool_call.status,
+            }
+            for tool_call in tool_calls
+        ],
+    }
 
 
 async def _ordered_turns(

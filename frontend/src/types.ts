@@ -559,6 +559,20 @@ export type SkillStage = {
   status: string;
 };
 
+export interface TurnExecutionExpert {
+  id: number;
+  agent_code: string;
+  agent_name: string;
+  status: string;
+}
+
+export interface TurnExecutionTool {
+  id: number;
+  tool_code: string;
+  tool_name: string;
+  status: string;
+}
+
 export type TurnProjection =
   | { type: "answer"; turn_id: number; message: string }
   | {
@@ -568,6 +582,16 @@ export type TurnProjection =
       stages: SkillStage[];
     }
   | { type: "expert"; turn_id: number; invocation: AgentInvocation }
+  | {
+      type: "execution_summary";
+      turn_id: number;
+      skill_code: string | null;
+      skill_run_id: number | null;
+      status: string | null;
+      quality_score: number | null;
+      experts: TurnExecutionExpert[];
+      tools: TurnExecutionTool[];
+    }
   | { type: "approval"; turn_id: number; approval: AgentToolCall }
   | {
       type: "artifact";
@@ -620,6 +644,16 @@ export interface ConversationThread {
   account_id: number;
   title: string;
   turns: ConversationTurn[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationThreadSummary {
+  id: number;
+  account_id: number;
+  title: string;
+  turn_count: number;
+  last_message: string;
   created_at: string;
   updated_at: string;
 }
