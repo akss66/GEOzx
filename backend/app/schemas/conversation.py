@@ -53,6 +53,22 @@ class ConversationThreadOut(BaseModel):
     updated_at: datetime
 
 
+class ConversationThreadSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_id: int
+    title: str
+    turn_count: int
+    last_message: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationThreadListOut(BaseModel):
+    data: list[ConversationThreadSummaryOut] = Field(default_factory=list)
+
+
 class ConversationAgentRunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

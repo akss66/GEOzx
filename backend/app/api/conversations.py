@@ -10,10 +10,11 @@ from app.config import settings
 from app.core.auth import CurrentUser
 from app.db import get_session
 from app.models import AgentRun, ConversationThread, ConversationTurn
-from app.models.enums import UserRole
 from app.schemas.conversation import (
     ConversationAgentRunOut,
+    ConversationThreadListOut,
     ConversationThreadOut,
+    ConversationThreadSummaryOut,
     ConversationTurnOut,
     CreateConversationThreadRequest,
     CreateConversationTurnRequest,
@@ -23,7 +24,9 @@ from app.services.agent_runs import claim_agent_run, get_agent_run
 from app.services.conversations import (
     append_conversation_turn,
     create_conversation_thread,
+    delete_conversation_thread,
     get_conversation_thread,
+    list_conversation_threads,
 )
 from app.services.turn_execution import execute_conversation_turn
 
@@ -33,12 +36,6 @@ _MAIN_AGENT_V2_DISABLED_DETAIL = {
     "code": "MAIN_AGENT_V2_DISABLED",
     "message": "Main Agent V2 is disabled",
 }
-_MAIN_AGENT_V2_ROLLOUT_RESTRICTED_DETAIL = {
-    "code": "MAIN_AGENT_V2_ROLLOUT_RESTRICTED",
-    "message": "Main Agent V2 rollout is restricted to administrators",
-}
-
-
 def _require_v2_enabled() -> None:
     if settings.main_agent_v2_enabled:
         return
@@ -50,12 +47,6 @@ def _require_v2_enabled() -> None:
 
 def _require_v2_rollout_access(user: CurrentUser) -> None:
     _require_v2_enabled()
-    if user.role is UserRole.ADMIN:
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=_MAIN_AGENT_V2_ROLLOUT_RESTRICTED_DETAIL,
-    )
 
 
 def _turn_out(
@@ -155,6 +146,37 @@ async def create_thread(
 
 
 @router.get(
+    "/conversations",
+    response_model=ConversationThreadListOut,
+)
+async def list_threads(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ConversationThreadListOut:
+    _require_v2_rollout_access(user)
+    rows = await list_conversation_threads(
+        session,
+        user,
+        account_id=account_id,
+    )
+    return ConversationThreadListOut(
+        data=[
+            ConversationThreadSummaryOut(
+                id=row.thread.id,
+                account_id=row.thread.account_id,
+                title=row.thread.title,
+                turn_count=row.turn_count,
+                last_message=row.last_message,
+                created_at=row.thread.created_at,
+                updated_at=row.thread.updated_at,
+            )
+            for row in rows
+        ]
+    )
+
+
+@router.get(
     "/conversations/{thread_id}",
     response_model=ConversationThreadOut,
 )
@@ -170,6 +192,19 @@ async def get_thread(
         thread,
         await _ordered_turns(session, thread),
     )
+
+
+@router.delete(
+    "/conversations/{thread_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_thread(
+    thread_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> None:
+    _require_v2_rollout_access(user)
+    await delete_conversation_thread(session, user, thread_id)
 
 
 @router.post(

@@ -16,6 +16,7 @@ from app.models import (
     Client,
     ClientMembership,
     ContentItem,
+    ConversationThread,
     ConversationTurn,
     Deliverable,
     Event,
@@ -156,6 +157,143 @@ async def test_create_and_get_thread_with_ordered_turn_history(
         "第二条",
     ]
     assert all(turn["projections"] == [] for turn in history["turns"])
+
+
+@pytest.mark.asyncio
+async def test_history_lists_only_the_current_users_selected_account_threads(
+    client,
+    session,
+    admin,
+    member,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    workspace = Client(org_id=admin.org_id, name="会话隔离客户")
+    account = Account(
+        org_id=admin.org_id,
+        client=workspace,
+        platform=Platform.DOUYIN,
+        nickname="会话隔离账号",
+    )
+    member.account_scope_mode = "selected"
+    session.add_all(
+        [
+            workspace,
+            account,
+            ClientMembership(
+                client=workspace,
+                user=member,
+                role=WorkspaceRole.OPERATOR,
+            ),
+            AccountMembership(user=member, account=account),
+        ]
+    )
+    await session.commit()
+    await session.refresh(account)
+
+    admin_thread = await _create_thread(client, admin, account)
+    member_thread = await _create_thread(client, member, account)
+    await _submit_turn(
+        client,
+        admin,
+        admin_thread["id"],
+        client_message_id="admin-history-1",
+        message="管理员自己的会话",
+        requested_skill_code="account_data_query",
+    )
+    await _submit_turn(
+        client,
+        member,
+        member_thread["id"],
+        client_message_id="member-history-1",
+        message="运营成员自己的会话",
+        requested_skill_code="account_data_query",
+    )
+
+    admin_history = await client.get(
+        f"/brain/conversations?account_id={account.id}",
+        headers=_auth(admin),
+    )
+    member_history = await client.get(
+        f"/brain/conversations?account_id={account.id}",
+        headers=_auth(member),
+    )
+
+    assert admin_history.status_code == 200
+    assert member_history.status_code == 200
+    assert [item["id"] for item in admin_history.json()["data"]] == [
+        admin_thread["id"]
+    ]
+    assert [item["id"] for item in member_history.json()["data"]] == [
+        member_thread["id"]
+    ]
+    assert member_history.json()["data"][0]["title"] == "运营成员自己的会话"
+    assert member_history.json()["data"][0]["turn_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_can_permanently_delete_conversation_and_execution_logs(
+    client,
+    session,
+    admin,
+    member,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "永久删除账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="delete-history-1",
+        message="读取账号数据",
+        requested_skill_code="account_data_query",
+    )
+    assert submitted.status_code == 202
+
+    denied = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(member),
+    )
+    deleted = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert denied.status_code == 404
+    assert deleted.status_code == 204
+    assert await session.get(ConversationThread, thread["id"]) is None
+    assert (
+        await session.scalar(
+            select(func.count(ConversationTurn.id)).where(
+                ConversationTurn.thread_id == thread["id"]
+            )
+        )
+        == 0
+    )
+    assert (
+        await session.scalar(
+            select(func.count(AgentRun.id)).where(
+                AgentRun.thread_id == thread["id"]
+            )
+        )
+        == 0
+    )
+    assert (
+        await session.scalar(
+            select(func.count(SkillRun.id)).where(
+                SkillRun.thread_id == thread["id"]
+            )
+        )
+        == 0
+    )
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(Event.thread_id == thread["id"])
+        )
+        == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -489,10 +627,11 @@ async def test_account_scoped_member_cannot_enumerate_or_append_thread_or_turn(
         ),
     ]
 
-    assert [response.status_code for response in responses] == [403, 403, 403]
-    assert {
-        response.json()["detail"]["code"] for response in responses
-    } == {"MAIN_AGENT_V2_ROLLOUT_RESTRICTED"}
+    assert [response.status_code for response in responses] == [404, 404, 404]
+    assert all(
+        "MAIN_AGENT_V2_ROLLOUT_RESTRICTED" not in str(response.json())
+        for response in responses
+    )
     assert (
         await session.scalar(
             select(func.count(ConversationTurn.id)).where(
@@ -662,7 +801,7 @@ async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
 
 
 @pytest.mark.asyncio
-async def test_feature_flag_enabled_is_admin_only_and_legacy_messages_remain_reachable(
+async def test_feature_flag_enabled_keeps_workspace_and_conversation_ownership_boundaries(
     client, session, admin, member, monkeypatch
 ) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
@@ -708,16 +847,16 @@ async def test_feature_flag_enabled_is_admin_only_and_legacy_messages_remain_rea
         member_get_thread.status_code,
         member_submit_turn.status_code,
         member_get_turn.status_code,
-    ] == [403, 403, 403, 403]
-    assert {
-        response.json()["detail"]["code"]
+    ] == [404, 404, 404, 404]
+    assert all(
+        "MAIN_AGENT_V2_ROLLOUT_RESTRICTED" not in str(response.json())
         for response in (
             member_create,
             member_get_thread,
             member_submit_turn,
             member_get_turn,
         )
-    } == {"MAIN_AGENT_V2_ROLLOUT_RESTRICTED"}
+    )
     assert legacy_response.status_code == 422
     assert legacy_response.json()["detail"] != member_create.json()["detail"]
 
