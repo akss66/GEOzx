@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
@@ -153,7 +154,7 @@ class AgentHarness:
             )
             if existing is not None:
                 if trace_only:
-                    return self._existing_trace_result(task, existing)
+                    return await self._existing_trace_result(session, task, existing)
                 await self._repair_successful_tool_projections(
                     session,
                     task=task,
@@ -247,7 +248,7 @@ class AgentHarness:
                 session,
                 org_id=user.org_id,
                 client_id=project.client_id,
-                project_id=project_id,
+                project_id=project.id,
             )
             if project is not None and project.client_id is not None
             else []
@@ -384,10 +385,12 @@ class AgentHarness:
             summary = self._payload_summary(payload_dict)
             invocation.status = AgentInvocationStatus.DONE
             invocation.output_summary = summary
-            invocation.upstream = [
-                *(invocation.upstream or []),
-                {"trace_only_output": payload_dict},
-            ]
+            await self._persist_trace_output(
+                session,
+                task=task,
+                invocation=invocation,
+                payload=payload_dict,
+            )
             invocation.finished_at = datetime.now(UTC)
             completed_lifecycle = await self._record_runtime_lifecycle(
                 session,
@@ -482,7 +485,7 @@ class AgentHarness:
                 rows=knowledge_rows,
                 org_id=user.org_id,
                 client_id=project.client_id,
-                project_id=project_id,
+                project_id=project.id,
                 task_id=task.id,
                 invocation_id=invocation.id,
                 agent_code=code.value,
@@ -833,10 +836,27 @@ class AgentHarness:
         )
 
     @staticmethod
-    def _existing_trace_result(
+    async def _existing_trace_result(
+        session: AsyncSession,
         task: BrainTask,
         invocation: AgentInvocation,
     ) -> AgentHarnessResult:
+        if invocation.run_id is not None:
+            run = await session.get(AgentRun, invocation.run_id)
+            if run is not None:
+                result_payload = dict(run.result_payload or {})
+                trace_outputs = result_payload.get("trace_only_outputs")
+                if isinstance(trace_outputs, dict):
+                    payload = trace_outputs.get(AgentHarness._trace_result_key(invocation))
+                    if isinstance(payload, dict):
+                        return AgentHarnessResult(
+                            task=task,
+                            invocation=invocation,
+                            deliverable=None,
+                            acceptance=None,
+                            knowledge_sources=[],
+                            output=dict(payload),
+                        )
         for item in reversed(invocation.upstream or []):
             if isinstance(item, dict) and isinstance(
                 item.get("trace_only_output"), dict
@@ -850,6 +870,30 @@ class AgentHarness:
                     output=dict(item["trace_only_output"]),
                 )
         raise AgentHarnessError("trace-only specialist result is incomplete")
+
+    @staticmethod
+    async def _persist_trace_output(
+        session: AsyncSession,
+        *,
+        task: BrainTask,
+        invocation: AgentInvocation,
+        payload: dict[str, Any],
+    ) -> None:
+        if invocation.run_id is None:
+            return
+        run = await session.get(AgentRun, invocation.run_id)
+        if run is None or run.org_id != task.org_id:
+            return
+        result_payload = dict(run.result_payload or {})
+        trace_outputs = result_payload.get("trace_only_outputs")
+        safe_outputs = dict(trace_outputs) if isinstance(trace_outputs, dict) else {}
+        safe_outputs[AgentHarness._trace_result_key(invocation)] = payload
+        result_payload["trace_only_outputs"] = safe_outputs
+        run.result_payload = result_payload
+
+    @staticmethod
+    def _trace_result_key(invocation: AgentInvocation) -> str:
+        return invocation.step_key or str(invocation.id)
 
     @staticmethod
     async def _next_version(

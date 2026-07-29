@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -46,6 +46,7 @@ from app.orchestrator.brain_intelligence import brain_intelligence
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skills.account_inspection import (
     AccountInspectionCriticOutcome,
+    AccountInspectionInput,
     AccountInspectionMetric,
     AccountInspectionReport,
 )
@@ -56,6 +57,7 @@ from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_
 
 _ACCOUNT_INSPECTION = "account_inspection"
 _MAX_CRITIC_IMPROVEMENTS = 2
+DataSufficiency = Literal["insufficient", "partial", "sufficient"]
 
 
 @dataclass(frozen=True)
@@ -117,7 +119,7 @@ class SkillRuntime:
         definition = skill_registry.get(skill_code)
         if definition.code != _ACCOUNT_INSPECTION:
             raise KeyError(skill_code)
-        frozen_input = definition.input_model(days=days)
+        frozen_input = AccountInspectionInput.model_validate({"days": days})
         idempotency_key = f"skill:{definition.code}:v{definition.version}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
         existing = await session.scalar(
@@ -567,9 +569,9 @@ class SkillRuntime:
             evaluation=model_review.evaluation,
             iteration=iteration,
             evidence_refs=evidence_refs,
-            prompt_id=model_review.prompt.id,
-            prompt_version=model_review.prompt.version,
-            prompt_hash=model_review.prompt.sha256,
+            prompt_id=model_review.prompt.spec.id,
+            prompt_version=model_review.prompt.spec.version,
+            prompt_hash=model_review.prompt.content_hash,
             critic_model=model_review.model,
         )
         score = recorded.score
@@ -830,10 +832,11 @@ class SkillRuntime:
             return task, content
         if task.org_id != user.org_id or task.content_item_id is None:
             raise PermissionError("existing compatibility task is unavailable")
-        content = await session.get(ContentItem, task.content_item_id)
-        if content is None or content.account_id != thread.account_id:
+        content_item_id = task.content_item_id
+        persisted_content = await session.get(ContentItem, content_item_id)
+        if persisted_content is None or persisted_content.account_id != thread.account_id:
             raise PermissionError("compatibility task account scope does not match")
-        return task, content
+        return task, persisted_content
 
     @staticmethod
     def _require_scope(
@@ -910,7 +913,7 @@ def _build_report(
         missing_data.append("缺少已确认的内容表现快照")
     if not metrics:
         missing_data.append("缺少可核验的账号核心指标")
-    sufficiency = (
+    sufficiency: DataSufficiency = (
         "insufficient"
         if not metrics or snapshot_count == 0
         else ("partial" if len(metrics) < 3 else "sufficient")

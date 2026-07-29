@@ -103,6 +103,8 @@ class OrchestrationEngine:
         ga.decided_at = _now()
         ga.comment = comment
         ci = await session.get(ContentItem, ga.content_item_id)
+        if ci is None:
+            raise ValueError(f"内容不存在: {ga.content_item_id}")
         await session.commit()
         await self._emit(
             "gate.decided",

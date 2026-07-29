@@ -4,7 +4,7 @@ import re
 from collections.abc import Collection
 from dataclasses import dataclass
 from math import ceil
-from typing import Any
+from typing import Any, TypeAlias
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
@@ -64,6 +64,7 @@ _ACCOUNT_INSPECTION_FIELDS = {
     "participating_experts",
     "critic",
 }
+SafeBusinessValue: TypeAlias = str | list["SafeBusinessValue"] | dict[str, "SafeBusinessValue"]
 
 _SECTION_TITLES = {
     "period": "复盘周期",
@@ -309,12 +310,13 @@ async def get_artifact_out(
     session: AsyncSession, user: User, artifact_id: int
 ) -> ArtifactOut:
     deliverable, content, provenance = await get_artifact(session, user, artifact_id)
+    account_id = _require_content_account_id(content)
     return await project_artifact(
         session,
         deliverable,
         content=content,
         expected_org_id=user.org_id,
-        expected_account_id=content.account_id,
+        expected_account_id=account_id,
         provenance=provenance,
     )
 
@@ -381,12 +383,13 @@ async def create_artifact_revision(
         row.status = DeliverableStatus.SUPERSEDED
     await session.commit()
     await session.refresh(revision)
+    account_id = _require_content_account_id(content)
     return await project_artifact(
         session,
         revision,
         content=content,
         expected_org_id=user.org_id,
-        expected_account_id=content.account_id,
+        expected_account_id=account_id,
     )
 
 
@@ -432,12 +435,13 @@ async def accept_artifact(
     await session.commit()
     if changed:
         await session.refresh(selected)
+    account_id = _require_content_account_id(content)
     return await project_artifact(
         session,
         selected,
         content=content,
         expected_org_id=user.org_id,
-        expected_account_id=content.account_id,
+        expected_account_id=account_id,
         provenance=provenance,
     )
 
@@ -473,9 +477,7 @@ async def project_artifact(
         raw_payload,
         business_artifact_type=business_artifact_type,
     )
-    quality_issues = (
-        _safe_business_value(list(quality.issues or [])) if quality is not None else []
-    )
+    quality_issues = _safe_issue_list(quality.issues or []) if quality is not None else []
     return ArtifactOut(
         id=deliverable.id,
         account_id=content.account_id,
@@ -499,7 +501,7 @@ async def project_artifact(
             ArtifactQuality(
                 score=float(quality.score),
                 passed=quality.passed,
-                issues=quality_issues if isinstance(quality_issues, list) else [],
+                issues=quality_issues,
             )
             if quality is not None
             else None
@@ -724,25 +726,29 @@ def _artifact_sections(
     return sections
 
 
-def _safe_business_value(value: Any) -> str | list[Any] | dict[str, Any] | None:
+def _safe_business_value(value: Any) -> SafeBusinessValue | None:
     if isinstance(value, str):
         if _looks_like_internal_confirmation(value):
             return None
         return value
     if isinstance(value, list):
-        cleaned = [
+        cleaned: list[SafeBusinessValue] = [
             item
             for item in (_safe_business_value(item) for item in value)
             if item is not None
         ]
         return cleaned
     if isinstance(value, dict):
-        return {
-            str(key): cleaned
-            for key, item in value.items()
-            if not _is_internal_key(str(key))
-            and (cleaned := _safe_business_value(item)) is not None
-        }
+        cleaned_dict: dict[str, SafeBusinessValue] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            if _is_internal_key(key_str):
+                continue
+            cleaned_item = _safe_business_value(item)
+            if cleaned_item is None:
+                continue
+            cleaned_dict[key_str] = cleaned_item
+        return cleaned_dict
     return str(value)
 
 
@@ -779,9 +785,8 @@ def _evidence_refs(
             continue
         kind = candidate.get("kind") or candidate.get("source_type")
         raw_id = candidate.get("id") or candidate.get("source_id")
-        try:
-            evidence_id = int(raw_id)
-        except (TypeError, ValueError):
+        evidence_id = _safe_evidence_id(raw_id)
+        if evidence_id is None:
             continue
         if not isinstance(kind, str) or not kind.strip() or _is_internal_key(kind):
             continue
@@ -799,6 +804,36 @@ def _evidence_refs(
             safe_label = f"{kind} #{evidence_id}"
         refs.append(EvidenceRef(kind=kind, id=evidence_id, label=safe_label))
     return refs
+
+
+def _require_content_account_id(content: ContentItem) -> int:
+    if content.account_id is None:
+        raise _artifact_not_found()
+    return content.account_id
+
+
+def _safe_evidence_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _safe_issue_list(values: list[Any]) -> list[str]:
+    issues: list[str] = []
+    for value in values:
+        cleaned = _safe_business_value(value)
+        if isinstance(cleaned, str):
+            issues.append(cleaned)
+    return issues
 
 
 def _humanize_key(key: str) -> str:

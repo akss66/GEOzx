@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentContext, LLMAgent
 from app.models.enums import DeliverableType
-from app.schemas.deliverable import DeliverablePayload
+from app.schemas.deliverable import VideoAssetPayload
 
 
 class VideoAgent(LLMAgent):
@@ -20,8 +20,9 @@ class VideoAgent(LLMAgent):
 
     async def run(
         self, session: AsyncSession, org_id: int | None, ctx: AgentContext
-    ) -> DeliverablePayload:
+    ) -> VideoAssetPayload:
         payload = await super().run(session, org_id, ctx)
+        assert isinstance(payload, VideoAssetPayload)
         # 标记待出片：真实生成在后台任务完成后回写 video_url
         payload.gen_status = "queued"
         return payload

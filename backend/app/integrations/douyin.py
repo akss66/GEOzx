@@ -507,7 +507,7 @@ def normalize_douyin_video_metrics(
     """
     snapshots: list[dict[str, Any]] = []
     for item in items:
-        statistics = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+        statistics = _as_object_dict(item.get("statistics"))
         play = _as_int(statistics.get("play_count"))
         share = _as_int(statistics.get("share_count") or statistics.get("forward_count"))
         stat_date = _stat_date_from_timestamp(item.get("create_time"), default_stat_date)
@@ -630,11 +630,27 @@ def _extract_response_payload(
     return _extract_douyin_data(payload, required_field), safe_extra
 
 
+def _as_object_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
 def _as_int(value: object) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
+    if value is None:
         return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
 
 
 def _rate(part: int, total: int) -> float:
@@ -644,10 +660,11 @@ def _rate(part: int, total: int) -> float:
 
 
 def _stat_date_from_timestamp(value: object, fallback: date | None) -> date:
-    if value:
+    timestamp = _as_int(value)
+    if timestamp > 0:
         try:
-            return datetime.fromtimestamp(int(value), tz=UTC).date()
-        except (TypeError, ValueError, OSError):
+            return datetime.fromtimestamp(timestamp, tz=UTC).date()
+        except OSError:
             pass
     return fallback or datetime.now(UTC).date()
 

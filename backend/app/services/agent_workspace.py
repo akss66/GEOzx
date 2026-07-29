@@ -462,6 +462,7 @@ async def handoff_agent_run(
         account_id=account_id,
         roles=None,
     )
+    assert bundle.acceptance is not None
     prompt = (
         f"请接续专家任务 #{bundle.task.id} 的成果，并为当前账号安排下一步工作。\n"
         f"专家：{bundle.invocation.agent_name}\n"
@@ -503,6 +504,8 @@ async def suggest_agent_run_knowledge(
         account_id=account_id,
         roles=_OPERATING_ROLES,
     )
+    assert bundle.deliverable is not None
+    assert bundle.acceptance is not None
     if project.client_id is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前项目尚未绑定客户")
     existing = await session.scalar(
@@ -700,7 +703,7 @@ def _acceptance_items(payload: dict) -> list[dict]:
         "objective": "目标",
         "risk_controls": "风险控制",
     }
-    items = []
+    items: list[dict[str, str]] = []
     for key, value in payload.items():
         if len(items) >= 6:
             break

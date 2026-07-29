@@ -75,6 +75,44 @@ def test_normalize_douyin_video_metrics_maps_statistics_to_review_snapshot_field
     ]
 
 
+def test_normalize_douyin_video_metrics_tolerates_malformed_statistics_values():
+    snapshots = normalize_douyin_video_metrics(
+        [
+            {
+                "item_id": "video-2",
+                "title": "bad stats",
+                "create_time": object(),
+                "statistics": {
+                    "play_count": object(),
+                    "digg_count": "oops",
+                    "comment_count": None,
+                    "share_count": ["bad"],
+                    "forward_count": {"bad": "value"},
+                },
+            }
+        ],
+        account_id=9,
+        default_stat_date=date(2026, 7, 1),
+    )
+
+    assert snapshots == [
+        {
+            "account_id": 9,
+            "source": MetricSource.DOUYIN,
+            "stat_date": date(2026, 7, 1),
+            "title": "bad stats",
+            "play": 0,
+            "exposure": 0,
+            "completion_rate": 0.0,
+            "like_rate": 0.0,
+            "comment_rate": 0.0,
+            "share_rate": 0.0,
+            "follower_delta": 0,
+            "external_item_id": "video-2",
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_fetch_douyin_user_info_uses_official_post_form_contract():
     captured_request: httpx.Request | None = None

@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.request_context import get_acting_user_id
-from app.llm.adapters import CompletionResult, LLMAdapter
+from app.llm.adapters import CompletionResult
 from app.llm.adapters.deepseek import DeepSeekAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.adapters.openai_compatible import OpenAICompatibleAdapter
@@ -32,6 +32,24 @@ _stream_observer: ContextVar[StreamObserver | None] = ContextVar(
     "llm_stream_observer",
     default=None,
 )
+
+
+class _GatewayAdapter(Protocol):
+    provider: str
+
+    async def complete(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict[str, Any] | None = None,
+    ) -> CompletionResult: ...
+
+    def stream(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[str]: ...
 
 
 @dataclass(frozen=True)
@@ -86,16 +104,18 @@ class LLMError(RuntimeError):
 
 
 class LLMGateway:
-    def __init__(self, adapters: dict[str, LLMAdapter] | None = None) -> None:
+    def __init__(self, adapters: dict[str, _GatewayAdapter] | None = None) -> None:
         self._custom_adapters = adapters is not None
-        self._adapters: dict[str, LLMAdapter] = adapters or {"litellm": LiteLLMAdapter()}
+        self._adapters: dict[str, _GatewayAdapter] = (
+            adapters if adapters is not None else {"litellm": LiteLLMAdapter()}
+        )
 
     async def _adapter(
         self,
         session: AsyncSession,
         org_id: int | None,
         target: ModelTarget,
-    ) -> LLMAdapter:
+    ) -> _GatewayAdapter:
         if target.provider_id is not None:
             runtime = await provider_runtime_for_target(
                 session,
