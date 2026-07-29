@@ -1,6 +1,8 @@
 import json
+from typing import cast
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.adapters import CompletionResult
 from app.llm.gateway import current_llm_call_context
@@ -8,6 +10,8 @@ from app.orchestrator.brain_intelligence import (
     BrainIntelligence,
     IntelligenceUnavailable,
 )
+
+TEST_SESSION = cast(AsyncSession, object())
 
 
 @pytest.mark.asyncio
@@ -54,7 +58,7 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
     decision = await BrainIntelligence().classify(
-        None,
+        TEST_SESSION,
         1,
         "帮我优化一下",
         has_account=True,
@@ -74,18 +78,23 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invalid_model_decision_never_falls_back_to_fixed_experts(monkeypatch):
+    calls = 0
+
     async def fake_chat(*args, **kwargs):
+        nonlocal calls
+        calls += 1
         return CompletionResult("not-json", "test-model", 4, 8, 12), 0.0
 
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
     with pytest.raises(IntelligenceUnavailable):
         await BrainIntelligence().classify(
-            None,
+            TEST_SESSION,
             1,
             "分析当前账号并制定下周内容策略",
             has_account=True,
         )
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -104,7 +113,7 @@ async def test_next_step_can_finish_after_observing_an_expert(monkeypatch):
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
     step = await BrainIntelligence().decide_next(
-        None,
+        TEST_SESSION,
         1,
         "分析账号定位",
         [{"agent_code": "01-positioning", "summary": "核心定位已经明确"}],
@@ -145,7 +154,7 @@ async def test_next_step_can_request_scoped_tool_calls(monkeypatch):
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
     step = await BrainIntelligence().decide_next(
-        None,
+        TEST_SESSION,
         1,
         "复盘当前账号",
         [],
@@ -191,7 +200,7 @@ async def test_next_step_repairs_one_invalid_structured_response(monkeypatch):
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
     step = await BrainIntelligence().decide_next(
-        None,
+        TEST_SESSION,
         1,
         "完成账号定位诊断",
         [],

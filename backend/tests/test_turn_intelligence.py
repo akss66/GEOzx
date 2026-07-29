@@ -1,7 +1,9 @@
 import json
+from typing import cast
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.adapters import CompletionResult
 from app.orchestrator.brain_intelligence import BrainIntelligence
@@ -9,6 +11,8 @@ from app.orchestrator.capability_router import SkillUnavailable
 from app.orchestrator.skills.registry import SkillRegistry
 from app.schemas.conversation import TurnExecutionMode
 from app.schemas.skills import SkillDefinition
+
+TEST_SESSION = cast(AsyncSession, object())
 
 
 class AccountInspectionInput(BaseModel):
@@ -49,7 +53,7 @@ async def _classify(
     registry: SkillRegistry | None = None,
 ):
     return await BrainIntelligence().classify_turn(
-        None,
+        TEST_SESSION,
         1,
         message,
         has_account=has_account,
@@ -228,7 +232,7 @@ async def test_legacy_classify_keeps_intent_mapping(monkeypatch):
     monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
 
     decision = await BrainIntelligence().classify(
-        None, 1, "制定 30 天策略", has_account=True
+        TEST_SESSION, 1, "制定 30 天策略", has_account=True
     )
 
     assert decision.intent == "workflow"
