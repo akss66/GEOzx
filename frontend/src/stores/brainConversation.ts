@@ -111,3 +111,8 @@ export function clearActiveConversationThreadId(accountId: number) {
   delete accounts[String(accountId)];
   writeActiveConversationThreads({ version: 1, accounts });
 }
+
+export function clearBrainConversationSession() {
+  localStorage.removeItem(ACTIVE_BRAIN_TASKS_KEY);
+  localStorage.removeItem(ACTIVE_CONVERSATION_THREADS_KEY);
+}

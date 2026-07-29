@@ -31,24 +31,45 @@ describe("useAuth", () => {
   });
 
   it("persists token and user when auth is set", async () => {
-    const storage = installLocalStorage();
+    const storage = installLocalStorage({
+      tongzhouxing_brain_active_tasks: '{"version":1,"accounts":{"3":12}}',
+      tongzhouxing_brain_active_conversation_threads: '{"version":1,"accounts":{"3":81}}',
+    });
+    const { queryClient } = await import("../queryClient");
     const { useAuth } = await import("./auth");
+    queryClient.setQueryData(["brain-conversation", 81], { id: 81 });
 
     useAuth.getState().setAuth("new-token", user);
 
     expect(storage.setItem).toHaveBeenCalledWith(TOKEN_KEY, "new-token");
+    expect(storage.removeItem).toHaveBeenCalledWith("tongzhouxing_brain_active_tasks");
+    expect(storage.removeItem).toHaveBeenCalledWith(
+      "tongzhouxing_brain_active_conversation_threads",
+    );
+    expect(queryClient.getQueryData(["brain-conversation", 81])).toBeUndefined();
     expect(useAuth.getState().token).toBe("new-token");
     expect(useAuth.getState().user).toEqual(user);
   });
 
   it("clears stored token and user on logout", async () => {
-    const storage = installLocalStorage({ [TOKEN_KEY]: "existing-token" });
+    const storage = installLocalStorage({
+      [TOKEN_KEY]: "existing-token",
+      tongzhouxing_brain_active_tasks: '{"version":1,"accounts":{"3":12}}',
+      tongzhouxing_brain_active_conversation_threads: '{"version":1,"accounts":{"3":81}}',
+    });
+    const { queryClient } = await import("../queryClient");
     const { useAuth } = await import("./auth");
+    queryClient.setQueryData(["brain-conversation", 81], { id: 81 });
 
     useAuth.getState().setUser(user);
     useAuth.getState().logout();
 
     expect(storage.removeItem).toHaveBeenCalledWith(TOKEN_KEY);
+    expect(storage.removeItem).toHaveBeenCalledWith("tongzhouxing_brain_active_tasks");
+    expect(storage.removeItem).toHaveBeenCalledWith(
+      "tongzhouxing_brain_active_conversation_threads",
+    );
+    expect(queryClient.getQueryData(["brain-conversation", 81])).toBeUndefined();
     expect(useAuth.getState().token).toBeNull();
     expect(useAuth.getState().user).toBeNull();
   });

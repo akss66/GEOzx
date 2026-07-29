@@ -79,6 +79,17 @@ async def redact_request_validation_error(
         content={"detail": _json_safe_validation_detail(exc.errors())},
     )
 
+
+@app.middleware("http")
+async def prevent_authenticated_response_caching(request: Request, call_next):
+    """Keep account-scoped API payloads out of browser and intermediary caches."""
+
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- 入口文件，Root 仅用于注入主题/Providers */
 import { App as AntApp, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
@@ -10,6 +10,7 @@ import "@fontsource-variable/geist/wght.css";
 import "@fontsource-variable/noto-sans-sc/wght.css";
 
 import App from "./App";
+import { queryClient } from "./queryClient";
 import { buildTheme } from "./theme/tokens";
 import "./index.css";
 import "./styles/foundation.css";
@@ -27,10 +28,6 @@ import "./styles/knowledge-studio.css";
 import "./styles/cost-workspace.css";
 import "./styles/user-workspace.css";
 import "./styles/high-fidelity-system.css";
-
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
-});
 
 function Root() {
   return (

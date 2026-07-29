@@ -16,6 +16,7 @@ client = TestClient(app)
 def test_health_liveness() -> None:
     resp = client.get("/health")
     assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store, private"
     body = resp.json()
     assert body["status"] == "ok"
     assert body["service"] == "dyflow-backend"
