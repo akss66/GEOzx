@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
+from typing import TypedDict
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -39,7 +40,7 @@ from app.models.enums import (
     MetricSource,
     Platform,
 )
-from app.services.data_import import REGISTERED_ADAPTERS
+from app.services.data_import import REGISTERED_ADAPTERS, DataSourceAdapter, SourceInput
 from app.services.data_import.identity import build_weak_fingerprint, match_content
 from app.services.data_import.parser import SUPPORTED_EXTENSIONS, RowIssue
 from app.services.data_import.templates import KNOWN_TEMPLATES
@@ -87,6 +88,11 @@ class QuarantinedArtifact:
     quarantined: Path
 
 
+class _RevokeConflict(TypedDict):
+    row_number: int
+    message: str
+
+
 async def create_preview(
     session: AsyncSession,
     *,
@@ -96,7 +102,7 @@ async def create_preview(
     content: bytes,
 ) -> DataImportBatch:
     _assert_org_account_scope(user=user, account=account)
-    source = {"filename": filename, "data": content}
+    source: SourceInput = {"filename": filename, "data": content}
     adapter = _resolve_adapter(source)
     parsed = adapter.parse(source)
     rows = adapter.validate(adapter.normalize(parsed))
@@ -1391,8 +1397,8 @@ async def _find_revoke_conflicts(
     session: AsyncSession,
     *,
     batch: DataImportBatch,
-) -> list[dict[str, object]]:
-    conflicts: list[dict[str, object]] = []
+) -> list[_RevokeConflict]:
+    conflicts: list[_RevokeConflict] = []
     for row in batch.rows:
         for target in row.projected_target_ids:
             if target.get("kind") != "platform_content_record":
@@ -1426,7 +1432,7 @@ async def _record_revoke_conflicts(
     session: AsyncSession,
     *,
     batch: DataImportBatch,
-    conflicts: list[dict[str, object]],
+    conflicts: list[_RevokeConflict],
 ) -> None:
     timestamp = datetime.now(UTC)
     for item in conflicts:
@@ -1435,7 +1441,7 @@ async def _record_revoke_conflicts(
                 DataConflict.org_id == batch.org_id,
                 DataConflict.account_id == batch.account_id,
                 DataConflict.batch_id == batch.id,
-                DataConflict.row_number == int(item["row_number"]),
+                DataConflict.row_number == item["row_number"],
                 DataConflict.field_name == "projected_target_ids",
             )
         )
@@ -1449,7 +1455,7 @@ async def _record_revoke_conflicts(
                 org_id=batch.org_id,
                 account_id=batch.account_id,
                 batch_id=batch.id,
-                row_number=int(item["row_number"]),
+                row_number=item["row_number"],
                 status=ConflictStatus.OPEN,
                 field_name="projected_target_ids",
                 conflict_code="superseded_projection",
@@ -1471,17 +1477,17 @@ async def _delete_row_targets(
             if metric is not None and metric.import_batch_id == batch.id:
                 await session.delete(metric)
         elif target.get("kind") == "account_metric_snapshot":
-            snapshot = await session.get(AccountMetricSnapshot, int(target["id"]))
-            if snapshot is not None and snapshot.import_batch_id == batch.id:
-                await session.delete(snapshot)
+            account_snapshot = await session.get(AccountMetricSnapshot, int(target["id"]))
+            if account_snapshot is not None and account_snapshot.import_batch_id == batch.id:
+                await session.delete(account_snapshot)
         elif target.get("kind") == "benchmark_snapshot":
-            snapshot = await session.get(BenchmarkSnapshot, int(target["id"]))
-            if snapshot is not None and snapshot.import_batch_id == batch.id:
-                await session.delete(snapshot)
+            benchmark_snapshot = await session.get(BenchmarkSnapshot, int(target["id"]))
+            if benchmark_snapshot is not None and benchmark_snapshot.import_batch_id == batch.id:
+                await session.delete(benchmark_snapshot)
         elif target.get("kind") == "audience_profile_snapshot":
-            snapshot = await session.get(AudienceProfileSnapshot, int(target["id"]))
-            if snapshot is not None and snapshot.import_batch_id == batch.id:
-                await session.delete(snapshot)
+            audience_snapshot = await session.get(AudienceProfileSnapshot, int(target["id"]))
+            if audience_snapshot is not None and audience_snapshot.import_batch_id == batch.id:
+                await session.delete(audience_snapshot)
         elif target.get("kind") == "platform_content_record" and target.get("action") == "created":
             content = await session.get(PlatformContentRecord, int(target["id"]))
             if content is not None and content.canonical_import_batch_id == batch.id:
@@ -1574,7 +1580,7 @@ async def _upsert_metric_snapshot(
             await session.flush()
         except IntegrityError:
             await savepoint.rollback()
-            metric = await session.scalar(
+            recovered_metric = await session.scalar(
                 select(MetricSnapshot).where(
                     MetricSnapshot.account_id == batch.account_id,
                     MetricSnapshot.import_batch_id == batch.id,
@@ -1582,8 +1588,9 @@ async def _upsert_metric_snapshot(
                     MetricSnapshot.stat_date == stat_date,
                 )
             )
-            if metric is None:
+            if recovered_metric is None:
                 raise
+            metric = recovered_metric
             action = "updated"
         else:
             await savepoint.commit()
@@ -1630,15 +1637,16 @@ async def _upsert_account_metric_snapshot(
             await session.flush()
         except IntegrityError:
             await savepoint.rollback()
-            snapshot = await session.scalar(
+            recovered_snapshot = await session.scalar(
                 select(AccountMetricSnapshot).where(
                     AccountMetricSnapshot.account_id == batch.account_id,
                     AccountMetricSnapshot.import_batch_id == batch.id,
                     AccountMetricSnapshot.stat_date == stat_date,
                 )
             )
-            if snapshot is None:
+            if recovered_snapshot is None:
                 raise
+            snapshot = recovered_snapshot
             action = "updated"
         else:
             await savepoint.commit()
@@ -1695,7 +1703,7 @@ async def _upsert_benchmark_snapshot(
             await session.flush()
         except IntegrityError:
             await savepoint.rollback()
-            snapshot = await session.scalar(
+            recovered_snapshot = await session.scalar(
                 select(BenchmarkSnapshot).where(
                     BenchmarkSnapshot.account_id == batch.account_id,
                     BenchmarkSnapshot.import_batch_id == batch.id,
@@ -1704,8 +1712,9 @@ async def _upsert_benchmark_snapshot(
                     BenchmarkSnapshot.metric_code == metric_code,
                 )
             )
-            if snapshot is None:
+            if recovered_snapshot is None:
                 raise
+            snapshot = recovered_snapshot
             action = "updated"
         else:
             await savepoint.commit()
@@ -1855,7 +1864,7 @@ def _resolved_replay_or_error(
     raise ValueError("import row must be in needs_resolution with an open conflict")
 
 
-def _resolve_adapter(source) -> object:
+def _resolve_adapter(source: SourceInput) -> DataSourceAdapter:
     for adapter in REGISTERED_ADAPTERS:
         detection = adapter.detect(source)
         if detection.matched:

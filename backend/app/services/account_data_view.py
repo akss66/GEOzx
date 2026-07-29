@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Literal
+from typing import Literal, TypedDict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -191,6 +191,13 @@ class AccountDataView:
     latest_synced_at: datetime | None
     latest_confirmed_at: datetime | None
     source_summary: list[AccountDataSourceSummary]
+
+
+class _SourceSummaryPayload(TypedDict):
+    data_domains: set[str]
+    confirmed_at: datetime | None
+    period_start: date | None
+    period_end: date | None
 
 
 @dataclass(slots=True)
@@ -730,29 +737,40 @@ def _latest_confirmed_at(
 ) -> datetime | None:
     candidates: list[datetime] = []
     for row in content_rows:
-        if row.import_batch_id is not None and row.import_batch_id in batch_by_id:
-            candidates.append(batch_by_id[row.import_batch_id].committed_at)
-        else:
-            candidates.append(row.updated_at)
-    for row in account_rows:
-        if row.import_batch_id in batch_by_id:
-            candidates.append(batch_by_id[row.import_batch_id].committed_at)
-        else:
-            candidates.append(row.updated_at)
-    for row in audience_rows:
-        if row.import_batch_id in batch_by_id:
-            candidates.append(batch_by_id[row.import_batch_id].committed_at)
-        else:
-            candidates.append(row.updated_at)
-    for row in benchmark_rows:
-        if row.import_batch_id in batch_by_id:
-            candidates.append(batch_by_id[row.import_batch_id].committed_at)
-        else:
-            candidates.append(row.updated_at)
-    dated = [item for item in candidates if item is not None]
-    if not dated:
+        batch = batch_by_id.get(row.import_batch_id) if row.import_batch_id is not None else None
+        confirmed_at = batch.committed_at if batch is not None else row.updated_at
+        if confirmed_at is not None:
+            candidates.append(confirmed_at)
+    for account_row in account_rows:
+        batch = (
+            batch_by_id.get(account_row.import_batch_id)
+            if account_row.import_batch_id is not None
+            else None
+        )
+        confirmed_at = batch.committed_at if batch is not None else account_row.updated_at
+        if confirmed_at is not None:
+            candidates.append(confirmed_at)
+    for audience_row in audience_rows:
+        batch = (
+            batch_by_id.get(audience_row.import_batch_id)
+            if audience_row.import_batch_id is not None
+            else None
+        )
+        confirmed_at = batch.committed_at if batch is not None else audience_row.updated_at
+        if confirmed_at is not None:
+            candidates.append(confirmed_at)
+    for benchmark_row in benchmark_rows:
+        batch = (
+            batch_by_id.get(benchmark_row.import_batch_id)
+            if benchmark_row.import_batch_id is not None
+            else None
+        )
+        confirmed_at = batch.committed_at if batch is not None else benchmark_row.updated_at
+        if confirmed_at is not None:
+            candidates.append(confirmed_at)
+    if not candidates:
         return None
-    return max(dated, key=_datetime_sort_key)
+    return max(candidates, key=_datetime_sort_key)
 
 
 def _latest_synced_at(
@@ -814,7 +832,7 @@ def _build_source_summary(
     benchmark_rows: list[BenchmarkSnapshot],
     batch_by_id: dict[int, DataImportBatch],
 ) -> list[AccountDataSourceSummary]:
-    grouped: dict[tuple[str, int | None], dict[str, object]] = {}
+    grouped: dict[tuple[str, int | None], _SourceSummaryPayload] = {}
     for row in content_rows:
         _accumulate_source_summary(
             grouped=grouped,
@@ -824,35 +842,47 @@ def _build_source_summary(
             observed_at=row.stat_date,
             fallback_confirmed_at=row.updated_at,
         )
-    for row in account_rows:
-        batch = batch_by_id.get(row.import_batch_id)
+    for account_row in account_rows:
+        batch = (
+            batch_by_id.get(account_row.import_batch_id)
+            if account_row.import_batch_id is not None
+            else None
+        )
         _accumulate_source_summary(
             grouped=grouped,
-            source=batch.source_kind if batch is not None else row.source_kind,
+            source=batch.source_kind if batch is not None else account_row.source_kind,
             batch=batch,
             data_domain="account_metrics",
-            observed_at=row.stat_date,
-            fallback_confirmed_at=row.updated_at,
+            observed_at=account_row.stat_date,
+            fallback_confirmed_at=account_row.updated_at,
         )
-    for row in audience_rows:
-        batch = batch_by_id.get(row.import_batch_id)
+    for audience_row in audience_rows:
+        batch = (
+            batch_by_id.get(audience_row.import_batch_id)
+            if audience_row.import_batch_id is not None
+            else None
+        )
         _accumulate_source_summary(
             grouped=grouped,
-            source=batch.source_kind if batch is not None else row.source_kind,
+            source=batch.source_kind if batch is not None else audience_row.source_kind,
             batch=batch,
             data_domain="audience",
-            observed_at=row.stat_date,
-            fallback_confirmed_at=row.updated_at,
+            observed_at=audience_row.stat_date,
+            fallback_confirmed_at=audience_row.updated_at,
         )
-    for row in benchmark_rows:
-        batch = batch_by_id.get(row.import_batch_id)
+    for benchmark_row in benchmark_rows:
+        batch = (
+            batch_by_id.get(benchmark_row.import_batch_id)
+            if benchmark_row.import_batch_id is not None
+            else None
+        )
         _accumulate_source_summary(
             grouped=grouped,
-            source=batch.source_kind if batch is not None else row.source_kind,
+            source=batch.source_kind if batch is not None else benchmark_row.source_kind,
             batch=batch,
             data_domain="benchmarks",
-            observed_at=row.stat_date,
-            fallback_confirmed_at=row.updated_at,
+            observed_at=benchmark_row.stat_date,
+            fallback_confirmed_at=benchmark_row.updated_at,
         )
     results = [
         AccountDataSourceSummary(
@@ -878,12 +908,12 @@ def _build_source_summary(
 
 def _accumulate_source_summary(
     *,
-    grouped: dict[tuple[str, int | None], dict[str, object]],
+    grouped: dict[tuple[str, int | None], _SourceSummaryPayload],
     source: ObservationSource,
     batch: DataImportBatch | None,
     data_domain: str,
     observed_at: date,
-    fallback_confirmed_at: datetime,
+    fallback_confirmed_at: datetime | None,
 ) -> None:
     if source == "derived":
         return
@@ -901,8 +931,12 @@ def _accumulate_source_summary(
     )
     payload["data_domains"].add(data_domain)
     if batch is None:
-        payload["period_start"] = min(payload["period_start"], observed_at)
-        payload["period_end"] = max(payload["period_end"], observed_at)
+        period_start = payload["period_start"]
+        period_end = payload["period_end"]
+        payload["period_start"] = (
+            observed_at if period_start is None else min(period_start, observed_at)
+        )
+        payload["period_end"] = observed_at if period_end is None else max(period_end, observed_at)
     confirmed_at = batch.committed_at if batch is not None else fallback_confirmed_at
     if confirmed_at is not None and (
         payload["confirmed_at"] is None

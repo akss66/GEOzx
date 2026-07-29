@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from datetime import date, timedelta
+from typing import TypedDict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,15 @@ _DATA_SYNC_STATUS_LABELS = {
     "failed": "同步失败",
     "manual": "仅支持手动录入",
 }
+
+
+class _DailyRollup(TypedDict):
+    date: date
+    play: int | float | None
+    exposure: int | float | None
+    follower_delta: int | float | None
+    completion_rate: float | None
+    like_rate: float | None
 
 
 def _data_sync_status_label(status: str) -> str:
@@ -209,13 +219,13 @@ def _metric_value(metrics: dict, key: str) -> int | float | None:
     return None if metric is None else metric.value
 
 
-def _daily_rollups(view: AccountDataView) -> list[dict[str, float | int | date | None]]:
+def _daily_rollups(view: AccountDataView) -> list[_DailyRollup]:
     content_by_date: dict[date, list] = defaultdict(list)
     for snapshot in view.content_snapshots:
         content_by_date[snapshot.stat_date].append(snapshot)
     account_by_date = {snapshot.stat_date: snapshot for snapshot in view.account_snapshots}
     dates = sorted(set(content_by_date) | set(account_by_date))
-    results: list[dict[str, float | int | date | None]] = []
+    results: list[_DailyRollup] = []
     for stat_date in dates:
         account_snapshot = account_by_date.get(stat_date)
         content_snapshots = content_by_date.get(stat_date, [])
