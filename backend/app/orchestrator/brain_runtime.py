@@ -208,6 +208,45 @@ class _StreamObserverState:
         self.models.pop(agent_code, None)
 
 
+@dataclass
+class _TaskFreeRealtimeStream:
+    turn: ConversationTurn
+    run: AgentRun
+    has_deltas: bool = False
+
+    async def observe(self, event: dict[str, Any]) -> None:
+        phase = str(event.get("phase") or "")
+        client_message_id = str(self.run.client_message_id or "")
+        base_payload = {
+            "task_id": None,
+            "thread_id": self.turn.thread_id,
+            "turn_id": self.turn.id,
+            "message_id": _runtime_message_id(
+                client_message_id,
+                AgentCode.DECISION.value,
+            ),
+            "agent_code": AgentCode.DECISION.value,
+            "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
+            "model": str(event.get("model") or ""),
+            "client_message_id": client_message_id,
+        }
+        if phase == "start":
+            self.has_deltas = False
+            await publish_realtime_event(
+                "brain.runtime.message_start",
+                base_payload,
+            )
+        elif phase == "delta":
+            delta = str(event.get("delta") or "")
+            if not delta:
+                return
+            self.has_deltas = True
+            await publish_realtime_event(
+                "brain.runtime.message_delta",
+                {**base_payload, "delta": delta},
+            )
+
+
 class BrainRuntimeGraph:
     """LangGraph wrapper that exposes a brain task as a resumable agent runtime."""
 
@@ -223,6 +262,21 @@ class BrainRuntimeGraph:
     def graph_config(thread_id: str) -> RunnableConfig:
         return {"configurable": {"thread_id": thread_id}}
 
+    @staticmethod
+    def task_free_realtime_stream(
+        *,
+        turn: ConversationTurn,
+        run: AgentRun,
+    ) -> _TaskFreeRealtimeStream:
+        if (
+            run.task_id is not None
+            or run.turn_id != turn.id
+            or run.thread_id != turn.thread_id
+            or not run.client_message_id
+        ):
+            raise ValueError("task-free realtime stream ownership does not match")
+        return _TaskFreeRealtimeStream(turn=turn, run=run)
+
     async def deliver_task_free_turn(
         self,
         session: AsyncSession,
@@ -235,6 +289,7 @@ class BrainRuntimeGraph:
         result_payload: dict[str, Any],
         status: str = "completed",
         error_code: str | None = None,
+        response_streamed: bool = False,
         extra_events: list[tuple[str, str, dict[str, Any]]] | None = None,
     ) -> None:
         """Durably deliver a Turn response without creating or reading a BrainTask."""
@@ -340,7 +395,7 @@ class BrainRuntimeGraph:
         for event_row, event_type in broadcasts:
             await session.refresh(event_row)
             payload = dict(event_row.payload or {})
-            if event_type == "brain.runtime.message_done":
+            if event_type == "brain.runtime.message_done" and not response_streamed:
                 stream_payload = {
                     key: value
                     for key, value in payload.items()

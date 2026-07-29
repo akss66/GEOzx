@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.base import extract_json
 from app.llm.gateway import (
     LLMCallContext,
+    StreamObserver,
     bind_llm_call_context,
     gateway,
     reset_stream_observer,
@@ -82,6 +83,7 @@ class BrainIntelligence:
         operating_context: str,
         history: Sequence[dict[str, str]],
         scope: dict[str, Any],
+        stream_observer: StreamObserver | None = None,
     ) -> str:
         """Answer one conversational Turn with the real main-Agent model."""
 
@@ -116,7 +118,7 @@ class BrainIntelligence:
                 prompt_schema_version=prompt.spec.schema_version,
                 scope={"org_id": org_id, **scope},
             )
-            token = set_stream_observer(None)
+            token = set_stream_observer(stream_observer)
             try:
                 with bind_llm_call_context(context):
                     result, _cost = await gateway.chat(

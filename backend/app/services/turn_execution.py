@@ -166,6 +166,10 @@ async def execute_conversation_turn(
         )
 
     if decision.mode is TurnExecutionMode.ANSWER:
+        realtime_stream = runtime_graph.task_free_realtime_stream(
+            turn=turn,
+            run=run,
+        )
         try:
             answer = await brain_intelligence.answer_turn(
                 session,
@@ -182,6 +186,7 @@ async def execute_conversation_turn(
                     "thread_id": thread.id,
                     "turn_id": turn.id,
                 },
+                stream_observer=realtime_stream.observe,
             )
         except IntelligenceUnavailable:
             return await _deliver_task_free(
@@ -201,6 +206,7 @@ async def execute_conversation_turn(
             account_id=account.id,
             decision=decision,
             response=answer,
+            response_streamed=realtime_stream.has_deltas,
         )
     if decision.mode is TurnExecutionMode.CLARIFY:
         return await _deliver_task_free(
@@ -511,6 +517,7 @@ async def _deliver_task_free(
     projections: list[dict[str, Any]] | None = None,
     status: str = "completed",
     error_code: str | None = None,
+    response_streamed: bool = False,
     extra_events: list[tuple[str, str, dict[str, Any]]] | None = None,
 ) -> TurnExecutionResult:
     result = TurnExecutionResult(
@@ -531,6 +538,7 @@ async def _deliver_task_free(
         result_payload=result.model_dump(mode="json"),
         status=status,
         error_code=error_code,
+        response_streamed=response_streamed,
         extra_events=extra_events,
     )
     _log_turn_completion(turn, run, result)

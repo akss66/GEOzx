@@ -146,22 +146,102 @@ async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
     assert result.response == "我是运营大脑。你可以问我账号数据、内容策划或运营执行问题。"
     assert turn.assistant_response == result.response
     assert run.status == "completed"
-    assert answer_calls == [
-        {
-            "operating_context": (
-                f"当前平台：抖音；当前账号：{account.nickname}（账号 ID {account.id}）；"
-                "当前项目：未选择项目。"
-            ),
-            "history": [],
-            "scope": {
-                "account_id": account.id,
-                "thread_id": thread.id,
-                "turn_id": turn.id,
-            },
-        }
-    ]
+    assert len(answer_calls) == 1
+    answer_call = answer_calls[0]
+    assert answer_call["operating_context"] == (
+        f"当前平台：抖音；当前账号：{account.nickname}（账号 ID {account.id}）；"
+        "当前项目：未选择项目。"
+    )
+    assert answer_call["history"] == []
+    assert answer_call["scope"] == {
+        "account_id": account.id,
+        "thread_id": thread.id,
+        "turn_id": turn.id,
+    }
+    assert callable(answer_call["stream_observer"])
     for model in (BrainTask, StrategyPlan, AgentInvocation, AgentToolCall):
         assert await session.scalar(select(func.count(model.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="answer-live-stream"
+    )
+    turn.user_input = "请实时回答"
+    await session.commit()
+    published: list[tuple[str, dict]] = []
+    response_during_delta: list[str | None] = []
+
+    async def classify(*_args, **_kwargs):
+        return _decision(
+            TurnExecutionMode.ANSWER,
+            requires_account_context=False,
+        )
+
+    async def answer(*_args, stream_observer=None, **_kwargs):
+        assert callable(stream_observer)
+        await stream_observer(
+            {
+                "phase": "start",
+                "agent_code": "00-decision",
+                "model": "test-model",
+            }
+        )
+        for delta in ("真", "实"):
+            await stream_observer(
+                {
+                    "phase": "delta",
+                    "agent_code": "00-decision",
+                    "model": "test-model",
+                    "delta": delta,
+                }
+            )
+        await stream_observer(
+            {
+                "phase": "done",
+                "agent_code": "00-decision",
+                "model": "test-model",
+                "content": "真实",
+            }
+        )
+        return "真实"
+
+    async def publish(event_type, payload, **_kwargs):
+        published.append((event_type, payload))
+        if event_type == "brain.runtime.message_delta":
+            response_during_delta.append(turn.assistant_response)
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn", classify
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.answer_turn", answer
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event", publish
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("answer-live-stream", "请实时回答"),
+    )
+
+    assert result.response == "真实"
+    assert response_during_delta == [None, None]
+    assert [
+        payload["delta"]
+        for event_type, payload in published
+        if event_type == "brain.runtime.message_delta"
+    ] == ["真", "实"]
+    assert published[0][0] == "brain.runtime.message_start"
+    assert published[-2][0] == "brain.runtime.message_done"
+    assert published[-1][0] == "brain.runtime.completed"
 
 
 @pytest.mark.asyncio
