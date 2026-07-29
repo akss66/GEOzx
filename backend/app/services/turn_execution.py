@@ -233,22 +233,14 @@ async def execute_conversation_turn(
             decision=decision,
         )
     if decision.mode is TurnExecutionMode.SKILL:
-        if decision.skill_code == "account_inspection":
-            return await _execute_composite_skill(
-                session,
-                user=user,
-                thread=thread,
-                turn=turn,
-                run=run,
-                decision=decision,
-                execution_owner=execution_owner,
-            )
-        return await _block_unavailable_skill(
+        return await _execute_composite_skill(
             session,
+            user=user,
             thread=thread,
             turn=turn,
             run=run,
             decision=decision,
+            execution_owner=execution_owner,
         )
     return await _execute_operation_task(
         session,

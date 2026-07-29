@@ -47,13 +47,19 @@ from app.orchestrator.brain_intelligence import brain_intelligence
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skills.account_inspection import (
     AccountInspectionCriticOutcome,
-    AccountInspectionInput,
     AccountInspectionMetric,
     AccountInspectionReport,
+)
+from app.orchestrator.skills.operating_tasks import (
+    PerformanceReviewReport,
+    PublishingPreparationReport,
+    ScriptGenerationReport,
+    TopicPlanningReport,
 )
 from app.orchestrator.skills.registry import skill_registry
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
+from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 
 _ACCOUNT_INSPECTION = "account_inspection"
@@ -119,9 +125,10 @@ class SkillRuntime:
         self._require_scope(user, thread, turn, run)
         run_id = run.id
         definition = skill_registry.get(skill_code)
-        if definition.code != _ACCOUNT_INSPECTION:
-            raise KeyError(skill_code)
-        frozen_input = AccountInspectionInput.model_validate({"days": days})
+        input_payload = (
+            {"days": days} if "days" in definition.input_model.model_fields else {}
+        )
+        frozen_input = definition.input_model.model_validate(input_payload)
         idempotency_key = f"skill:{definition.code}:v{definition.version}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
         existing = await session.scalar(
@@ -163,6 +170,8 @@ class SkillRuntime:
             thread=thread,
             turn=turn,
             run=run,
+            skill_code=definition.code,
+            artifact_type=definition.artifact_type or definition.code,
         )
         skill_run = existing
         if skill_run is None:
@@ -229,7 +238,20 @@ class SkillRuntime:
         ):
             return self._existing_result(skill_run)
         try:
-            return await self._execute_account_inspection(
+            if definition.code == _ACCOUNT_INSPECTION:
+                return await self._execute_account_inspection(
+                    session,
+                    user=user,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    content=content,
+                    skill_run=skill_run,
+                    days=frozen_input.days,
+                    lease_owner=lease_owner,
+                )
+            return await self._execute_operating_skill(
                 session,
                 user=user,
                 thread=thread,
@@ -238,7 +260,8 @@ class SkillRuntime:
                 task=task,
                 content=content,
                 skill_run=skill_run,
-                days=frozen_input.days,
+                definition=definition,
+                frozen_input=frozen_input.model_dump(mode="json"),
                 lease_owner=lease_owner,
             )
         except _SkillLeaseLost:
@@ -541,6 +564,165 @@ class SkillRuntime:
         await session.commit()
         return self._existing_result(skill_run)
 
+    async def _execute_operating_skill(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        content: ContentItem,
+        skill_run: SkillRun,
+        definition: SkillDefinition,
+        frozen_input: dict[str, Any],
+        lease_owner: str,
+    ) -> SkillExecutionResult:
+        """Run one bounded specialist graph and persist its business artifact."""
+
+        tool_executor = self._tool_executor or DurableToolExecutor(
+            build_runtime_tool_adapter()
+        )
+        tool_results: dict[str, dict[str, Any]] = {}
+        for tool_code in definition.tool_codes:
+            if tool_code not in {"account.profile", "account.data_context"}:
+                continue
+            arguments = (
+                {"days": int(frozen_input.get("days") or 30)}
+                if tool_code == "account.data_context"
+                else {}
+            )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
+            outcome = await tool_executor.execute(
+                task=task,
+                user=user,
+                request=RuntimeToolCall(
+                    tool_code=tool_code,
+                    arguments=arguments,
+                    purpose=f"{definition.name}读取 {tool_code}",
+                    idempotency_key=f"{skill_run.id}:{tool_code}",
+                ),
+                project_id=thread.project_id,
+                account_id=thread.account_id,
+                agent_code=AgentCode.DECISION.value,
+                skill_run_id=skill_run.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
+            )
+            if outcome.status != "success" or outcome.result is None:
+                return await self._pause_for_tool(
+                    session,
+                    skill_run=skill_run,
+                    task=task,
+                    status=outcome.status,
+                    skill_name=definition.name,
+                    artifact_type=definition.artifact_type or definition.code,
+                )
+            self._require_tool_scope(outcome.result, thread.account_id)
+            tool_results[tool_code] = dict(outcome.result)
+            if isinstance(outcome.tool_call, AgentToolCall):
+                outcome.tool_call.skill_run_id = skill_run.id
+                outcome.tool_call.thread_id = thread.id
+                outcome.tool_call.turn_id = turn.id
+                await session.commit()
+
+        expert_results: list[Any] = []
+        upstream_outputs: list[dict[str, Any]] = []
+        evidence_refs = _evidence_refs(tool_results.get("account.data_context", {}))
+        for index, raw_code in enumerate(definition.expert_codes):
+            code = AgentCode(raw_code)
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
+            result = await self._harness.execute(
+                session,
+                user=user,
+                task=task,
+                code=code,
+                purpose=(
+                    f"完成“{definition.name}”：{turn.user_input}。"
+                    "必须遵守当前账号范围，不得编造数据或声称已经发布。"
+                ),
+                evidence_refs=[_evidence_label(item) for item in evidence_refs],
+                run_id=run.id,
+                step_key=f"{definition.code}:{index}:{code.value}",
+                attempt=0,
+                upstream={
+                    "tool_results": {
+                        "items": [
+                            {"tool_code": key, "result": value}
+                            for key, value in tool_results.items()
+                        ]
+                    },
+                    "expert_outputs": upstream_outputs,
+                },
+                skill_run_id=skill_run.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                trace_only=True,
+            )
+            await self._attach_expert_provenance(
+                session,
+                result=result,
+                thread=thread,
+                turn=turn,
+                run=run,
+                skill_run=skill_run,
+            )
+            expert_results.append(result)
+            upstream_outputs.append(
+                {
+                    "agent_code": code.value,
+                    "summary": result.invocation.output_summary,
+                    "payload": dict(result.output or {}),
+                }
+            )
+
+        report, deliverable_type, deliverable_payload = _build_operating_report(
+            definition=definition,
+            account_id=thread.account_id,
+            platform=str(
+                tool_results.get("account.profile", {}).get("platform") or "douyin"
+            ),
+            user_input=turn.user_input,
+            frozen_input=frozen_input,
+            tool_results=tool_results,
+            expert_results=expert_results,
+            evidence_refs=evidence_refs,
+        )
+        deliverable = Deliverable(
+            content_item_id=content.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+            skill_run_id=skill_run.id,
+            agent_code=AgentCode.DECISION.value,
+            type=deliverable_type,
+            version=1,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=deliverable_payload,
+            note=f"generated by {definition.code} Skill",
+        )
+        session.add(deliverable)
+        await session.flush()
+
+        task.status = BrainTaskStatus.COMPLETED
+        task.progress = 100
+        task.current_focus = f"{definition.name}已完成。"
+        content.status = ContentStatus.DRAFT
+        skill_run.status = "completed"
+        skill_run.error_code = None
+        output = {
+            "status": "completed",
+            "task_id": task.id,
+            "artifact_id": deliverable.id,
+            "artifact_type": definition.artifact_type or definition.code,
+            "report": report,
+            "response": f"{definition.name}已完成，正式成果已生成。",
+        }
+        skill_run.output_snapshot = output
+        await session.commit()
+        return self._existing_result(skill_run)
+
     async def _review(
         self,
         session: AsyncSession,
@@ -772,6 +954,8 @@ class SkillRuntime:
         skill_run: SkillRun,
         task: BrainTask,
         status: str,
+        skill_name: str = "账号体检",
+        artifact_type: str = "account_inspection_report",
     ) -> SkillExecutionResult:
         paused_status = (
             "waiting_permission" if status == "waiting_approval" else "failed"
@@ -782,9 +966,9 @@ class SkillRuntime:
             else "TOOL_EXECUTION_FAILED"
         )
         task.current_focus = (
-            "账号体检正在等待工具授权。"
+            f"{skill_name}正在等待工具授权。"
             if paused_status.startswith("waiting")
-            else "账号体检工具执行失败。"
+            else f"{skill_name}工具执行失败。"
         )
         if paused_status == "failed":
             task.status = BrainTaskStatus.FAILED
@@ -794,7 +978,7 @@ class SkillRuntime:
             "status": paused_status,
             "task_id": task.id,
             "artifact_id": None,
-            "artifact_type": "account_inspection_report",
+            "artifact_type": artifact_type,
             "report": {},
             "response": task.current_focus,
             "error_code": error_code,
@@ -810,14 +994,21 @@ class SkillRuntime:
         thread: ConversationThread,
         turn: ConversationTurn,
         run: AgentRun,
+        skill_code: str,
+        artifact_type: str,
     ) -> tuple[BrainTask, ContentItem]:
         task = await session.get(BrainTask, run.task_id) if run.task_id else None
         if task is None:
+            skill_name = skill_registry.get(skill_code).name
+            task_type = {
+                "account_inspection": BrainTaskType.ACCOUNT_DIAGNOSIS,
+                "performance_review": BrainTaskType.REVIEW_OPTIMIZATION,
+            }.get(skill_code, BrainTaskType.CONTENT_CREATION)
             content = ContentItem(
                 project_id=thread.project_id,
                 created_by_id=user.id,
                 account_id=thread.account_id,
-                title=f"账号体检：{turn.user_input[:240]}",
+                title=f"{skill_name}：{turn.user_input[:240]}",
                 current_stage=ContentStage.OPERATION,
                 status=ContentStatus.IN_PROGRESS,
             )
@@ -828,10 +1019,10 @@ class SkillRuntime:
                 created_by_id=user.id,
                 content_item_id=content.id,
                 title=turn.user_input[:300],
-                type=BrainTaskType.ACCOUNT_DIAGNOSIS,
+                type=task_type,
                 status=BrainTaskStatus.RUNNING,
                 progress=0,
-                current_focus="正在执行一键账号体检。",
+                current_focus=f"正在执行{skill_name}。",
                 runtime_mode="skill",
             )
             task.brief = TaskBrief(
@@ -842,7 +1033,7 @@ class SkillRuntime:
                 cycle="current_turn",
                 content_goal=turn.user_input,
                 risk_constraints=[],
-                expected_outputs=["account_inspection_report"],
+                expected_outputs=[artifact_type],
                 confirmation_actions=[],
             )
             session.add(task)
@@ -901,6 +1092,223 @@ class SkillRuntime:
             response=response,
             error_code=output.get("error_code") or skill_run.error_code,
         )
+
+
+def _build_operating_report(
+    *,
+    definition: SkillDefinition,
+    account_id: int,
+    platform: str,
+    user_input: str,
+    frozen_input: dict[str, Any],
+    tool_results: dict[str, dict[str, Any]],
+    expert_results: list[Any],
+    evidence_refs: list[dict[str, Any]],
+) -> tuple[dict[str, Any], DeliverableType, dict[str, Any]]:
+    outputs = [dict(item.output or {}) for item in expert_results]
+    participants = [str(item.invocation.agent_code) for item in expert_results]
+    outputs_by_agent = {
+        str(item.invocation.agent_code): dict(item.output or {})
+        for item in expert_results
+    }
+    preferred_agent = (
+        AgentCode.OPERATOR.value
+        if definition.code in {"performance_review", "publishing_preparation"}
+        else AgentCode.CONTENT_DIRECTOR.value
+    )
+    latest = outputs_by_agent.get(preferred_agent, outputs[-1] if outputs else {})
+
+    if definition.code == "script_generation":
+        scenes = [
+            str(item).strip()
+            for item in latest.get("scenes", [])
+            if str(item).strip()
+        ]
+        while len(scenes) < 3:
+            scenes.append(
+                "主体：用具体案例解释核心观点。"
+                if len(scenes) == 1
+                else "结尾：总结价值并给出明确互动引导。"
+            )
+        report = ScriptGenerationReport(
+            account_id=account_id,
+            title=str(latest.get("title") or user_input[:80]),
+            hook=str(latest.get("hook") or "先说结论：这件事最容易踩的坑在这里。"),
+            scenes=scenes,
+            duration_seconds=int(
+                latest.get("duration_seconds")
+                or frozen_input.get("duration_seconds")
+                or 60
+            ),
+            bgm_suggestion=latest.get("bgm_suggestion"),
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return (
+            data,
+            DeliverableType.VIDEO_SCRIPT,
+            {
+                key: data[key]
+                for key in (
+                    "title",
+                    "hook",
+                    "scenes",
+                    "duration_seconds",
+                    "bgm_suggestion",
+                )
+            },
+        )
+
+    if definition.code == "topic_planning":
+        raw_topics = latest.get("topics")
+        if not isinstance(raw_topics, list) or not raw_topics:
+            raw_topics = latest.get("scenes")
+        source_topics = (
+            [item for item in raw_topics if str(item).strip()]
+            if isinstance(raw_topics, list)
+            else []
+        )
+        if not source_topics:
+            source_topics = [user_input]
+        topic_count = int(frozen_input.get("topic_count") or 5)
+        topics: list[dict[str, Any]] = []
+        for index in range(topic_count):
+            source = source_topics[index % len(source_topics)]
+            if isinstance(source, dict):
+                item = dict(source)
+                item.setdefault("title", f"选题 {index + 1}")
+            else:
+                item = {
+                    "title": str(source),
+                    "angle": str(latest.get("hook") or "结合账号受众给出具体价值"),
+                    "format": "short_video",
+                }
+            topics.append(item)
+        report = TopicPlanningReport(
+            account_id=account_id,
+            period=f"未来 {int(frozen_input.get('days') or 7)} 天",
+            theme=str(latest.get("theme") or latest.get("title") or user_input[:80]),
+            topics=topics,
+            posting_notes=[
+                str(item)
+                for item in latest.get("posting_notes", [])
+                if str(item).strip()
+            ]
+            or ["先小批量发布并根据完播、互动和咨询反馈调整后续选题。"],
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return (
+            data,
+            DeliverableType.TOPIC_PLAN,
+            {
+                "theme": data["theme"],
+                "topics": data["topics"],
+                "posting_notes": data["posting_notes"],
+            },
+        )
+
+    if definition.code == "performance_review":
+        data_context = tool_results.get("account.data_context", {})
+        metrics = data_context.get("metrics")
+        metrics = dict(metrics) if isinstance(metrics, dict) else {}
+        coverage = data_context.get("coverage")
+        has_data = bool(metrics) or (
+            isinstance(coverage, dict)
+            and any(value == "available" for value in coverage.values())
+        )
+        highlights = _string_list(latest.get("highlights"))
+        issues = _string_list(latest.get("issues"))
+        suggestions = _string_list(latest.get("optimization_suggestions"))
+        report = PerformanceReviewReport(
+            account_id=account_id,
+            period=dict(data_context.get("period") or {"days": 30}),
+            data_sufficiency="sufficient" if has_data else "insufficient",
+            summary=str(
+                latest.get("summary")
+                or (
+                    "已基于当前账号数据完成复盘。"
+                    if has_data
+                    else "当前数据不足，暂时无法形成可靠的表现判断。"
+                )
+            ),
+            key_metrics=metrics,
+            highlights=highlights or ["当前周期暂无可确认的突出表现。"],
+            issues=issues or ["需要补充完整内容、互动和粉丝指标。"],
+            optimization_suggestions=suggestions
+            or ["完成数据同步后，再按内容逐条比较完播、互动和转化表现。"],
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return (
+            data,
+            DeliverableType.REVIEW_REPORT,
+            {
+                "period": _period_label(data["period"]),
+                "summary": data["summary"],
+                "key_metrics": data["key_metrics"] or {"data_status": "insufficient"},
+                "highlights": data["highlights"],
+                "issues": data["issues"],
+                "optimization_suggestions": data["optimization_suggestions"],
+            },
+        )
+
+    if definition.code == "publishing_preparation":
+        issues = _string_list(latest.get("issues"))
+        suggestions = _string_list(latest.get("optimization_suggestions"))
+        readiness = "needs_input" if issues else "ready"
+        report = PublishingPreparationReport(
+            account_id=account_id,
+            platform=platform,
+            readiness=readiness,
+            period="待确认发布窗口",
+            items=[
+                {
+                    "title": user_input[:120],
+                    "status": "待人工确认",
+                    "checklist": suggestions
+                    or [
+                        "确认标题、正文、话题和封面素材。",
+                        "确认发布时间、可见范围和评论设置。",
+                        "确认账号授权有效后再进入发布审批。",
+                    ],
+                }
+            ],
+            operating_notes=issues
+            or ["本 Skill 只完成发布准备，不会直接向平台发布。"],
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return (
+            data,
+            DeliverableType.PUBLISH_CALENDAR,
+            {
+                "period": data["period"],
+                "items": data["items"],
+                "operating_notes": data["operating_notes"],
+            },
+        )
+
+    raise KeyError(definition.code)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _period_label(value: dict[str, Any]) -> str:
+    days = value.get("days")
+    if isinstance(days, int) and days > 0:
+        return f"最近 {days} 天"
+    start = value.get("start")
+    end = value.get("end")
+    if start and end:
+        return f"{start} 至 {end}"
+    return "当前周期"
 
 
 def _build_report(

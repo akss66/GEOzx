@@ -26,6 +26,34 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer"}),
     ),
+    "topic_planning": PublicSkillPolicy(
+        code="topic_planning",
+        category="quick_operations",
+        icon="calendar",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+    ),
+    "script_generation": PublicSkillPolicy(
+        code="script_generation",
+        category="quick_operations",
+        icon="file-text",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+    ),
+    "publishing_preparation": PublicSkillPolicy(
+        code="publishing_preparation",
+        category="quick_operations",
+        icon="send",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+    ),
+    "performance_review": PublicSkillPolicy(
+        code="performance_review",
+        category="quick_operations",
+        icon="line-chart",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+    ),
 }
 
 

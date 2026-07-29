@@ -3,7 +3,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import BaseModel, Field
 
-from app.orchestrator.skills.registry import SkillRegistry
+from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.skills import SkillCatalogItem, SkillDefinition
 
 
@@ -118,3 +118,20 @@ def test_catalog_item_projects_stable_business_fields_without_python_model_types
     }
     assert "input_model" not in SkillCatalogItem.model_fields
     assert "output_model" not in SkillCatalogItem.model_fields
+
+
+def test_production_registry_covers_the_first_account_operations_loop() -> None:
+    expected = {
+        "account_inspection",
+        "topic_planning",
+        "script_generation",
+        "publishing_preparation",
+        "performance_review",
+    }
+
+    assert {item.code for item in skill_registry.list_for("douyin")} == expected
+    for code in expected:
+        definition = skill_registry.get(code)
+        assert definition.version >= 1
+        assert definition.expert_codes
+        assert definition.artifact_type
