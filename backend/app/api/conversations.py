@@ -63,7 +63,20 @@ def _turn_out(
     projections: list[dict] | None = None,
 ) -> ConversationTurnOut:
     values = ConversationTurnOut.model_validate(turn)
-    return values.model_copy(update={"projections": projections or []})
+    return values.model_copy(
+        update={"projections": _bind_projections_to_turn(turn.id, projections)}
+    )
+
+
+def _bind_projections_to_turn(
+    turn_id: int,
+    projections: list[dict] | None,
+) -> list[dict]:
+    return [
+        {**projection, "turn_id": turn_id}
+        for projection in (projections or [])
+        if isinstance(projection, dict)
+    ]
 
 
 async def _thread_out(
@@ -230,7 +243,7 @@ async def submit_turn(
         turn=turn_out,
         run=ConversationAgentRunOut.model_validate(run),
         task_id=result.task_id,
-        projections=result.projections,
+        projections=turn_out.projections,
     )
 
 

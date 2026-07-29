@@ -188,6 +188,7 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     assert len(body["projections"]) == 1
     assert body["projections"][0]["type"] == "account_data"
     assert body["projections"][0]["account_id"] == account.id
+    assert body["projections"][0]["turn_id"] == body["turn"]["id"]
     assert body["turn"]["projections"] == body["projections"]
 
     run = await session.get(AgentRun, body["run"]["id"])
@@ -244,6 +245,7 @@ async def test_unknown_explicit_skill_returns_blocked_turn_without_formal_record
             "skill_code": "not_registered",
             "code": "UNKNOWN_SKILL",
             "recovery_action": "请从当前公开能力目录重新选择。",
+            "turn_id": body["turn"]["id"],
         }
     ]
     for model in (SkillRun, Deliverable, ContentItem, BrainTask):
