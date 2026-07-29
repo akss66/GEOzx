@@ -13,6 +13,7 @@ from app.models import BrainTask, Event, OrchestrationPlan, TaskBrief
 from app.models.enums import BrainTaskStatus, BrainTaskType
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.schemas.brain import IntentDecision
+from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.agent_runs import (
     acquire_agent_run,
     claim_agent_run,
@@ -391,9 +392,20 @@ async def test_worker_executes_queued_agent_run_and_persists_completion(
     async def test_session_factory():
         yield session
 
-    async def fake_start_smart(runtime_session, runtime_task, intent, **kwargs):
+    captured_routes: list[TurnRouteDecision] = []
+
+    async def fake_start_routed(
+        runtime_session,
+        runtime_task,
+        *,
+        route_decision,
+        intent,
+        **kwargs,
+    ):
         assert runtime_session is session
+        assert runtime_task is task
         assert intent.intent == "conversation"
+        captured_routes.append(route_decision)
         runtime_task.status = BrainTaskStatus.COMPLETED
         runtime_task.progress = 100
         await runtime_session.commit()
@@ -405,13 +417,23 @@ async def test_worker_executes_queued_agent_run_and_persists_completion(
         enqueued.append(run_id)
 
     monkeypatch.setattr("app.worker.async_session", test_session_factory)
-    monkeypatch.setattr("app.worker.runtime_graph.start_smart", fake_start_smart)
+    monkeypatch.setattr("app.worker.runtime_graph.start_routed", fake_start_routed)
     monkeypatch.setattr("app.worker.enqueue_agent_runtime", fake_enqueue)
     result = await execute_agent_run({"worker_id": "test-worker"}, run.id)
 
     await session.refresh(run)
     await session.refresh(followup)
     assert result == task.id
+    assert captured_routes == [
+        TurnRouteDecision(
+            mode=TurnExecutionMode.ANSWER,
+            intent="conversation",
+            confidence=1,
+            reason="test",
+            requires_account_context=False,
+            requires_operation_task=False,
+        )
+    ]
     assert run.status == "completed"
     assert run.attempt == 1
     assert run.lease_owner is None
@@ -570,7 +592,20 @@ async def test_worker_does_not_retry_invalid_model_route_configuration(
     async def test_session_factory():
         yield session
 
-    async def fail_with_invalid_route(*args, **kwargs):
+    captured_routes: list[TurnRouteDecision] = []
+
+    async def fail_with_invalid_route(
+        runtime_session,
+        runtime_task,
+        *,
+        route_decision,
+        intent,
+        **kwargs,
+    ):
+        assert runtime_session is session
+        assert runtime_task is task
+        assert intent.intent == "analysis"
+        captured_routes.append(route_decision)
         config_error = ModelRouteConfigurationError(
             "model removed-model is not available for provider deepseek"
         )
@@ -581,12 +616,22 @@ async def test_worker_does_not_retry_invalid_model_route_configuration(
         raise harness_error
 
     monkeypatch.setattr("app.worker.async_session", test_session_factory)
-    monkeypatch.setattr("app.worker.runtime_graph.start_smart", fail_with_invalid_route)
+    monkeypatch.setattr("app.worker.runtime_graph.start_routed", fail_with_invalid_route)
 
     result = await execute_agent_run({"worker_id": "test-worker"}, run.id)
 
     await session.refresh(run)
     assert result is None
+    assert captured_routes == [
+        TurnRouteDecision(
+            mode=TurnExecutionMode.QUERY,
+            intent="analysis",
+            confidence=1,
+            reason="test",
+            requires_account_context=False,
+            requires_operation_task=False,
+        )
+    ]
     assert run.status == "failed"
     assert run.phase == "failed"
     assert run.attempt == 1

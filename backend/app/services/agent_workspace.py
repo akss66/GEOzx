@@ -569,6 +569,11 @@ async def load_agent_run(
     )
     if invocation is None or deliverable is None or acceptance is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="专家任务尚未生成正式成果")
+    if acceptance.deliverable_id is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="专家任务尚未生成正式成果")
+    deliverable = await session.get(Deliverable, acceptance.deliverable_id)
+    if deliverable is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="专家任务尚未生成正式成果")
     entry_ids = list(
         await session.scalars(
             select(KnowledgeCitation.entry_id)
@@ -583,7 +588,14 @@ async def load_agent_run(
         )
         by_id = {row.id: row for row in rows}
         knowledge_sources = [by_id[entry_id] for entry_id in entry_ids if entry_id in by_id]
-    return AgentRunBundle(task, invocation, deliverable, acceptance, knowledge_sources)
+    return AgentRunBundle(
+        task,
+        invocation,
+        deliverable,
+        acceptance,
+        knowledge_sources,
+        dict(deliverable.payload or {}),
+    )
 
 
 async def _load_direct_task(session: AsyncSession, task_id: int, org_id: int) -> BrainTask:
