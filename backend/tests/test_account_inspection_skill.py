@@ -203,12 +203,37 @@ class _FakeHarness:
         )
 
 
+class _RevisionHarness(_FakeHarness):
+    async def execute(self, *args, **kwargs):
+        result = await super().execute(*args, **kwargs)
+        if kwargs["code"] is AgentCode.OPERATOR:
+            revised = kwargs["attempt"] > 0
+            result.output = {
+                "period": "最近30天",
+                "summary": "已完成账号体检",
+                "key_metrics": {"play": 1200},
+                "highlights": ["内容已有稳定播放基础"],
+                "issues": ["2秒跳出率偏高"],
+                "optimization_suggestions": [
+                    (
+                        "前3秒分别测试提问式、温差对比式和案例结果式开场，"
+                        "每种连续发布3条并对比2秒跳出率。"
+                        if revised
+                        else "优化视频开头"
+                    )
+                ],
+            }
+        return result
+
+
 class _PassingCritic:
     def __init__(self, outcomes: list[bool] | None = None) -> None:
         self.outcomes = list(outcomes or [True])
         self.calls = 0
+        self.reports: list[dict] = []
 
     async def review(self, **_kwargs):
+        self.reports.append(dict(_kwargs["report"]))
         passed = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
         iteration = _kwargs["iteration"]
         invocation = _kwargs["invocation"]
@@ -305,9 +330,9 @@ async def test_account_inspection_runs_bounded_graph_and_persists_one_artifact(
     assert result.artifact_type == "account_inspection_report"
     assert tools.calls == ["account.profile", "account.data_context"]
     assert harness.calls == [
-        AgentCode.OPERATOR,
         AgentCode.POSITIONING,
         AgentCode.CONTENT_DIRECTOR,
+        AgentCode.OPERATOR,
     ]
     assert await session.scalar(select(func.count(SkillRun.id))) == 1
     assert await session.scalar(select(func.count(AgentToolCall.id))) == 2
@@ -344,6 +369,43 @@ async def test_account_inspection_runs_bounded_graph_and_persists_one_artifact(
         assert {row.turn_id for row in rows} == {turn.id}
 
 
+@pytest.mark.asyncio
+async def test_critic_reviews_the_revised_operator_report(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-critic-revision"
+    )
+    critic = _PassingCritic([False, True])
+    harness = _RevisionHarness()
+    result = await SkillRuntime(
+        tool_executor=_FakeTools(sufficient=True),
+        harness=harness,
+        critic=critic,
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+        days=30,
+    )
+
+    assert result.status == "completed"
+    assert harness.calls == [
+        AgentCode.POSITIONING,
+        AgentCode.CONTENT_DIRECTOR,
+        AgentCode.OPERATOR,
+        AgentCode.OPERATOR,
+    ]
+    assert critic.calls == 2
+    assert critic.reports[0]["recommendations"] == ["优化视频开头"]
+    assert "每种连续发布3条" in critic.reports[1]["recommendations"][0]
+    assert "每种连续发布3条" in result.report["recommendations"][0]
+
+
 def test_account_inspection_definition_freezes_one_explicit_graph() -> None:
     assert ACCOUNT_INSPECTION_SKILL.code == "account_inspection"
     assert ACCOUNT_INSPECTION_SKILL.version > 0
@@ -352,9 +414,9 @@ def test_account_inspection_definition_freezes_one_explicit_graph() -> None:
         "account.data_context",
     )
     assert ACCOUNT_INSPECTION_SKILL.expert_codes == (
-        "06-operator",
         "01-positioning",
         "02-content-director",
+        "06-operator",
     )
     assert ACCOUNT_INSPECTION_SKILL.artifact_type == "account_inspection_report"
 
@@ -389,11 +451,11 @@ async def test_account_inspection_critic_retry_budget_blocks_without_artifact(
     assert result.error_code == "CRITIC_RETRY_EXHAUSTED"
     assert critic.calls == 3
     assert harness.calls == [
-        AgentCode.OPERATOR,
         AgentCode.POSITIONING,
         AgentCode.CONTENT_DIRECTOR,
-        AgentCode.CONTENT_DIRECTOR,
-        AgentCode.CONTENT_DIRECTOR,
+        AgentCode.OPERATOR,
+        AgentCode.OPERATOR,
+        AgentCode.OPERATOR,
     ]
     assert await session.scalar(select(func.count(AgentQualityScore.id))) == 3
     assert await session.scalar(select(func.count(Deliverable.id))) == 0

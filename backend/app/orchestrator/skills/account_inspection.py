@@ -51,13 +51,13 @@ class AccountInspectionReport(BaseModel):
 
 ACCOUNT_INSPECTION_SKILL = SkillDefinition(
     code="account_inspection",
-    version=1,
+    version=2,
     name="一键账号体检",
     description="读取所选账号证据，由运营、定位和内容专家完成有质量门的账号体检。",
     supported_platforms=frozenset({"douyin", "xiaohongshu", "shipinhao"}),
     input_model=AccountInspectionInput,
     output_model=AccountInspectionReport,
-    expert_codes=("06-operator", "01-positioning", "02-content-director"),
+    expert_codes=("01-positioning", "02-content-director", "06-operator"),
     tool_codes=("account.profile", "account.data_context"),
     risk_level="low",
     approval_policy="none",

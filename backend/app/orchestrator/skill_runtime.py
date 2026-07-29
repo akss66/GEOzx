@@ -358,9 +358,9 @@ class SkillRuntime:
         ]
         for index, code in enumerate(
             (
-                AgentCode.OPERATOR,
                 AgentCode.POSITIONING,
                 AgentCode.CONTENT_DIRECTOR,
+                AgentCode.OPERATOR,
             )
         ):
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -453,12 +453,12 @@ class SkillRuntime:
                 session,
                 user=user,
                 task=task,
-                code=AgentCode.CONTENT_DIRECTOR,
+                code=AgentCode.OPERATOR,
                 purpose="按质量审核意见修订账号体检建议，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
                 run_id=run.id,
                 step_key=(
-                    f"account-inspection:critic-revision:{AgentCode.CONTENT_DIRECTOR.value}"
+                    f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"
                 ),
                 attempt=iteration + 1,
                 upstream={
@@ -483,6 +483,15 @@ class SkillRuntime:
                 skill_run=skill_run,
             )
             expert_results.append(latest_result)
+            report = _build_report(
+                account_id=thread.account_id,
+                days=days,
+                data_context=data_context,
+                expert_results=expert_results,
+                evidence_refs=evidence_refs,
+                critic=review,
+                critic_iterations=iteration + 1,
+            )
 
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
         final_deliverable = Deliverable(
@@ -934,6 +943,15 @@ def _build_report(
         for item in expert_results
     ]
     findings = [item for item in summaries if item]
+    operator_payload = next(
+        (
+            dict(item.output)
+            for item in reversed(expert_results)
+            if isinstance(getattr(item, "output", None), dict)
+            and isinstance(item.output.get("optimization_suggestions"), list)
+        ),
+        {},
+    )
     if sufficiency == "insufficient":
         findings = ["当前只能确认数据缺口，尚不能形成账号表现或内容方向结论。"]
     if sufficiency == "insufficient":
@@ -943,8 +961,22 @@ def _build_report(
         recommendations = ["先补齐账号指标和内容表现快照，再进行趋势与内容诊断。"]
         next_action = "补齐并确认最近30天账号及内容数据"
     else:
-        summary = "已基于所选账号的可核验证据完成账号体检。"
-        recommendations = findings[-2:] or ["围绕已有证据继续验证内容方向。"]
+        summary = str(operator_payload.get("summary") or "").strip() or (
+            "已基于所选账号的可核验证据完成账号体检。"
+        )
+        operator_findings = [
+            str(item).strip()
+            for key in ("highlights", "issues")
+            for item in (operator_payload.get(key) or [])
+            if str(item).strip()
+        ]
+        if operator_findings:
+            findings = operator_findings
+        recommendations = [
+            str(item).strip()
+            for item in (operator_payload.get("optimization_suggestions") or [])
+            if str(item).strip()
+        ] or (findings[-2:] or ["围绕已有证据继续验证内容方向。"])
         next_action = "确认体检结论并选择一项优化建议进入执行"
     period = dict(data_context.get("period") or {"days": days})
     period.setdefault("days", days)
@@ -960,9 +992,9 @@ def _build_report(
         next_action=next_action,
         evidence_refs=evidence_refs,
         participating_experts=[
-            AgentCode.OPERATOR.value,
             AgentCode.POSITIONING.value,
             AgentCode.CONTENT_DIRECTOR.value,
+            AgentCode.OPERATOR.value,
         ],
         critic=AccountInspectionCriticOutcome(
             passed=critic.passed,
