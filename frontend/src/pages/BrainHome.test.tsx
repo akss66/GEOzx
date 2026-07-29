@@ -1343,6 +1343,45 @@ describe("BrainHome", () => {
     expect(screen.getByText("正在输出")).toBeInTheDocument();
   });
 
+  it("does not refetch the persisted Turn before streamed message deltas finish", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_conversation_threads",
+      JSON.stringify({ version: 1, accounts: { 3: 81 } }),
+    );
+    vi.mocked(sendConversationTurn).mockImplementationOnce(() => new Promise(() => undefined));
+
+    renderBrainHome();
+    await screen.findByTestId("conversation-turn-101");
+    fireEvent.change(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      target: { value: "保持流式可见" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledOnce());
+    const request = vi.mocked(sendConversationTurn).mock.calls[0]?.[1] as {
+      client_message_id: string;
+    };
+    const callsBeforeEvents = vi.mocked(getConversation).mock.calls.length;
+
+    await act(async () => {
+      for (const type of [
+        "brain.runtime.started",
+        "brain.runtime.intent_classified",
+        "brain.runtime.tool_completed",
+      ]) {
+        mocks.eventHandler?.({
+          type,
+          payload: {
+            thread_id: 81,
+            client_message_id: request.client_message_id,
+          },
+        });
+      }
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(getConversation).mock.calls.length).toBe(callsBeforeEvents);
+  });
+
   it("refreshes the active V2 Thread after a realtime lifecycle event", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_conversation_threads",

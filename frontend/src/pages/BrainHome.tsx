@@ -205,7 +205,14 @@ export default function BrainHome() {
       setPendingTurn((current) => current?.clientMessageId === eventClientMessageId ? null : current);
       pendingClientMessageId.current = null;
     }
-    if (!["brain.runtime.message_start", "brain.runtime.message_delta"].includes(event.type)) {
+    const deferConversationRefresh = [
+      "brain.runtime.started",
+      "brain.runtime.intent_classified",
+      "brain.runtime.tool_completed",
+      "brain.runtime.message_start",
+      "brain.runtime.message_delta",
+    ].includes(event.type);
+    if (!deferConversationRefresh) {
       qc.invalidateQueries({ queryKey: ["brain-tasks"] });
       qc.invalidateQueries({ queryKey: ["brain-runtime"] });
       if (eventThreadId === activeConversationThreadId) {

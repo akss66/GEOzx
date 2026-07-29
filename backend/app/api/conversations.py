@@ -118,13 +118,9 @@ async def _turn_projections(
         if isinstance(payload, dict) and isinstance(payload.get("projections"), list)
         else []
     )
-    if any(
-        isinstance(projection, dict) and projection.get("type") == "artifact"
-        for projection in projections
-    ):
-        execution_summary = await _execution_summary_projection(session, turn)
-        if execution_summary is not None:
-            projections.append(execution_summary)
+    execution_summary = await _execution_summary_projection(session, turn)
+    if execution_summary is not None:
+        projections.append(execution_summary)
     return projections
 
 

@@ -539,6 +539,67 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
 
 
 @pytest.mark.asyncio
+async def test_blocked_turn_still_projects_called_experts(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "失败溯源账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="blocked-experts-1",
+        message="体检这个账号",
+        requested_skill_code="account_inspection",
+    )
+    assert submitted.status_code == 202
+    skill_run = await session.scalar(
+        select(SkillRun).where(SkillRun.thread_id == thread["id"])
+    )
+    assert skill_run is not None
+    run = await session.get(AgentRun, skill_run.run_id)
+    assert run is not None
+    run.result_payload = {
+        "projections": [
+            {
+                "type": "execution_blocked",
+                "artifact_type": "account_inspection_report",
+                "skill_run_id": skill_run.id,
+                "code": "CRITIC_RETRY_EXHAUSTED",
+            }
+        ]
+    }
+    session.add(
+        AgentInvocation(
+            task_id=skill_run.task_id,
+            run_id=skill_run.run_id,
+            skill_run_id=skill_run.id,
+            thread_id=skill_run.thread_id,
+            turn_id=skill_run.turn_id,
+            step_key="blocked-positioning",
+            agent_code=AgentCode.POSITIONING,
+            agent_name="账号定位专家",
+            status=AgentInvocationStatus.DONE,
+        )
+    )
+    await session.commit()
+
+    history_response = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert history_response.status_code == 200
+    projections = history_response.json()["turns"][0]["projections"]
+    assert any(item["type"] == "execution_blocked" for item in projections)
+    execution = next(
+        item for item in projections if item["type"] == "execution_summary"
+    )
+    assert execution["experts"][0]["agent_name"] == "账号定位专家"
+
+
+@pytest.mark.asyncio
 async def test_duplicate_rejects_changed_immutable_request_payload(
     client, session, admin, monkeypatch
 ) -> None:

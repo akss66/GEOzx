@@ -465,10 +465,14 @@ class SkillRuntime:
             if review.passed:
                 break
             if iteration == _MAX_CRITIC_IMPROVEMENTS:
-                return await self._block_after_critic(
+                return await self._complete_for_human_review(
                     session,
                     skill_run=skill_run,
                     task=task,
+                    content=content,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
                     report=report,
                 )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -923,26 +927,59 @@ class SkillRuntime:
         await session.commit()
 
     @staticmethod
-    async def _block_after_critic(
+    async def _complete_for_human_review(
         session: AsyncSession,
         *,
         skill_run: SkillRun,
         task: BrainTask,
+        content: ContentItem,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
         report: AccountInspectionReport,
     ) -> SkillExecutionResult:
-        task.status = BrainTaskStatus.FAILED
-        task.progress = 0
-        task.current_focus = "账号体检未通过质量审核，需要人工处理。"
-        skill_run.status = "blocked"
-        skill_run.error_code = "CRITIC_RETRY_EXHAUSTED"
+        deliverable = Deliverable(
+            content_item_id=content.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+            skill_run_id=skill_run.id,
+            agent_code=AgentCode.DECISION.value,
+            type=DeliverableType.REVIEW_REPORT,
+            version=1,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=_review_report_payload(report),
+            note=(
+                "business_artifact_type=account_inspection_report; "
+                "critic below auto-pass threshold; requires human review"
+            ),
+        )
+        session.add(deliverable)
+        await session.flush()
+        quality = await session.scalar(
+            select(AgentQualityScore)
+            .where(AgentQualityScore.skill_run_id == skill_run.id)
+            .order_by(AgentQualityScore.iteration.desc())
+        )
+        if quality is not None:
+            quality.deliverable_id = deliverable.id
+
+        task.status = BrainTaskStatus.COMPLETED
+        task.progress = 100
+        task.current_focus = "体检报告已生成，需人工确认。"
+        skill_run.status = "completed"
+        skill_run.error_code = None
+        skill_run.quality_score = Decimal(str(report.critic.score / 100))
         skill_run.output_snapshot = {
-            "status": "blocked",
+            "status": "completed",
             "task_id": task.id,
-            "artifact_id": None,
+            "artifact_id": deliverable.id,
             "artifact_type": "account_inspection_report",
             "report": report.model_dump(mode="json"),
-            "response": "体检报告连续未通过质量审核，已停止并等待人工处理。",
-            "error_code": "CRITIC_RETRY_EXHAUSTED",
+            "response": (
+                f"账号体检报告已生成，质量审核 {report.critic.score} 分，"
+                "未达到自动通过标准，请人工确认后采用。"
+            ),
         }
         await session.commit()
         return SkillRuntime._existing_result(skill_run)

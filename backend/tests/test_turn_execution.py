@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
 
 import pytest
 from sqlalchemy import func, select
@@ -224,8 +223,36 @@ async def test_query_uses_authorized_account_and_records_one_skill_run(
             )
             return {
                 "account_id": context.account_id,
-                "period": {"days": params["days"], "end": date.today().isoformat()},
-                "metrics": {"play": {"value": 42}},
+                "period": {
+                    "days": params["days"],
+                    "start": "2026-06-30",
+                    "end": "2026-07-29",
+                },
+                "metrics": {
+                    "play": {
+                        "value": 42,
+                        "source": "platform_export",
+                        "observed_at": "2026-07-18",
+                    },
+                    "exposure": {"value": None},
+                    "content_count": {"value": 3},
+                    "follower_count": {"value": 100},
+                    "new_followers": {"value": 2},
+                    "like_count": {"value": 9},
+                    "comment_count": {"value": 4},
+                    "cover_click_rate": {"value": None},
+                },
+                "sources": [
+                    {
+                        "batch_id": 7,
+                        "source_kind": "platform_export",
+                        "confirmed_at": "2026-07-20T10:00:00+08:00",
+                    }
+                ],
+                "coverage": {
+                    "content_metrics": "available",
+                    "audience": "missing",
+                },
             }
 
     monkeypatch.setattr(
@@ -264,8 +291,10 @@ async def test_query_uses_authorized_account_and_records_one_skill_run(
     assert skill_run.skill_version == 1
     assert skill_run.input_snapshot == {"account_id": account.id, "days": 30}
     assert skill_run.output_snapshot["account_id"] == account.id
-    assert "近 30 天" in result.response
-    assert "播放量：42" in result.response
+    assert "数据周期：2026-06-30 至 2026-07-29（近 30 天）" in result.response
+    assert "数据来源：平台导出批次 #7" in result.response
+    assert "播放量：42（平台导出，观测于 2026-07-18）" in result.response
+    assert "缺失数据：曝光量、封面点击率、受众画像" in result.response
     assert "account_id" not in result.response
     assert "{'" not in result.response
     assert await session.scalar(select(func.count(BrainTask.id))) == 0

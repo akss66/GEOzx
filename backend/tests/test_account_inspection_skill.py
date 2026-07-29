@@ -27,6 +27,7 @@ from app.models.enums import (
     AgentCode,
     AgentInvocationStatus,
     BrainTaskStatus,
+    DeliverableStatus,
     Platform,
     UserRole,
 )
@@ -422,7 +423,7 @@ def test_account_inspection_definition_freezes_one_explicit_graph() -> None:
 
 
 @pytest.mark.asyncio
-async def test_account_inspection_critic_retry_budget_blocks_without_artifact(
+async def test_account_inspection_critic_retry_budget_delivers_for_human_review(
     session,
     admin,
 ) -> None:
@@ -447,8 +448,11 @@ async def test_account_inspection_critic_retry_budget_blocks_without_artifact(
         days=30,
     )
 
-    assert result.status == "blocked"
-    assert result.error_code == "CRITIC_RETRY_EXHAUSTED"
+    assert result.status == "completed"
+    assert result.error_code is None
+    assert result.artifact_id is not None
+    assert result.report["critic"]["passed"] is False
+    assert "人工确认" in result.response
     assert critic.calls == 3
     assert harness.calls == [
         AgentCode.POSITIONING,
@@ -458,7 +462,17 @@ async def test_account_inspection_critic_retry_budget_blocks_without_artifact(
         AgentCode.OPERATOR,
     ]
     assert await session.scalar(select(func.count(AgentQualityScore.id))) == 3
-    assert await session.scalar(select(func.count(Deliverable.id))) == 0
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
+    deliverable = await session.get(Deliverable, result.artifact_id)
+    assert deliverable is not None
+    assert deliverable.status is DeliverableStatus.PENDING_REVIEW
+    latest_quality = await session.scalar(
+        select(AgentQualityScore)
+        .where(AgentQualityScore.skill_run_id == result.skill_run_id)
+        .order_by(AgentQualityScore.iteration.desc())
+    )
+    assert latest_quality is not None
+    assert latest_quality.deliverable_id == deliverable.id
     assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
 
 

@@ -1074,12 +1074,25 @@ def _conversation_operating_context(account: Any) -> str:
 
 def _format_account_data_summary(data: dict[str, Any]) -> str:
     period = data.get("period")
-    days = period.get("days") if isinstance(period, dict) else None
-    period_text = f"近 {days} 天" if isinstance(days, int) and days > 0 else "当前周期"
+    period = period if isinstance(period, dict) else {}
+    days = period.get("days")
+    start = period.get("start")
+    end = period.get("end")
+    if isinstance(start, str) and isinstance(end, str):
+        day_suffix = (
+            f"（近 {days} 天）" if isinstance(days, int) and days > 0 else ""
+        )
+        period_text = f"{start} 至 {end}{day_suffix}"
+    else:
+        period_text = (
+            f"近 {days} 天" if isinstance(days, int) and days > 0 else "当前周期"
+        )
     metrics = data.get("metrics")
     if not isinstance(metrics, dict):
         metrics = {}
     labels = {
+        "exposure": "曝光量",
+        "impressions": "曝光量",
         "play": "播放量",
         "play_count": "播放量",
         "views": "播放量",
@@ -1095,14 +1108,20 @@ def _format_account_data_summary(data: dict[str, Any]) -> str:
         "share_count": "分享数",
         "shares": "分享数",
         "engagement_rate": "互动率",
+        "cover_click_rate": "封面点击率",
     }
     rendered: list[str] = []
+    missing: list[str] = []
     used_labels: set[str] = set()
     for key, label in labels.items():
         if label in used_labels or key not in metrics:
             continue
         raw = metrics[key]
         value = raw.get("value") if isinstance(raw, dict) else raw
+        if value is None:
+            missing.append(label)
+            used_labels.add(label)
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         if key == "engagement_rate":
@@ -1111,13 +1130,70 @@ def _format_account_data_summary(data: dict[str, Any]) -> str:
             formatted = f"{value:,.2f}"
         else:
             formatted = f"{int(value):,}"
-        rendered.append(f"{label}：{formatted}")
+        metadata: list[str] = []
+        if isinstance(raw, dict):
+            source = {
+                "platform_export": "平台导出",
+                "derived": "系统计算",
+            }.get(str(raw.get("source") or ""))
+            if source:
+                metadata.append(source)
+            observed_at = raw.get("observed_at")
+            if isinstance(observed_at, str) and observed_at:
+                metadata.append(f"观测于 {observed_at[:10]}")
+        suffix = f"（{'，'.join(metadata)}）" if metadata else ""
+        if len(rendered) < 6:
+            rendered.append(f"{label}：{formatted}{suffix}")
         used_labels.add(label)
-        if len(rendered) == 6:
-            break
-    if rendered:
-        return f"已读取{period_text}的账号数据：{'；'.join(rendered)}。"
-    return (
-        f"已读取{period_text}的账号数据，但当前数据源尚未提供播放、互动或粉丝等"
-        "核心指标。建议先检查数据同步状态。"
+
+    coverage_labels = {
+        "account_metrics": "账号整体指标",
+        "content_metrics": "内容表现指标",
+        "content_identity": "内容身份数据",
+        "audience": "受众画像",
+        "benchmarks": "行业基准",
+    }
+    coverage = data.get("coverage")
+    if isinstance(coverage, dict):
+        for key, label in coverage_labels.items():
+            if coverage.get(key) == "missing" and label not in missing:
+                missing.append(label)
+
+    source_names: list[str] = []
+    sources = data.get("sources")
+    if isinstance(sources, list):
+        for source_item in sources:
+            if not isinstance(source_item, dict):
+                continue
+            source_kind = str(source_item.get("source_kind") or "")
+            source_label = {
+                "platform_export": "平台导出",
+                "derived": "系统计算",
+            }.get(source_kind, source_kind)
+            batch_id = source_item.get("batch_id")
+            if source_label and batch_id is not None:
+                source_label = f"{source_label}批次 #{batch_id}"
+            if source_label and source_label not in source_names:
+                source_names.append(source_label)
+    if not source_names:
+        for raw in metrics.values():
+            if not isinstance(raw, dict):
+                continue
+            source_label = {
+                "platform_export": "平台导出",
+                "derived": "系统计算",
+            }.get(str(raw.get("source") or ""))
+            if source_label and source_label not in source_names:
+                source_names.append(source_label)
+
+    lines = [f"数据周期：{period_text}"]
+    lines.append(
+        f"数据来源：{'；'.join(source_names)}"
+        if source_names
+        else "数据来源：缺失"
     )
+    lines.append(
+        f"已有指标：{'；'.join(rendered)}" if rendered else "已有指标：暂无"
+    )
+    lines.append(f"缺失数据：{'、'.join(missing)}" if missing else "缺失数据：未发现")
+    return "\n".join(lines)
