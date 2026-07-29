@@ -1853,21 +1853,23 @@ function ExecutionDetails({
         </div>
       </section>
 
-      <section>
-        <h3>专家接力</h3>
-        <div className="dy-brain-dispatch">
-          {task.plan.steps.slice(0, 6).map((step) => (
-            <div key={step.id}>
-              <DispatchIcon status={step.status} />
-              <div>
-                <strong>{step.agent_name}</strong>
-                <p>{cleanBrainCopy(step.intent)}</p>
-                <span>{dispatchStatusCopy(step.status)}</span>
+      {task.plan ? (
+        <section>
+          <h3>专家接力</h3>
+          <div className="dy-brain-dispatch">
+            {task.plan.steps.slice(0, 6).map((step) => (
+              <div key={step.id}>
+                <DispatchIcon status={step.status} />
+                <div>
+                  <strong>{step.agent_name}</strong>
+                  <p>{cleanBrainCopy(step.intent)}</p>
+                  <span>{dispatchStatusCopy(step.status)}</span>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {runtime && runtime.tool_calls.length > 0 && (
         <section>

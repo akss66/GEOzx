@@ -87,15 +87,12 @@ function TurnArticle({
       data-turn-id={turn.id}
       data-turn-key={`turn-${turn.id}`}
     >
-      <header className="tz-conversation-turn__header">
-        <span>Turn {turn.id}</span>
-        <TurnRoute intent={turn.intent} />
-      </header>
       <section className="tz-conversation-turn__user" aria-label="User message">
         {turn.user_input}
       </section>
       {turn.assistant_response ? (
         <section className="tz-conversation-turn__assistant" aria-label="Assistant response">
+          <strong className="tz-conversation-turn__speaker">运营大脑</strong>
           {turn.assistant_response}
         </section>
       ) : null}
@@ -120,21 +117,23 @@ function TurnArticle({
         ))}
         {unknownProjection ? <UnknownProjection turnId={turn.id} /> : null}
       </div>
+      <TurnTechnicalDetails turn={turn} />
     </article>
   );
 }
 
-function TurnRoute({ intent }: { intent: Record<string, unknown> | null }) {
+function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
+  const { intent } = turn;
   const route = readableIntent(intent, "mode");
   const status = readableIntent(intent, "status");
-  if (!route && !status) return null;
 
   return (
-    <span className="tz-conversation-turn__route">
-      {route ? `Route: ${route}` : null}
-      {route && status ? " · " : null}
-      {status ? `Status: ${status}` : null}
-    </span>
+    <details className="tz-conversation-turn__technical">
+      <summary>技术日志</summary>
+      <div>消息编号：{turn.id}</div>
+      {route ? <div>路由：{route}</div> : null}
+      {status ? <div>状态：{status}</div> : null}
+    </details>
   );
 }
 
@@ -250,11 +249,11 @@ function Projection({
         />
       );
     case "account_data":
-      return <section {...shared}>Account data is ready.</section>;
+      return <section {...shared}>已读取当前账号的数据，可继续告诉我想分析的指标。</section>;
     case "execution_blocked":
       return (
         <section {...shared} aria-label="Execution blocked">
-          This turn needs attention.{projection.recovery_action ? ` ${projection.recovery_action}` : ""}
+          本次执行需要处理。{projection.recovery_action ? ` ${projection.recovery_action}` : ""}
         </section>
       );
   }
@@ -270,7 +269,7 @@ function UnknownProjection({ turnId }: { turnId: number }) {
       className="tz-turn-projection tz-turn-projection--unknown"
       data-projection-key={`unknown-${turnId}`}
     >
-      An update is available for this turn.
+      本轮有一条新进展，请刷新后查看。
     </section>
   );
 }

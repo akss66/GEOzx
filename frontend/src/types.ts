@@ -268,7 +268,7 @@ export interface BrainTask {
   type: "content_creation" | "account_diagnosis" | "review_optimization" | "matrix_distribution";
   status: BrainTaskStatus;
   brief: TaskBrief;
-  plan: OrchestrationPlan;
+  plan: OrchestrationPlan | null;
   progress: number;
   current_focus: string;
   risk_count: number;

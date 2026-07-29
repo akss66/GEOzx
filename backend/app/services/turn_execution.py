@@ -58,6 +58,11 @@ _QUERY_SKILL_CODES = {"account_data_query", "account.data_context"}
 _QUERY_SKILL_CODE = "account_data_query"
 _QUERY_SKILL_VERSION = 1
 _QUERY_IDEMPOTENCY_KEY = "account-data-query:v1"
+_MODEL_SKILL_ALIASES = {
+    "account_audit": "account_inspection",
+    "account_diagnosis": "account_inspection",
+    "account_health_check": "account_inspection",
+}
 log = logging.getLogger("dyflow.main_agent_v2")
 
 
@@ -237,6 +242,8 @@ async def _execute_composite_skill(
     decision: TurnRouteDecision,
     execution_owner: str | None = None,
 ) -> TurnExecutionResult:
+    account_id = thread.account_id
+    project_id = thread.project_id
     execution_kwargs: dict[str, Any] = {
         "user": user,
         "thread": thread,
@@ -256,7 +263,7 @@ async def _execute_composite_skill(
                 "artifact_id": executed.artifact_id,
                 "artifact_type": executed.artifact_type,
                 "skill_run_id": executed.skill_run_id,
-                "account_id": thread.account_id,
+                "account_id": account_id,
                 "report": executed.report,
             }
         )
@@ -266,7 +273,7 @@ async def _execute_composite_skill(
                 "type": "execution_blocked",
                 "artifact_type": executed.artifact_type,
                 "skill_run_id": executed.skill_run_id,
-                "account_id": thread.account_id,
+                "account_id": account_id,
                 "code": executed.error_code,
             }
         )
@@ -287,6 +294,12 @@ async def _execute_composite_skill(
     )
     if task is None:
         raise RuntimeError("composite Skill did not persist its compatibility task")
+    # The Skill runtime commits multiple durable ledgers. Callers and tests may
+    # expire the request-scoped ORM objects across those commits, so explicitly
+    # refresh instead of allowing scalar attribute access to trigger async IO.
+    await session.refresh(user)
+    await session.refresh(turn)
+    await session.refresh(run)
     task_status = (
         BrainTaskStatus.COMPLETED
         if executed.status == "completed"
@@ -301,8 +314,8 @@ async def _execute_composite_skill(
         task=task,
         turn=turn,
         run=run,
-        account_id=thread.account_id,
-        project_id=thread.project_id,
+        account_id=account_id,
+        project_id=project_id,
         response=executed.response,
         result_payload=result.model_dump(mode="json"),
         run_status=executed.status,
@@ -424,13 +437,47 @@ async def _route_turn(
                 reason="requested_skill_not_registered",
             )
         return decision
-    return await brain_intelligence.classify_turn(
+    decision = await brain_intelligence.classify_turn(
         session,
         user.org_id,
         request.message,
         has_account=True,
         platform=platform,
+        registry=skill_registry,
     )
+    return _normalize_model_skill_route(
+        decision,
+        user=user,
+        platform=platform,
+    )
+
+
+def _normalize_model_skill_route(
+    decision: TurnRouteDecision,
+    *,
+    user: User,
+    platform: str,
+) -> TurnRouteDecision:
+    """Accept only published Skill codes and normalize known model aliases."""
+
+    if decision.mode is not TurnExecutionMode.SKILL:
+        return decision
+    raw_code = (decision.skill_code or "").strip()
+    code = _MODEL_SKILL_ALIASES.get(raw_code, raw_code)
+    try:
+        definition = skill_registry.get(code)
+    except KeyError as exc:
+        raise IntelligenceUnavailable("model selected an unknown Skill") from exc
+    policy = PUBLIC_SKILL_POLICIES.get(code)
+    if (
+        platform not in definition.supported_platforms
+        or policy is None
+        or "composer" not in policy.surfaces
+        or not policy.enabled
+        or user.role not in policy.allowed_roles
+    ):
+        raise IntelligenceUnavailable("model selected an unavailable Skill")
+    return decision.model_copy(update={"skill_code": code})
 
 
 async def _deliver_task_free(

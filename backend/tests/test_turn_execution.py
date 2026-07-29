@@ -446,10 +446,10 @@ async def test_unavailable_skill_is_structured_blocked_without_artifact(
     )
 
     assert result.status == "blocked"
-    assert result.error_code == "SKILL_EXECUTOR_UNAVAILABLE"
+    assert result.error_code == "INTELLIGENCE_UNAVAILABLE"
     assert result.task_id is None
     assert run.status == "blocked"
-    assert run.error_code == "SKILL_EXECUTOR_UNAVAILABLE"
+    assert run.error_code == "INTELLIGENCE_UNAVAILABLE"
     assert await session.scalar(select(func.count(ContentItem.id))) == 0
     assert await session.scalar(select(func.count(BrainTask.id))) == 0
 

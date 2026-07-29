@@ -22,6 +22,7 @@ from app.llm.gateway import (
 from app.models.enums import AgentCode
 from app.orchestrator.agent_identity import with_operations_brain_public_identity
 from app.orchestrator.capability_router import SkillUnavailable, route_explicit_request
+from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import SkillRegistry
 from app.prompts import prompt_registry
 from app.prompts.manifest import LoadedPrompt
@@ -112,6 +113,23 @@ class BrainIntelligence:
 
         try:
             prompt = prompt_registry.load("main-agent.intent")
+            public_skills = (
+                [
+                    {
+                        "code": item.code,
+                        "name": item.name,
+                        "description": item.description,
+                    }
+                    for item in registry.list_for(platform)
+                    if (
+                        (policy := PUBLIC_SKILL_POLICIES.get(item.code)) is not None
+                        and policy.enabled
+                        and "composer" in policy.surfaces
+                    )
+                ]
+                if registry is not None
+                else []
+            )
             result, _cost = await _structured_chat(
                 session,
                 org_id,
@@ -126,6 +144,9 @@ class BrainIntelligence:
                         "content": (
                             f"当前是否已选择账号：{'是' if has_account else '否'}\n"
                             f"当前平台：{platform}\n"
+                            "若 mode=skill，skill_code 必须严格使用下列公开 Skill "
+                            "中的 code：\n"
+                            f"{json.dumps(public_skills, ensure_ascii=False)}\n"
                             f"用户消息：{message}"
                         ),
                     },

@@ -1640,6 +1640,29 @@ describe("BrainHome", () => {
     expect(screen.getByText("专家接力")).toBeInTheDocument();
   });
 
+  it("renders execution details for a Skill task without an orchestration plan", async () => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: { 3: 12 } }),
+    );
+    vi.mocked(getBrainTaskRuntime).mockResolvedValueOnce({
+      ...mocks.runtime,
+      task: {
+        ...mocks.taskWithRuntime,
+        runtime_mode: "skill",
+        plan: null,
+      },
+    });
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: /执行详情/ }));
+
+    expect(await screen.findByRole("dialog", { name: "执行详情" })).toBeInTheDocument();
+    expect(screen.getByText("运行状态")).toBeInTheDocument();
+    expect(screen.queryByText("专家接力")).not.toBeInTheDocument();
+  });
+
   it("keeps the composer at the bottom and starts a workflow directly", async () => {
     renderBrainHome();
 

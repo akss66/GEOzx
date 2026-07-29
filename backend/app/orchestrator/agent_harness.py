@@ -119,6 +119,10 @@ class AgentHarness:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
             )
+        # Async ORM relationships must never be loaded by plain attribute access.
+        # Skill retries and worker hand-offs can supply a persisted task whose
+        # one-to-one Brief relationship is unloaded or expired.
+        await session.refresh(task, attribute_names=["brief"])
         spec = get_agent_spec(code)
         project_id, account_id = self._task_scope(task)
         project, account = await self._require_scope(

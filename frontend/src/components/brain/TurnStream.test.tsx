@@ -265,6 +265,19 @@ describe("TurnStream", () => {
     );
   });
 
+  it("keeps technical Turn and route metadata behind an explicit disclosure", () => {
+    render(<TurnStream thread={thread} />);
+
+    const details = screen.getAllByText("技术日志")[0].closest("details");
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details as HTMLElement).getByText("消息编号：101")).not.toBeVisible();
+    expect(within(details as HTMLElement).getByText("路由：SKILL")).not.toBeVisible();
+    fireEvent.click(within(details as HTMLElement).getByText("技术日志"));
+
+    expect(within(details as HTMLElement).getByText("消息编号：101")).toBeVisible();
+    expect(within(details as HTMLElement).getByText("路由：SKILL")).toBeVisible();
+  });
+
   it("renders an unknown projection as a compact safe fallback without raw payload data", () => {
     const unknownThread: ConversationThread = {
       ...thread,
@@ -281,7 +294,7 @@ describe("TurnStream", () => {
 
     render(<TurnStream thread={unknownThread} />);
 
-    expect(screen.getByText("An update is available for this turn.")).toBeInTheDocument();
+    expect(screen.getByText("本轮有一条新进展，请刷新后查看。")).toBeInTheDocument();
     expect(screen.queryByText("future_projection")).not.toBeInTheDocument();
     expect(screen.queryByText("Traceback: secret-token")).not.toBeInTheDocument();
     expect(screen.queryByText("must never render")).not.toBeInTheDocument();

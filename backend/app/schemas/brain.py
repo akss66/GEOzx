@@ -255,7 +255,7 @@ class BrainTaskOut(BaseModel):
     type: BrainTaskType
     status: BrainTaskStatus
     brief: TaskBriefOut
-    plan: OrchestrationPlanOut
+    plan: OrchestrationPlanOut | None
     progress: int
     current_focus: str
     risk_count: int

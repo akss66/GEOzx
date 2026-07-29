@@ -821,17 +821,23 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
         await runtime_session.flush()
         run.task_id = task.id
         await runtime_session.commit()
+        account_id = thread.account_id
+        task_id = task.id
         calls.append(
             {
                 "skill_code": skill_code,
                 "days": days,
-                "account_id": thread.account_id,
+                "account_id": account_id,
             }
         )
+        # The durable Skill runtime commits several ledgers. Reproduce the
+        # production state where request-scoped ORM objects are expired before
+        # the Turn delivery layer resumes.
+        runtime_session.expire_all()
         return SkillExecutionResult(
             status="completed",
             skill_run_id=100 + len(calls),
-            task_id=task.id,
+            task_id=task_id,
             artifact_id=200 + len(calls),
             artifact_type="account_inspection_report",
             report={"summary": "完成"},
@@ -867,6 +873,10 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
             execution_preference="FORMAL_TASK",
         ),
     )
+    # The natural-language case represents a separate HTTP request, whose Turn
+    # and Run would be loaded afresh even though this unit test shares a session.
+    await session.refresh(contexts[1][2])
+    await session.refresh(contexts[1][3])
     natural = await execute_conversation_turn(
         session,
         admin,
@@ -889,3 +899,76 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
         explicit.projections[0]["artifact_type"],
         natural.projections[0]["artifact_type"],
     } == {"account_inspection_report"}
+
+
+@pytest.mark.asyncio
+async def test_natural_language_skill_alias_is_normalized_to_public_executor(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, _thread, turn, run = await _conversation_scope(
+        session,
+        admin,
+        key="inspection-model-alias",
+    )
+    turn.user_input = "帮我做一次账号健康检查"
+    await session.commit()
+    received: list[str] = []
+
+    async def classify(*_args, **_kwargs):
+        return TurnRouteDecision(
+            mode=TurnExecutionMode.SKILL,
+            intent="account_health_check",
+            confidence=0.98,
+            reason="model selected a semantic alias",
+            skill_code="account_health_check",
+            requires_account_context=True,
+            requires_operation_task=True,
+        )
+
+    async def fake_execute(runtime_session, **kwargs):
+        received.append(kwargs["skill_code"])
+        task = BrainTask(
+            org_id=admin.org_id,
+            created_by_id=admin.id,
+            title="Alias inspection",
+            status=BrainTaskStatus.COMPLETED,
+            runtime_mode="skill",
+        )
+        runtime_session.add(task)
+        await runtime_session.flush()
+        kwargs["run"].task_id = task.id
+        await runtime_session.commit()
+        return SkillExecutionResult(
+            status="completed",
+            skill_run_id=999,
+            task_id=task.id,
+            artifact_id=1000,
+            artifact_type="account_inspection_report",
+            report={"summary": "completed"},
+            response="账号体检已完成。",
+        )
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn",
+        classify,
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute",
+        fake_execute,
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        CreateConversationTurnRequest(
+            client_message_id=turn.client_message_id,
+            message="帮我做一次账号健康检查",
+        ),
+    )
+
+    assert received == ["account_inspection"]
+    assert result.status == "completed"

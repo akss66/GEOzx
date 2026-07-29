@@ -22,6 +22,7 @@ from app.models import (
 from app.models.enums import (
     AgentInvocationStatus,
     BrainTaskStatus,
+    BrainTaskType,
     GateStatus,
     GateType,
     Platform,
@@ -2149,6 +2150,43 @@ async def test_brain_strategy_decision_can_generate_a_new_option_set(client, adm
     assert len(pending) == 1
     assert pending[0]["id"].startswith("content-direction-1-revision-")
     assert [choice["id"] for choice in pending[0]["choices"]] == ["series", "qa"]
+
+
+@pytest.mark.asyncio
+async def test_brain_task_listing_allows_skill_task_without_plan(
+    client,
+    session,
+    admin,
+):
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="One-click account inspection",
+        type=BrainTaskType.ACCOUNT_DIAGNOSIS,
+        status=BrainTaskStatus.COMPLETED,
+        runtime_mode="skill",
+    )
+    task.brief = TaskBrief(
+        goal="Inspect the selected account",
+        project_id=None,
+        platforms=[Platform.DOUYIN.value],
+        account_ids=[],
+        cycle="current_turn",
+        content_goal="inspection",
+        risk_constraints=[],
+        expected_outputs=["account_inspection_report"],
+        confirmation_actions=[],
+    )
+    session.add(task)
+    await session.commit()
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    response = await client.get("/brain/tasks", headers=_auth(token))
+
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["id"] == task.id)
+    assert row["runtime_mode"] == "skill"
+    assert row["plan"] is None
 
 
 @pytest.mark.asyncio

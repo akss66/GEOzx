@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -58,6 +59,7 @@ from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_
 _ACCOUNT_INSPECTION = "account_inspection"
 _MAX_CRITIC_IMPROVEMENTS = 2
 DataSufficiency = Literal["insufficient", "partial", "sufficient"]
+log = logging.getLogger("dyflow.skill_runtime")
 
 
 @dataclass(frozen=True)
@@ -246,6 +248,15 @@ class SkillRuntime:
                 raise
             return self._existing_result(persisted)
         except Exception as exc:
+            log.exception(
+                "Skill execution failed",
+                extra={
+                    "skill_code": definition.code,
+                    "skill_run_id": skill_run_id,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                },
+            )
             await session.rollback()
             persisted = await session.get(SkillRun, skill_run_id)
             persisted_task = await session.get(BrainTask, task_id)

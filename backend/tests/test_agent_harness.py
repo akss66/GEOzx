@@ -150,6 +150,99 @@ async def test_trace_only_harness_persists_output_without_public_deliverable(
     assert await session.scalar(select(func.count(DeliverableAcceptance.id))) == 0
 
 
+@pytest.mark.asyncio
+async def test_trace_only_harness_explicitly_reloads_an_expired_task_brief(
+    session, admin, monkeypatch
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Expired-brief account",
+        auth={"auth_status": "authorized"},
+    )
+    session.add(account)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Expired-brief diagnosis",
+        type=BrainTaskType.ACCOUNT_DIAGNOSIS,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="skill",
+    )
+    task.brief = TaskBrief(
+        goal="Prove the harness never performs implicit async relationship IO",
+        project_id=None,
+        platforms=[Platform.DOUYIN.value],
+        account_ids=[account.id],
+        cycle="current",
+        content_goal="diagnosis",
+        risk_constraints=[],
+        expected_outputs=["trace"],
+        confirmation_actions=[],
+    )
+    session.add(task)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        client_message_id="expired-brief-run",
+        request_payload={},
+    )
+    session.add(run)
+    await session.commit()
+    session.expire(task, ["brief"])
+
+    class TracePositioningAgent(BaseAgent):
+        code = AgentCode.POSITIONING.value
+        output_type = DeliverableType.POSITIONING_STRATEGY
+
+        async def run(self, runtime_session, org_id, ctx):
+            return PositioningStrategyPayload(
+                account_persona="Explicitly loaded",
+                target_audience="Account operators",
+                differentiation=["No implicit async IO", "Durable provenance"],
+                content_pillars=["Diagnosis", "Operations"],
+            )
+
+    async def fake_business_config(*_args, **_kwargs):
+        return {"tool_permissions": {}, "quality_gates": []}
+
+    original = AGENT_SPECS[AgentCode.POSITIONING]
+    monkeypatch.setitem(
+        AGENT_SPECS,
+        AgentCode.POSITIONING,
+        original.__class__(
+            original.name,
+            TracePositioningAgent,
+            original.deliverable_type,
+            original.deliverable_title,
+            original.stage,
+            original.task_type,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.agent_harness.get_business_config",
+        fake_business_config,
+    )
+
+    result = await AgentHarness().execute(
+        session,
+        user=admin,
+        task=task,
+        code=AgentCode.POSITIONING,
+        purpose="Expired relationship regression",
+        evidence_refs=[],
+        run_id=run.id,
+        step_key="account-inspection:expired-brief",
+        trace_only=True,
+    )
+
+    assert result.invocation.status is AgentInvocationStatus.DONE
+    assert result.output["account_persona"] == "Explicitly loaded"
+
+
 def test_agent_registry_contains_every_specialist() -> None:
     assert set(AGENT_SPECS) == {
         AgentCode.POSITIONING,
