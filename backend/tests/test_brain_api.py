@@ -390,6 +390,35 @@ async def _project_bound_douyin_account(
     return project_id, account["id"]
 
 
+async def _project_bound_authorized_douyin_account(
+    session,
+    org_id: int,
+    client,
+    headers: dict[str, str],
+    *,
+    account_name: str = "Agent runtime authorized account",
+    project_name: str = "Agent runtime authorized project",
+) -> tuple[int, int]:
+    project_id = (
+        await client.post("/projects", headers=headers, json={"name": project_name})
+    ).json()["id"]
+    account = Account(
+        org_id=org_id,
+        nickname=account_name,
+        platform=Platform.DOUYIN,
+        external_account_id=f"open-id-{project_id}",
+        project_id=project_id,
+        auth={
+            "integration_status": "connected",
+            "auth_status": "authorized",
+            "data_sync_status": "healthy",
+        },
+    )
+    session.add(account)
+    await session.commit()
+    return project_id, account.id
+
+
 async def _authorized_douyin_account(
     client,
     headers: dict[str, str],
@@ -676,9 +705,20 @@ async def test_legacy_analysis_with_positioning_hint_uses_diagnostic_route(
             requires_account_context=True,
         )
 
+    decide_next_calls = 0
+
+    async def fail_if_decide_next_called(*args, **kwargs):
+        nonlocal decide_next_calls
+        decide_next_calls += 1
+        raise AssertionError("diagnostic SKILL route must not call decide_next")
+
     monkeypatch.setattr(
         "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
         classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fail_if_decide_next_called,
     )
 
     response = await client.post(
@@ -694,6 +734,9 @@ async def test_legacy_analysis_with_positioning_hint_uses_diagnostic_route(
     assert response.status_code == 201, response.text
     runtime = response.json()
     assert runtime["strategy"] is None
+    assert not any(
+        event["type"] == "brain.runtime.next_step" for event in runtime["timeline"]
+    )
     invocations = (
         await session.scalars(
             select(AgentInvocation).where(
@@ -714,6 +757,7 @@ async def test_legacy_analysis_with_positioning_hint_uses_diagnostic_route(
         run.request_payload["route_decision"]["skill_code"]
         == "account_positioning_diagnosis"
     )
+    assert decide_next_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1231,10 +1275,17 @@ async def test_brain_conversation_keeps_operations_identity_and_account_context(
 
 
 @pytest.mark.asyncio
-async def test_brain_message_replans_after_each_expert_result(client, admin, monkeypatch):
+async def test_brain_message_replans_after_each_expert_result(
+    client, session, admin, monkeypatch
+):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    project_id, account_id = await _project_bound_douyin_account(client, headers)
+    project_id, account_id = await _project_bound_authorized_douyin_account(
+        session,
+        admin.org_id,
+        client,
+        headers,
+    )
     customer_service = (
         await client.get("/agents/08-customer-service/management", headers=headers)
     ).json()
@@ -1255,6 +1306,7 @@ async def test_brain_message_replans_after_each_expert_result(client, admin, mon
         )
 
     available_catalogs: list[list[dict]] = []
+    observed_rounds: list[list[dict]] = []
     next_steps = iter(
         [
             RuntimeNextStep(
@@ -1281,6 +1333,7 @@ async def test_brain_message_replans_after_each_expert_result(client, admin, mon
     async def fake_decide_next(
         self, session, org_id, goal, observations, available_experts, round_index
     ):
+        observed_rounds.append([dict(item) for item in observations])
         available_catalogs.append([dict(item) for item in available_experts])
         return next(next_steps)
 
@@ -1323,14 +1376,22 @@ async def test_brain_message_replans_after_each_expert_result(client, admin, mon
         if event["type"] == "brain.runtime.subagent_completed"
         and event["payload"]["agent_code"] == "01-positioning"
     )
-    next_step = event_types.index("brain.runtime.next_step", first_decision + 1)
     content_started = next(
         index
         for index, event in enumerate(runtime["timeline"])
         if event["type"] == "brain.runtime.subagent_started"
         and event["payload"]["agent_code"] == "02-content-director"
     )
-    assert first_decision < positioning_started < positioning_done < next_step < content_started
+    assert first_decision < positioning_started < positioning_done < content_started
+    assert len(observed_rounds) == 3
+    assert observed_rounds[0] == []
+    assert any(
+        observation.get("agent_code") == "01-positioning"
+        for observation in observed_rounds[1]
+    )
+    assert {
+        observation.get("agent_code") for observation in observed_rounds[2]
+    } >= {"01-positioning", "02-content-director"}
     assert {
         item["code"]
         for item in available_catalogs[0]
@@ -1482,16 +1543,22 @@ async def test_brain_runtime_respond_completes_turn_without_dispatch(client, adm
 @pytest.mark.asyncio
 async def test_brain_runtime_cannot_replace_required_expert_with_direct_response(
     client,
+    session,
     admin,
     monkeypatch,
 ):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    project_id, account_id = await _project_bound_douyin_account(client, headers)
+    project_id, account_id = await _project_bound_authorized_douyin_account(
+        session,
+        admin.org_id,
+        client,
+        headers,
+    )
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
-            intent="analysis",
+            intent="workflow",
             confidence=0.98,
             reason="Account positioning requires the positioning expert.",
             suggested_expert_codes=["01-positioning"],
@@ -1513,7 +1580,11 @@ async def test_brain_runtime_cannot_replace_required_expert_with_direct_response
         ]
     )
 
+    decide_next_calls = 0
+
     async def fake_decide_next(*args, **kwargs):
+        nonlocal decide_next_calls
+        decide_next_calls += 1
         return next(decisions)
 
     monkeypatch.setattr(
@@ -1544,7 +1615,8 @@ async def test_brain_runtime_cannot_replace_required_expert_with_direct_response
         for event in runtime["timeline"]
         if event["type"] == "brain.runtime.next_step"
     ]
-    assert effective_steps == ["dispatch_experts", "finish"]
+    assert decide_next_calls >= 1
+    assert effective_steps == ["dispatch_experts"]
     assert not any(
         event["type"] == "brain.runtime.message_done"
         and event["payload"].get("content") == "The main agent should not publish this analysis."
@@ -1555,16 +1627,22 @@ async def test_brain_runtime_cannot_replace_required_expert_with_direct_response
 @pytest.mark.asyncio
 async def test_brain_runtime_recovers_invalid_controller_decision_with_dynamic_plan(
     client,
+    session,
     admin,
     monkeypatch,
 ):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    project_id, account_id = await _project_bound_douyin_account(client, headers)
+    project_id, account_id = await _project_bound_authorized_douyin_account(
+        session,
+        admin.org_id,
+        client,
+        headers,
+    )
 
     async def fake_classify(*args, **kwargs):
         return IntentDecision(
-            intent="analysis",
+            intent="workflow",
             confidence=0.98,
             reason="Account positioning requires the positioning expert.",
             suggested_expert_codes=["01-positioning"],
@@ -1620,6 +1698,83 @@ async def test_brain_runtime_recovers_invalid_controller_decision_with_dynamic_p
         event["type"] == "brain.runtime.message_error"
         for event in runtime["timeline"]
     )
+
+
+@pytest.mark.asyncio
+async def test_brain_runtime_manual_project_bound_account_fails_terminal_409_without_retry(
+    client,
+    session,
+    admin,
+    monkeypatch,
+):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+    project_id, account_id = await _project_bound_douyin_account(client, headers)
+    client_message_id = "manual-project-bound-account-terminal-409"
+    decide_next_calls = 0
+
+    async def fake_classify(*args, **kwargs):
+        return IntentDecision(
+            intent="workflow",
+            confidence=0.97,
+            reason="Account positioning requires the positioning expert.",
+            suggested_expert_codes=["01-positioning"],
+            requires_account_context=True,
+        )
+
+    async def fake_decide_next(*args, **kwargs):
+        nonlocal decide_next_calls
+        decide_next_calls += 1
+        return RuntimeNextStep(
+            action="dispatch_experts",
+            expert_codes=["01-positioning"],
+            rationale="The positioning expert must validate the account context first.",
+            handoff_message="I will hand this off to the positioning expert first.",
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.classify",
+        fake_classify,
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_intelligence.BrainIntelligence.decide_next",
+        fake_decide_next,
+    )
+
+    response = await client.post(
+        "/brain/messages",
+        headers=headers,
+        json={
+            "message": "Run an account positioning diagnosis.",
+            "project_id": project_id,
+            "account_id": account_id,
+            "platform": "douyin",
+            "client_message_id": client_message_id,
+        },
+    )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == client_message_id)
+    )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "任务因业务冲突未能继续，请处理后重试"}
+    assert decide_next_calls == 1
+    assert run is not None
+    task = await session.get(BrainTask, run.task_id)
+    failures = [
+        event
+        for event in await session.scalars(
+            select(Event).where(Event.type == "brain.runtime.failed")
+        )
+        if (event.payload or {}).get("agent_run_id") == run.id
+    ]
+    assert run.status == "failed"
+    assert run.next_retry_at is None
+    assert run.error_code == "runtime.http_409"
+    assert task is not None
+    assert task.status == BrainTaskStatus.FAILED
+    assert len(failures) == 1
+    assert failures[0].payload["error_code"] == "runtime.http_409"
 
 
 @pytest.mark.asyncio
@@ -2323,11 +2478,13 @@ async def test_tool_approval_records_runtime_resume_event(client, admin):
 
 @pytest.mark.asyncio
 async def test_smart_runtime_resumes_from_permission_with_decision_in_parent_context(
-    client, admin, monkeypatch
+    client, session, admin, monkeypatch
 ):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
-    project_id, account_id = await _project_bound_douyin_account(
+    project_id, account_id = await _project_bound_authorized_douyin_account(
+        session,
+        admin.org_id,
         client,
         headers,
         account_name="Permission resume account",
