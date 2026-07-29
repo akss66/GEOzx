@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException, status
 from sqlalchemy import select
 
 from app.agents.base import AgentContext
@@ -10,6 +11,8 @@ from app.models import (
     BrainTask,
     Client,
     ContentItem,
+    Deliverable,
+    DeliverableAcceptance,
     Event,
     KnowledgeEntry,
     Project,
@@ -17,12 +20,17 @@ from app.models import (
 )
 from app.models.enums import (
     BrainTaskStatus,
+    ContentStage,
+    ContentStatus,
+    DeliverableStatus,
+    DeliverableType,
     KnowledgeCategory,
     Platform,
     WorkspaceRole,
 )
 from app.orchestrator.agent_kernel import KernelAction, SpecialistKernelDecision
 from app.schemas.deliverable import PositioningStrategyPayload
+from app.services.agent_workspace import load_agent_run
 
 
 async def _token(client, email: str, password: str) -> str:
@@ -409,8 +417,12 @@ async def test_direct_agent_run_creates_real_artifact_and_pending_acceptance(
     stored_task = await session.get(BrainTask, body["task"]["id"])
     assert stored_task is not None
     stored_content = await session.get(ContentItem, stored_task.content_item_id)
+    stored_deliverable = await session.get(Deliverable, body["acceptance"]["deliverable_id"])
     assert stored_task.created_by_id == admin.id
     assert stored_content is not None and stored_content.created_by_id == admin.id
+    assert stored_deliverable is not None
+    assert stored_deliverable.content_item_id == stored_task.content_item_id
+    assert stored_deliverable.agent_code == body["invocation"]["agent_code"]
 
     runs = await client.get(
         "/agents/01-positioning/runs",
@@ -478,6 +490,76 @@ async def test_direct_agent_run_rejects_reviewer_and_cross_project_account(
 
     assert denied.status_code == 403
     assert unlinked.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_load_agent_run_rejects_acceptance_deliverable_from_other_content_or_agent(
+    client, admin, session, monkeypatch
+):
+    project, account = await _direct_context(session, admin)
+
+    async def fake_run(self, session, org_id, ctx):
+        return PositioningStrategyPayload(
+            account_persona="聚焦真实体验的测评号",
+            target_audience="准备购买数码产品的理性用户",
+            differentiation=["不做参数堆砌", "优先长期使用反馈"],
+            content_pillars=["真实体验", "购买建议"],
+        )
+
+    _patch_positioning_kernel(monkeypatch, fake_run)
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    created = await client.post(
+        "/agents/01-positioning/invoke",
+        headers=_auth(token),
+        json={
+            "prompt": "只做账号诊断",
+            "project_id": project.id,
+            "account_id": account.id,
+        },
+    )
+
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+    acceptance = await session.scalar(
+        select(DeliverableAcceptance).where(DeliverableAcceptance.task_id == task_id)
+    )
+    assert acceptance is not None
+
+    foreign_content = ContentItem(
+        project_id=project.id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="foreign deliverable",
+        current_stage=ContentStage.POSITIONING,
+        status=ContentStatus.IN_PROGRESS,
+    )
+    session.add(foreign_content)
+    await session.flush()
+
+    foreign_deliverable = Deliverable(
+        content_item_id=foreign_content.id,
+        agent_code="02-content-director",
+        type=DeliverableType.POSITIONING_STRATEGY,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={
+            "account_persona": "另一条内容链路",
+            "target_audience": "其他受众",
+            "differentiation": ["不同专家", "不同内容"],
+            "content_pillars": ["其他方向"],
+        },
+    )
+    session.add(foreign_deliverable)
+    await session.flush()
+
+    acceptance.deliverable_id = foreign_deliverable.id
+    await session.commit()
+
+    with pytest.raises(HTTPException) as raised:
+        await load_agent_run(session, task_id, admin.org_id)
+
+    assert raised.value.status_code == status.HTTP_404_NOT_FOUND
+    assert raised.value.detail == "专家任务成果不存在"
 
 
 @pytest.mark.asyncio

@@ -560,21 +560,24 @@ async def load_agent_run(
         .where(AgentInvocation.task_id == task.id)
         .order_by(AgentInvocation.id.desc())
     )
-    deliverable = await session.scalar(
-        select(Deliverable)
-        .where(Deliverable.content_item_id == task.content_item_id)
-        .order_by(Deliverable.id.desc())
-    )
     acceptance = await session.scalar(
         select(DeliverableAcceptance)
         .where(DeliverableAcceptance.task_id == task.id)
         .order_by(DeliverableAcceptance.id.desc())
     )
-    if invocation is None or deliverable is None or acceptance is None:
+    if invocation is None or acceptance is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="专家任务尚未生成正式成果")
     if acceptance.deliverable_id is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="专家任务尚未生成正式成果")
     deliverable = await session.get(Deliverable, acceptance.deliverable_id)
+    if (
+        deliverable is not None
+        and (
+            deliverable.content_item_id != task.content_item_id
+            or deliverable.agent_code != invocation.agent_code.value
+        )
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="专家任务成果不存在")
     if deliverable is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="专家任务尚未生成正式成果")
     entry_ids = list(
