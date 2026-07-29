@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.auth import CurrentUser
 from app.core.workspace_access import accessible_account_clause, require_account_access
@@ -128,15 +129,15 @@ async def review_overview(
 ) -> ReviewOverview:
     """复盘聚合：近 N 天趋势 + 完播互动 + 内容排名 + 汇总。无数据时 has_data=False。"""
     since = date.today() - timedelta(days=days - 1)
-    base = (
+    base_filters: list[ColumnElement[bool]] = [
         MetricSnapshot.org_id == user.org_id,
-        MetricSnapshot.source != MetricSource.DEMO.value,
-    )
+        MetricSnapshot.source != MetricSource.DEMO,
+    ]
     if user.role != UserRole.ADMIN:
         visible_accounts = select(Account.id).where(
             await accessible_account_clause(session, user)
         )
-        base = (*base, MetricSnapshot.account_id.in_(visible_accounts))
+        base_filters.append(MetricSnapshot.account_id.in_(visible_accounts))
 
     # 趋势 + 完播互动：按日期聚合
     by_date = (
@@ -148,7 +149,7 @@ async def review_overview(
                 func.avg(MetricSnapshot.completion_rate),
                 func.avg(MetricSnapshot.like_rate),
             )
-            .where(*base, MetricSnapshot.stat_date >= since)
+            .where(*base_filters, MetricSnapshot.stat_date >= since)
             .group_by(MetricSnapshot.stat_date)
             .order_by(MetricSnapshot.stat_date)
         )
@@ -175,7 +176,7 @@ async def review_overview(
                 func.avg(MetricSnapshot.completion_rate),
             )
             .where(
-                *base,
+                *base_filters,
                 MetricSnapshot.stat_date >= since,
                 MetricSnapshot.title.isnot(None),
             )
@@ -191,19 +192,17 @@ async def review_overview(
         reverse=True,
     )
 
-    total_play = sum(t.play for t in trend)
+    total_play = sum((t.play or 0) for t in trend)
     avg_completion = (
-        round(sum(e.completion_rate for e in engagement) / len(engagement), 4)
+        round(sum((e.completion_rate or 0.0) for e in engagement) / len(engagement), 4)
         if engagement
         else 0.0
     )
-    follower_delta = (
-        await session.scalar(
-            select(func.coalesce(func.sum(MetricSnapshot.follower_delta), 0)).where(
-                *base, MetricSnapshot.stat_date >= since
-            )
+    follower_delta_total = await session.scalar(
+        select(func.coalesce(func.sum(MetricSnapshot.follower_delta), 0)).where(
+            *base_filters, MetricSnapshot.stat_date >= since
         )
-    ) or 0
+    )
 
     return ReviewOverview(
         has_data=bool(by_date),
@@ -213,7 +212,7 @@ async def review_overview(
         rank_bottom=ranked[-3:][::-1] if len(ranked) > 3 else [],
         total_play=total_play,
         avg_completion_rate=avg_completion,
-        follower_delta=int(follower_delta),
+        follower_delta=int(follower_delta_total or 0),
     )
 
 

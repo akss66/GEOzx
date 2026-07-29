@@ -50,6 +50,25 @@ def _out(row: OptimizationSuggestion, content_title: str) -> OptimizationSuggest
     )
 
 
+async def _require_feedback_scope(
+    session: AsyncSession,
+    user: CurrentUser,
+    content: ContentItem,
+) -> int:
+    project_id = content.project_id
+    if project_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Content not found")
+    await require_project_access(session, user, project_id, roles=FEEDBACK_WRITE_ROLES)
+    if content.account_id is not None:
+        await require_account_access(
+            session,
+            user,
+            content.account_id,
+            roles=FEEDBACK_WRITE_ROLES,
+        )
+    return project_id
+
+
 @router.get("", response_model=list[OptimizationSuggestionOut])
 async def list_optimization_suggestions(
     user: CurrentUser,
@@ -98,19 +117,7 @@ async def update_optimization_suggestion(
     content = await session.get(ContentItem, row.content_item_id)
     if content is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
-    await require_project_access(
-        session,
-        user,
-        content.project_id,
-        roles=FEEDBACK_WRITE_ROLES,
-    )
-    if content.account_id is not None:
-        await require_account_access(
-            session,
-            user,
-            content.account_id,
-            roles=FEEDBACK_WRITE_ROLES,
-        )
+    await _require_feedback_scope(session, user, content)
 
     row.status = body.status
     row.note = body.note
@@ -151,12 +158,7 @@ async def send_suggestion_to_brain(
     content = await session.get(ContentItem, row.content_item_id)
     if content is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
-    await require_project_access(
-        session,
-        user,
-        content.project_id,
-        roles=FEEDBACK_WRITE_ROLES,
-    )
+    project_id = await _require_feedback_scope(session, user, content)
 
     row.status = OptimizationSuggestionStatus.ACCEPTED
     row.note = row.note or "已送入运营大脑生成下一轮 Brief"
@@ -172,7 +174,7 @@ async def send_suggestion_to_brain(
                 f"基于《{content.title}》复盘建议生成下一轮优化任务。"
                 f"{stage}；建议：{row.suggestion}"
             ),
-            project_id=content.project_id,
+            project_id=project_id,
             platforms=None,
             account_ids=[content.account_id] if content.account_id is not None else [],
         ),

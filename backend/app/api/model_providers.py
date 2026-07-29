@@ -168,7 +168,7 @@ async def post_provider_discover_models(
     provider_id: int,
     admin: AdminUser,
     session: SessionDep,
-) -> ModelProviderDiscoveryOut:
+) -> ModelProviderDiscoveryOut | JSONResponse:
     try:
         return ModelProviderDiscoveryOut.model_validate(
             await discover_model_provider_models(
@@ -194,7 +194,7 @@ async def put_provider_models(
     body: PutModelProviderModelsRequest,
     admin: AdminUser,
     session: SessionDep,
-) -> ModelProviderDetailOut:
+) -> ModelProviderDetailOut | JSONResponse:
     try:
         return ModelProviderDetailOut.model_validate(
             await put_model_provider_models(

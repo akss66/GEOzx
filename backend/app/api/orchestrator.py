@@ -360,16 +360,16 @@ async def _build_publish_readiness_findings(
             )
         )
 
-    materials = []
+    materials: list[MaterialAsset] = []
     if material_ids_to_load:
-        materials = (
+        materials = list(
             await session.scalars(
                 select(MaterialAsset).where(
                     MaterialAsset.org_id == org_id,
                     MaterialAsset.id.in_(material_ids_to_load),
                 )
             )
-        ).all()
+        )
     material_by_id = {material.id: material for material in materials}
 
     for material_id in body.material_ids:
@@ -536,14 +536,14 @@ async def _load_publish_materials(
         material_ids_to_load.add(body.cover_material_id)
     if not material_ids_to_load:
         return []
-    return (
+    return list(
         await session.scalars(
             select(MaterialAsset).where(
                 MaterialAsset.org_id == org_id,
                 MaterialAsset.id.in_(material_ids_to_load),
             )
         )
-    ).all()
+    )
 
 
 @router.post("/content-items", response_model=ContentItemOut, status_code=status.HTTP_201_CREATED)
@@ -557,8 +557,11 @@ async def create_content_item(
         account_id=body.account_id,
         roles={WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR},
     )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     if body.account_id is not None:
-        assert account is not None
+        if account is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
         project_account_id = await session.scalar(
             select(ProjectAccount.id).where(
                 ProjectAccount.project_id == project.id,

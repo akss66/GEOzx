@@ -227,6 +227,41 @@ async def test_suggestion_can_be_sent_to_brain_as_next_cycle_brief(client, admin
 
 
 @pytest.mark.asyncio
+async def test_projectless_suggestion_routes_return_404_instead_of_relying_on_null_project_scope(
+    client, admin, session
+):
+    ci = ContentItem(project_id=None, title="Account scoped only")
+    session.add(ci)
+    await session.flush()
+    suggestion = OptimizationSuggestion(
+        org_id=admin.org_id,
+        content_item_id=ci.id,
+        source_deliverable_id=None,
+        target_stage="content_direction",
+        suggestion="Keep the next brief scoped safely",
+    )
+    session.add(suggestion)
+    await session.commit()
+    await session.refresh(suggestion)
+
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    headers = _auth(token)
+
+    update_response = await client.patch(
+        f"/optimization-suggestions/{suggestion.id}",
+        headers=headers,
+        json={"status": "accepted", "note": "not allowed without project scope"},
+    )
+    send_response = await client.post(
+        f"/optimization-suggestions/{suggestion.id}/send-to-brain",
+        headers=headers,
+    )
+
+    assert update_response.status_code == 404
+    assert send_response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_accepted_suggestions_are_injected_into_next_cycle(session, monkeypatch):
     captured: dict[str, list] = {}
 
