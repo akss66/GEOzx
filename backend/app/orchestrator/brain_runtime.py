@@ -14,9 +14,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 from uuid import uuid4
 
+from langchain_core.runnables.config import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from sqlalchemy import select
@@ -91,7 +92,7 @@ from app.services.runtime_memory import runtime_memory_service
 
 class BrainRuntimeState(TypedDict, total=False):
     task_id: int
-    agent_run_id: int
+    agent_run_id: int | None
     agent_run_attempt: int
     thread_id: str
     status: str
@@ -111,9 +112,9 @@ class BrainRuntimeState(TypedDict, total=False):
     selected_expert_evidence_refs: list[str]
     termination_reason: str
     kernel_route: str
-    active_client_id: int
-    active_project_id: int
-    account_id: int
+    active_client_id: int | None
+    active_project_id: int | None
+    account_id: int | None
     available_client_ids: list[int]
     available_project_ids: list[int]
     normalized_goal: dict[str, Any]
@@ -219,7 +220,7 @@ class BrainRuntimeGraph:
         self._compile_graphs(checkpointer)
 
     @staticmethod
-    def graph_config(thread_id: str) -> dict[str, dict[str, str]]:
+    def graph_config(thread_id: str) -> RunnableConfig:
         return {"configurable": {"thread_id": thread_id}}
 
     async def deliver_task_free_turn(
@@ -431,12 +432,13 @@ class BrainRuntimeGraph:
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         runtime_session_token = _runtime_session.set(session)
         try:
+            observation_state: BrainRuntimeState = {
+                "task_id": task.id,
+                "thread_id": task.thread_id,
+                "status": "refreshing_observation",
+            }
             await self._observation_graph.ainvoke(
-                {
-                    "task_id": task.id,
-                    "thread_id": task.thread_id,
-                    "status": "refreshing_observation",
-                },
+                observation_state,
                 config=self.graph_config(f"{task.thread_id}:observation"),
             )
         finally:
@@ -793,7 +795,6 @@ class BrainRuntimeGraph:
             expert_codes = _expert_codes_for_route(route_decision, intent)
             state: BrainRuntimeState = {
                 "task_id": task.id,
-                "agent_run_id": agent_run_id,
                 "agent_run_attempt": agent_run_attempt,
                 "thread_id": task.thread_id,
                 "round_index": 1,
@@ -815,6 +816,8 @@ class BrainRuntimeGraph:
                 "critic_iteration": 0,
                 "critic_feedback": [],
             }
+            if agent_run_id is not None:
+                state["agent_run_id"] = agent_run_id
             if route_decision.mode is TurnExecutionMode.QUERY:
                 await self._query_graph.ainvoke(
                     state,
@@ -858,8 +861,12 @@ class BrainRuntimeGraph:
         token = set_stream_observer(observer)
         try:
             await self._stream_main_agent_turn(session, task)
+            graph_state: BrainRuntimeState = {
+                "task_id": task.id,
+                "thread_id": task.thread_id,
+            }
             await self._graph.ainvoke(
-                {"task_id": task.id, "thread_id": task.thread_id},
+                graph_state,
                 config=self.graph_config(task.thread_id),
             )
         finally:
@@ -972,21 +979,27 @@ class BrainRuntimeGraph:
                 )
             elif is_smart_runtime:
                 observations = await _runtime_observations(session, task.id)
+                resume_state: BrainRuntimeState = {
+                    "task_id": task.id,
+                    "agent_run_attempt": agent_run_attempt,
+                    "thread_id": task.thread_id,
+                    "round_index": _next_round_index(events),
+                    "selected_experts": [],
+                    "observations": observations,
+                }
+                if agent_run_id is not None:
+                    resume_state["agent_run_id"] = agent_run_id
                 await self._smart_resume_graph.ainvoke(
-                    {
-                        "task_id": task.id,
-                        "agent_run_id": agent_run_id,
-                        "agent_run_attempt": agent_run_attempt,
-                        "thread_id": task.thread_id,
-                        "round_index": _next_round_index(events),
-                        "selected_experts": [],
-                        "observations": observations,
-                    },
+                    resume_state,
                     config=self.graph_config(task.thread_id),
                 )
             else:
+                resume_graph_state: BrainRuntimeState = {
+                    "task_id": task.id,
+                    "thread_id": task.thread_id,
+                }
                 await self._resume_graph.ainvoke(
-                    {"task_id": task.id, "thread_id": task.thread_id},
+                    resume_graph_state,
                     config=self.graph_config(task.thread_id),
                 )
         finally:
@@ -1341,6 +1354,8 @@ class BrainRuntimeGraph:
                     attempt=state.get("agent_run_attempt", 0),
                 )
                 if result is not None:
+                    if result.deliverable is None or result.acceptance is None:
+                        continue
                     current_outputs.append(
                         {
                             "agent_code": code,
@@ -1731,12 +1746,18 @@ class BrainRuntimeGraph:
                     **scope,
                 },
             )
-        return {
-            **state,
-            "status": "context_resolved",
-            "account_id": account_id,
-            **scope,
-        }
+        context_state = cast(BrainRuntimeState, dict(state))
+        context_state["status"] = "context_resolved"
+        context_state["account_id"] = account_id
+        context_state["active_client_id"] = cast(int | None, scope.get("active_client_id"))
+        context_state["active_project_id"] = cast(int | None, scope.get("active_project_id"))
+        context_state["available_client_ids"] = list(
+            cast(list[int], scope.get("available_client_ids", []))
+        )
+        context_state["available_project_ids"] = list(
+            cast(list[int], scope.get("available_project_ids", []))
+        )
+        return context_state
 
     async def _query_data_card(self, state: BrainRuntimeState) -> BrainRuntimeState:
         """Return a deterministic account data card without strategy generation."""
@@ -1778,15 +1799,14 @@ class BrainRuntimeGraph:
                     raise RuntimeError("account data-card query did not complete")
                 card = outcome.result
                 tool_call_id = outcome.tool_call.id
+            runtime_identity = _runtime_event_identity.get()
             await self._stream_runtime_message(
                 session,
                 task,
                 str(card),
                 model="tool:account.data_context",
                 client_message_id=(
-                    _runtime_event_identity.get()[3]
-                    if _runtime_event_identity.get() is not None
-                    else None
+                    runtime_identity[3] if runtime_identity is not None else None
                 ),
             )
             await self._record_event(
@@ -2113,13 +2133,14 @@ class BrainRuntimeGraph:
                     for code in step.expert_codes
                     if code.value in allowed_codes
                 ]
-                authorization = budget_guard.authorize_experts(
+                requested_codes: list[str] = [str(code) for code in requested]
+                expert_authorization = budget_guard.authorize_experts(
                     state,
-                    requested,
+                    requested_codes,
                     purpose=step.purpose or step.rationale,
                     evidence_refs=step.evidence_refs,
                 )
-                selected = authorization.allowed_codes
+                selected = expert_authorization.allowed_codes
                 if selected:
                     await self._record_event(
                         session,
@@ -2130,51 +2151,50 @@ class BrainRuntimeGraph:
                             "agent_codes": selected,
                         },
                     )
-                    return {
-                        **authorization.state,
-                        "status": transition.status,
-                        "kernel_route": transition.route.value,
-                        "selected_experts": selected,
-                        "selected_expert_purpose": step.purpose or step.rationale,
-                        "selected_expert_evidence_refs": step.evidence_refs,
-                        "round_index": state.get("round_index", 1) + 1,
-                    }
-                if authorization.blocked_reason is not None:
+                    next_state = cast(BrainRuntimeState, dict(expert_authorization.state))
+                    next_state["status"] = transition.status
+                    next_state["kernel_route"] = transition.route.value
+                    next_state["selected_experts"] = selected
+                    next_state["selected_expert_purpose"] = step.purpose or step.rationale
+                    next_state["selected_expert_evidence_refs"] = step.evidence_refs
+                    next_state["round_index"] = state.get("round_index", 1) + 1
+                    return next_state
+                if expert_authorization.blocked_reason is not None:
                     await self._record_event(
                         session,
                         task,
                         "brain.runtime.loop_blocked",
                         {
                             "message": "检测到重复调度或专家预算已耗尽，我先汇总已有结论。",
-                            "reason": authorization.blocked_reason,
-                            "expert_codes": requested,
+                            "reason": expert_authorization.blocked_reason,
+                            "expert_codes": requested_codes,
                         },
                     )
-                    return {
-                        **authorization.state,
-                        "status": "finish",
-                        "kernel_route": MainKernelRoute.FINISH.value,
-                        "termination_reason": authorization.blocked_reason,
-                    }
+                    blocked_state = cast(BrainRuntimeState, dict(expert_authorization.state))
+                    blocked_state["status"] = "finish"
+                    blocked_state["kernel_route"] = MainKernelRoute.FINISH.value
+                    blocked_state["termination_reason"] = expert_authorization.blocked_reason
+                    return blocked_state
 
             if step.action in {"call_tools", "request_permission"} and step.tool_calls:
-                authorization = budget_guard.authorize_tools(state, len(step.tool_calls))
-                if authorization.allowed_count == 0:
+                tool_authorization = budget_guard.authorize_tools(state, len(step.tool_calls))
+                if tool_authorization.allowed_count == 0:
                     await self._record_event(
                         session,
                         task,
                         "brain.runtime.budget_exhausted",
                         {
                             "message": "工具调用已达到本轮安全预算，我先汇总已有结论。",
-                            "reason": authorization.blocked_reason,
+                            "reason": tool_authorization.blocked_reason,
                         },
                     )
-                    return {
-                        **authorization.state,
-                        "status": "finish",
-                        "kernel_route": MainKernelRoute.FINISH.value,
-                        "termination_reason": authorization.blocked_reason or "tool_blocked",
-                    }
+                    blocked_state = cast(BrainRuntimeState, dict(tool_authorization.state))
+                    blocked_state["status"] = "finish"
+                    blocked_state["kernel_route"] = MainKernelRoute.FINISH.value
+                    blocked_state["termination_reason"] = (
+                        tool_authorization.blocked_reason or "tool_blocked"
+                    )
+                    return blocked_state
                 await self._record_event(
                     session,
                     task,
@@ -2184,15 +2204,14 @@ class BrainRuntimeGraph:
                         "tool_codes": [call.tool_code for call in step.tool_calls],
                     },
                 )
-                return {
-                    **authorization.state,
-                    "status": transition.status,
-                    "kernel_route": transition.route.value,
-                    "selected_tool_calls": [
-                        call.model_dump(mode="json") for call in step.tool_calls
-                    ],
-                    "round_index": state.get("round_index", 1) + 1,
-                }
+                next_state = cast(BrainRuntimeState, dict(tool_authorization.state))
+                next_state["status"] = transition.status
+                next_state["kernel_route"] = transition.route.value
+                next_state["selected_tool_calls"] = [
+                    call.model_dump(mode="json") for call in step.tool_calls
+                ]
+                next_state["round_index"] = state.get("round_index", 1) + 1
+                return next_state
 
             if step.action == "respond":
                 await self._stream_runtime_message(
@@ -3179,8 +3198,9 @@ async def next_actions(session: AsyncSession, task: BrainTask) -> list[str]:
 async def _pending_permissions(
     session: AsyncSession, task_id: int, org_id: int
 ) -> list[AgentToolCall]:
-    return (
-        await session.scalars(
+    return list(
+        (
+            await session.scalars(
             select(AgentToolCall)
             .where(
                 AgentToolCall.task_id == task_id,
@@ -3190,7 +3210,8 @@ async def _pending_permissions(
             )
             .order_by(AgentToolCall.id)
         )
-    ).all()
+        ).all()
+    )
 
 
 async def _runtime_observations(

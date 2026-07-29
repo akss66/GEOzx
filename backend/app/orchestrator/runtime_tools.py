@@ -7,8 +7,9 @@ each handler before data is read.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,6 +23,8 @@ from app.services.account_data_view import (
     AccountDataViewService,
 )
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
+
+ParamsT = TypeVar("ParamsT", bound=BaseModel)
 
 
 class AccountProfileParams(BaseModel):
@@ -174,13 +177,21 @@ def _metric_context(metric_name: str, metrics: list[AccountDataMetric]) -> dict[
     if not values:
         value = None
     elif metric_name in _SUM_METRICS:
-        total = sum(values)
+        total = float(sum(values))
         value = int(total) if total.is_integer() else total
     else:
         value = sum(values) / len(values)
 
     observations = [observation for item in metrics for observation in item.observations]
     source_values = sorted({_enum_value(item.source) for item in observations})
+    latest_observed_at = max(
+        (item.observed_at for item in observations),
+        default=None,
+    )
+    latest_confirmed_at = max(
+        (item.confirmed_at for item in observations if item.confirmed_at is not None),
+        default=None,
+    )
     evidence_refs = []
     seen_refs: set[tuple[str, int]] = set()
     for observation in observations:
@@ -197,11 +208,8 @@ def _metric_context(metric_name: str, metrics: list[AccountDataMetric]) -> dict[
             else ("mixed" if source_values else None)
         ),
         "sources": source_values,
-        "observed_at": max((_iso(item.observed_at) for item in observations), default=None),
-        "confirmed_at": max(
-            (_iso(item.confirmed_at) for item in observations if item.confirmed_at is not None),
-            default=None,
-        ),
+        "observed_at": _iso(latest_observed_at),
+        "confirmed_at": _iso(latest_confirmed_at),
         "evidence_refs": evidence_refs,
     }
 
@@ -229,24 +237,39 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _tool_handler(
+    params_model: type[ParamsT],
+    handler: Callable[[ParamsT, ToolExecutionContext], Awaitable[Mapping[str, Any]]],
+) -> Callable[[BaseModel, ToolExecutionContext], Awaitable[Mapping[str, Any]]]:
+    async def invoke(
+        params: BaseModel,
+        context: ToolExecutionContext,
+    ) -> Mapping[str, Any]:
+        if not isinstance(params, params_model):
+            raise TypeError(f"expected {params_model.__name__} params")
+        return await handler(cast(ParamsT, params), context)
+
+    return invoke
+
+
 _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.profile",
-        handler=_account_profile,
+        handler=_tool_handler(AccountProfileParams, _account_profile),
         params_model=AccountProfileParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
     ),
     ToolSpec(
         name="account.data_context",
-        handler=_account_data_context,
+        handler=_tool_handler(AccountMetricsParams, _account_data_context),
         params_model=AccountMetricsParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
     ),
     ToolSpec(
         name="account.metrics_summary",
-        handler=_account_metrics_summary,
+        handler=_tool_handler(AccountMetricsParams, _account_metrics_summary),
         params_model=AccountMetricsParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",

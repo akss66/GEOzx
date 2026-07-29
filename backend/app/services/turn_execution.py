@@ -642,6 +642,9 @@ async def _close_query_failure(
     turn_id = turn.id
     run_id = run.id
     skill_run_id = skill_run.id
+    persisted_turn: ConversationTurn | None
+    persisted_run: AgentRun | None
+    persisted_skill_run: SkillRun | None
     if session.sync_session.is_active:
         persisted_turn = turn
         persisted_run = run
@@ -854,10 +857,14 @@ async def _execute_operation_task(
     except Exception as exc:  # noqa: BLE001 - persist only a safe operation failure
         await session.rollback()
         task = await session.get(BrainTask, task_id)
-        turn = await session.get(ConversationTurn, turn_id)
-        run = await session.get(AgentRun, run_id)
-        if task is None or turn is None or run is None:
+        persisted_turn = await session.get(ConversationTurn, turn_id)
+        persisted_run = await session.get(AgentRun, run_id)
+        recovered_turn = persisted_turn
+        recovered_run = persisted_run
+        if task is None or recovered_turn is None or recovered_run is None:
             raise RuntimeError("operation execution ownership disappeared") from exc
+        turn = recovered_turn
+        run = recovered_run
         task_state = "failed"
 
     return await _close_operation_state(

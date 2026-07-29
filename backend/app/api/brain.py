@@ -2,9 +2,10 @@
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -60,7 +61,7 @@ from app.models.enums import (
 )
 from app.orchestrator.brain_adapter import rerun_brain_acceptance
 from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
-from app.orchestrator.brain_planner import brain_planner
+from app.orchestrator.brain_planner import PlanningDecision, brain_planner
 from app.orchestrator.brain_runtime import (
     next_actions,
     runtime_events,
@@ -119,6 +120,13 @@ from app.services.publishing import sync_publish_jobs_after_approval
 
 router = APIRouter(prefix="/brain", tags=["brain"])
 log = logging.getLogger("dyflow.brain")
+
+
+class BriefBindings(TypedDict):
+    project_name: str | None
+    account_group_name: str | None
+    platforms: list[str]
+    account_ids: list[int]
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -267,8 +275,8 @@ def _default_steps() -> list[dict]:
     )
 
 
-def _enrich_step_contracts(steps: list[dict]) -> list[dict]:
-    contract = {
+def _enrich_step_contracts(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    contract: dict[str, dict[str, Any]] = {
         "step-positioning": {
             "execution_kind": "account_diagnosis",
             "human_gate": False,
@@ -300,10 +308,15 @@ def _enrich_step_contracts(steps: list[dict]) -> list[dict]:
             "tool_codes": ["publish_package_prepare", "review_metrics"],
         },
     }
-    return [{**step, **contract.get(step.get("id"), {})} for step in steps]
+    enriched: list[dict[str, Any]] = []
+    for step in steps:
+        step_id = step.get("id")
+        contract_values = contract.get(step_id, {}) if isinstance(step_id, str) else {}
+        enriched.append({**step, **contract_values})
+    return enriched
 
 
-def _build_plan_steps(task_type: BrainTaskType) -> list[dict]:
+def _build_plan_steps(task_type: BrainTaskType) -> list[dict[str, Any]]:
     skipped_for_type: dict[BrainTaskType, set[str]] = {
         BrainTaskType.ACCOUNT_DIAGNOSIS: {"step-art", "step-video", "step-editing"},
         BrainTaskType.REVIEW_OPTIMIZATION: {"step-art", "step-video", "step-editing"},
@@ -392,7 +405,7 @@ async def _resolve_brief_bindings(
     session: AsyncSession,
     user: CurrentUser,
     body: DraftBrainTaskRequest,
-) -> dict:
+) -> BriefBindings:
     org_id = user.org_id
     project_name = None
     if body.project_id is not None:
@@ -514,15 +527,22 @@ async def create_brain_task_draft(
         await require_agent_enabled(session, org_id, AgentCode.DECISION)
     risk_constraints = [] if is_casual else ["发布前必须过合规门", "高风险平台动作需要人工确认"]
     task_type = _infer_type(body.goal)
-    planning = (
-        None if is_casual else await brain_planner.plan(session, org_id, body.goal, task_type)
-    )
-    if planning is not None and not planning.steps:
+    if is_casual:
+        planning = PlanningDecision([], "", "intent", [])
+    else:
+        planning = await brain_planner.plan(session, org_id, body.goal, task_type)
+    if not is_casual and not planning.steps:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="当前目标没有可用专家，请先在专家管理中启用对应专家",
         )
-    plan_steps = planning.steps if planning is not None else []
+    plan_steps = planning.steps
+    plan_summary = (
+        "杩愯惀澶ц剳灏嗙洿鎺ュ洖搴旇繖鏉℃櫘閫氭秷鎭紝涓嶈皟鐢ㄤ笓瀹跺洟銆?"
+        if is_casual
+        else planning.summary
+    )
+    plan_quality_gates = quality_gate_labels(planning.quality_gates)
     expected_outputs = (
         ["运营大脑普通回复"]
         if is_casual
@@ -568,6 +588,8 @@ async def create_brain_task_draft(
         estimated_cost=Decimal("0.00") if is_casual else Decimal("0.68"),
         requires_human_confirmation=not is_casual,
     )
+    task.plan.summary = plan_summary
+    task.plan.quality_gates = plan_quality_gates
     session.add(task)
     await session.commit()
     return task
@@ -769,7 +791,7 @@ async def _execute_brain_message(
         }
         await session.commit()
 
-    bindings = {
+    bindings: BriefBindings = {
         "project_name": task.brief.project_name if task and task.brief else None,
         "account_group_name": None,
         "platforms": list(task.brief.platforms)
@@ -839,6 +861,8 @@ async def _execute_brain_message(
         )
         session.add(task)
     else:
+        if task.brief is None or task.plan is None:
+            raise RuntimeError("brain task draft is missing brief or plan")
         task.type = task_type
         task.status = BrainTaskStatus.RUNNING
         task.progress = 0
@@ -874,6 +898,8 @@ async def _execute_brain_message(
             client_message_id=body.client_message_id,
         )
     else:
+        if regeneration_source_event_id is None:
+            raise RuntimeError("regeneration requested without source event id")
         await runtime_graph.record_regeneration_requested(
             session,
             task,
@@ -1320,7 +1346,7 @@ async def _runtime_response(
         session,
         task=task,
     )
-    llm_calls = []
+    llm_calls: Sequence[LLMCall] = ()
     if viewer.role == UserRole.ADMIN:
         llm_calls = (
             await session.scalars(
@@ -1602,7 +1628,10 @@ async def _audit_task_approval_decision(
     comment: str | None,
 ) -> None:
     project_ids = await task_project_ids(session, task)
-    for project_id in sorted(project_ids) or [None]:
+    audit_project_ids: list[int | None] = list(sorted(project_ids))
+    if not audit_project_ids:
+        audit_project_ids = [None]
+    for project_id in audit_project_ids:
         await add_approval_decided(
             session,
             org_id=user.org_id,

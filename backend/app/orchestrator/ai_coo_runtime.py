@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -420,7 +421,7 @@ async def _resolve_scope(
     }
 
 
-def _build_task_plan(required_expert_codes: list[str]) -> list[dict[str, Any]]:
+def _build_task_plan(required_expert_codes: Sequence[str]) -> list[dict[str, Any]]:
     return [
         {
             "order": index,

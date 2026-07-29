@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,12 +100,15 @@ class BrainIntelligence:
                     code="skill_registry_unavailable",
                     reason="explicit_skill_registry_required",
                 )
-            return route_explicit_request(
+            route = route_explicit_request(
                 requested_skill_code,
                 platform=platform,
                 registry=registry,
                 has_account=has_account,
             )
+            if route is None:
+                raise RuntimeError("explicit skill routing returned no decision")
+            return route
 
         try:
             prompt = prompt_registry.load("main-agent.intent")
@@ -186,7 +190,7 @@ class BrainIntelligence:
         org_id: int,
         goal: str,
         observations: list[dict[str, Any]],
-        available_experts: list[str | dict[str, Any]],
+        available_experts: Sequence[str | dict[str, Any]],
         round_index: int,
     ) -> RuntimeNextStep:
         capabilities = _sanitize_capabilities(available_experts)
@@ -442,6 +446,8 @@ async def _structured_chat(
     prompt: LoadedPrompt,
     messages: list[dict],
 ):
+    if session is None:
+        raise RuntimeError("brain intelligence requires an active database session")
     call_context = LLMCallContext(
         prompt_id=prompt.spec.id,
         prompt_version=prompt.spec.version,
@@ -464,7 +470,7 @@ async def _structured_chat(
 
 
 def _sanitize_capabilities(
-    available: list[str | dict[str, Any]],
+    available: Sequence[str | dict[str, Any]],
 ) -> list[dict[str, Any]]:
     capabilities: list[dict[str, Any]] = []
     for item in available:
