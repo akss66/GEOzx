@@ -52,6 +52,7 @@ const thread: ConversationThread = {
       user_input: "Inspect my account",
       assistant_response: "Inspection has started.",
       intent: { mode: "SKILL", status: "completed" },
+      status: "completed",
       projections: [
         {
           type: "artifact",
@@ -78,6 +79,7 @@ const thread: ConversationThread = {
       user_input: "Hello again",
       assistant_response: "Hello! What would you like to do next?",
       intent: { mode: "ANSWER" },
+      status: "completed",
       projections: [],
       created_at: "2026-07-28T00:01:00Z",
       updated_at: "2026-07-28T00:01:00Z",
@@ -91,6 +93,7 @@ const thread: ConversationThread = {
       user_input: "Retry the review",
       assistant_response: "Retry is queued.",
       intent: { mode: "SKILL", status: "running" },
+      status: "running",
       projections: [
         {
           type: "progress",
@@ -109,6 +112,62 @@ describe("TurnStream", () => {
   afterEach(cleanup);
   beforeEach(() => {
     vi.mocked(getArtifact).mockResolvedValue(artifact);
+  });
+
+  it("uses one stable TurnArticle while an optimistic Turn binds its server id", () => {
+    const optimisticThread: ConversationThread = {
+      ...thread,
+      turns: [{
+        ...thread.turns[1],
+        id: null,
+        client_message_id: "optimistic-1",
+        status: "queued",
+        assistant_response: null,
+      }],
+    };
+    const view = render(<TurnStream thread={optimisticThread} />);
+    const optimisticArticle = screen.getByTestId("conversation-turn-optimistic-1");
+
+    expect(optimisticArticle).toHaveAttribute("data-turn-status", "queued");
+    expect(within(optimisticArticle).getByLabelText("Assistant response")).toBeInTheDocument();
+
+    view.rerender(
+      <TurnStream
+        thread={{
+          ...optimisticThread,
+          turns: [{
+            ...optimisticThread.turns[0],
+            id: 104,
+            status: "running",
+            assistant_response: "正在处理",
+          }],
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("conversation-turn-104")).toBe(optimisticArticle);
+    expect(optimisticArticle).toHaveAttribute("data-turn-id", "104");
+    expect(optimisticArticle).toHaveAttribute("data-turn-status", "running");
+  });
+
+  it("uses the authoritative Turn status instead of intent status", () => {
+    render(
+      <TurnStream
+        thread={{
+          ...thread,
+          turns: [{
+            ...thread.turns[1],
+            status: "failed",
+            intent: { mode: "SKILL", status: "completed" },
+          }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("执行失败")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("技术日志"));
+    expect(screen.getByText("状态：failed")).toBeVisible();
+    expect(screen.queryByText("状态：completed")).not.toBeInTheDocument();
   });
 
   it("uses the established chat anatomy for persisted user and operations-brain messages", () => {
@@ -134,6 +193,7 @@ describe("TurnStream", () => {
         projections: [{
           type: "execution_summary",
           turn_id: 102,
+          run_id: 3002,
           skill_code: "account_inspection",
           skill_run_id: 4002,
           status: "completed",
@@ -164,7 +224,72 @@ describe("TurnStream", () => {
     fireEvent.click(technicalSummary);
     expect(technicalSummary.closest("details")).toHaveAttribute("open");
     expect(screen.getByText("Skill Run：4002")).toBeInTheDocument();
+    expect(screen.getByText("Agent Run：3002")).toBeInTheDocument();
     expect(screen.getByText(/Tool #8001/)).toBeInTheDocument();
+  });
+
+  it("shows a useful tool-only execution summary without exposing raw details", () => {
+    render(
+      <TurnStream
+        thread={{
+          ...thread,
+          turns: [{
+            ...thread.turns[1],
+            projections: [{
+              type: "execution_summary",
+              turn_id: 102,
+              run_id: 3003,
+              skill_code: null,
+              skill_run_id: null,
+              status: "completed",
+              quality_score: null,
+              experts: [],
+              tools: [{
+                id: 8002,
+                tool_code: "account.profile",
+                tool_name: "账号资料",
+                status: "completed",
+              }],
+            }],
+          }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("调用工具")).toBeInTheDocument();
+    expect(screen.getByText("账号资料")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("技术日志"));
+    expect(screen.getByText(/Tool #8002/)).toBeVisible();
+  });
+
+  it("shows critic-only quality without inventing an expert", () => {
+    render(
+      <TurnStream
+        thread={{
+          ...thread,
+          turns: [{
+            ...thread.turns[1],
+            projections: [{
+              type: "execution_summary",
+              turn_id: 102,
+              run_id: 3004,
+              skill_code: "artifact_quality_review",
+              skill_run_id: 4010,
+              status: "completed",
+              quality_score: 0.93,
+              experts: [],
+              tools: [],
+            }],
+          }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("质量审核")).toBeInTheDocument();
+    expect(screen.getByText("质量评分：93 分")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("技术日志"));
+    expect(screen.getByText("质量门：93 分")).toBeVisible();
+    expect(screen.queryByText("本次未调用专家")).not.toBeInTheDocument();
   });
 
   it("keeps the exact persisted Artifact in its source Turn when later greetings and retries arrive", async () => {
@@ -310,7 +435,10 @@ describe("TurnStream", () => {
     expect(
       [...container.querySelectorAll<HTMLElement>("[data-turn-id]")].map((node) => node.dataset.turnId),
     ).toEqual(["101", "102", "103"]);
-    expect(screen.getByTestId("conversation-turn-101")).toHaveAttribute("data-turn-key", "turn-101");
+    expect(screen.getByTestId("conversation-turn-101")).toHaveAttribute(
+      "data-turn-key",
+      "81:turn-101",
+    );
     expect(screen.getByTestId("projection-artifact-5001")).toHaveAttribute(
       "data-projection-key",
       "artifact-5001",

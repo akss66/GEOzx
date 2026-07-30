@@ -33,6 +33,7 @@ class ConversationTurnOut(BaseModel):
     user_input: str
     assistant_response: str | None
     intent: dict[str, Any] | None
+    status: str
     projections: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

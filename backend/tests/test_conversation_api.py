@@ -3,6 +3,7 @@
 import json
 import logging
 from contextlib import asynccontextmanager
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -215,6 +216,7 @@ async def test_create_and_get_thread_with_ordered_turn_history(
         "第一条",
         "第二条",
     ]
+    assert [turn["status"] for turn in history["turns"]] == ["queued", "queued"]
     assert all(turn["projections"] == [] for turn in history["turns"])
 
 
@@ -1067,6 +1069,9 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     ]
     assert response_events[0][0] == "brain.runtime.message_start"
     assert response_events[-1][0] == "brain.runtime.message_done"
+    assert [payload["stream_seq"] for _, payload in response_events] == list(
+        range(len(response_events))
+    )
     response_deltas = [
         payload["delta"]
         for event_type, payload in response_events
@@ -1294,6 +1299,122 @@ async def test_blocked_turn_still_projects_called_experts(
         item for item in projections if item["type"] == "execution_summary"
     )
     assert execution["experts"][0]["agent_name"] == "账号定位专家"
+
+
+@pytest.mark.asyncio
+async def test_turn_projects_sanitized_tool_only_execution_summary(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "仅工具日志账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="tool-only-summary",
+        message="读取账号资料",
+    )
+    body = submitted.json()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="只调用工具",
+    )
+    session.add(task)
+    await session.flush()
+    session.add(
+        AgentToolCall(
+            org_id=admin.org_id,
+            task_id=task.id,
+            thread_id=thread["id"],
+            turn_id=body["turn"]["id"],
+            tool_code="account.profile",
+            tool_name="账号资料",
+            status="success",
+            side_effect_level="read",
+            input_summary="SECRET_INPUT",
+            output_summary="SECRET_OUTPUT",
+            error="Traceback: SHOULD_NOT_LEAK",
+        )
+    )
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    summary = next(
+        projection
+        for projection in history.json()["turns"][0]["projections"]
+        if projection["type"] == "execution_summary"
+    )
+    assert summary["run_id"] == body["run"]["id"]
+    assert summary["experts"] == []
+    assert summary["tools"] == [
+        {
+            "id": summary["tools"][0]["id"],
+            "tool_code": "account.profile",
+            "tool_name": "账号资料",
+            "status": "success",
+        }
+    ]
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert "SECRET_INPUT" not in serialized
+    assert "SECRET_OUTPUT" not in serialized
+    assert "Traceback" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_turn_projects_critic_only_quality_summary(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "仅质量门日志账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="critic-only-summary",
+        message="检查现有成果质量",
+    )
+    body = submitted.json()
+    session.add(
+        SkillRun(
+            org_id=admin.org_id,
+            thread_id=thread["id"],
+            turn_id=body["turn"]["id"],
+            run_id=body["run"]["id"],
+            task_id=None,
+            idempotency_key="critic-only-summary",
+            skill_code="artifact_quality_review",
+            skill_version=1,
+            status="completed",
+            input_snapshot={},
+            output_snapshot={"raw_critic_prompt": "SHOULD_NOT_LEAK"},
+            quality_score=Decimal("0.9300"),
+        )
+    )
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    summary = next(
+        projection
+        for projection in history.json()["turns"][0]["projections"]
+        if projection["type"] == "execution_summary"
+    )
+    assert summary["run_id"] == body["run"]["id"]
+    assert summary["skill_code"] == "artifact_quality_review"
+    assert summary["quality_score"] == 0.93
+    assert summary["experts"] == []
+    assert summary["tools"] == []
+    assert "SHOULD_NOT_LEAK" not in json.dumps(summary, ensure_ascii=False)
 
 
 @pytest.mark.asyncio

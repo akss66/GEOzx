@@ -439,6 +439,11 @@ async def _record_delivery_events(
                 "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                 "model": "system",
                 "status": status,
+                # The durable done frame follows start=0 and delta=1..N.
+                # It therefore needs its own monotonically increasing sequence
+                # so the client reducer cannot mistake it for a duplicate of
+                # the final delta.
+                "stream_seq": len(_realtime_text_chunks(message)) + 1,
             },
         ),
         RuntimeEventSpec(
@@ -498,15 +503,15 @@ async def _publish_delivery_events(
             }
             await brain_runtime.publish_realtime_event(
                 "brain.runtime.message_start",
-                stream_payload,
+                {**stream_payload, "stream_seq": 0},
                 content_item_id=event.content_item_id,
                 project_id=event.project_id,
                 event_id=event.id,
             )
-            for delta in _realtime_text_chunks(message):
+            for index, delta in enumerate(_realtime_text_chunks(message), start=1):
                 await brain_runtime.publish_realtime_event(
                     "brain.runtime.message_delta",
-                    {**stream_payload, "delta": delta},
+                    {**stream_payload, "delta": delta, "stream_seq": index},
                     content_item_id=event.content_item_id,
                     project_id=event.project_id,
                     event_id=event.id,

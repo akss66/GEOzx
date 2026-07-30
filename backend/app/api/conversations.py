@@ -134,6 +134,16 @@ async def _execution_summary_projection(
 ) -> dict | None:
     """Expose business provenance while keeping raw execution traces collapsed."""
 
+    run_id = await session.scalar(
+        select(AgentRun.id)
+        .where(
+            AgentRun.org_id == turn.org_id,
+            AgentRun.thread_id == turn.thread_id,
+            AgentRun.turn_id == turn.id,
+        )
+        .order_by(AgentRun.id.desc())
+        .limit(1)
+    )
     skill_run = await session.scalar(
         select(SkillRun)
         .where(
@@ -165,10 +175,11 @@ async def _execution_summary_projection(
             .order_by(AgentToolCall.id)
         )
     )
-    if not invocations:
+    if skill_run is None and not invocations and not tool_calls:
         return None
     return {
         "type": "execution_summary",
+        "run_id": run_id,
         "skill_code": skill_run.skill_code if skill_run is not None else None,
         "skill_run_id": skill_run.id if skill_run is not None else None,
         "status": skill_run.status if skill_run is not None else None,

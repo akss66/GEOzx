@@ -585,6 +585,7 @@ export type TurnProjection =
   | {
       type: "execution_summary";
       turn_id: number;
+      run_id: number | null;
       skill_code: string | null;
       skill_run_id: number | null;
       status: string | null;
@@ -622,7 +623,7 @@ export type TurnProjection =
     };
 
 export interface ConversationTurn {
-  id: number;
+  id: number | null;
   thread_id: number;
   org_id: number;
   created_by_id: number | null;
@@ -630,7 +631,13 @@ export interface ConversationTurn {
   user_input: string;
   assistant_response: string | null;
   intent: Record<string, unknown> | null;
+  status: string;
   projections: TurnProjection[];
+  stream_state?: {
+    messageId: string;
+    lastSequence: number;
+    terminal: boolean;
+  };
   created_at: string;
   updated_at: string;
 }
