@@ -31,6 +31,7 @@ from app.schemas.conversation import (
     CreateConversationThreadRequest,
     CreateConversationTurnRequest,
     TurnSubmissionOut,
+    sanitize_conversation_projection,
 )
 from app.services.agent_runs import (
     claim_agent_run,
@@ -98,11 +99,14 @@ def _bind_projections_to_turn(
     turn_id: int,
     projections: list[dict] | None,
 ) -> list[dict]:
-    return [
-        {**projection, "turn_id": turn_id}
-        for projection in (projections or [])
-        if isinstance(projection, dict)
-    ]
+    safe: list[dict] = []
+    for projection in projections or []:
+        if not isinstance(projection, dict):
+            continue
+        sanitized = sanitize_conversation_projection({**projection, "turn_id": turn_id})
+        if sanitized is not None:
+            safe.append(sanitized)
+    return safe
 
 
 async def _thread_out(
@@ -138,11 +142,24 @@ async def _turn_projections(
         .order_by(AgentRun.id.desc())
         .limit(1)
     )
-    projections = (
+    raw_projections = (
         list(payload.get("projections", []))
         if isinstance(payload, dict) and isinstance(payload.get("projections"), list)
         else []
     )
+    result_payload_types = {
+        "progress",
+        "expert",
+        "artifact",
+        "account_data",
+        "execution_blocked",
+    }
+    projections = [
+        safe
+        for projection in raw_projections
+        if isinstance(projection, dict) and projection.get("type") in result_payload_types
+        if (safe := sanitize_conversation_projection(projection)) is not None
+    ]
     projections.extend(await _approval_projections(session, turn))
     execution_summary = await _execution_summary_projection(session, turn)
     if execution_summary is not None:

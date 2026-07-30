@@ -39,6 +39,26 @@
 - Added the ten-case browser matrix covering greeting, capability, query,
   account inspection, review, topic planning, publish preparation, real
   publish permission, forced expert failure, and same-thread follow-up.
+- Replaced the private route-helper matrix with ten API-to-Worker integration
+  scenarios. Each scenario now submits a real Turn, executes the persisted Run,
+  polls the public Turn API, and checks the resulting Task, SkillRun,
+  invocation, tool, artifact, and account provenance.
+- Hardened every public conversation projection behind one discriminated,
+  typed Pydantic allowlist. Raw answer, approval, execution-summary, unknown,
+  provider, prompt, tool payload, and trace fields from `AgentRun.result_payload`
+  fail closed; approvals and execution summaries are rebuilt from authoritative
+  database rows.
+- Added a deterministic provider and confirmation tool that exist only when
+  both `ENVIRONMENT=test` and the explicit deterministic-provider flag are
+  enabled. The real service smoke therefore exercises API, Redis, ARQ,
+  LangGraph, DurableToolExecutor, approval persistence, and Turn projection
+  restoration without an outbound fake-model HTTP bypass.
+- Bound main-graph V3 ToolCalls to an immutable RuntimeScope. Operation Tasks
+  now create account-scoped ContentItems, and persisted ToolCalls retain their
+  Thread and Turn ownership so approval controls survive history reload.
+- Replaced the unreliable repository-wide Ruff format baseline with a
+  changed-Python gate that combines committed, staged, unstaged, and untracked
+  files and fails on the exact changed set.
 - Made Playwright verification deterministic:
   - CI cannot reuse an unrelated server already bound to port 5173;
   - the dev-server command is cross-platform;
@@ -93,42 +113,46 @@ or production database:
 
 ## Verification
 
-- Backend V3 directed gate before final review:
-  `111 passed` in 26.17 seconds.
-- Backend directed gate after the final grouped retry-count query:
-  `96 passed` in 18.49 seconds.
-- Full backend after test-isolation fixes:
-  `959 passed`, 5 warnings, in 294.47 seconds.
+- Final full backend release gate:
+  `970 passed`, 5 warnings, in 297.61 seconds.
+- Review-fix affected backend gate:
+  `155 passed`, 1 warning, in 66.97 seconds.
+- Projection, Gateway, tool, Turn-execution, V3 integration, performance, and
+  changed-format directed gate:
+  `129 passed`, 4 warnings, in 35.67 seconds.
 - Frontend unit suite:
-  `70 files / 333 tests passed` in 23.69 seconds.
+  `70 files / 333 tests passed` in 24.35 seconds.
 - Playwright `main-agent-v2.spec.ts`:
-  `4 passed` in 8.4 seconds; the V3 ten-case matrix itself completed in
+  `4 passed` in 8.5 seconds; the V3 ten-case UI contract itself completed in
   2.8 seconds.
+- Real backend + Worker Playwright:
+  greeting, account-data query, and persisted approval restoration
+  `1 passed` in 5.2 seconds.
 - Frontend lint:
   `0 errors`; 15 pre-existing React/Fast Refresh warnings.
 - Frontend type check and production build:
   passed.
 - Ruff lint over the full backend:
   passed.
-- Ruff format over every Task 9 changed/new Python file:
-  passed.
+- Changed-Python Ruff format gate:
+  all 28 changed/new Python files passed.
 - `git diff --check`:
   passed.
 
 ## Full-suite failures found and resolved
 
-The first full backend run completed with `957 passed / 2 failed`. Neither
-failure was accepted or hidden:
+The final-review full backend run completed with `967 passed / 3 failed`.
+Neither failure was accepted or hidden:
 
-- the cross-intent flow fixture still assumed synchronous execution after the
-  API had moved to durable queued execution and could accidentally contact
-  Redis from a developer `.env`;
-- a private Skill fixture replaced `expert_codes` without replacing the new
-  ordered `expert_stages`.
+- two legacy `/brain/messages` tests used AgentRuns that correctly had neither
+  conversation Thread nor Turn ownership. The V3 scope helper now preserves
+  that legacy path while still rejecting partial conversation provenance;
+- the ambiguous external-write fixture had conversation provenance but omitted
+  the account-scoped ContentItem required by RuntimeScope, so the fixture was
+  corrected instead of weakening the production invariant.
 
-The fixtures now stub only the queue boundary, explicitly execute the persisted
-Turn, and preserve the Skill definition invariant. Both focused regressions
-passed before the second full run reached `959 passed`.
+The three focused regressions passed, the affected six-file gate reached
+`155 passed`, and the second full run reached `970 passed`.
 
 ## Final review
 
@@ -167,14 +191,12 @@ passed before the second full run reached `959 passed`.
 
 Approve Task 9. No critical or required review finding remains.
 
-## Known repository baseline
+## Format gate scope
 
-The full-repository command `ruff format --check .` reports 106 files that
-predate Task 9 as unformatted under the locked Ruff 0.16.0. Reformatting those
-unrelated files was intentionally not included in this focused task. Every
-Python file changed or added by Task 9 passes the same formatter. The existing
-repository-wide format CI step therefore remains a known baseline cleanup item;
-lint, tests, migration smoke, frontend gates, and Task 9 formatting are green.
+The repository contains pre-existing files that do not match the locked Ruff
+formatter. CI now computes the exact changed Python set from the PR base,
+staged, unstaged, and untracked files, filters deleted paths, and runs the
+locked formatter only on that set. Repository-wide Ruff lint remains enabled.
 
 ## Scope boundary
 

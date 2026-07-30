@@ -1400,6 +1400,126 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
 
 
 @pytest.mark.asyncio
+async def test_history_fail_closed_sanitizes_every_result_payload_projection_kind(
+    client, session, admin, monkeypatch
+) -> None:
+    """AgentRun payloads are untrusted trace data, never a public API passthrough."""
+
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "projection-security")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="projection-security",
+        message="inspect projection safety",
+    )
+    body = submitted.json()
+    run = await session.get(AgentRun, body["run"]["id"])
+    assert run is not None
+    malicious = {
+        "prompt": "SECRET_PROMPT",
+        "api_key": "sk-secret",
+        "provider_body": {"raw_output": "RAW_TOOL_OUTPUT"},
+    }
+    run.result_payload = {
+        "projections": [
+            {"type": "answer", "message": "SECRET_PROMPT", **malicious},
+            {
+                "type": "progress",
+                "skill_run_id": 101,
+                "stages": [
+                    {
+                        "code": "analysis",
+                        "name": "Data analysis",
+                        "status": "completed",
+                        **malicious,
+                    }
+                ],
+                **malicious,
+            },
+            {
+                "type": "expert",
+                "invocation": {
+                    "id": 201,
+                    "agent_code": "01-positioning",
+                    "agent_name": "Positioning expert",
+                    "status": "done",
+                    "attempt": 0,
+                    **malicious,
+                },
+                **malicious,
+            },
+            {
+                "type": "artifact",
+                "artifact_id": 301,
+                "artifact_type": "account_inspection_report",
+                "skill_run_id": 101,
+                "account_id": account.id,
+                "report": {"raw_output": "RAW_TOOL_OUTPUT", "api_key": "sk-secret"},
+                **malicious,
+            },
+            {
+                "type": "account_data",
+                "account_id": account.id,
+                "skill_code": "account_data_query",
+                "skill_run_id": 102,
+                "data": {"raw_output": "RAW_TOOL_OUTPUT", "api_key": "sk-secret"},
+                **malicious,
+            },
+            {
+                "type": "execution_blocked",
+                "skill_run_id": 103,
+                "skill_code": "account_inspection",
+                "code": "EXECUTION_FAILED",
+                "recovery_action": "Retry the account inspection.",
+                **malicious,
+            },
+            {
+                "type": "approval",
+                "approval": {"id": 401, **malicious},
+                **malicious,
+            },
+            {
+                "type": "execution_summary",
+                "run_id": run.id,
+                "experts": [{"agent_name": "SECRET_PROMPT"}],
+                "tools": [{"output": "RAW_TOOL_OUTPUT"}],
+                **malicious,
+            },
+            {"type": "future_projection", **malicious},
+        ]
+    }
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert history.status_code == 200
+    projections = history.json()["turns"][0]["projections"]
+    assert [item["type"] for item in projections] == [
+        "progress",
+        "expert",
+        "artifact",
+        "account_data",
+        "execution_blocked",
+    ]
+    serialized = json.dumps(projections, ensure_ascii=False)
+    assert "SECRET_PROMPT" not in serialized
+    assert "sk-secret" not in serialized
+    assert "RAW_TOOL_OUTPUT" not in serialized
+    assert "provider_body" not in serialized
+    assert all(item["turn_id"] == body["turn"]["id"] for item in projections)
+    artifact_projection = next(item for item in projections if item["type"] == "artifact")
+    assert "report" not in artifact_projection
+    account_projection = next(item for item in projections if item["type"] == "account_data")
+    assert "data" not in account_projection
+
+
+@pytest.mark.asyncio
 async def test_history_reconstructs_pending_approval_projection(
     client, session, admin, monkeypatch
 ) -> None:
@@ -1461,8 +1581,6 @@ async def test_history_reconstructs_pending_approval_projection(
             "status": "waiting_approval",
             "permission_mode": "confirm",
             "requires_human_confirmation": True,
-            "input_summary": "SAFE_INPUT_SUMMARY",
-            "output_summary": "SAFE_OUTPUT_SUMMARY",
         },
     }
     assert "MUST_NOT_LEAK" not in json.dumps(approval, ensure_ascii=False)

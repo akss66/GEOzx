@@ -445,9 +445,10 @@ export type ConversationApproval = Pick<
   | "status"
   | "permission_mode"
   | "requires_human_confirmation"
-  | "input_summary"
-  | "output_summary"
->;
+> & {
+  input_summary?: string;
+  output_summary?: string;
+};
 
 export type ConversationExecutionPreference =
   | "AUTO"
@@ -626,7 +627,7 @@ export type TurnProjection =
       artifact_type: string;
       skill_run_id: number;
       account_id: number;
-      report: Record<string, unknown>;
+      report?: Record<string, unknown>;
       turn_id?: number;
     }
   | {
@@ -634,7 +635,6 @@ export type TurnProjection =
       account_id: number;
       skill_code: string;
       skill_run_id: number;
-      data: Record<string, unknown>;
       turn_id?: number;
     }
   | {

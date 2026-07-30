@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from app.config import settings
 from app.models import Account, MetricSnapshot, PlatformContentRecord
 from app.models.enums import (
     AccountStatus,
@@ -205,3 +206,22 @@ def test_runtime_tool_catalog_marks_read_only_tools_as_automatic(admin) -> None:
     assert all(item["kind"] == "tool" for item in catalog)
     assert all(item["permission_mode"] == "auto" for item in catalog)
     assert all(item["scope"] == "account" for item in catalog)
+
+
+def test_runtime_tool_catalog_exposes_confirm_tool_only_in_explicit_test_mode(
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "environment", "test")
+    monkeypatch.setattr(
+        settings,
+        "llm_deterministic_test_provider_enabled",
+        True,
+        raising=False,
+    )
+
+    catalog = runtime_tool_capabilities(admin)
+    confirm_tool = next(item for item in catalog if item["code"] == "test.confirm_action")
+
+    assert confirm_tool["permission_mode"] == "confirm"
+    assert confirm_tool["scope"] == "account"

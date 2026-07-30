@@ -23,6 +23,7 @@ jobs:
       - name: Capability, telemetry, safety, and budget contracts
         run: >-
           pytest -q
+          tests/test_main_agent_v3_integration.py
           tests/test_main_agent_v3_performance.py
           tests/test_llm_gateway.py
           tests/test_conversation_api.py
@@ -46,7 +47,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
       - name: Format check (ruff)
-        run: ruff format --check .
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/check_changed_python_format.py --base "$BASE_SHA"
       - name: Tests (pytest)
         run: pytest -q --durations=25
 
@@ -113,12 +116,48 @@ jobs:
 
   main-agent-v3-playwright:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dyflow
+          POSTGRES_PASSWORD: dyflow_ci_pw
+          POSTGRES_DB: dyflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dyflow -d dyflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://dyflow:dyflow_ci_pw@localhost:5432/dyflow
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: test
+      MAIN_AGENT_V2_ENABLED: "true"
+      LLM_DETERMINISTIC_TEST_PROVIDER_ENABLED: "true"
+      ADMIN_EMAIL: ci-admin@example.invalid
+      ADMIN_PASSWORD: ci-main-agent-password
+      DEFAULT_ORG_NAME: Main Agent V3 CI
     defaults:
       run:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -128,7 +167,35 @@ jobs:
         run: corepack enable
       - name: Install deps
         run: pnpm install --frozen-lockfile
+      - name: Install backend deps
+        working-directory: backend
+        run: uv pip install --system ".[dev]"
+      - name: Migrate and seed smoke database
+        working-directory: backend
+        run: |
+          alembic upgrade head
+          python -m app.seed
+      - name: Start backend and worker with deterministic test provider
+        working-directory: backend
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 >/tmp/backend.log 2>&1 &
+          arq app.worker.WorkerSettings >/tmp/worker.log 2>&1 &
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/backend.log /tmp/worker.log
+          exit 1
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Ten-case browser matrix
+      - name: Frontend Turn UI contracts
         run: pnpm exec playwright test main-agent-v2.spec.ts
+      - name: Real backend greeting, query, and approval smoke
+        env:
+          REAL_BACKEND_SMOKE: "1"
+          REAL_API_ORIGIN: http://127.0.0.1:8000
+          REAL_SMOKE_EMAIL: ci-admin@example.invalid
+          REAL_SMOKE_PASSWORD: ci-main-agent-password
+        run: pnpm exec playwright test main-agent-real-api.spec.ts

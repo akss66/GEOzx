@@ -15,6 +15,7 @@ from app.core.workspace_access import require_account_access
 from app.models import (
     AgentRun,
     BrainTask,
+    ContentItem,
     ConversationThread,
     ConversationTurn,
     OrchestrationPlan,
@@ -22,7 +23,12 @@ from app.models import (
     TaskBrief,
     User,
 )
-from app.models.enums import BrainTaskStatus, BrainTaskType
+from app.models.enums import (
+    BrainTaskStatus,
+    BrainTaskType,
+    ContentStage,
+    ContentStatus,
+)
 from app.orchestrator.brain_intelligence import (
     IntelligenceUnavailable,
     brain_intelligence,
@@ -964,9 +970,20 @@ async def _execute_operation_task(
 ) -> TurnExecutionResult:
     task = await session.get(BrainTask, run.task_id) if run.task_id else None
     if task is None:
+        content = ContentItem(
+            project_id=thread.project_id,
+            created_by_id=user.id,
+            account_id=thread.account_id,
+            title=turn.user_input[:300],
+            current_stage=ContentStage.OPERATION,
+            status=ContentStatus.IN_PROGRESS,
+        )
+        session.add(content)
+        await session.flush()
         task = BrainTask(
             org_id=user.org_id,
             created_by_id=user.id,
+            content_item_id=content.id,
             title=turn.user_input[:300],
             type=BrainTaskType.REVIEW_OPTIMIZATION,
             status=BrainTaskStatus.RUNNING,

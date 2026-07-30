@@ -12,6 +12,7 @@ from app.models import (
     AgentRun,
     AgentToolCall,
     BrainTask,
+    ContentItem,
     ConversationThread,
     ConversationTurn,
     Event,
@@ -55,9 +56,17 @@ async def _runtime_retry_fixture(session, admin, *, client_message_id: str):
     )
     session.add(account)
     await session.flush()
+    content = ContentItem(
+        created_by_id=admin.id,
+        account_id=account.id,
+        title=f"Runtime content {client_message_id}",
+    )
+    session.add(content)
+    await session.flush()
     task = BrainTask(
         org_id=admin.org_id,
         created_by_id=admin.id,
+        content_item_id=content.id,
         title=f"Runtime task {client_message_id}",
         type=BrainTaskType.REVIEW_OPTIMIZATION,
         status=BrainTaskStatus.RUNNING,
@@ -176,12 +185,10 @@ async def test_execute_tools_converges_ambiguous_write_without_false_success_or_
     admin,
     monkeypatch,
 ) -> None:
-    account, task, run, turn, skill_run, tool_call = (
-        await _ambiguous_tool_fixture(
-            session,
-            admin,
-            client_message_id="ambiguous-provider-write-1",
-        )
+    account, task, run, turn, skill_run, tool_call = await _ambiguous_tool_fixture(
+        session,
+        admin,
+        client_message_id="ambiguous-provider-write-1",
     )
     request = RuntimeToolCall(
         tool_code=tool_call.tool_code,
@@ -234,9 +241,7 @@ async def test_execute_tools_converges_ambiguous_write_without_false_success_or_
     await session.refresh(task)
     events = [
         event
-        for event in (
-            await session.scalars(select(Event).order_by(Event.id))
-        ).all()
+        for event in (await session.scalars(select(Event).order_by(Event.id))).all()
         if (event.payload or {}).get("task_id") == task.id
     ]
 
@@ -252,9 +257,7 @@ async def test_execute_tools_converges_ambiguous_write_without_false_success_or_
     assert skill_run.status == "stopped"
     assert skill_run.error_code == "TOOL_RESULT_AMBIGUOUS"
     assert task.status is BrainTaskStatus.PENDING_CONFIRMATION
-    assert [event.type for event in events].count(
-        "brain.runtime.tool_ambiguous"
-    ) == 1
+    assert [event.type for event in events].count("brain.runtime.tool_ambiguous") == 1
     assert not any(event.type == "brain.runtime.tool_completed" for event in events)
     session.add_all(
         [
@@ -385,9 +388,7 @@ def test_expert_and_tool_budgets_are_enforced_before_dispatch():
         (_state(token_count=100_001), "token_budget_exhausted"),
         (_state(cost_usd=5.01), "cost_budget_exhausted"),
         (
-            _state(
-                runtime_started_at=(datetime.now(UTC) - timedelta(seconds=901)).isoformat()
-            ),
+            _state(runtime_started_at=(datetime.now(UTC) - timedelta(seconds=901)).isoformat()),
             "elapsed_time_budget_exhausted",
         ),
     ],
@@ -472,9 +473,7 @@ async def test_runtime_event_idempotency_reuses_persisted_event_and_isolates_acc
     await session.commit()
 
     rows = list(
-        await session.scalars(
-            select(Event).where(Event.type == "brain.runtime.message_done")
-        )
+        await session.scalars(select(Event).where(Event.type == "brain.runtime.message_done"))
     )
     assert created_first is True
     assert created_second is False
@@ -552,11 +551,7 @@ async def test_resume_after_permission_reuses_runtime_event_identity_on_retry(
         for event in (
             await session.scalars(
                 select(Event)
-                .where(
-                    Event.type.in_(
-                        ["brain.runtime.resumed", "brain.runtime.completed"]
-                    )
-                )
+                .where(Event.type.in_(["brain.runtime.resumed", "brain.runtime.completed"]))
                 .order_by(Event.id)
             )
         ).all()
@@ -619,9 +614,7 @@ async def test_resume_after_decision_reuses_runtime_event_identity_on_retry(
         event
         for event in (
             await session.scalars(
-                select(Event)
-                .where(Event.type == "brain.runtime.completed")
-                .order_by(Event.id)
+                select(Event).where(Event.type == "brain.runtime.completed").order_by(Event.id)
             )
         ).all()
         if (event.payload or {}).get("task_id") == task.id
@@ -743,8 +736,7 @@ async def test_main_agent_acknowledgement_is_bounded_and_never_calls_the_model(
     acknowledgement = await session.scalar(
         select(Event).where(
             Event.type == "brain.runtime.message_done",
-            Event.payload["semantic_key"].as_string()
-            == "00-decision:main-agent.acknowledgement",
+            Event.payload["semantic_key"].as_string() == "00-decision:main-agent.acknowledgement",
         )
     )
     assert acknowledgement is not None
@@ -930,9 +922,7 @@ async def test_summary_uses_only_a_completed_specialist_invocation(
 
     assert partial_delivered is False
     blocked = await session.scalar(
-        select(Event)
-        .where(Event.type == "brain.runtime.summary_blocked")
-        .order_by(Event.id.desc())
+        select(Event).where(Event.type == "brain.runtime.summary_blocked").order_by(Event.id.desc())
     )
     assert blocked is not None
     assert blocked.payload["missing_expert_codes"] == [AgentCode.OPERATOR.value]
@@ -987,9 +977,7 @@ async def test_tool_only_result_can_be_reported_without_a_specialist_conclusion(
 
 
 @pytest.mark.asyncio
-async def test_legacy_pipeline_projects_only_new_completed_invocations(
-    session, admin
-) -> None:
+async def test_legacy_pipeline_projects_only_new_completed_invocations(session, admin) -> None:
     account, task, run = await _runtime_retry_fixture(
         session, admin, client_message_id="legacy-lifecycle-1"
     )
@@ -1054,14 +1042,10 @@ async def test_legacy_pipeline_projects_only_new_completed_invocations(
 
     lifecycle = (
         await session.scalars(
-            select(Event)
-            .where(Event.type == "brain.runtime.subagent_completed")
-            .order_by(Event.id)
+            select(Event).where(Event.type == "brain.runtime.subagent_completed").order_by(Event.id)
         )
     ).all()
-    assert [event.type for event in lifecycle] == [
-        "brain.runtime.subagent_completed"
-    ]
+    assert [event.type for event in lifecycle] == ["brain.runtime.subagent_completed"]
     assert lifecycle[0].payload["invocation_id"] == new_invocation.id
 
 
@@ -1128,9 +1112,7 @@ async def test_legacy_pipeline_projects_truthful_failed_and_blocked_lifecycle_ev
         token_count=1,
         cost=Decimal("0"),
     )
-    session.add_all(
-        [old_invocation, done_invocation, failed_invocation, blocked_invocation]
-    )
+    session.add_all([old_invocation, done_invocation, failed_invocation, blocked_invocation])
     await session.commit()
     await session.refresh(task, attribute_names=["brief", "plan"])
 
@@ -1149,9 +1131,7 @@ async def test_legacy_pipeline_projects_truthful_failed_and_blocked_lifecycle_ev
 
     lifecycle = (
         await session.scalars(
-            select(Event)
-            .where(Event.type.like("brain.runtime.subagent_%"))
-            .order_by(Event.id)
+            select(Event).where(Event.type.like("brain.runtime.subagent_%")).order_by(Event.id)
         )
     ).all()
     assert [event.type for event in lifecycle] == [
@@ -1164,9 +1144,7 @@ async def test_legacy_pipeline_projects_truthful_failed_and_blocked_lifecycle_ev
         failed_invocation.id,
         blocked_invocation.id,
     ]
-    assert old_invocation.id not in [
-        int(event.payload["invocation_id"]) for event in lifecycle
-    ]
+    assert old_invocation.id not in [int(event.payload["invocation_id"]) for event in lifecycle]
 
 
 @pytest.mark.asyncio
@@ -1220,9 +1198,7 @@ async def test_observe_round_does_not_overwrite_failed_lifecycle_with_completed(
 
     lifecycle = (
         await session.scalars(
-            select(Event)
-            .where(Event.type.like("brain.runtime.subagent_%"))
-            .order_by(Event.id)
+            select(Event).where(Event.type.like("brain.runtime.subagent_%")).order_by(Event.id)
         )
     ).all()
     assert [event.type for event in lifecycle] == ["brain.runtime.subagent_failed"]
@@ -1264,9 +1240,7 @@ async def test_observe_round_skips_specialist_lifecycle_without_real_invocation(
 
     lifecycle = (
         await session.scalars(
-            select(Event)
-            .where(Event.type.like("brain.runtime.subagent_%"))
-            .order_by(Event.id)
+            select(Event).where(Event.type.like("brain.runtime.subagent_%")).order_by(Event.id)
         )
     ).all()
     assert lifecycle == []

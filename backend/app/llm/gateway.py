@@ -12,6 +12,7 @@ from typing import Any, Protocol
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.request_context import get_acting_user_id
 from app.core.runtime_failures import (
     ProviderRuntimeFailure,
@@ -20,6 +21,7 @@ from app.core.runtime_failures import (
 )
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.deepseek import DeepSeekAdapter
+from app.llm.adapters.deterministic_test import DeterministicTestAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from app.llm.cost import compute_cost
@@ -126,6 +128,12 @@ class LLMGateway:
         org_id: int | None,
         target: ModelTarget,
     ) -> _GatewayAdapter:
+        if (
+            not self._custom_adapters
+            and settings.environment == "test"
+            and settings.llm_deterministic_test_provider_enabled
+        ):
+            return DeterministicTestAdapter()
         if target.provider_id is not None:
             runtime = await provider_runtime_for_target(
                 session,
@@ -368,6 +376,13 @@ def _effective_options(options: dict[str, Any]) -> dict[str, Any]:
     call_context = _call_context.get()
     if call_context is not None and call_context.response_format is not None:
         effective["response_format"] = dict(call_context.response_format)
+    if (
+        call_context is not None
+        and call_context.prompt_id
+        and settings.environment == "test"
+        and settings.llm_deterministic_test_provider_enabled
+    ):
+        effective["_deterministic_prompt_id"] = call_context.prompt_id
     return effective
 
 

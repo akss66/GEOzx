@@ -320,7 +320,7 @@ test("empty main agent workspace keeps actions compact and content above the fol
   await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
 });
 
-test("main agent v3 exposes the ten-case capability matrix through one Turn UI", async ({
+test("Turn UI renders ten mocked presentation states as a frontend-only contract", async ({
   page,
 }) => {
   await installBrowserState(page);
@@ -470,7 +470,7 @@ async function mockApi(page: Page) {
       };
       const isSourceTurn = !sourceTurnSubmitted && body.requested_skill_code === inspectionSkill.code;
       const turnId = sourceTurnId + turns.length;
-      const capability = matrixTurn(body.message, turnId);
+      const capability = mockedUiContractTurn(body.message, turnId);
       const projections = isSourceTurn ? sourceTurnProjections() : capability.projections;
       const turn = {
         id: turnId,
@@ -530,7 +530,7 @@ async function mockApi(page: Page) {
   return unexpectedApiCalls;
 }
 
-function matrixTurn(message: string, turnId: number) {
+function mockedUiContractTurn(message: string, turnId: number) {
   const baseSummary = (skillCode: string | null, status: string) => ({
     type: "execution_summary",
     turn_id: turnId,

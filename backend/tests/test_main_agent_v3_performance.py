@@ -19,11 +19,7 @@ from app.models import (
     LLMCall,
 )
 from app.models.enums import Platform
-from app.schemas.conversation import (
-    CreateConversationTurnRequest,
-    TurnExecutionMode,
-)
-from app.services.turn_execution import _route_turn
+from app.schemas.conversation import TurnExecutionMode
 from app.services.turn_observability import (
     TurnObservabilityScope,
     apply_turn_closure_metrics,
@@ -311,45 +307,3 @@ async def test_fuzzy_answer_budget_is_one_router_plus_one_answer(
     assert [call.agent_code for call in calls] == ["00-router", "00-decision"]
     await session.refresh(turn)
     assert turn.model_call_count == 2
-
-
-@pytest.mark.parametrize(
-    ("message", "requested_skill", "expected_mode", "expected_skill"),
-    [
-        ("你好", None, TurnExecutionMode.ANSWER, None),
-        ("你能做什么", None, TurnExecutionMode.ANSWER, None),
-        ("只查询账号数据，不生成策略", None, TurnExecutionMode.QUERY, "account_data_query"),
-        ("给当前账号做一次账号体检", None, TurnExecutionMode.SKILL, "account_inspection"),
-        ("复盘这个账号", "performance_review", TurnExecutionMode.SKILL, "performance_review"),
-        ("规划下周选题", "topic_planning", TurnExecutionMode.SKILL, "topic_planning"),
-        (
-            "准备发布包",
-            "publishing_preparation",
-            TurnExecutionMode.SKILL,
-            "publishing_preparation",
-        ),
-    ],
-)
-@pytest.mark.asyncio
-async def test_capability_matrix_safe_routes_skip_router_model(
-    session,
-    admin,
-    message: str,
-    requested_skill: str | None,
-    expected_mode: TurnExecutionMode,
-    expected_skill: str | None,
-) -> None:
-    decision = await _route_turn(
-        session,
-        admin,
-        CreateConversationTurnRequest(
-            client_message_id=f"matrix-{expected_mode}-{requested_skill}",
-            message=message,
-            requested_skill_code=requested_skill,
-        ),
-        platform="douyin",
-    )
-
-    assert decision.mode is expected_mode
-    assert decision.skill_code == expected_skill
-    assert list(await session.scalars(select(LLMCall.id))) == []

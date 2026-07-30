@@ -13,12 +13,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.llm.adapters import CompletionResult
+from app.llm.adapters.deterministic_test import DeterministicTestAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.cost import compute_cost
 from app.llm.gateway import (
     LLMCallContext,
     LLMError,
     LLMGateway,
+    _effective_options,
     bind_llm_call_context,
     provider_for,
 )
@@ -33,6 +35,7 @@ from app.models import (
     Org,
 )
 from app.models.enums import Platform
+from app.services.model_infrastructure import ModelTarget
 from app.services.model_provider_registry import replace_provider_key
 from app.services.turn_observability import (
     TurnObservabilityScope,
@@ -69,6 +72,49 @@ def _gw(adapter: FakeAdapter) -> LLMGateway:
 
 
 MSG = [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_gateway_selects_deterministic_provider_only_in_explicit_test_mode(
+    session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "environment", "test")
+    monkeypatch.setattr(
+        settings,
+        "llm_deterministic_test_provider_enabled",
+        True,
+        raising=False,
+    )
+    adapter = await LLMGateway()._adapter(
+        session,
+        admin.org_id,
+        ModelTarget(provider_id=None, provider_code="deepseek", model="deepseek-chat"),
+    )
+
+    assert isinstance(adapter, DeterministicTestAdapter)
+
+
+def test_gateway_passes_prompt_contract_only_to_explicit_deterministic_test_provider(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "environment", "test")
+    monkeypatch.setattr(
+        settings,
+        "llm_deterministic_test_provider_enabled",
+        True,
+        raising=False,
+    )
+
+    with bind_llm_call_context(
+        LLMCallContext(
+            prompt_id="main-agent.next-step",
+            response_format={"type": "json_object"},
+        )
+    ):
+        options = _effective_options({})
+
+    assert options["_deterministic_prompt_id"] == "main-agent.next-step"
+    assert options["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.parametrize(
