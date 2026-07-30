@@ -50,11 +50,11 @@
 - Produces: 独立路由 workload code `00-router`。
 - 保留: `00-decision` 作为主 Agent 回答和综合模型。
 
-- [ ] 写测试：歧义分类调用 `00-router`，回答调用 `00-decision`。
-- [ ] 写迁移测试：每个组织获得 Flash 路由配置，供应商/兜底来源与主 Agent 配置兼容。
-- [ ] 运行定向测试确认失败。
-- [ ] 增加路由 workload、种子和迁移；配置不存在时安全回退到 `00-decision`，不能使生产请求不可用。
-- [ ] 运行定向测试并提交 `feat: separate router and answer model profiles`。
+- [x] 写测试：歧义分类调用 `00-router`，回答调用 `00-decision`。
+- [x] 写迁移测试：每个组织获得 Flash 路由配置，供应商/兜底来源与主 Agent 配置兼容。
+- [x] 运行定向测试确认失败。
+- [x] 增加路由 workload、种子和迁移；配置不存在时安全回退到 `00-decision`，不能使生产请求不可用。
+- [x] 运行定向测试并提交 `feat: separate router and answer model profiles`。
 
 ### Task 3: Conversation Worker 化与可分类故障
 
@@ -180,24 +180,24 @@
 **Files:**
 - Modify: `frontend/src/pages/BrainHome.tsx`
 - Modify: `frontend/src/components/brain/TurnStream.tsx`
-- Modify: `frontend/src/components/brain/TurnArtifact.tsx`
-- Modify: `frontend/src/components/brain/ArtifactCenter.tsx`
 - Modify: `frontend/src/hooks/useEventStream.ts`
+- Modify: `frontend/src/types.ts`
 - Test: `frontend/src/pages/BrainHome.test.tsx`
 - Test: `frontend/src/components/brain/TurnStream.test.tsx`
-- Test: `frontend/src/components/brain/ArtifactCenter.test.tsx`
 - Test: `frontend/src/hooks/useEventStream.test.tsx`
 
 **Interfaces:**
 - ConversationTurn 是聊天区唯一渲染源。
 - SSE 以 `thread_id + turn_id + client_message_id` 合并。
-- 同一 Artifact id 同时可由来源 Turn 和成果中心引用。
+- 实时状态作为当前 Turn 的临时投影，不再作为独立聊天消息列表。
+- 现有来源 Turn 与成果中心继续引用同一 Artifact id。
 
-- [ ] 写测试：pending Turn 与历史 Turn 使用同一布局，不在回答后跳位。
-- [ ] 写测试：只显示一个运行状态，delta 实时追加并且 done 不重复正文。
-- [ ] 写测试：默认显示参与专家，展开后显示路由、工具、质量门、重试和耗时。
+- [ ] 写测试：HTTP submission 已写入缓存时只渲染一个用户 Turn；新 Thread 初次 pending 也使用同一布局。
+- [ ] 写测试：只显示一个运行状态，delta 到 done 不跳位、不重复，跨 Thread/client 事件被忽略。
+- [ ] 写测试：默认显示参与专家，展开后显示现有路由、工具、质量门和状态；耗时由 Task 9 的真实字段补充，不在前端臆造。
 - [ ] 运行前端定向测试确认失败。
-- [ ] 实现单一投影与技术日志展示。
+- [ ] 移除当前聊天页的 legacy BrainTask/ConversationStream 渲染回退，将 pending 和实时事件合并到对应 ConversationTurn。
+- [ ] 保留 transport durable event id 去重，并在领域层以 Turn 组合键归并；不得按 delta 文本去重。
 - [ ] 运行定向测试、TypeScript 和构建并提交 `fix: unify v3 turn streaming and technical details`。
 
 ### Task 9: 性能预算、可观测性与端到端能力矩阵
