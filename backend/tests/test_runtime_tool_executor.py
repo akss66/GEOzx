@@ -118,9 +118,7 @@ async def test_controlled_tool_creates_permission_before_execution(session, admi
     assert calls == 1
 
     rows = list(
-        await session.scalars(
-            select(AgentToolCall).where(AgentToolCall.task_id == task.id)
-        )
+        await session.scalars(select(AgentToolCall).where(AgentToolCall.task_id == task.id))
     )
     assert len(rows) == 1
     assert rows[0].requires_human_confirmation is True
@@ -179,9 +177,7 @@ async def test_idempotent_write_retries_with_one_server_provider_key(
         )
     )
     assert [attempt.status for attempt in attempts] == ["failed", "success"]
-    assert {attempt.provider_idempotency_key for attempt in attempts} == {
-        provider_keys[0]
-    }
+    assert {attempt.provider_idempotency_key for attempt in attempts} == {provider_keys[0]}
 
 
 @pytest.mark.asyncio
@@ -291,9 +287,7 @@ async def test_non_idempotent_local_commit_failure_is_ambiguous(
     assert first.status == replay.status == "ambiguous"
     assert calls == 1
     attempt = await session.scalar(
-        select(ToolExecutionAttempt).where(
-            ToolExecutionAttempt.tool_call_id == first.tool_call.id
-        )
+        select(ToolExecutionAttempt).where(ToolExecutionAttempt.tool_call_id == first.tool_call.id)
     )
     assert attempt is not None
     assert attempt.status == "ambiguous"
@@ -345,8 +339,6 @@ async def test_non_idempotent_reentrant_dispatch_uses_one_tool_call(
     assert nested_statuses == ["running"]
     assert calls == 1
     rows = list(
-        await session.scalars(
-            select(AgentToolCall).where(AgentToolCall.task_id == task.id)
-        )
+        await session.scalars(select(AgentToolCall).where(AgentToolCall.task_id == task.id))
     )
     assert len(rows) == 1

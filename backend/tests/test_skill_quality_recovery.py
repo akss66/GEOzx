@@ -155,16 +155,12 @@ async def test_unique_legacy_terminal_skill_run_is_reused_without_execution(
 
 
 @pytest.mark.asyncio
-async def test_multiple_legacy_terminal_candidates_are_ambiguous(
-    session, admin
-) -> None:
+async def test_multiple_legacy_terminal_candidates_are_ambiguous(session, admin) -> None:
     account, thread, turn, run = await _scope(
         session, admin, key="legacy-terminal-ambiguous", message="Plan topics"
     )
     snapshot = {"account_id": account.id, "days": 30, "topic_count": 5}
-    for index, key in enumerate(
-        ("skill:topic_planning:v1", "skill:topic_planning")
-    ):
+    for index, key in enumerate(("skill:topic_planning:v1", "skill:topic_planning")):
         session.add(
             SkillRun(
                 org_id=admin.org_id,

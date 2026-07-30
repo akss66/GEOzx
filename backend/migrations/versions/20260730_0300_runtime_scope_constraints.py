@@ -162,9 +162,7 @@ def _preflight(bind: sa.engine.Connection) -> None:
         if bind.execute(sa.text(query)).first() is not None
     ]
     if conflicts:
-        raise RuntimeError(
-            "runtime scope preflight failed: " + ", ".join(sorted(conflicts))
-        )
+        raise RuntimeError("runtime scope preflight failed: " + ", ".join(sorted(conflicts)))
 
 
 def _backfill_canonical_sources(bind: sa.engine.Connection) -> None:

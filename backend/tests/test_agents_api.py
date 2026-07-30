@@ -205,9 +205,7 @@ async def test_admin_can_persist_expert_policy_with_audit_event(client, admin, s
     assert body["quality_gates"] == ["topic_review", "script_compliance"]
 
     events = list(
-        await session.scalars(
-            select(Event).where(Event.type == "expert.management.updated")
-        )
+        await session.scalars(select(Event).where(Event.type == "expert.management.updated"))
     )
     assert len(events) == 1
     assert events[0].payload["agent_code"] == "02-content-director"
@@ -268,9 +266,7 @@ async def test_disabled_expert_cannot_be_invoked_directly(client, admin, session
 
 
 @pytest.mark.asyncio
-async def test_expert_prompt_addition_is_applied_to_real_agent_runtime(
-    client, admin, session
-):
+async def test_expert_prompt_addition_is_applied_to_real_agent_runtime(client, admin, session):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     updated = await client.put(
         "/agents/01-positioning/management",

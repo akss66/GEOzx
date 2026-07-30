@@ -283,9 +283,7 @@ class BrainIntelligence:
         allowed_experts = {
             str(item["code"]) for item in capabilities if item.get("kind") == "expert"
         }
-        allowed_tools = {
-            str(item["code"]) for item in capabilities if item.get("kind") == "tool"
-        }
+        allowed_tools = {str(item["code"]) for item in capabilities if item.get("kind") == "tool"}
         try:
             prompt = prompt_registry.render(
                 "main-agent.next-step",
@@ -304,11 +302,7 @@ class BrainIntelligence:
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"目标：{goal}\n"
-                        f"当前轮次：{round_index}\n"
-                        f"专家观察：{observations}"
-                    ),
+                    "content": (f"目标：{goal}\n当前轮次：{round_index}\n专家观察：{observations}"),
                 },
             ]
             result, _cost = await _structured_chat(
@@ -343,19 +337,13 @@ class BrainIntelligence:
                         {"role": "user", "content": repair_instruction},
                     ],
                 )
-                step = RuntimeNextStep.model_validate(
-                    extract_json(repaired_result.content)
-                )
+                step = RuntimeNextStep.model_validate(extract_json(repaired_result.content))
             except (ValidationError, ValueError, TypeError, KeyError) as exc:
-                raise IntelligenceUnavailable(
-                    "运营大脑暂时无法决定可靠的下一步"
-                ) from exc
+                raise IntelligenceUnavailable("运营大脑暂时无法决定可靠的下一步") from exc
             except Exception as exc:  # noqa: BLE001 - provider failures become a safe domain error
                 raise IntelligenceUnavailable("运营大脑暂时不可用，请稍后重试") from exc
 
-        filtered_experts = [
-            code for code in step.expert_codes if code.value in allowed_experts
-        ]
+        filtered_experts = [code for code in step.expert_codes if code.value in allowed_experts]
         filtered_tools = [
             request for request in step.tool_calls if request.tool_code in allowed_tools
         ]
@@ -484,8 +472,7 @@ class BrainIntelligence:
                 {
                     **item,
                     "evidence_id": (
-                        f"{item.get('source_type')}:{item.get('source_id')}:"
-                        f"{item.get('metric')}"
+                        f"{item.get('source_type')}:{item.get('source_id')}:{item.get('metric')}"
                     ),
                 }
                 for item in evidence_refs
@@ -510,9 +497,7 @@ class BrainIntelligence:
                 ],
             )
             return OperatingStrategyModelPlan(
-                draft=OperatingStrategyDraft.model_validate(
-                    extract_json(result.content)
-                ),
+                draft=OperatingStrategyDraft.model_validate(extract_json(result.content)),
                 prompt=prompt,
                 model=result.model,
             )
@@ -582,11 +567,15 @@ def _experts_for_route(decision: TurnRouteDecision) -> list[AgentCode]:
     if decision.mode is not TurnExecutionMode.SKILL:
         return []
     normalized = (decision.skill_code or "").strip().lower().replace("_", "-")
-    if normalized in {
-        "account-positioning",
-        "account-positioning-diagnosis",
-        "positioning",
-        "positioning-diagnosis",
-    } or "positioning" in normalized:
+    if (
+        normalized
+        in {
+            "account-positioning",
+            "account-positioning-diagnosis",
+            "positioning",
+            "positioning-diagnosis",
+        }
+        or "positioning" in normalized
+    ):
         return [AgentCode.POSITIONING]
     return []

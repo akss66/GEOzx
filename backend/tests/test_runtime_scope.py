@@ -217,10 +217,7 @@ async def test_runtime_deliverable_rejects_partial_and_cross_account_provenance(
             status=DeliverableStatus.PENDING_REVIEW,
             payload={"summary": "wrong account"},
         )
-    assert (
-        await session.scalar(select(func.count()).select_from(Deliverable))
-        == 0
-    )
+    assert await session.scalar(select(func.count()).select_from(Deliverable)) == 0
 
     deliverable = await write_runtime_deliverable(
         session,
@@ -365,7 +362,4 @@ async def test_harness_rejects_cross_task_scope_before_creating_invocation(
             trace_only=True,
         )
 
-    assert (
-        await session.scalar(select(func.count()).select_from(AgentInvocation))
-        == 0
-    )
+    assert await session.scalar(select(func.count()).select_from(AgentInvocation)) == 0

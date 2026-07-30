@@ -100,8 +100,7 @@ def _require_compatible_claim(
     """Prevent a V2 idempotency key from being rebound to another Turn."""
 
     is_turn_owned_claim = any(
-        value is not None
-        for value in (run.thread_id, run.turn_id, thread_id, turn_id)
+        value is not None for value in (run.thread_id, run.turn_id, thread_id, turn_id)
     )
     if not is_turn_owned_claim:
         # Legacy BrainTask runs mutate request_payload as execution advances.
@@ -201,17 +200,13 @@ async def queue_agent_run_behind_task(
 ) -> bool:
     """Queue one follow-up without mutating the shared task before its turn."""
 
-    await session.scalar(
-        select(BrainTask.id).where(BrainTask.id == task_id).with_for_update()
-    )
+    await session.scalar(select(BrainTask.id).where(BrainTask.id == task_id).with_for_update())
     blocker = await session.scalar(
         select(AgentRun.id)
         .where(
             AgentRun.task_id == task_id,
             AgentRun.id != run_id,
-            AgentRun.status.in_(
-                [*ACTIVE_TASK_RUN_STATUSES, WAITING_PREDECESSOR_STATUS]
-            ),
+            AgentRun.status.in_([*ACTIVE_TASK_RUN_STATUSES, WAITING_PREDECESSOR_STATUS]),
         )
         .order_by(AgentRun.id.desc())
         .limit(1)
@@ -239,9 +234,7 @@ async def promote_next_waiting_agent_run(
 ) -> AgentRun | None:
     """Promote the oldest follow-up only when no task run is executable."""
 
-    await session.scalar(
-        select(BrainTask.id).where(BrainTask.id == task_id).with_for_update()
-    )
+    await session.scalar(select(BrainTask.id).where(BrainTask.id == task_id).with_for_update())
     active = await session.scalar(
         select(AgentRun.id)
         .where(
@@ -358,9 +351,7 @@ async def release_agent_run_failure(
     recovery_action: str | None = None,
 ) -> tuple[bool, int]:
     await session.rollback()
-    run = await session.scalar(
-        select(AgentRun).where(AgentRun.id == run_id).with_for_update()
-    )
+    run = await session.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
     if run is None:
         return False, 0
     if run.status in {"failed", "dead_letter", "cancelled", "completed"}:
@@ -515,10 +506,7 @@ async def _runtime_state_scope(
     error_detail: str | None = None,
 ) -> RuntimeStateScope:
     skill_run_id = await session.scalar(
-        select(SkillRun.id)
-        .where(SkillRun.run_id == run.id)
-        .order_by(SkillRun.id.desc())
-        .limit(1)
+        select(SkillRun.id).where(SkillRun.run_id == run.id).order_by(SkillRun.id.desc()).limit(1)
     )
     request_payload = dict(run.request_payload or {})
     account_id = request_payload.get("account_id")

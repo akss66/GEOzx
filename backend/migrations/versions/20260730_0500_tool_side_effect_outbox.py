@@ -16,13 +16,8 @@ down_revision: str | None = "20260730_0400"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_SIDE_EFFECT_CHECK = (
-    "side_effect_level IN "
-    "('read', 'idempotent_write', 'non_idempotent_write')"
-)
-_ATTEMPT_STATUS_CHECK = (
-    "status IN ('planned', 'dispatched', 'success', 'failed', 'ambiguous')"
-)
+_SIDE_EFFECT_CHECK = "side_effect_level IN ('read', 'idempotent_write', 'non_idempotent_write')"
+_ATTEMPT_STATUS_CHECK = "status IN ('planned', 'dispatched', 'success', 'failed', 'ambiguous')"
 
 
 def upgrade() -> None:

@@ -28,9 +28,7 @@ from app.models.enums import (
 
 
 async def _token(client, email: str, password: str) -> str:
-    response = await client.post(
-        "/auth/login", json={"email": email, "password": password}
-    )
+    response = await client.post("/auth/login", json={"email": email, "password": password})
     assert response.status_code == 200
     return response.json()["access_token"]
 
@@ -47,9 +45,7 @@ def _review_payload(*, summary: str = "互动率回升，但涨粉速度仍需�
         "highlights": ["知识类内容完播率较高"],
         "issues": ["更新频率不稳定"],
         "optimization_suggestions": ["固定每周发布三条"],
-        "evidence_refs": [
-            {"kind": "account_metric_snapshot", "id": 81, "label": "近28天账号指标"}
-        ],
+        "evidence_refs": [{"kind": "account_metric_snapshot", "id": 81, "label": "近28天账号指标"}],
         "acceptance_items": [
             {
                 "label": "summary",
@@ -310,9 +306,7 @@ async def test_artifact_list_detail_share_business_projection_and_provenance(
 
 
 @pytest.mark.asyncio
-async def test_artifact_queries_and_actions_are_isolated_by_account(
-    client, session, admin
-):
+async def test_artifact_queries_and_actions_are_isolated_by_account(client, session, admin):
     account_a = await _seed_artifact(session, admin, account_name="账号A")
     account_b = await _seed_artifact(session, admin, account_name="账号B")
     legacy_content = ContentItem(
@@ -368,9 +362,7 @@ async def test_artifact_queries_and_actions_are_isolated_by_account(
     assert second_page.status_code == 200
     assert [row["id"] for row in second_page.json()["data"]] == [account_a[8].id]
     hidden = await client.get(f"/artifacts/{account_b[8].id}", headers=headers)
-    assert (
-        hidden.status_code == 200
-    )  # admin can view it only as its own account-scoped identity
+    assert hidden.status_code == 200  # admin can view it only as its own account-scoped identity
     assert hidden.json()["account_id"] == account_b[1].id
     legacy_detail = await client.get(f"/artifacts/{legacy.id}", headers=headers)
     assert legacy_detail.status_code == 404
@@ -393,12 +385,8 @@ async def test_member_cannot_enumerate_view_or_change_another_account_artifact(
     token = await _token(client, member.email, "user-pw-123")
     headers = _auth(token)
 
-    visible_list = await client.get(
-        f"/artifacts?account_id={account_a[1].id}", headers=headers
-    )
-    hidden_list = await client.get(
-        f"/artifacts?account_id={account_b[1].id}", headers=headers
-    )
+    visible_list = await client.get(f"/artifacts?account_id={account_a[1].id}", headers=headers)
+    hidden_list = await client.get(f"/artifacts?account_id={account_b[1].id}", headers=headers)
     hidden_detail = await client.get(f"/artifacts/{account_b[8].id}", headers=headers)
     hidden_revision = await client.post(
         "/artifact-revisions",
@@ -613,9 +601,7 @@ async def test_artifact_first_acceptance_rejects_stale_version_without_mutation(
 
 
 @pytest.mark.asyncio
-async def test_reviewer_cannot_revise_or_accept_artifact(
-    client, session, admin, member
-):
+async def test_reviewer_cannot_revise_or_accept_artifact(client, session, admin, member):
     seeded = await _seed_artifact(session, admin, account_name="只读账号")
     session.add(
         ProjectMembership(
@@ -830,9 +816,7 @@ async def test_artifact_projection_recursively_removes_internal_data_but_keeps_a
         assert private_value not in review_serialized
 
     assert art.status_code == 200
-    art_sections = {
-        section["key"]: section["content"] for section in art.json()["sections"]
-    }
+    art_sections = {section["key"]: section["content"] for section in art.json()["sections"]}
     assert art_sections["prompts"] == [
         "sunlit glass office",
         "close-up installation detail",
@@ -843,9 +827,7 @@ async def test_artifact_projection_recursively_removes_internal_data_but_keeps_a
 
 
 @pytest.mark.asyncio
-async def test_every_deliverable_status_maps_and_filters_to_business_status(
-    client, session, admin
-):
+async def test_every_deliverable_status_maps_and_filters_to_business_status(client, session, admin):
     seeded = await _seed_artifact(
         session,
         admin,
@@ -860,9 +842,7 @@ async def test_every_deliverable_status_maps_and_filters_to_business_status(
         (DeliverableStatus.SUPERSEDED, "superseded"),
     ]
     artifacts = {DeliverableStatus.DRAFT: seeded[8]}
-    for version, (internal_status, _business_status) in enumerate(
-        statuses[1:], start=2
-    ):
+    for version, (internal_status, _business_status) in enumerate(statuses[1:], start=2):
         row = Deliverable(
             content_item_id=seeded[2].id,
             thread_id=seeded[3].id,
@@ -941,9 +921,7 @@ async def test_revision_integrity_race_rolls_back_without_duplicate_version(
             and row.version == 2
             for row in session.new
         ):
-            raise IntegrityError(
-                "INSERT deliverables", {}, Exception("unique collision")
-            )
+            raise IntegrityError("INSERT deliverables", {}, Exception("unique collision"))
         return await original_flush(objects)
 
     monkeypatch.setattr(session, "flush", collide_on_revision)

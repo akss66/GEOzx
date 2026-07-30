@@ -122,9 +122,7 @@ async def test_isolated_trace_entry_uses_distinct_sessions_and_frozen_stage_inpu
     assert peak == 2
     assert len(created_sessions) == 2
     assert created_sessions[0] is not created_sessions[1]
-    assert [result.agent_code for result in results] == [
-        code.value for code in codes
-    ]
+    assert [result.agent_code for result in results] == [code.value for code in codes]
     assert observed_upstream == [
         {"expert_outputs": []},
         {"expert_outputs": []},

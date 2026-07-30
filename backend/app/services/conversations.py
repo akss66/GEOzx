@@ -273,9 +273,7 @@ async def delete_conversation_thread(
         if run_ids:
             invocation_scope.append(AgentInvocation.run_id.in_(run_ids))
         if skill_run_ids:
-            invocation_scope.append(
-                AgentInvocation.skill_run_id.in_(skill_run_ids)
-            )
+            invocation_scope.append(AgentInvocation.skill_run_id.in_(skill_run_ids))
         invocations = list(
             await session.scalars(
                 select(AgentInvocation)
@@ -331,16 +329,10 @@ async def delete_conversation_thread(
         )
         if (
             any(row.created_by_id != user.id or row.org_id != user.org_id for row in turns)
-            or any(
-                row.requested_by_id != user.id or row.org_id != user.org_id
-                for row in runs
-            )
+            or any(row.requested_by_id != user.id or row.org_id != user.org_id for row in runs)
             or any(row.org_id != user.org_id for row in skill_runs)
             or any(row.org_id != user.org_id for row in tool_calls)
-            or any(
-                row.created_by_id != user.id or row.org_id != user.org_id
-                for row in tasks
-            )
+            or any(row.created_by_id != user.id or row.org_id != user.org_id for row in tasks)
         ):
             raise _active_delete_conflict()
 
@@ -365,10 +357,7 @@ async def delete_conversation_thread(
         event_scope = or_(*event_scope_parts)
         deletable_event_type = or_(
             Event.type.in_(_DELETABLE_CONVERSATION_EVENT_TYPES),
-            *(
-                Event.type.like(f"{prefix}%")
-                for prefix in _TECHNICAL_EVENT_TYPE_PREFIXES
-            ),
+            *(Event.type.like(f"{prefix}%") for prefix in _TECHNICAL_EVENT_TYPE_PREFIXES),
         )
         await session.execute(delete(Event).where(and_(event_scope, deletable_event_type)))
         await session.execute(
@@ -393,29 +382,15 @@ async def delete_conversation_thread(
             .where(
                 or_(
                     Deliverable.thread_id == thread.id,
-                    *(
-                        [Deliverable.turn_id.in_(turn_ids)]
-                        if turn_ids
-                        else []
-                    ),
-                    *(
-                        [Deliverable.run_id.in_(run_ids)]
-                        if run_ids
-                        else []
-                    ),
-                    *(
-                        [Deliverable.skill_run_id.in_(skill_run_ids)]
-                        if skill_run_ids
-                        else []
-                    ),
+                    *([Deliverable.turn_id.in_(turn_ids)] if turn_ids else []),
+                    *([Deliverable.run_id.in_(run_ids)] if run_ids else []),
+                    *([Deliverable.skill_run_id.in_(skill_run_ids)] if skill_run_ids else []),
                 )
             )
             .values(thread_id=None, turn_id=None, run_id=None, skill_run_id=None)
         )
 
-        write_tool_ids = [
-            row.id for row in tool_calls if row.side_effect_level != "read"
-        ]
+        write_tool_ids = [row.id for row in tool_calls if row.side_effect_level != "read"]
         if write_tool_ids:
             await session.execute(
                 update(AgentToolCall)
@@ -427,21 +402,15 @@ async def delete_conversation_thread(
                     turn_id=None,
                 )
             )
-        read_tool_ids = [
-            row.id for row in tool_calls if row.side_effect_level == "read"
-        ]
+        read_tool_ids = [row.id for row in tool_calls if row.side_effect_level == "read"]
         if read_tool_ids:
-            await session.execute(
-                delete(AgentToolCall).where(AgentToolCall.id.in_(read_tool_ids))
-            )
+            await session.execute(delete(AgentToolCall).where(AgentToolCall.id.in_(read_tool_ids)))
         if invocation_ids:
             await session.execute(
                 delete(AgentInvocation).where(AgentInvocation.id.in_(invocation_ids))
             )
         if skill_run_ids:
-            await session.execute(
-                delete(SkillRun).where(SkillRun.id.in_(skill_run_ids))
-            )
+            await session.execute(delete(SkillRun).where(SkillRun.id.in_(skill_run_ids)))
         if run_ids:
             await session.execute(delete(AgentRun).where(AgentRun.id.in_(run_ids)))
         await session.delete(thread)

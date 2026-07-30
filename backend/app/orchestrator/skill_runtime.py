@@ -204,9 +204,8 @@ class SkillRuntime:
         )
         if len(persisted_candidates) > 1:
             raise SkillRecoveryConflict("SKILL_RECOVERY_AMBIGUOUS")
-        recovery_candidate = (
-            resume_skill_run
-            or (persisted_candidates[0] if persisted_candidates else None)
+        recovery_candidate = resume_skill_run or (
+            persisted_candidates[0] if persisted_candidates else None
         )
         definition = (
             resolve_frozen_skill_definition(recovery_candidate)
@@ -227,7 +226,7 @@ class SkillRuntime:
             frozen_snapshot = {
                 "account_id": thread.account_id,
                 **frozen_input.model_dump(mode="json"),
-        }
+            }
         idempotency_key = f"skill:{definition.code}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
         existing = recovery_candidate
@@ -1369,9 +1368,7 @@ class SkillRuntime:
             "TOOL_PERMISSION_REQUIRED"
             if paused_status == "waiting_permission"
             else (
-                "TOOL_RESULT_AMBIGUOUS"
-                if paused_status == "stopped"
-                else "TOOL_EXECUTION_FAILED"
+                "TOOL_RESULT_AMBIGUOUS" if paused_status == "stopped" else "TOOL_EXECUTION_FAILED"
             )
         )
         response = (

@@ -31,9 +31,7 @@ async def write_runtime_deliverable(
     Legacy callers may omit ``scope`` only when every provenance field is null.
     """
 
-    provenance = {
-        field: (legacy_provenance or {}).get(field) for field in _PROVENANCE_FIELDS
-    }
+    provenance = {field: (legacy_provenance or {}).get(field) for field in _PROVENANCE_FIELDS}
     if scope is None:
         if any(value is not None for value in provenance.values()):
             raise RuntimeScopeConflict("partial legacy provenance is not allowed")

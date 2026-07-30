@@ -204,9 +204,7 @@ async def provider_runtime_for_target(
     model: str,
 ) -> dict[str, str | None]:
     if org_id is None:
-        raise ModelRouteConfigurationError(
-            "model provider routes require an organization"
-        )
+        raise ModelRouteConfigurationError("model provider routes require an organization")
     provider = await session.scalar(
         select(ModelProvider).where(
             ModelProvider.org_id == org_id,
@@ -214,17 +212,11 @@ async def provider_runtime_for_target(
         )
     )
     if provider is None:
-        raise ModelRouteConfigurationError(
-            "model provider is not available for this organization"
-        )
+        raise ModelRouteConfigurationError("model provider is not available for this organization")
     if not provider.enabled:
-        raise ModelRouteConfigurationError(
-            f"model provider {provider.code} is disabled"
-        )
+        raise ModelRouteConfigurationError(f"model provider {provider.code} is disabled")
     if provider.verification_status != "verified":
-        raise ModelRouteConfigurationError(
-            f"model provider {provider.code} is not verified"
-        )
+        raise ModelRouteConfigurationError(f"model provider {provider.code} is not verified")
     models = list(provider.models or [])
     if model not in models:
         raise ModelRouteConfigurationError(
@@ -549,12 +541,14 @@ async def infrastructure_overview(session: AsyncSession, org_id: int) -> dict[st
     routes = await route_rows(session, org_id)
     since = datetime.now(UTC) - timedelta(hours=24)
     calls_24h = await session.scalar(
-        select(func.count()).select_from(LLMCall).where(
-            LLMCall.org_id == org_id, LLMCall.created_at >= since
-        )
+        select(func.count())
+        .select_from(LLMCall)
+        .where(LLMCall.org_id == org_id, LLMCall.created_at >= since)
     )
     failures_24h = await session.scalar(
-        select(func.count()).select_from(LLMCall).where(
+        select(func.count())
+        .select_from(LLMCall)
+        .where(
             LLMCall.org_id == org_id,
             LLMCall.created_at >= since,
             LLMCall.status == "error",
@@ -596,9 +590,7 @@ async def recent_calls(
     conditions = [LLMCall.org_id == org_id]
     if call_status:
         conditions.append(LLMCall.status == call_status)
-    total = await session.scalar(
-        select(func.count()).select_from(LLMCall).where(*conditions)
-    )
+    total = await session.scalar(select(func.count()).select_from(LLMCall).where(*conditions))
     rows = (
         await session.scalars(
             select(LLMCall)

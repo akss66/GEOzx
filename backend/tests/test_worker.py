@@ -98,9 +98,7 @@ async def test_worker_executes_a_task_free_conversation_before_legacy_task_looku
     run_id = run.id
     client_message_id = turn.client_message_id
     user_input = turn.user_input
-    captured: list[
-        tuple[int, int, int, CreateConversationTurnRequest, SkillRun | None]
-    ] = []
+    captured: list[tuple[int, int, int, CreateConversationTurnRequest, SkillRun | None]] = []
 
     @asynccontextmanager
     async def test_session_factory():
@@ -245,9 +243,7 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
         title="Expired Skill worker task",
         type=BrainTaskType.ACCOUNT_DIAGNOSIS,
         status=(
-            BrainTaskStatus.RUNNING
-            if skill_status == "running"
-            else BrainTaskStatus.COMPLETED
+            BrainTaskStatus.RUNNING if skill_status == "running" else BrainTaskStatus.COMPLETED
         ),
         runtime_mode="skill",
     )
@@ -272,9 +268,7 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
             "client_message_id": turn.client_message_id,
             "execution_preference": "FORMAL_TASK",
             "message": turn.user_input,
-            "requested_skill_code": (
-                None if has_ambiguous_call else "account_inspection"
-            ),
+            "requested_skill_code": (None if has_ambiguous_call else "account_inspection"),
             "thread_id": thread.id,
             "turn_id": turn.id,
         },
@@ -287,9 +281,7 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key=(
-            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
-        ),
+        idempotency_key=(f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"),
         skill_code="account_inspection",
         skill_version=ACCOUNT_INSPECTION_SKILL.version,
         status=skill_status,
@@ -745,9 +737,7 @@ async def test_worker_409_conflict_finishes_run_and_task_once(session, admin, mo
     await session.refresh(run)
     await session.refresh(task)
     failures = list(
-        await session.scalars(
-            select(Event).where(Event.type == "brain.runtime.failed")
-        )
+        await session.scalars(select(Event).where(Event.type == "brain.runtime.failed"))
     )
     assert result is None
     assert run.attempt == 1
@@ -864,7 +854,6 @@ def test_classify_runtime_failure_keeps_permission_and_input_errors_terminal() -
         invalid_request.value,
     ]
 
-    assert {
-        classify_runtime_failure(failure)
-        for failure in failures
-    } == {FailureDisposition.TERMINAL}
+    assert {classify_runtime_failure(failure) for failure in failures} == {
+        FailureDisposition.TERMINAL
+    }

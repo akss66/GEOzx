@@ -66,11 +66,7 @@ class DurableToolExecutor:
         session = _session_for(user)
         if scope is not None:
             await scope.validate(session)
-            if (
-                scope.org_id != task.org_id
-                or scope.user_id != user.id
-                or scope.task_id != task.id
-            ):
+            if scope.org_id != task.org_id or scope.user_id != user.id or scope.task_id != task.id:
                 raise RuntimeScopeConflict("tool execution scope does not match")
             if any(
                 explicit is not None and explicit != expected
@@ -231,14 +227,17 @@ class DurableToolExecutor:
                 await session.commit()
                 return ToolExecutionOutcome("waiting_approval", row, None)
 
-        attempt_no = int(
-            await session.scalar(
-                select(func.max(ToolExecutionAttempt.attempt_no)).where(
-                    ToolExecutionAttempt.tool_call_id == row.id
+        attempt_no = (
+            int(
+                await session.scalar(
+                    select(func.max(ToolExecutionAttempt.attempt_no)).where(
+                        ToolExecutionAttempt.tool_call_id == row.id
+                    )
                 )
+                or 0
             )
-            or 0
-        ) + 1
+            + 1
+        )
         attempt = ToolExecutionAttempt(
             tool_call_id=row.id,
             attempt_no=attempt_no,
@@ -358,22 +357,15 @@ def _existing_outcome(
 ) -> ToolExecutionOutcome | None:
     original = dict((row.meta or {}).get("arguments") or {})
     if original != request.arguments:
-        raise ToolIdempotencyConflict(
-            "idempotency key was already used with different arguments"
-        )
+        raise ToolIdempotencyConflict("idempotency key was already used with different arguments")
     if (
         row.invocation_id != invocation_id
         or (skill_run_id is not None and row.skill_run_id != skill_run_id)
         or (thread_id is not None and row.thread_id != thread_id)
         or (turn_id is not None and row.turn_id != turn_id)
-        or (
-            scope is not None
-            and (row.meta or {}).get("runtime_scope") != scope.as_dict()
-        )
+        or (scope is not None and (row.meta or {}).get("runtime_scope") != scope.as_dict())
     ):
-        raise ToolIdempotencyConflict(
-            "idempotent tool call provenance does not match"
-        )
+        raise ToolIdempotencyConflict("idempotent tool call provenance does not match")
     if row.status == "success":
         return ToolExecutionOutcome(
             status="success",
@@ -406,7 +398,5 @@ def _provider_idempotency_key(
 ) -> str | None:
     if side_effect_level == "read":
         return None
-    digest = hashlib.sha256(
-        f"{org_id}:{task_id}:{tool_code}:{logical_key}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{org_id}:{task_id}:{tool_code}:{logical_key}".encode()).hexdigest()
     return f"geozx:{digest}"

@@ -172,15 +172,8 @@ def _normalize_artifact_type(
 ) -> str | None:
     if artifact_type is None:
         return None
-    value = (
-        artifact_type.value
-        if isinstance(artifact_type, DeliverableType)
-        else artifact_type
-    )
-    if (
-        value == _ACCOUNT_INSPECTION_ARTIFACT_TYPE
-        or value in _DELIVERABLE_ARTIFACT_TYPES
-    ):
+    value = artifact_type.value if isinstance(artifact_type, DeliverableType) else artifact_type
+    if value == _ACCOUNT_INSPECTION_ARTIFACT_TYPE or value in _DELIVERABLE_ARTIFACT_TYPES:
         return value
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -192,10 +185,7 @@ async def _business_artifact_type(
     session: AsyncSession,
     deliverable: Deliverable,
 ) -> str:
-    if (
-        deliverable.type == DeliverableType.REVIEW_REPORT
-        and deliverable.skill_run_id is not None
-    ):
+    if deliverable.type == DeliverableType.REVIEW_REPORT and deliverable.skill_run_id is not None:
         skill_run = await session.get(SkillRun, deliverable.skill_run_id)
         if skill_run is not None and skill_run.skill_code == "account_inspection":
             return _ACCOUNT_INSPECTION_ARTIFACT_TYPE
@@ -247,10 +237,7 @@ async def list_artifacts(
         )
         if provenance is not None:
             projected_type = await _business_artifact_type(session, deliverable)
-            if (
-                requested_artifact_type is None
-                or projected_type == requested_artifact_type
-            ):
+            if requested_artifact_type is None or projected_type == requested_artifact_type:
                 valid.append((deliverable, content, provenance))
 
     total = len(valid)
@@ -291,9 +278,7 @@ async def get_artifact(
     content = await session.get(ContentItem, deliverable.content_item_id)
     if content is None or content.account_id is None:
         raise _artifact_not_found()
-    account = await require_account_access(
-        session, user, content.account_id, roles=roles
-    )
+    account = await require_account_access(session, user, content.account_id, roles=roles)
     provenance = await _load_valid_provenance(
         session,
         deliverable,
@@ -306,9 +291,7 @@ async def get_artifact(
     return deliverable, content, provenance
 
 
-async def get_artifact_out(
-    session: AsyncSession, user: User, artifact_id: int
-) -> ArtifactOut:
+async def get_artifact_out(session: AsyncSession, user: User, artifact_id: int) -> ArtifactOut:
     deliverable, content, provenance = await get_artifact(session, user, artifact_id)
     account_id = _require_content_account_id(content)
     return await project_artifact(
@@ -335,10 +318,7 @@ async def create_artifact_revision(
         artifact_id,
     )
     latest_version = await _require_latest_artifact_version(session, source)
-    if (
-        source.status == DeliverableStatus.SUPERSEDED
-        or source.version != latest_version
-    ):
+    if source.status == DeliverableStatus.SUPERSEDED or source.version != latest_version:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="成果版本已更新，请刷新后重试",
@@ -442,10 +422,7 @@ async def accept_artifact(
         roles=ARTIFACT_ACTION_ROLES,
     )
     latest_version = await _require_latest_artifact_version(session, selected)
-    if (
-        selected.status == DeliverableStatus.SUPERSEDED
-        or selected.version != latest_version
-    ):
+    if selected.status == DeliverableStatus.SUPERSEDED or selected.version != latest_version:
         raise _artifact_version_conflict(
             artifact_id=selected.id,
             selected_version=selected.version,
@@ -555,13 +532,9 @@ def _validate_revision_payload(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="成果内容不符合当前类型要求",
         )
-    business_payload = {
-        key: payload[key] for key in schema.model_fields if key in payload
-    }
+    business_payload = {key: payload[key] for key in schema.model_fields if key in payload}
     try:
-        return validate_payload(deliverable_type, business_payload).model_dump(
-            mode="json"
-        )
+        return validate_payload(deliverable_type, business_payload).model_dump(mode="json")
     except (KeyError, ValidationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -599,11 +572,7 @@ async def _load_valid_provenance(
         if thread is None:
             return None
         turn = await session.get(ConversationTurn, deliverable.turn_id)
-        if (
-            turn is None
-            or turn.org_id != expected_org_id
-            or turn.thread_id != thread.id
-        ):
+        if turn is None or turn.org_id != expected_org_id or turn.thread_id != thread.id:
             return None
 
     run: AgentRun | None = None
@@ -652,9 +621,7 @@ async def _load_valid_provenance(
             or not _optional_link_matches(quality.thread_id, deliverable.thread_id)
             or not _optional_link_matches(quality.turn_id, deliverable.turn_id)
             or not _optional_link_matches(quality.run_id, deliverable.run_id)
-            or not _optional_link_matches(
-                quality.skill_run_id, deliverable.skill_run_id
-            )
+            or not _optional_link_matches(quality.skill_run_id, deliverable.skill_run_id)
         ):
             return None
         task_ids.add(quality.task_id)
@@ -663,14 +630,10 @@ async def _load_valid_provenance(
             if (
                 invocation is None
                 or invocation.task_id != quality.task_id
-                or not _optional_link_matches(
-                    invocation.thread_id, deliverable.thread_id
-                )
+                or not _optional_link_matches(invocation.thread_id, deliverable.thread_id)
                 or not _optional_link_matches(invocation.turn_id, deliverable.turn_id)
                 or not _optional_link_matches(invocation.run_id, deliverable.run_id)
-                or not _optional_link_matches(
-                    invocation.skill_run_id, deliverable.skill_run_id
-                )
+                or not _optional_link_matches(invocation.skill_run_id, deliverable.skill_run_id)
             ):
                 return None
 
@@ -687,11 +650,7 @@ async def _load_valid_provenance(
     task_id = next(iter(task_ids), None)
     if task_id is not None:
         task = await session.get(BrainTask, task_id)
-        if (
-            task is None
-            or task.org_id != expected_org_id
-            or task.content_item_id != content.id
-        ):
+        if task is None or task.org_id != expected_org_id or task.content_item_id != content.id:
             return None
 
     return _ArtifactProvenance(
@@ -769,9 +728,7 @@ def _safe_business_value(value: Any) -> SafeBusinessValue | None:
         return value
     if isinstance(value, list):
         cleaned: list[SafeBusinessValue] = [
-            item
-            for item in (_safe_business_value(item) for item in value)
-            if item is not None
+            item for item in (_safe_business_value(item) for item in value) if item is not None
         ]
         return cleaned
     if isinstance(value, dict):
@@ -804,9 +761,7 @@ def _looks_like_internal_confirmation(value: str) -> bool:
     return any(pattern.search(normalized) for pattern in _CONFIRMATION_PATTERNS)
 
 
-def _evidence_refs(
-    payload: dict[str, Any], quality: AgentQualityScore | None
-) -> list[EvidenceRef]:
+def _evidence_refs(payload: dict[str, Any], quality: AgentQualityScore | None) -> list[EvidenceRef]:
     candidates: list[Any] = []
     raw_payload_refs = payload.get("evidence_refs", [])
     if isinstance(raw_payload_refs, list):
@@ -830,11 +785,7 @@ def _evidence_refs(
         if identity in seen:
             continue
         seen.add(identity)
-        label = (
-            candidate.get("label")
-            or candidate.get("metric")
-            or f"{kind} #{evidence_id}"
-        )
+        label = candidate.get("label") or candidate.get("metric") or f"{kind} #{evidence_id}"
         safe_label = str(label)
         if _looks_like_internal_confirmation(safe_label):
             safe_label = f"{kind} #{evidence_id}"
@@ -881,9 +832,7 @@ async def _require_latest_artifact_version(
     selected: Deliverable,
 ) -> int:
     locked_content_id = await session.scalar(
-        select(ContentItem.id)
-        .where(ContentItem.id == selected.content_item_id)
-        .with_for_update()
+        select(ContentItem.id).where(ContentItem.id == selected.content_item_id).with_for_update()
     )
     if locked_content_id is None:
         raise _artifact_not_found()

@@ -114,16 +114,12 @@ class _FakeTools:
                 "data_sync_status": "ready",
             }
 
-        async def data_context(
-            _params: _DaysParams, context: ToolExecutionContext
-        ) -> dict:
+        async def data_context(_params: _DaysParams, context: ToolExecutionContext) -> dict:
             calls.append("account.data_context")
             return {
                 "account_id": context.account_id,
                 "period": {"days": 30, "start": "2026-06-29", "end": "2026-07-28"},
-                "coverage": {
-                    "content_metrics": "available" if sufficient_flag else "missing"
-                },
+                "coverage": {"content_metrics": "available" if sufficient_flag else "missing"},
                 "metrics": (
                     {
                         "play": {
@@ -143,9 +139,7 @@ class _FakeTools:
                     else {}
                 ),
                 "sources": (
-                    [{"batch_id": 7, "source_kind": "platform_export"}]
-                    if sufficient_flag
-                    else []
+                    [{"batch_id": 7, "source_kind": "platform_export"}] if sufficient_flag else []
                 ),
                 "content_snapshot_count": 3 if sufficient_flag else 0,
                 "account_snapshot_count": 1 if sufficient_flag else 0,
@@ -277,9 +271,7 @@ async def test_account_inspection_reports_missing_data_without_fabricated_metric
     session,
     admin,
 ) -> None:
-    account, thread, turn, run = await _conversation_scope(
-        session, admin, key="inspection-missing"
-    )
+    account, thread, turn, run = await _conversation_scope(session, admin, key="inspection-missing")
     runtime = SkillRuntime(
         tool_executor=_FakeTools(sufficient=False),
         harness=_FakeHarness(),
@@ -395,9 +387,7 @@ async def test_account_inspection_runs_bounded_graph_and_persists_one_artifact(
     assert persisted.payload["artifact_type"] == "account_inspection_report"
     assert persisted.payload["data_sufficiency"] == "sufficient"
     assert persisted.payload["next_action"]
-    assert persisted.payload["evidence_refs"] == [
-        {"kind": "data_import_batch", "id": 7}
-    ]
+    assert persisted.payload["evidence_refs"] == [{"kind": "data_import_batch", "id": 7}]
     assert (
         await session.scalar(
             select(func.count(AgentQualityScore.id)).where(
@@ -672,9 +662,7 @@ async def test_account_inspection_active_owner_reuses_running_winner_without_ree
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key=(
-            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
-        ),
+        idempotency_key=(f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"),
         skill_code="account_inspection",
         skill_version=ACCOUNT_INSPECTION_SKILL.version,
         status="running",
@@ -790,9 +778,7 @@ async def test_account_inspection_crash_replay_closes_stale_running_side_effects
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key=(
-            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
-        ),
+        idempotency_key=(f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"),
         skill_code="account_inspection",
         skill_version=ACCOUNT_INSPECTION_SKILL.version,
         status="running",
@@ -975,12 +961,8 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
             requires_operation_task=True,
         )
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.skill_runtime.execute", fake_execute
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime.execute", fake_execute)
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
     explicit = await execute_conversation_turn(
         session,
         admin,

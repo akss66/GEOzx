@@ -56,20 +56,16 @@ def classify_runtime_failure(exc: BaseException) -> FailureDisposition:
 
     chain = exception_chain(exc)
     status_codes = [
-        status_code
-        for item in chain
-        if (status_code := http_status_code(item)) is not None
+        status_code for item in chain if (status_code := http_status_code(item)) is not None
     ]
     if any(
-        400 <= status_code < 500 and status_code not in {408, 429}
-        for status_code in status_codes
+        400 <= status_code < 500 and status_code not in {408, 429} for status_code in status_codes
     ):
         return FailureDisposition.TERMINAL
     if any(status_code in {408, 429} or status_code >= 500 for status_code in status_codes):
         return FailureDisposition.RETRYABLE
     if any(
-        isinstance(item, ProviderRuntimeFailure)
-        and item.failure_kind in {"connection", "timeout"}
+        isinstance(item, ProviderRuntimeFailure) and item.failure_kind in {"connection", "timeout"}
         for item in chain
     ):
         return FailureDisposition.RETRYABLE
@@ -83,11 +79,7 @@ def describe_runtime_failure(exc: BaseException) -> RuntimeFailure:
 
     disposition = classify_runtime_failure(exc)
     status_code = next(
-        (
-            code
-            for item in exception_chain(exc)
-            if (code := http_status_code(item)) is not None
-        ),
+        (code for item in exception_chain(exc) if (code := http_status_code(item)) is not None),
         None,
     )
     if status_code == 409:

@@ -163,10 +163,7 @@ class ToolAdapter:
             )
             raise ToolPermissionRequired(f"explicit approval is required for tool: {name}")
 
-        if (
-            tool.side_effect_level != "read"
-            and not context.provider_idempotency_key
-        ):
+        if tool.side_effect_level != "read" and not context.provider_idempotency_key:
             await self._audit(
                 context,
                 name,

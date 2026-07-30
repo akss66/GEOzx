@@ -168,17 +168,25 @@ def test_router_profile_migration_copies_decision_provider_and_fallback_idempote
         migration.upgrade()
         migration.upgrade()
 
-        rows = connection.execute(
-            sa.select(configs)
-            .where(configs.c.agent_code == "00-router")
-            .order_by(configs.c.org_id)
-        ).mappings().all()
+        rows = (
+            connection.execute(
+                sa.select(configs)
+                .where(configs.c.agent_code == "00-router")
+                .order_by(configs.c.org_id)
+            )
+            .mappings()
+            .all()
+        )
         migration.downgrade()
-        rows_after_downgrade = connection.execute(
-            sa.select(configs)
-            .where(configs.c.agent_code == "00-router")
-            .order_by(configs.c.org_id)
-        ).mappings().all()
+        rows_after_downgrade = (
+            connection.execute(
+                sa.select(configs)
+                .where(configs.c.agent_code == "00-router")
+                .order_by(configs.c.org_id)
+            )
+            .mappings()
+            .all()
+        )
 
     assert [dict(row) for row in rows] == [
         {
