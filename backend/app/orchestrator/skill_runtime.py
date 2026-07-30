@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.models import (
     AgentInvocation,
     AgentQualityScore,
@@ -271,6 +272,12 @@ class SkillRuntime:
                 raise
             return self._existing_result(persisted)
         except Exception as exc:
+            retryable = (
+                classify_runtime_failure(exc) is FailureDisposition.RETRYABLE
+            )
+            await session.rollback()
+            if retryable:
+                raise
             log.exception(
                 "Skill execution failed",
                 extra={
@@ -280,7 +287,6 @@ class SkillRuntime:
                     "run_id": run_id,
                 },
             )
-            await session.rollback()
             persisted = await session.get(SkillRun, skill_run_id)
             persisted_task = await session.get(BrainTask, task_id)
             scope_mismatch = isinstance(exc, _ToolScopeMismatch)

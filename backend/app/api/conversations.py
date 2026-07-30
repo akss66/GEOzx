@@ -27,7 +27,12 @@ from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnSubmissionOut,
 )
-from app.services.agent_runs import claim_agent_run, get_agent_run
+from app.services.agent_runs import (
+    claim_agent_run,
+    enqueue_agent_runtime,
+    get_agent_run,
+    mark_agent_run_queued,
+)
 from app.services.conversations import (
     append_conversation_turn,
     create_conversation_thread,
@@ -35,7 +40,6 @@ from app.services.conversations import (
     get_conversation_thread,
     list_conversation_threads,
 )
-from app.services.turn_execution import execute_conversation_turn
 
 router = APIRouter(prefix="/brain", tags=["brain-conversations"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -333,7 +337,7 @@ async def submit_turn(
         "turn_id": turn.id,
     }
     try:
-        run, _claimed = await claim_agent_run(
+        run, claimed = await claim_agent_run(
             session,
             org_id=user.org_id,
             requested_by_id=user.id,
@@ -346,20 +350,21 @@ async def submit_turn(
         if created:
             await session.rollback()
         raise
-    result = await execute_conversation_turn(
-        session,
-        user,
-        turn,
-        run,
-        body,
-    )
+    if claimed:
+        run = await mark_agent_run_queued(
+            session,
+            run.id,
+            task_id=None,
+        )
+        await enqueue_agent_runtime(run_id=run.id)
     await session.refresh(turn)
     await session.refresh(run)
-    turn_out = _turn_out(turn, result.projections)
+    projections = await _turn_projections(session, turn)
+    turn_out = _turn_out(turn, projections)
     return TurnSubmissionOut(
         turn=turn_out,
         run=ConversationAgentRunOut.model_validate(run),
-        task_id=result.task_id,
+        task_id=run.task_id,
         projections=turn_out.projections,
     )
 

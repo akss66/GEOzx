@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -299,6 +300,45 @@ async def test_account_inspection_reports_missing_data_without_fabricated_metric
     assert "无法" in report.summary
     assert all("output" not in finding for finding in report.findings)
     assert report.account_id == account.id
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_retryable_infrastructure_failure_bubbles_to_worker(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-retryable"
+    )
+
+    class RetryableTools:
+        async def execute(self, **_kwargs):
+            raise HTTPException(status_code=503, detail="provider-secret")
+
+    runtime = SkillRuntime(
+        tool_executor=RetryableTools(),
+        harness=_FakeHarness(),
+        critic=_PassingCritic(),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await runtime.execute(
+            session,
+            user=admin,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="account_inspection",
+            days=30,
+        )
+
+    assert caught.value.status_code == 503
+    skill_run = await session.scalar(select(SkillRun))
+    task = await session.scalar(select(BrainTask))
+    assert skill_run is not None
+    assert task is not None
+    assert skill_run.status == "running"
+    assert task.status == BrainTaskStatus.RUNNING
 
 
 @pytest.mark.asyncio

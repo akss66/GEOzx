@@ -3,10 +3,12 @@
 import sys
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 
 from app.config import settings
+from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.cost import compute_cost
@@ -334,6 +336,70 @@ async def test_all_candidates_fail_raises(session) -> None:
 
     with pytest.raises(LLMError):
         await _gw(FakeAdapter(fail_models={"bad", "bad2"})).chat(session, org.id, "01", MSG)
+
+
+@pytest.mark.parametrize(
+    ("provider_failure", "expected_status", "expected_kind"),
+    [
+        (
+            httpx.HTTPStatusError(
+                "rate limited: sk-provider-secret",
+                request=httpx.Request(
+                    "POST",
+                    "https://provider.invalid/chat?api_key=sk-provider-secret",
+                ),
+                response=httpx.Response(
+                    429,
+                    text='{"error":"provider-secret-response-body"}',
+                ),
+            ),
+            429,
+            "http",
+        ),
+        (
+            httpx.HTTPStatusError(
+                "provider unavailable",
+                request=httpx.Request("POST", "https://provider.invalid/chat"),
+                response=httpx.Response(503),
+            ),
+            503,
+            "http",
+        ),
+        (
+            httpx.ReadTimeout(
+                "provider-secret-timeout",
+                request=httpx.Request("POST", "https://provider.invalid/chat"),
+            ),
+            None,
+            "timeout",
+        ),
+    ],
+    ids=["429", "503", "read-timeout"],
+)
+@pytest.mark.asyncio
+async def test_gateway_preserves_safe_retry_metadata_as_the_llm_error_cause(
+    session,
+    provider_failure,
+    expected_status,
+    expected_kind,
+) -> None:
+    class FailingAdapter(FakeAdapter):
+        async def complete(self, *_args, **_kwargs):
+            raise provider_failure
+
+    with pytest.raises(LLMError) as caught:
+        await _gw(FailingAdapter()).chat(session, None, "x", MSG)
+
+    error = caught.value
+    cause = error.__cause__
+    assert cause is not None
+    assert getattr(cause, "status_code", None) == expected_status
+    assert getattr(cause, "failure_kind", None) == expected_kind
+    assert classify_runtime_failure(error) is FailureDisposition.RETRYABLE
+    visible_error = f"{error} {cause}"
+    assert "sk-provider-secret" not in visible_error
+    assert "provider-secret-response-body" not in visible_error
+    assert "provider-secret-timeout" not in visible_error
 
 
 @pytest.mark.asyncio

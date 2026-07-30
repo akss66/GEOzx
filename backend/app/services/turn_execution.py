@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.core.workspace_access import require_account_access
 from app.models import (
     AgentRun,
@@ -381,12 +382,21 @@ def _require_resumable_skill_run(
     request: CreateConversationTurnRequest,
     skill_run: SkillRun,
 ) -> None:
+    requested_skill_code = (request.requested_skill_code or "").strip()
+    skill_code_matches = (
+        not requested_skill_code
+        or skill_run.skill_code == requested_skill_code
+        or (
+            skill_run.skill_code in _QUERY_SKILL_CODES
+            and requested_skill_code in _QUERY_SKILL_CODES
+        )
+    )
     if (
         skill_run.org_id != user.org_id
         or skill_run.run_id != run.id
         or skill_run.thread_id != turn.thread_id
         or skill_run.turn_id != turn.id
-        or skill_run.skill_code != request.requested_skill_code
+        or not skill_code_matches
     ):
         raise PermissionError("persisted SkillRun recovery ownership does not match")
 
@@ -649,7 +659,9 @@ async def _execute_query(
                     invocation_id=None,
                 ),
             )
-        except Exception:  # noqa: BLE001 - provider details must not escape
+        except Exception as exc:  # noqa: BLE001 - classify before safe terminal
+            if classify_runtime_failure(exc) is FailureDisposition.RETRYABLE:
+                raise
             return await _close_query_failure(
                 session,
                 account_id=thread.account_id,
@@ -940,6 +952,8 @@ async def _execute_operation_task(
         task_state = await runtime_status(session, task)
     except Exception as exc:  # noqa: BLE001 - persist only a safe operation failure
         await session.rollback()
+        if classify_runtime_failure(exc) is FailureDisposition.RETRYABLE:
+            raise
         task = await session.get(BrainTask, task_id)
         persisted_turn = await session.get(ConversationTurn, turn_id)
         persisted_run = await session.get(AgentRun, run_id)

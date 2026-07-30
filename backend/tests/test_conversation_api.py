@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy import func, select
@@ -34,6 +35,21 @@ from app.models.enums import (
     UserRole,
     WorkspaceRole,
 )
+from app.schemas.conversation import CreateConversationTurnRequest
+from app.services.turn_execution import execute_conversation_turn
+from app.worker import recover_agent_runs
+
+
+@pytest.fixture(autouse=True)
+def _stub_agent_runtime_queue(monkeypatch):
+    async def enqueue_agent_runtime(*, run_id: int) -> None:
+        del run_id
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        enqueue_agent_runtime,
+        raising=False,
+    )
 
 
 def _auth(user: User) -> dict[str, str]:
@@ -85,6 +101,37 @@ async def _submit_turn(
             "attachment_ids": attachment_ids or [],
         },
     )
+
+
+async def _execute_queued_turn(
+    session,
+    user: User,
+    response,
+    *,
+    message: str,
+    requested_skill_code: str | None = None,
+    execution_preference: str = "AUTO",
+    attachment_ids: list[int] | None = None,
+):
+    payload = response.json()
+    turn = await session.get(ConversationTurn, payload["turn"]["id"])
+    run = await session.get(AgentRun, payload["run"]["id"])
+    assert turn is not None
+    assert run is not None
+    result = await execute_conversation_turn(
+        session,
+        user,
+        turn,
+        run,
+        CreateConversationTurnRequest(
+            client_message_id=run.client_message_id,
+            message=message,
+            requested_skill_code=requested_skill_code,
+            execution_preference=execution_preference,
+            attachment_ids=attachment_ids or [],
+        ),
+    )
+    return result, turn, run
 
 
 @pytest.mark.asyncio
@@ -264,6 +311,13 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         requested_skill_code="account_inspection",
     )
     assert submitted.status_code == 202
+    await _execute_queued_turn(
+        session,
+        admin,
+        submitted,
+        message="体检这个账号",
+        requested_skill_code="account_inspection",
+    )
     run = await session.get(AgentRun, submitted.json()["run"]["id"])
     assert run is not None
     assert run.task_id is not None
@@ -359,6 +413,24 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
     account = await _account(session, admin, "提交账号")
     thread = await _create_thread(client, admin, account)
+    enqueued: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        enqueued.append(run_id)
+
+    async def reject_inline_execution(*_args, **_kwargs):
+        raise AssertionError("conversation runtime must not execute in the HTTP request")
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        capture_enqueue,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.api.conversations.execute_conversation_turn",
+        reject_inline_execution,
+        raising=False,
+    )
 
     response = await _submit_turn(
         client,
@@ -378,12 +450,12 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     assert body["run"]["turn_id"] == body["turn"]["id"]
     assert body["run"]["task_id"] is None
     assert body["task_id"] is None
-    assert body["run"]["status"] == "completed"
-    assert len(body["projections"]) == 1
-    assert body["projections"][0]["type"] == "account_data"
-    assert body["projections"][0]["account_id"] == account.id
-    assert body["projections"][0]["turn_id"] == body["turn"]["id"]
+    assert body["run"]["status"] == "queued"
+    assert body["run"]["phase"] == "queued"
+    assert body["turn"]["assistant_response"] is None
+    assert body["projections"] == []
     assert body["turn"]["projections"] == body["projections"]
+    assert enqueued == [body["run"]["id"]]
 
     run = await session.get(AgentRun, body["run"]["id"])
     assert run is not None
@@ -407,6 +479,101 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     )
     assert turn_response.status_code == 200
     assert turn_response.json() == body["turn"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_turn_submission_does_not_enqueue_the_same_run_twice(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "幂等入队账号")
+    thread = await _create_thread(client, admin, account)
+    enqueued: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        enqueued.append(run_id)
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        capture_enqueue,
+        raising=False,
+    )
+
+    first = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="enqueue-once-1",
+        message="查看最近七天数据",
+    )
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="enqueue-once-1",
+        message="查看最近七天数据",
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["run"]["id"] == first.json()["run"]["id"]
+    assert enqueued == [first.json()["run"]["id"]]
+    assert await session.scalar(select(func.count(ConversationTurn.id))) == 1
+    assert await session.scalar(select(func.count(AgentRun.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_submission_failure_keeps_a_durable_queued_run(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "队列恢复账号")
+    thread = await _create_thread(client, admin, account)
+
+    async def fail_enqueue(*, run_id: int) -> None:
+        raise ConnectionError(f"queue unavailable for run {run_id}")
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        fail_enqueue,
+        raising=False,
+    )
+
+    with pytest.raises(ConnectionError, match="queue unavailable"):
+        await _submit_turn(
+            client,
+            admin,
+            thread["id"],
+            client_message_id="queue-failure-1",
+            message="查看最近七天数据",
+        )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "queue-failure-1")
+    )
+    assert run is not None
+    assert run.status == "queued"
+    assert run.phase == "queued"
+
+    enqueued: list[tuple[tuple, dict]] = []
+
+    class RecoveryPool:
+        async def enqueue_job(self, *args, **kwargs):
+            enqueued.append((args, kwargs))
+            return object()
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    recovered = await recover_agent_runs({"redis": RecoveryPool()})
+
+    assert recovered == 1
+    assert enqueued[0][0] == ("execute_agent_run", run.id)
+    assert enqueued[0][1]["_job_id"].startswith(
+        f"agent-run:{run.id}:recovery:"
+    )
 
 
 @pytest.mark.asyncio
@@ -435,8 +602,13 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     )
 
     assert response.status_code == 202
-    body = response.json()
-    response_text = body["turn"]["assistant_response"]
+    result, _turn, _run = await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="你好",
+    )
+    response_text = result.response
     response_events = [
         (event_type, payload)
         for event_type, payload in realtime_events
@@ -487,7 +659,22 @@ async def test_unknown_explicit_skill_returns_blocked_turn_without_formal_record
     )
 
     assert response.status_code == 202
-    body = response.json()
+    await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="Run a capability that is not in the public catalog",
+        requested_skill_code="not_registered",
+    )
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="unsupported-explicit-skill",
+        message="Run a capability that is not in the public catalog",
+        requested_skill_code="not_registered",
+    )
+    body = replay.json()
     assert body["task_id"] is None
     assert body["run"]["status"] == "blocked"
     assert body["projections"] == [
@@ -517,6 +704,13 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
     }
 
     first = await _submit_turn(client, admin, thread["id"], **request)
+    await _execute_queued_turn(
+        session,
+        admin,
+        first,
+        message=request["message"],
+        requested_skill_code=request["requested_skill_code"],
+    )
     repeated = await _submit_turn(client, admin, thread["id"], **request)
 
     assert first.status_code == 202
@@ -603,6 +797,13 @@ async def test_blocked_turn_still_projects_called_experts(
         requested_skill_code="account_inspection",
     )
     assert submitted.status_code == 202
+    await _execute_queued_turn(
+        session,
+        admin,
+        submitted,
+        message="体检这个账号",
+        requested_skill_code="account_inspection",
+    )
     skill_run = await session.scalar(
         select(SkillRun).where(SkillRun.thread_id == thread["id"])
     )
@@ -920,8 +1121,15 @@ async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
     )
 
     assert response.status_code == 202
+    result, _turn, _run = await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="查看近七天数据",
+        requested_skill_code="account_data_query",
+    )
     body = response.json()
-    skill_run_id = body["projections"][0]["skill_run_id"]
+    skill_run_id = result.projections[0]["skill_run_id"]
     run_event = next(
         event
         for event in (await session.scalars(select(Event).order_by(Event.id))).all()
@@ -1044,8 +1252,15 @@ async def test_feature_flag_turn_submission_emits_json_route_diagnostics(
     )
 
     assert response.status_code == 202
+    result, _turn, _run = await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="sensitive rollout prompt that must not be logged",
+        requested_skill_code="account_data_query",
+    )
     body = response.json()
-    skill_run_id = body["projections"][0]["skill_run_id"]
+    skill_run_id = result.projections[0]["skill_run_id"]
     record = next(
         entry
         for entry in caplog.records

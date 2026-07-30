@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from arq import Retry
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
@@ -25,9 +26,142 @@ from app.models.enums import BrainTaskStatus, BrainTaskType, Platform
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.orchestrator.skills.account_inspection import ACCOUNT_INSPECTION_SKILL
 from app.schemas.brain import IntentDecision
-from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
+from app.schemas.conversation import (
+    CreateConversationTurnRequest,
+    TurnExecutionMode,
+    TurnExecutionResult,
+    TurnRouteDecision,
+)
 from app.services.agent_runs import claim_agent_run, mark_agent_run_queued
 from app.worker import execute_agent_run
+
+
+@pytest.mark.asyncio
+async def test_worker_executes_a_task_free_conversation_before_legacy_task_lookup(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Task-free worker account",
+        platform=Platform.DOUYIN,
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Task-free worker thread",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="task-free-worker-1",
+        user_input="你好",
+    )
+    session.add(turn)
+    await session.commit()
+    await session.refresh(turn)
+    request_payload = {
+        "account_id": account.id,
+        "attachment_ids": [17],
+        "client_message_id": turn.client_message_id,
+        "execution_preference": "AUTO",
+        "message": turn.user_input,
+        "requested_skill_code": None,
+        "thread_id": thread.id,
+        "turn_id": turn.id,
+    }
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id=turn.client_message_id,
+        request_payload=request_payload,
+        thread_id=thread.id,
+        turn_id=turn.id,
+    )
+    await mark_agent_run_queued(
+        session,
+        run.id,
+        task_id=None,
+        request_payload=request_payload,
+    )
+    admin_id = admin.id
+    turn_id = turn.id
+    run_id = run.id
+    client_message_id = turn.client_message_id
+    user_input = turn.user_input
+    captured: list[
+        tuple[int, int, int, CreateConversationTurnRequest, SkillRun | None]
+    ] = []
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def capture_conversation(
+        _session,
+        user,
+        loaded_turn,
+        loaded_run,
+        request,
+        *,
+        execution_owner,
+        resume_skill_run=None,
+    ):
+        assert execution_owner == "conversation-worker"
+        captured.append(
+            (
+                user.id,
+                loaded_turn.id,
+                loaded_run.id,
+                request,
+                resume_skill_run,
+            )
+        )
+        loaded_run.status = "completed"
+        loaded_run.phase = "completed"
+        await _session.commit()
+        return TurnExecutionResult(
+            mode=TurnExecutionMode.ANSWER,
+            status="completed",
+            response="你好",
+        )
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.execute_conversation_turn",
+        capture_conversation,
+    )
+
+    result = await execute_agent_run(
+        {"worker_id": "conversation-worker"},
+        run.id,
+    )
+
+    assert result is None
+    assert captured == [
+        (
+            admin_id,
+            turn_id,
+            run_id,
+            CreateConversationTurnRequest(
+                client_message_id=client_message_id,
+                message=user_input,
+                attachment_ids=[17],
+            ),
+            None,
+        )
+    ]
+    await session.refresh(run)
+    assert run.status == "completed"
+    assert run.error_code is None
 
 
 @pytest.mark.parametrize(
@@ -137,7 +271,9 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
             "client_message_id": turn.client_message_id,
             "execution_preference": "FORMAL_TASK",
             "message": turn.user_input,
-            "requested_skill_code": "account_inspection",
+            "requested_skill_code": (
+                None if has_ambiguous_call else "account_inspection"
+            ),
             "thread_id": thread.id,
             "turn_id": turn.id,
         },
@@ -575,3 +711,22 @@ def test_classify_runtime_failure_treats_business_conflicts_as_terminal() -> Non
     conflict.__context__ = wrapped
 
     assert classify_runtime_failure(wrapped) is FailureDisposition.TERMINAL
+
+
+def test_classify_runtime_failure_keeps_permission_and_input_errors_terminal() -> None:
+    with pytest.raises(ValidationError) as invalid_request:
+        CreateConversationTurnRequest(
+            client_message_id="invalid-request",
+            message="",
+        )
+
+    failures = [
+        HTTPException(status_code=403, detail="forbidden"),
+        PermissionError("scope mismatch"),
+        invalid_request.value,
+    ]
+
+    assert {
+        classify_runtime_failure(failure)
+        for failure in failures
+    } == {FailureDisposition.TERMINAL}

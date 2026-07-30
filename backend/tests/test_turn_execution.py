@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
 
 from app.models import (
@@ -519,6 +520,49 @@ async def test_query_tool_failure_closes_run_and_skill_without_retry_or_leak(
     assert all("provider-secret" not in str(event.payload) for event in events)
 
 
+@pytest.mark.asyncio
+async def test_query_retryable_infrastructure_failure_bubbles_to_the_worker(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="query-retryable"
+    )
+
+    async def classify(*_args, **_kwargs):
+        return _decision(
+            TurnExecutionMode.QUERY,
+            skill_code="account_data_query",
+            requires_operation_task=False,
+        )
+
+    class Adapter:
+        async def invoke(self, *_args, **_kwargs):
+            raise HTTPException(status_code=503, detail="provider-secret")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn", classify
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter()
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await execute_conversation_turn(
+            session,
+            admin,
+            turn,
+            run,
+            _request("query-retryable"),
+        )
+
+    assert caught.value.status_code == 503
+    skill_run = await session.scalar(select(SkillRun))
+    assert skill_run is not None
+    assert skill_run.status == "running"
+    assert turn.assistant_response is None
+    assert run.status == "claimed"
+
+
 @pytest.mark.parametrize("tool_account_id", [None, 999999])
 @pytest.mark.asyncio
 async def test_query_rejects_missing_or_cross_account_tool_result(
@@ -918,6 +962,46 @@ async def test_operation_start_failure_closes_task_run_and_turn_without_replay(
     assert starts == 1
     events = list(await session.scalars(select(Event)))
     assert all("runtime-secret" not in str(event.payload) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_operation_retryable_infrastructure_failure_bubbles_to_the_worker(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="task-retryable"
+    )
+
+    async def classify(*_args, **_kwargs):
+        return _decision(TurnExecutionMode.TASK)
+
+    async def start_routed(*_args, **_kwargs):
+        raise HTTPException(status_code=503, detail="runtime-provider-secret")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn", classify
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.runtime_graph.start_routed", start_routed
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await execute_conversation_turn(
+            session,
+            admin,
+            turn,
+            run,
+            _request("task-retryable"),
+        )
+
+    assert caught.value.status_code == 503
+    await session.refresh(run)
+    await session.refresh(turn)
+    task = await session.get(BrainTask, run.task_id)
+    assert task is not None
+    assert task.status == BrainTaskStatus.RUNNING
+    assert run.status == "claimed"
+    assert turn.assistant_response is None
 
 
 @pytest.mark.parametrize(

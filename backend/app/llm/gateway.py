@@ -9,9 +9,11 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.request_context import get_acting_user_id
+from app.core.runtime_failures import ProviderRuntimeFailure, exception_chain
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.deepseek import DeepSeekAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
@@ -205,12 +207,10 @@ class LLMGateway:
                 last_exc = (
                     exc
                     if isinstance(exc, ModelRouteConfigurationError)
-                    else RuntimeError(safe_error)
+                    else _provider_runtime_failure(exc, safe_error=safe_error)
                 )
 
-        raise LLMError(
-            f"all candidate models failed: {[item.model for item in candidates]}"
-        ) from last_exc
+        raise LLMError("all candidate models failed") from last_exc
 
     async def chat_stream(
         self,
@@ -301,12 +301,10 @@ class LLMGateway:
                 last_exc = (
                     exc
                     if isinstance(exc, ModelRouteConfigurationError)
-                    else RuntimeError(safe_error)
+                    else _provider_runtime_failure(exc, safe_error=safe_error)
                 )
 
-        raise LLMError(
-            f"all candidate models failed: {[item.model for item in candidates]}"
-        ) from last_exc
+        raise LLMError("all candidate models failed") from last_exc
 
     async def _record(
         self,
@@ -367,6 +365,45 @@ def _rough_token_count(text: str) -> int:
 
 def _safe_error(exc: Exception) -> str:
     return redact_error(str(exc)) or "model provider request failed"
+
+
+def _provider_runtime_failure(
+    exc: Exception,
+    *,
+    safe_error: str,
+) -> ProviderRuntimeFailure:
+    chain = exception_chain(exc)
+    status_code = next(
+        (
+            item.response.status_code
+            for item in chain
+            if isinstance(item, httpx.HTTPStatusError)
+        ),
+        None,
+    )
+    if status_code is not None:
+        failure_kind = "http"
+    elif any(
+        isinstance(item, (TimeoutError, httpx.TimeoutException))
+        for item in chain
+    ):
+        failure_kind = "timeout"
+    elif any(
+        isinstance(item, (ConnectionError, httpx.NetworkError))
+        for item in chain
+    ):
+        failure_kind = "connection"
+    else:
+        failure_kind = "unknown"
+    return ProviderRuntimeFailure(
+        status_code=status_code,
+        failure_kind=failure_kind,
+        safe_message=(
+            safe_error
+            if "[REDACTED]" in safe_error
+            else "model provider request failed"
+        ),
+    )
 
 
 gateway = LLMGateway()

@@ -15,6 +15,21 @@ class FailureDisposition(enum.StrEnum):
     TERMINAL = "terminal"
 
 
+class ProviderRuntimeFailure(RuntimeError):
+    """User-safe provider failure metadata retained across gateway wrapping."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        failure_kind: str = "unknown",
+        safe_message: str = "model provider request failed",
+    ) -> None:
+        super().__init__(safe_message)
+        self.status_code = status_code
+        self.failure_kind = failure_kind
+
+
 @dataclass(frozen=True)
 class RuntimeFailure:
     disposition: FailureDisposition
@@ -51,6 +66,12 @@ def classify_runtime_failure(exc: BaseException) -> FailureDisposition:
     ):
         return FailureDisposition.TERMINAL
     if any(status_code in {408, 429} or status_code >= 500 for status_code in status_codes):
+        return FailureDisposition.RETRYABLE
+    if any(
+        isinstance(item, ProviderRuntimeFailure)
+        and item.failure_kind in {"connection", "timeout"}
+        for item in chain
+    ):
         return FailureDisposition.RETRYABLE
     if any(isinstance(item, _RETRYABLE_EXCEPTIONS) for item in chain):
         return FailureDisposition.RETRYABLE
@@ -114,6 +135,8 @@ _RETRYABLE_EXCEPTIONS = (
 
 
 def _http_status_code(exc: BaseException) -> int | None:
+    if isinstance(exc, ProviderRuntimeFailure):
+        return exc.status_code
     if isinstance(exc, HTTPException):
         return exc.status_code
     if isinstance(exc, httpx.HTTPStatusError):
