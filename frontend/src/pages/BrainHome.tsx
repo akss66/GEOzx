@@ -1675,13 +1675,15 @@ function AgentMessage({ message }: { message: LiveRuntimeMessage }) {
               ? "系统提示"
               : presentOperationsBrainSystemCopy(message.agentName)}
           </span>
-          <Tag style={{ marginInlineEnd: 0 }}>
-            {hasSystemError
-              ? "需配置"
-              : message.status === "streaming"
-                ? isThinking ? "思考中" : "正在输出"
-                : statusCopy(message.status)}
-          </Tag>
+          {isThinking ? null : (
+            <Tag style={{ marginInlineEnd: 0 }}>
+              {hasSystemError
+                ? "需配置"
+                : message.status === "streaming"
+                  ? "正在输出"
+                  : statusCopy(message.status)}
+            </Tag>
+          )}
         </div>
         <Typography.Paragraph style={{ color: "inherit", margin: 0, whiteSpace: "pre-wrap" }}>
           {hasSystemError

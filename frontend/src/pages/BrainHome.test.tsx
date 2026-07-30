@@ -1311,6 +1311,12 @@ describe("BrainHome", () => {
           model: "system",
         },
       });
+    });
+
+    expect(await screen.findByText("正在思考...")).toBeInTheDocument();
+    expect(screen.queryByText("思考中")).not.toBeInTheDocument();
+
+    await act(async () => {
       mocks.eventHandler?.({
         type: "brain.runtime.message_delta",
         payload: {
