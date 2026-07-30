@@ -86,17 +86,31 @@
   seeded synchronously.
 - RED: tool-only and critic-only runs had no execution summary.
   GREEN: allowlisted summaries are returned independently of expert invocation.
+- Review RED: a refreshed `waiting_permission` Turn retained its ToolCall ledger
+  but Conversation history returned no approval projection.
+  GREEN: history rebuilds an allowlisted typed approval from the Turn-scoped
+  `waiting_approval` ToolCall; BrainHome restores the composer and Turn controls
+  without returning ToolCall meta or raw payloads.
+- Review RED: a refreshed `running` Turn left the composer enabled and exposed no
+  usable stop target because local `pendingTurn` was empty.
+  GREEN: `claimed`, `waiting_predecessor`, `queued`, `running`, and `retry_wait`
+  are one authoritative active-status set, and stop uses the durable Turn's
+  `client_message_id`.
+- Review RED: a fast terminal stream followed by a late queued POST response kept
+  the final text but regressed the Turn status to `queued`.
+  GREEN: HTTP identity binding preserves any newer live/terminal overlay until
+  the authoritative durable Conversation GET replaces the cached Turn.
 
 ## Verification
 
 - Directed frontend Task 8 suite:
-  `4 files passed, 39 tests passed`.
+  `4 files passed, 52 tests passed`.
 - Full frontend suite:
-  `70 files passed, 319 tests passed`.
+  `70 files passed, 332 tests passed`.
 - Frontend TypeScript and production build:
   `tsc --noEmit && vite build` passed.
 - Backend conversation API suite:
-  `31 tests passed`.
+  `32 tests passed`.
 - Ruff on all changed backend and backend test files: passed.
 - `git diff --check`: passed.
 - Legacy BrainHome runtime-path search: no

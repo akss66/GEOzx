@@ -4,6 +4,7 @@ import type { ConversationThread } from "../../types";
 import {
   applyConversationEvent,
   appendOptimisticTurn,
+  isActiveConversationTurnStatus,
   mergeConversationTurn,
   turnDomainKey,
   turnReactKey,
@@ -83,6 +84,49 @@ describe("conversation Turn projection", () => {
       .toBe(turnReactKey({ threadId: 81, turnId: 101, clientMessageId: "client-1" }));
     expect(turnDomainKey({ threadId: 81, turnId: 101, clientMessageId: "client-1" }))
       .toBe("81:101:client-1");
+  });
+
+  it("keeps a fast terminal stream result when the queued HTTP response arrives later", () => {
+    const done = applyConversationEvent(
+      thread,
+      frame("brain.runtime.message_done", 3, { content: "流式最终答案" }),
+    );
+
+    const merged = mergeConversationTurn(done, {
+      ...thread.turns[0],
+      id: 101,
+      status: "queued",
+    });
+
+    expect(merged.turns[0]).toMatchObject({
+      id: 101,
+      assistant_response: "流式最终答案",
+      status: "completed",
+      stream_state: {
+        lastSequence: 3,
+        terminal: true,
+      },
+    });
+  });
+
+  it.each([
+    "claimed",
+    "waiting_predecessor",
+    "queued",
+    "running",
+    "retry_wait",
+  ])("treats %s as an active durable Turn status", (status) => {
+    expect(isActiveConversationTurnStatus(status)).toBe(true);
+  });
+
+  it.each([
+    "waiting_permission",
+    "completed",
+    "blocked",
+    "failed",
+    "stopped",
+  ])("does not treat %s as an active durable Turn status", (status) => {
+    expect(isActiveConversationTurnStatus(status)).toBe(false);
   });
 
   it("applies duplicate text deltas in sequence and lets done replace the overlay", () => {

@@ -8,7 +8,7 @@ import {
 import { Button, Input } from "antd";
 import { useEffect, useState } from "react";
 
-import type { AgentToolCall, PublicSkill } from "../../types";
+import type { ConversationApproval, PublicSkill } from "../../types";
 import { presentOperationsBrainSystemCopy } from "../../utils/operationsBrainCopy";
 import {
   CapabilityLauncher,
@@ -38,7 +38,7 @@ export function BrainComposer({
   value: string;
   disabled: boolean;
   loading: boolean;
-  pendingPermission: AgentToolCall | null;
+  pendingPermission: ConversationApproval | null;
   approvalComment: string;
   approving: boolean;
   promptChips?: string[];
@@ -136,6 +136,7 @@ export function BrainComposer({
             <Input.TextArea
               aria-label="运营大脑消息"
               value={value}
+              disabled={disabled || loading}
               onChange={(event) => onChange(event.target.value)}
               autoSize={{ minRows: 1, maxRows: 6 }}
               data-autosize-min-rows="1"
@@ -196,7 +197,7 @@ function appendPrompt(value: string, prompt: string) {
   return trimmed ? `${trimmed}\n${prompt}` : prompt;
 }
 
-function permissionName(toolCall: AgentToolCall) {
+function permissionName(toolCall: ConversationApproval) {
   const names: Record<string, string> = {
     brief_builder: "整理任务目标",
     compliance_precheck: "执行合规预检查",
@@ -207,7 +208,7 @@ function permissionName(toolCall: AgentToolCall) {
   return toolCall.tool_name || toolCall.tool_code || "执行高风险动作";
 }
 
-function permissionPurpose(toolCall: AgentToolCall) {
+function permissionPurpose(toolCall: ConversationApproval) {
   return presentOperationsBrainSystemCopy(
     toolCall.output_summary
       || toolCall.input_summary

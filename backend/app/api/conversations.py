@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.schemas.conversation import (
     ConversationAgentRunOut,
+    ConversationApprovalOut,
     ConversationThreadListOut,
     ConversationThreadOut,
     ConversationThreadSummaryOut,
@@ -122,10 +123,41 @@ async def _turn_projections(
         if isinstance(payload, dict) and isinstance(payload.get("projections"), list)
         else []
     )
+    projections.extend(await _approval_projections(session, turn))
     execution_summary = await _execution_summary_projection(session, turn)
     if execution_summary is not None:
         projections.append(execution_summary)
     return projections
+
+
+async def _approval_projections(
+    session: AsyncSession,
+    turn: ConversationTurn,
+) -> list[dict]:
+    """Restore pending approvals without exposing ToolCall meta or raw payloads."""
+
+    approvals = list(
+        await session.scalars(
+            select(AgentToolCall)
+            .where(
+                AgentToolCall.org_id == turn.org_id,
+                AgentToolCall.thread_id == turn.thread_id,
+                AgentToolCall.turn_id == turn.id,
+                AgentToolCall.requires_human_confirmation.is_(True),
+                AgentToolCall.status == "waiting_approval",
+            )
+            .order_by(AgentToolCall.id)
+        )
+    )
+    return [
+        {
+            "type": "approval",
+            "approval": ConversationApprovalOut.model_validate(approval).model_dump(
+                mode="json"
+            ),
+        }
+        for approval in approvals
+    ]
 
 
 async def _execution_summary_projection(

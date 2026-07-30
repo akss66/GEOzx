@@ -9,6 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  approveToolCall,
   createConversation,
   getBrainTaskRuntime,
   getConversation,
@@ -330,6 +331,53 @@ describe("BrainHome V3 conversation projection", () => {
     }));
   });
 
+  it("restores a waiting approval and its controls from durable conversation history", async () => {
+    const approval = pendingApproval(901);
+    const waiting = {
+      ...persistedTurn(
+        501,
+        "approval-client",
+        "准备发布",
+        "发布前需要确认",
+        "waiting_permission",
+      ),
+      projections: [{
+        type: "approval" as const,
+        turn_id: 501,
+        approval,
+      }],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [waiting]));
+
+    renderBrainHome();
+
+    expect(await screen.findByLabelText("Approval required")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "允许" }));
+    await waitFor(() => expect(vi.mocked(approveToolCall).mock.calls[0]?.[0]).toEqual({
+      toolCallId: 901,
+      approved: true,
+      comment: undefined,
+    }));
+  });
+
+  it("uses a durable active Turn to disable input and stop after reload", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "durable-running", "生成长报告", null, "running"),
+    ]));
+
+    renderBrainHome();
+
+    expect(await screen.findByText("生成长报告")).toBeInTheDocument();
+    expect(screen.getByLabelText("运营大脑消息")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    await waitFor(() => expect(vi.mocked(stopBrainGeneration).mock.calls[0]?.[0]).toEqual({
+      clientMessageId: "durable-running",
+      taskId: null,
+    }));
+  });
+
   it("never restores the removed legacy Task runtime even when stale local storage exists", async () => {
     localStorage.setItem(
       "tongzhouxing_brain_active_tasks",
@@ -454,6 +502,32 @@ function inspectionSkill(): PublicSkill {
     requires_account: true,
     is_available: true,
     unavailable_reason: null,
+  };
+}
+
+function pendingApproval(id: number) {
+  return {
+    id,
+    org_id: 1,
+    task_id: 700,
+    invocation_id: null,
+    module: "brain",
+    agent_code: "00-decision",
+    tool_code: "publish_package_prepare",
+    tool_name: "生成发布包并进入人工审批",
+    status: "waiting_approval" as const,
+    permission_mode: "confirm",
+    requires_human_confirmation: true,
+    input_summary: "准备发布内容",
+    output_summary: "确认后生成发布包",
+    error: null,
+    latency_ms: null,
+    cost: 0,
+    meta: {},
+    started_at: null,
+    finished_at: null,
+    created_at: "2026-07-28T00:00:00Z",
+    updated_at: "2026-07-28T00:00:01Z",
   };
 }
 

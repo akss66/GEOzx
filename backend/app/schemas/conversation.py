@@ -39,6 +39,22 @@ class ConversationTurnOut(BaseModel):
     updated_at: datetime
 
 
+class ConversationApprovalOut(BaseModel):
+    """Allowlisted approval data safe to restore in conversation history."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    tool_code: str
+    tool_name: str
+    status: str
+    permission_mode: str
+    requires_human_confirmation: bool
+    input_summary: str
+    output_summary: str
+
+
 class ConversationThreadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

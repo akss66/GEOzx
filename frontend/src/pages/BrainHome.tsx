@@ -29,6 +29,7 @@ import { TurnStream } from "../components/brain/TurnStream";
 import {
   applyConversationEvent,
   appendOptimisticTurn,
+  isActiveConversationTurnStatus,
   mergeConversationTurn,
 } from "../components/brain/conversationTurnProjection";
 import { OperationalState } from "../components/ui";
@@ -46,7 +47,9 @@ import {
 import type {
   Account,
   Artifact,
+  ConversationApproval,
   ConversationThread,
+  ConversationTurn,
 } from "../types";
 
 interface PendingTurn {
@@ -216,6 +219,14 @@ export default function BrainHome() {
     && conversationQuery.data.account_id === effectiveAccount.id
       ? conversationQuery.data
       : null;
+  const activeTurn = useMemo(
+    () => findLatestActiveTurn(activeConversation),
+    [activeConversation],
+  );
+  const pendingPermission = useMemo(
+    () => findLatestPendingApproval(activeConversation),
+    [activeConversation],
+  );
 
   const conversationTurnMutation = useMutation({
     mutationFn: ({
@@ -402,7 +413,7 @@ export default function BrainHome() {
   const isGenerating =
     conversationTurnMutation.isPending
     || launcherPending
-    || (activeConversationThreadId != null && pendingTurn != null);
+    || activeTurn != null;
 
   const ensureAccountThread = useCallback(async (account: Account) => {
     const savedThreadId =
@@ -831,7 +842,7 @@ export default function BrainHome() {
                       formalArtifactRevisionMutation.mutate,
                     )}
                   />
-                  {!pendingTurn ? (
+                  {!isGenerating && !pendingPermission ? (
                     <Button
                       aria-label="重新生成"
                       icon={<RedoOutlined />}
@@ -865,7 +876,7 @@ export default function BrainHome() {
                 onAddAccountDataPackage={() => message.info("尚未接入账号数据包附件")}
                 onAddHistoricalArtifacts={() => setWorkspaceMode("results")}
                 onSelectAccount={requestAccountSelection}
-                pendingPermission={null}
+                pendingPermission={pendingPermission}
                 approvalComment={approvalComment}
                 approving={approveMutation.isPending}
                 onChange={setGoal}
@@ -875,10 +886,16 @@ export default function BrainHome() {
                 }
                 onSubmit={startWorkflow}
                 onStop={() => {
-                  if (!pendingTurn || stopMutation.isPending) return;
+                  if (
+                    !activeTurn?.client_message_id
+                    || stopMutation.isPending
+                  ) return;
                   stopMutation.mutate({
-                    clientMessageId: pendingTurn.clientMessageId,
-                    taskId: pendingTurn.taskId,
+                    clientMessageId: activeTurn.client_message_id,
+                    taskId:
+                      pendingTurn?.clientMessageId === activeTurn.client_message_id
+                        ? pendingTurn.taskId
+                        : null,
                   });
                 }}
               />
@@ -1125,6 +1142,40 @@ function createClientMessageId() {
     return globalThis.crypto.randomUUID();
   }
   return `brain-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function findLatestActiveTurn(
+  conversation: ConversationThread | null,
+): ConversationTurn | null {
+  if (!conversation) return null;
+  for (let index = conversation.turns.length - 1; index >= 0; index -= 1) {
+    const turn = conversation.turns[index];
+    if (isActiveConversationTurnStatus(turn.status)) return turn;
+  }
+  return null;
+}
+
+function findLatestPendingApproval(
+  conversation: ConversationThread | null,
+): ConversationApproval | null {
+  if (!conversation) return null;
+  for (let turnIndex = conversation.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const projections = conversation.turns[turnIndex].projections;
+    for (
+      let projectionIndex = projections.length - 1;
+      projectionIndex >= 0;
+      projectionIndex -= 1
+    ) {
+      const projection = projections[projectionIndex];
+      if (
+        projection.type === "approval"
+        && projection.approval.status === "waiting_approval"
+      ) {
+        return projection.approval;
+      }
+    }
+  }
+  return null;
 }
 
 function syncLabel(status: Account["data_sync_status"]) {

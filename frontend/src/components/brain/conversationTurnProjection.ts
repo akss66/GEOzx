@@ -15,6 +15,16 @@ export function turnReactKey(identity: TurnIdentity) {
   return `${identity.threadId}:${identity.clientMessageId}`;
 }
 
+export function isActiveConversationTurnStatus(status: string) {
+  return [
+    "claimed",
+    "waiting_predecessor",
+    "queued",
+    "running",
+    "retry_wait",
+  ].includes(status);
+}
+
 export function appendOptimisticTurn(
   thread: ConversationThread,
   clientMessageId: string,
@@ -61,11 +71,17 @@ export function mergeConversationTurn(
   if (index < 0) return { ...thread, turns: [...thread.turns, incoming] };
 
   const current = thread.turns[index];
-  const replacement = current.stream_state && incoming.assistant_response == null
+  const preserveRuntimeOverlay = current.stream_state != null
+    || (
+      current.id != null
+      && current.status !== "queued"
+      && ["claimed", "waiting_predecessor", "queued"].includes(incoming.status)
+    );
+  const replacement = preserveRuntimeOverlay
     ? {
         ...incoming,
         assistant_response: current.assistant_response,
-        status: current.status === "running" ? current.status : incoming.status,
+        status: current.status,
         stream_state: current.stream_state,
       }
     : incoming;

@@ -1,9 +1,17 @@
-import type { Artifact, ConversationThread, ConversationTurn, TurnProjection } from "../../types";
+import type {
+  Artifact,
+  ConversationApproval,
+  ConversationThread,
+  ConversationTurn,
+  TurnProjection,
+} from "../../types";
 import { Button, Input, Tag, Typography } from "antd";
-import type { AgentToolCall } from "../../types";
 import { AgentAvatar } from "../agents/AgentAvatar";
 import type { ArtifactAction } from "./ArtifactCard";
-import { turnReactKey } from "./conversationTurnProjection";
+import {
+  isActiveConversationTurnStatus,
+  turnReactKey,
+} from "./conversationTurnProjection";
 import { TurnArtifact } from "./TurnArtifact";
 
 export function TurnStream({
@@ -22,7 +30,7 @@ export function TurnStream({
   approvingToolCallId?: number | null;
   approvalComment?: string;
   onApprovalCommentChange?: (value: string) => void;
-  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId?: number | null;
   artifactRefreshKey?: number;
@@ -76,7 +84,7 @@ function TurnArticle({
   approvingToolCallId: number | null;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
-  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
@@ -116,7 +124,7 @@ function TurnArticle({
       <section
         className="dy-chat-message dy-chat-message-agent tz-conversation-turn__assistant"
         aria-label="Assistant response"
-        aria-busy={isActiveTurnStatus(turn.status)}
+        aria-busy={isActiveConversationTurnStatus(turn.status)}
       >
         <AgentAvatar code="00-decision" className="dy-chat-avatar" />
         <div className="dy-chat-bubble">
@@ -132,7 +140,7 @@ function TurnArticle({
             </Typography.Paragraph>
           ) : (
             <Typography.Text type="secondary">
-              {isActiveTurnStatus(turn.status) ? "正在处理…" : "暂无回复"}
+              {isActiveConversationTurnStatus(turn.status) ? "正在处理…" : "暂无回复"}
             </Typography.Text>
           )}
         </div>
@@ -202,12 +210,8 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
   );
 }
 
-function isActiveTurnStatus(status: string) {
-  return ["queued", "running", "retry_wait"].includes(status);
-}
-
 function turnStatusCopy(status: string) {
-  if (["queued"].includes(status)) return "等待中";
+  if (["claimed", "waiting_predecessor", "queued"].includes(status)) return "等待中";
   if (["running", "retry_wait"].includes(status)) return "执行中";
   if (["completed"].includes(status)) return "完成";
   if (["blocked", "waiting_permission", "waiting_decision", "waiting_user"].includes(status)) {
@@ -240,7 +244,7 @@ function Projection({
   approving: boolean;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
-  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   artifactRefreshKey: number;

@@ -1367,6 +1367,75 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
 
 
 @pytest.mark.asyncio
+async def test_history_reconstructs_pending_approval_projection(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "审批恢复账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="approval-history",
+        message="准备发布",
+    )
+    body = submitted.json()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="审批恢复",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        turn_id=body["turn"]["id"],
+        tool_code="publish_package_prepare",
+        tool_name="生成发布包并进入人工审批",
+        status="waiting_approval",
+        permission_mode="confirm",
+        requires_human_confirmation=True,
+        side_effect_level="read",
+        input_summary="SAFE_INPUT_SUMMARY",
+        output_summary="SAFE_OUTPUT_SUMMARY",
+        meta={"secret": "MUST_NOT_LEAK"},
+    )
+    session.add(tool_call)
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert history.status_code == 200
+    approval = next(
+        projection
+        for projection in history.json()["turns"][0]["projections"]
+        if projection["type"] == "approval"
+    )
+    assert approval == {
+        "type": "approval",
+        "turn_id": body["turn"]["id"],
+        "approval": {
+            "id": tool_call.id,
+            "task_id": task.id,
+            "tool_code": "publish_package_prepare",
+            "tool_name": "生成发布包并进入人工审批",
+            "status": "waiting_approval",
+            "permission_mode": "confirm",
+            "requires_human_confirmation": True,
+            "input_summary": "SAFE_INPUT_SUMMARY",
+            "output_summary": "SAFE_OUTPUT_SUMMARY",
+        },
+    }
+    assert "MUST_NOT_LEAK" not in json.dumps(approval, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
 async def test_turn_projects_critic_only_quality_summary(
     client, session, admin, monkeypatch
 ) -> None:

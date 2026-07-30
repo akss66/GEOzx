@@ -436,6 +436,19 @@ export interface AgentToolCall {
   updated_at: string;
 }
 
+export type ConversationApproval = Pick<
+  AgentToolCall,
+  | "id"
+  | "task_id"
+  | "tool_code"
+  | "tool_name"
+  | "status"
+  | "permission_mode"
+  | "requires_human_confirmation"
+  | "input_summary"
+  | "output_summary"
+>;
+
 export type ConversationExecutionPreference =
   | "AUTO"
   | "DISCUSS_ONLY"
@@ -593,7 +606,7 @@ export type TurnProjection =
       experts: TurnExecutionExpert[];
       tools: TurnExecutionTool[];
     }
-  | { type: "approval"; turn_id: number; approval: AgentToolCall }
+  | { type: "approval"; turn_id: number; approval: ConversationApproval }
   | {
       type: "artifact";
       artifact_id: number;
