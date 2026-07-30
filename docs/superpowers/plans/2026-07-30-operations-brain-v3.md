@@ -104,6 +104,9 @@
 **Interfaces:**
 - Produces: `close_runtime_state(session, *, scope, status, message, error_code=None)`。
 - 状态族固定为 active、paused、terminal；等待审批属于 paused，不得继续显示 running。
+- ConversationTurn 允许状态：`queued`、`running`、`retry_wait`、`waiting_permission`、`waiting_decision`、`waiting_user`、`completed`、`blocked`、`failed`、`dead_letter`、`cancelled`、`stopped`。
+- AgentRun 保留 `claimed`、`waiting_predecessor` 以及上述状态；SkillRun 允许 `running`、`retry_wait`、`waiting_permission`、`completed`、`blocked`、`failed`、`cancelled`、`stopped`。
+- BrainTask 映射：active/retry 为 `RUNNING`；waiting/stopped 为 `PENDING_CONFIRMATION`；completed 为 `COMPLETED`；blocked/failed/dead_letter/cancelled 为 `FAILED`。
 
 - [ ] 写参数化测试：completed、failed、dead_letter、cancelled、waiting_permission 在四类账本中的映射一致。
 - [ ] 写测试：失败/取消只产生一条终态用户消息，重放不会重复写。
