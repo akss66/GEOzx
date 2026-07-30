@@ -64,9 +64,13 @@
 - Modify: `backend/app/llm/gateway.py`
 - Modify: `backend/app/core/runtime_failures.py`
 - Modify: `backend/app/services/agent_runs.py`
+- Modify: `backend/app/services/turn_execution.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
 - Test: `backend/tests/test_conversation_api.py`
 - Test: `backend/tests/test_llm_gateway.py`
 - Test: `backend/tests/test_worker.py`
+- Test: `backend/tests/test_turn_execution.py`
+- Test: `backend/tests/test_account_inspection_skill.py`
 
 **Interfaces:**
 - Conversation API 只负责持久化 Turn/Run 并入队，Worker 负责正式执行。
@@ -75,9 +79,11 @@
 - [ ] 写测试：提交 Turn 返回已入队 Run，不能在 HTTP 请求线程内执行完整 Runtime。
 - [ ] 写测试：409、权限和校验错误不重试；429、5xx、连接和响应超时有界重试。
 - [ ] 写测试：LLM Gateway 包装异常后仍可识别原始状态码与 cause。
+- [ ] 写测试：Query、Skill 和 operation 不吞掉可重试基础设施故障。
 - [ ] 运行定向测试确认失败。
 - [ ] 将 Conversation 初次执行接入现有 durable Worker；保留 SSE 通过 Run/Turn 关联推送。
 - [ ] 调整 Gateway 安全异常包装，在不暴露供应商正文的同时保留类型化故障元数据。
+- [ ] 业务错误继续生成可操作终态；可重试技术错误向 Worker 冒泡。
 - [ ] 运行定向测试并提交 `feat: execute conversation turns through durable workers`。
 
 ### Task 4: 统一 Turn/Run/SkillRun/Task 状态机
