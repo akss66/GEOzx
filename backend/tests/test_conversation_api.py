@@ -288,6 +288,83 @@ async def test_history_lists_only_the_current_users_selected_account_threads(
 
 
 @pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_active_runtime(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Active AgentRun deletion account")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="delete-active-1",
+        message="Do not delete this active run",
+        requested_skill_code="account_inspection",
+    )
+
+    assert submitted.status_code == 202
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_active_skill_run(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Active SkillRun deletion account")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="delete-active-skill-1",
+        message="Run the account inspection",
+        requested_skill_code="account_inspection",
+    )
+    assert submitted.status_code == 202
+    await _execute_queued_turn(
+        session,
+        admin,
+        submitted,
+        message="Run the account inspection",
+        requested_skill_code="account_inspection",
+    )
+    run = await session.get(AgentRun, submitted.json()["run"]["id"])
+    skill_run = await session.scalar(
+        select(SkillRun).where(SkillRun.thread_id == thread["id"])
+    )
+    assert run is not None
+    assert skill_run is not None
+    run.status = "completed"
+    skill_run.status = "running"
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+
+
+@pytest.mark.asyncio
 async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     client,
     session,
@@ -349,8 +426,36 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     )
     session.add(deliverable)
     await session.flush()
+    preserved_event = Event(
+        type="preserved.audit",
+        content_item_id=content_item.id,
+        payload={"kept": True},
+    )
+    formal_event = Event(
+        type="brain.runtime.deliverable_completed",
+        content_item_id=content_item.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+        payload={"deliverable_id": deliverable.id},
+    )
+    technical_event = Event(
+        type="agent.kernel.tool_end",
+        content_item_id=content_item.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+        payload={"tool_code": "account.profile"},
+    )
+    session.add_all([preserved_event, formal_event, technical_event])
+    await session.flush()
     content_item_id = content_item.id
     deliverable_id = deliverable.id
+    preserved_event_id = preserved_event.id
+    formal_event_id = formal_event.id
+    technical_event_id = technical_event.id
     await session.commit()
 
     denied = await client.delete(
@@ -406,6 +511,18 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         )
         == 0
     )
+    preserved_event_row = await session.get(Event, preserved_event_id)
+    assert preserved_event_row is not None
+    assert preserved_event_row.type == "preserved.audit"
+    formal_event_row = await session.get(Event, formal_event_id)
+    assert formal_event_row is not None
+    assert formal_event_row.content_item_id == content_item_id
+    assert formal_event_row.thread_id is None
+    assert formal_event_row.turn_id is None
+    assert formal_event_row.run_id is None
+    assert formal_event_row.skill_run_id is None
+    assert formal_event_row.payload == {"deliverable_id": deliverable_id}
+    assert await session.get(Event, technical_event_id) is None
 
 
 @pytest.mark.asyncio

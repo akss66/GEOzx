@@ -67,3 +67,35 @@ Full-chain `alembic upgrade head --sql` is blocked by pre-existing migration
 in Alembic offline mode. This failure predates Task 5 and occurs before the new
 `20260730_0300` migration is reached. The Task 5 migration itself compiles for the
 PostgreSQL dialect and is the single Alembic head.
+
+## Review fix round 1
+
+Conversation deletion now rejects both active AgentRun and active SkillRun
+lifecycles with the stable `CONVERSATION_DELETE_BLOCKED` HTTP 409 response.
+After terminal completion it deletes conversation messages and explicitly
+technical `agent.kernel.*` / `agent.harness.*` events, while retaining formal
+lifecycle and Deliverable events. Retained events have conversation, turn, run,
+and SkillRun provenance cleared; formal Deliverables and BrainTasks remain
+unchanged.
+
+The migration's canonical Invocation guard was restored: ToolCall provenance is
+backfilled only when the source Invocation has non-null SkillRun, Run, Thread,
+and Turn provenance. Invocation-backed partial rows continue to fail preflight
+instead of being partially repaired.
+
+TDD evidence:
+
+- RED: the migration regression failed with `invocation_graph` after the
+  canonical guard had been loosened.
+- RED: the deletion regression failed because
+  `brain.runtime.deliverable_completed` was deleted with the whole thread.
+- GREEN: active AgentRun, active SkillRun, formal Event retention/provenance
+  clearing, technical Event deletion, and migration canonical-source tests:
+  **4 passed**.
+- Conversation, provenance, RuntimeScope, and migration regression suite:
+  **54 passed**.
+- Task 5 directed suite covering RuntimeScope, Harness, Tool Executor, Artifacts,
+  conversations, migrations, turn provenance, and account inspection:
+  **89 passed**.
+- Ruff on changed Python files: **passed**.
+- `alembic heads`: **20260730_0300 (head)**.
