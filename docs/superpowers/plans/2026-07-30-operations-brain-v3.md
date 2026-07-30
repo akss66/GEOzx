@@ -236,26 +236,40 @@
 ### Task 8: 前端单一 Turn 投影和专业技术日志
 
 **Files:**
+- Modify: `backend/app/schemas/conversation.py`
+- Modify: `backend/app/api/conversations.py`
+- Modify: `backend/app/services/runtime_state.py`
 - Modify: `frontend/src/pages/BrainHome.tsx`
 - Modify: `frontend/src/components/brain/TurnStream.tsx`
 - Modify: `frontend/src/hooks/useEventStream.ts`
 - Modify: `frontend/src/types.ts`
+- Modify: `frontend/src/styles/brain-v2.css`
+- Create: `frontend/src/components/brain/conversationProjection.ts`
+- Test: `frontend/src/components/brain/conversationProjection.test.ts`
 - Test: `frontend/src/pages/BrainHome.test.tsx`
 - Test: `frontend/src/components/brain/TurnStream.test.tsx`
 - Test: `frontend/src/hooks/useEventStream.test.tsx`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_turn_execution.py`
 
 **Interfaces:**
 - ConversationTurn 是聊天区唯一渲染源。
-- SSE 以 `thread_id + turn_id + client_message_id` 合并。
+- `ConversationTurn.status` 由后端 schema 暴露，前端不得从 intent 猜运行状态。
+- optimistic、HTTP durable、SSE live 以 `thread_id + turn_id? + client_message_id` 合并；绑定服务器 turn_id 前后 React key 稳定。
+- 持久 Event ID 仅用于 transport checkpoint；流式 frame 以 sequence/领域键归并，不能因 start/delta/done 复用 ID 而丢帧。
 - 实时状态作为当前 Turn 的临时投影，不再作为独立聊天消息列表。
 - 现有来源 Turn 与成果中心继续引用同一 Artifact id。
 
-- [ ] 写测试：HTTP submission 已写入缓存时只渲染一个用户 Turn；新 Thread 初次 pending 也使用同一布局。
-- [ ] 写测试：只显示一个运行状态，delta 到 done 不跳位、不重复，跨 Thread/client 事件被忽略。
-- [ ] 写测试：默认显示参与专家，展开后显示现有路由、工具、质量门和状态；耗时由 Task 9 的真实字段补充，不在前端臆造。
+- [ ] 写测试：HTTP submission 已写入缓存时同一 client id 只渲染一个用户 Turn；新 Thread pending 使用同一 TurnArticle，绑定服务器 ID 后不跳位。
+- [ ] 写测试：start/delta/done 即使复用 transport ID 也不丢帧；delta→late start 不清空；done without start 可完成；done 后 late delta 忽略。
+- [ ] 写测试：durable done 重连去重；跨 Thread/Turn/client 事件忽略；重连后的 durable GET 覆盖 live 临时投影。
+- [ ] 写测试：默认仅显示参与专家摘要；展开显示权威 Turn 状态、route/skill/tool/critic/审计 ID；tool-only/critic-only 也有 execution summary。
+- [ ] 写测试：Turn 内成果与成果中心使用同一 Artifact ID；旧 active task localStorage 不再激活 legacy UI。
 - [ ] 运行前端定向测试确认失败。
-- [ ] 移除当前聊天页的 legacy BrainTask/ConversationStream 渲染回退，将 pending 和实时事件合并到对应 ConversationTurn。
-- [ ] 保留 transport durable event id 去重，并在领域层以 Turn 组合键归并；不得按 delta 文本去重。
+- [ ] 新 Thread 创建后立即写 Conversation query cache；移除独立 PendingConversation，将 pending/running/done 全部投影为同一个 TurnArticle。
+- [ ] 移除聊天页 legacy BrainTask/ConversationStream、active task localStorage 与重复运行态渲染回退。
+- [ ] durable ID 仅去重 durable event；start/delta 为 ephemeral，领域层以 Turn 组合键和 sequence 归并；不得按 delta 文本去重。
+- [ ] 扩展脱敏 execution summary，使 tool-only/critic-only 可见；不暴露 Prompt、原始 Tool 输入输出、堆栈或密钥。
 - [ ] 运行定向测试、TypeScript 和构建并提交 `fix: unify v3 turn streaming and technical details`。
 
 ### Task 9: 性能预算、可观测性与端到端能力矩阵
