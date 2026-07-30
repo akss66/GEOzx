@@ -1,5 +1,7 @@
 """Durable, versioned executions of business-facing agent skills."""
 
+import hashlib
+import json
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -12,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -113,9 +116,7 @@ class SkillRun(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
-    org_id: Mapped[int] = mapped_column(
-        ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
-    )
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False)
     thread_id: Mapped[int] = mapped_column(
         ForeignKey("conversation_threads.id", ondelete="CASCADE"), nullable=False
     )
@@ -133,6 +134,10 @@ class SkillRun(Base, TimestampMixin):
     skill_version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     input_snapshot: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    input_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
     output_snapshot: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     quality_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -158,3 +163,16 @@ class SkillRun(Base, TimestampMixin):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError("skill_version must be a positive integer")
         return value
+
+
+@event.listens_for(SkillRun, "before_insert")
+def _freeze_skill_input_hash(_mapper, _connection, target: SkillRun) -> None:
+    if target.input_hash:
+        return
+    normalized = json.dumps(
+        dict(target.input_snapshot or {}),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    target.input_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()

@@ -146,6 +146,7 @@ async def test_trace_only_harness_persists_output_without_public_deliverable(
     assert result.output["account_persona"] == "Evidence-led operator"
     assert duplicate.invocation.id == result.invocation.id
     assert duplicate.output == result.output
+    assert result.invocation.upstream[-1]["trace_only_output"] == result.output
     assert await session.scalar(select(func.count(Deliverable.id))) == 0
     assert await session.scalar(select(func.count(DeliverableAcceptance.id))) == 0
 
@@ -354,9 +355,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
         output_type = DeliverableType.POSITIONING_STRATEGY
 
         async def run(self, runtime_session, org_id, ctx: AgentContext):
-            raise AssertionError(
-                "The bounded tool loop should call kernel_decide instead"
-            )
+            raise AssertionError("The bounded tool loop should call kernel_decide instead")
 
         async def kernel_decide(
             self,
@@ -403,9 +402,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
             "quality_gates": [],
         }
 
-    monkeypatch.setattr(
-        "app.orchestrator.agent_harness.get_business_config", fake_business_config
-    )
+    monkeypatch.setattr("app.orchestrator.agent_harness.get_business_config", fake_business_config)
 
     original = AGENT_SPECS[AgentCode.POSITIONING]
     monkeypatch.setitem(
@@ -458,9 +455,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert contexts[0].account_id == account.id
     assert contexts[0].upstream["tool_results"] == upstream["tool_results"]
     tool_calls = (
-        await session.scalars(
-            select(AgentToolCall).where(AgentToolCall.task_id == task.id)
-        )
+        await session.scalars(select(AgentToolCall).where(AgentToolCall.task_id == task.id))
     ).all()
     assert len(tool_calls) == 1
     assert tool_calls[0].tool_code == "account.profile"
@@ -485,17 +480,13 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert runtime_tool_payload["run_id"] == run.id
     assert runtime_tool_payload["account_id"] == account.id
     published_tool_events = [
-        event
-        for event in realtime_events
-        if event["type"] == "brain.runtime.tool_completed"
+        event for event in realtime_events if event["type"] == "brain.runtime.tool_completed"
     ]
     assert len(published_tool_events) == 1
     assert published_tool_events[0]["event_id"] == runtime_tool_events[0].id
     assert published_tool_events[0]["in_transaction"] is False
     tool_events = (
-        await session.scalars(
-            select(Event).where(Event.type == "agent.kernel.tool_end")
-        )
+        await session.scalars(select(Event).where(Event.type == "agent.kernel.tool_end"))
     ).all()
     assert len(tool_events) == 1
     assert tool_events[0].project_id is None
@@ -545,22 +536,16 @@ async def test_harness_runs_positioning_with_one_account_without_project(
                 .order_by(Event.id)
             )
         ).all()
-        if event.payload is not None
-        and event.payload.get("invocation_id") == result.invocation.id
+        if event.payload is not None and event.payload.get("invocation_id") == result.invocation.id
     ]
     assert [event.type for event in lifecycle_events] == [
         "brain.runtime.subagent_started",
         "brain.runtime.subagent_completed",
     ]
-    assert all(
-        event.payload["invocation_id"] == result.invocation.id
-        for event in lifecycle_events
-    )
+    assert all(event.payload["invocation_id"] == result.invocation.id for event in lifecycle_events)
     assert all(event.idempotency_key is not None for event in lifecycle_events)
     invocations = (
-        await session.scalars(
-            select(AgentInvocation).where(AgentInvocation.task_id == task.id)
-        )
+        await session.scalars(select(AgentInvocation).where(AgentInvocation.task_id == task.id))
     ).all()
     assert [invocation.id for invocation in invocations] == [result.invocation.id]
 
@@ -579,9 +564,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert duplicate_retry.invocation.id == result.invocation.id
     assert len(contexts) == 2
     assert not [
-        event
-        for event in realtime_events
-        if event["type"] == "brain.runtime.tool_completed"
+        event for event in realtime_events if event["type"] == "brain.runtime.tool_completed"
     ]
 
     await session.delete(runtime_tool_events[0])
@@ -603,9 +586,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert retry.invocation.id == result.invocation.id
     assert len(contexts) == 2
     replay_tool_calls = (
-        await session.scalars(
-            select(AgentToolCall).where(AgentToolCall.task_id == task.id)
-        )
+        await session.scalars(select(AgentToolCall).where(AgentToolCall.task_id == task.id))
     ).all()
     assert [tool_call.id for tool_call in replay_tool_calls] == [tool_calls[0].id]
     repaired_tool_events = (
@@ -620,9 +601,7 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     assert repaired_tool_events[0].payload is not None
     assert repaired_tool_events[0].payload["tool_call_id"] == tool_calls[0].id
     replay_publications = [
-        event
-        for event in realtime_events
-        if event["type"] == "brain.runtime.tool_completed"
+        event for event in realtime_events if event["type"] == "brain.runtime.tool_completed"
     ]
     assert len(replay_publications) == 1
     assert replay_publications[0]["in_transaction"] is False
@@ -848,9 +827,7 @@ async def test_harness_reuses_the_same_invocation_for_an_idempotent_retry(
     assert failed.status == AgentInvocationStatus.FAILED
     assert failed.failure_reason == "RuntimeError"
     failed_lifecycle = [
-        event
-        for event in realtime_events
-        if event["payload"]["invocation_id"] == failed.id
+        event for event in realtime_events if event["payload"]["invocation_id"] == failed.id
     ]
     assert [event["type"] for event in failed_lifecycle] == [
         "brain.runtime.subagent_started",
@@ -914,9 +891,7 @@ async def test_runtime_dispatches_growth_expert_through_the_shared_harness(
     async def fake_execute(runtime_session, **kwargs):
         captured.append(kwargs)
 
-    monkeypatch.setattr(
-        "app.orchestrator.brain_runtime.agent_harness.execute", fake_execute
-    )
+    monkeypatch.setattr("app.orchestrator.brain_runtime.agent_harness.execute", fake_execute)
     runtime = BrainRuntimeGraph()
     with bind_runtime_session(session):
         state = await runtime._dispatch_round(

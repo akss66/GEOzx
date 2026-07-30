@@ -34,7 +34,7 @@ from app.orchestrator.capability_router import (
     route_explicit_request,
 )
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
-from app.orchestrator.skill_runtime import skill_runtime
+from app.orchestrator.skill_runtime import skill_input_hash, skill_runtime
 from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import skill_registry
 from app.schemas.conversation import (
@@ -222,8 +222,7 @@ async def execute_conversation_turn(
             run=run,
             account_id=account.id,
             decision=decision,
-            response=decision.clarifying_question
-            or "请补充完成这次请求所需的关键信息。",
+            response=decision.clarifying_question or "请补充完成这次请求所需的关键信息。",
             extra_events=[
                 (
                     "brain.runtime.clarification_requested",
@@ -254,6 +253,7 @@ async def execute_conversation_turn(
             run=run,
             decision=decision,
             execution_owner=execution_owner,
+            resume_skill_run=resume_skill_run,
         )
     return await _execute_operation_task(
         session,
@@ -274,6 +274,7 @@ async def _execute_composite_skill(
     run: AgentRun,
     decision: TurnRouteDecision,
     execution_owner: str | None = None,
+    resume_skill_run: SkillRun | None = None,
 ) -> TurnExecutionResult:
     account_id = thread.account_id
     project_id = thread.project_id
@@ -287,6 +288,8 @@ async def _execute_composite_skill(
     }
     if execution_owner is not None:
         execution_kwargs["lease_owner"] = execution_owner
+    if resume_skill_run is not None:
+        execution_kwargs["resume_skill_run"] = resume_skill_run
     executed = await skill_runtime.execute(session, **execution_kwargs)
     projections: list[dict[str, Any]] = []
     if executed.artifact_id is not None:
@@ -320,11 +323,7 @@ async def _execute_composite_skill(
     )
     if executed.status == "running":
         return result
-    task = (
-        await session.get(BrainTask, executed.task_id)
-        if executed.task_id is not None
-        else None
-    )
+    task = await session.get(BrainTask, executed.task_id) if executed.task_id is not None else None
     if task is None:
         raise RuntimeError("composite Skill did not persist its compatibility task")
     persisted_skill_run = await session.get(SkillRun, executed.skill_run_id)
@@ -339,9 +338,7 @@ async def _execute_composite_skill(
         scope=RuntimeStateScope(
             run_id=run.id,
             turn_id=turn.id,
-            skill_run_id=(
-                persisted_skill_run.id if persisted_skill_run is not None else None
-            ),
+            skill_run_id=(persisted_skill_run.id if persisted_skill_run is not None else None),
             task_id=task.id,
             account_id=account_id,
             project_id=project_id,
@@ -662,6 +659,7 @@ async def _execute_query(
         data = dict(skill_run.output_snapshot or {})
     else:
         if skill_run is None:
+            query_input = {"account_id": thread.account_id, "days": 30}
             skill_run = SkillRun(
                 org_id=user.org_id,
                 thread_id=thread.id,
@@ -672,7 +670,8 @@ async def _execute_query(
                 skill_code=_QUERY_SKILL_CODE,
                 skill_version=_QUERY_SKILL_VERSION,
                 status="running",
-                input_snapshot={"account_id": thread.account_id, "days": 30},
+                input_snapshot=query_input,
+                input_hash=skill_input_hash(query_input),
                 output_snapshot={},
             )
             session.add(skill_run)
@@ -866,6 +865,7 @@ async def _block_unavailable_skill(
         )
     )
     if skill_run is None:
+        unavailable_input = {"account_id": thread.account_id}
         skill_run = SkillRun(
             org_id=turn.org_id,
             thread_id=thread.id,
@@ -876,7 +876,8 @@ async def _block_unavailable_skill(
             skill_code=code,
             skill_version=1,
             status="running",
-            input_snapshot={"account_id": thread.account_id},
+            input_snapshot=unavailable_input,
+            input_hash=skill_input_hash(unavailable_input),
             output_snapshot={
                 "code": "SKILL_EXECUTOR_UNAVAILABLE",
                 "message": "该能力尚未接入执行器。",
@@ -951,9 +952,7 @@ async def _execute_operation_task(
             ),
             expected_outputs=["operation_result"],
             confirmation_actions=(
-                ["Confirm external actions."]
-                if decision.mode is TurnExecutionMode.ACTION
-                else []
+                ["Confirm external actions."] if decision.mode is TurnExecutionMode.ACTION else []
             ),
         )
         task.plan = OrchestrationPlan(
@@ -1114,9 +1113,7 @@ async def _conversation_history(
     for row in reversed(rows):
         messages.append({"role": "user", "content": row.user_input})
         if row.assistant_response:
-            messages.append(
-                {"role": "assistant", "content": row.assistant_response}
-            )
+            messages.append({"role": "assistant", "content": row.assistant_response})
     return messages
 
 
@@ -1139,14 +1136,10 @@ def _format_account_data_summary(data: dict[str, Any]) -> str:
     start = period.get("start")
     end = period.get("end")
     if isinstance(start, str) and isinstance(end, str):
-        day_suffix = (
-            f"（近 {days} 天）" if isinstance(days, int) and days > 0 else ""
-        )
+        day_suffix = f"（近 {days} 天）" if isinstance(days, int) and days > 0 else ""
         period_text = f"{start} 至 {end}{day_suffix}"
     else:
-        period_text = (
-            f"近 {days} 天" if isinstance(days, int) and days > 0 else "当前周期"
-        )
+        period_text = f"近 {days} 天" if isinstance(days, int) and days > 0 else "当前周期"
     metrics = data.get("metrics")
     if not isinstance(metrics, dict):
         metrics = {}
@@ -1247,13 +1240,7 @@ def _format_account_data_summary(data: dict[str, Any]) -> str:
                 source_names.append(source_label)
 
     lines = [f"数据周期：{period_text}"]
-    lines.append(
-        f"数据来源：{'；'.join(source_names)}"
-        if source_names
-        else "数据来源：缺失"
-    )
-    lines.append(
-        f"已有指标：{'；'.join(rendered)}" if rendered else "已有指标：暂无"
-    )
+    lines.append(f"数据来源：{'；'.join(source_names)}" if source_names else "数据来源：缺失")
+    lines.append(f"已有指标：{'；'.join(rendered)}" if rendered else "已有指标：暂无")
     lines.append(f"缺失数据：{'、'.join(missing)}" if missing else "缺失数据：未发现")
     return "\n".join(lines)

@@ -87,9 +87,7 @@ async def generate_video(ctx: dict, deliverable_id: int) -> int | None:
     from app.integrations.video_gen.tasks import generate_video_for_deliverable
 
     async with async_session() as session:
-        asset = await generate_video_for_deliverable(
-            session, deliverable_id, emit=publish_event
-        )
+        asset = await generate_video_for_deliverable(session, deliverable_id, emit=publish_event)
         return asset.id if asset else None
 
 
@@ -100,8 +98,7 @@ async def execute_agent_run(
     """Execute one leased AgentRun and persist retry or terminal state."""
 
     worker_id = str(
-        ctx.get("worker_id")
-        or f"{socket.gethostname()}:{ctx.get('job_id', f'agent-run:{run_id}')}"
+        ctx.get("worker_id") or f"{socket.gethostname()}:{ctx.get('job_id', f'agent-run:{run_id}')}"
     )
     heartbeat_task: asyncio.Task[None] | None = None
     async with async_session() as session:
@@ -117,9 +114,7 @@ async def execute_agent_run(
         task_id = int(request.get("task_id") or run.task_id or 0)
         is_conversation_run = run.thread_id is not None and run.turn_id is not None
         task = (
-            None
-            if is_conversation_run
-            else await _load_runtime_task(session, task_id, run.org_id)
+            None if is_conversation_run else await _load_runtime_task(session, task_id, run.org_id)
         )
         if not is_conversation_run and task is None:
             await release_agent_run_failure(
@@ -192,13 +187,9 @@ async def execute_agent_run(
                     session,
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,
-                    regeneration_source_event_id=request.get(
-                        "regeneration_source_event_id"
-                    ),
+                    regeneration_source_event_id=request.get("regeneration_source_event_id"),
                     force_inline=True,
-                    user_message_recorded=bool(
-                        request.get("user_message_recorded")
-                    ),
+                    user_message_recorded=bool(request.get("user_message_recorded")),
                 )
             elif operation == "resume_decision":
                 await runtime_graph.resume_after_decision(
@@ -303,13 +294,25 @@ async def _execute_v2_conversation_run(
     if user is None or thread is None or turn is None:
         raise ValueError("Turn-owned Conversation execution scope is unavailable")
 
-    recoverable_skill = await session.scalar(
-        select(SkillRun)
-        .where(
-            SkillRun.run_id == run.id,
-            SkillRun.org_id == run.org_id,
+    persisted_skills = list(
+        await session.scalars(
+            select(SkillRun).where(
+                SkillRun.run_id == run.id,
+                SkillRun.org_id == run.org_id,
+            )
         )
-        .order_by(SkillRun.id.desc())
+    )
+    recoverable_skills = [
+        item
+        for item in persisted_skills
+        if item.status in {"running", "retry_wait", "waiting_permission"}
+    ]
+    if len(recoverable_skills) > 1:
+        raise RuntimeError("SKILL_RECOVERY_AMBIGUOUS")
+    recoverable_skill = (
+        recoverable_skills[0]
+        if recoverable_skills
+        else (persisted_skills[0] if len(persisted_skills) == 1 else None)
     )
     if recoverable_skill is not None and (
         recoverable_skill.thread_id != thread.id

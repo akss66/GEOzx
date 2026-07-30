@@ -119,16 +119,10 @@ class AgentHarness:
         trace_only: bool = False,
     ) -> AgentHarnessResult:
         if task.org_id != user.org_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
         if scope is not None:
             await scope.validate(session)
-            if (
-                scope.org_id != task.org_id
-                or scope.user_id != user.id
-                or scope.task_id != task.id
-            ):
+            if scope.org_id != task.org_id or scope.user_id != user.id or scope.task_id != task.id:
                 raise RuntimeScopeConflict("Agent Harness scope does not match")
             if any(
                 explicit is not None and explicit != expected
@@ -306,9 +300,7 @@ class AgentHarness:
         operating_context["agent_policy"]["kernel"] = kernel_policy.as_context()
         runner = spec.runner()
         runner.code = code.value
-        runtime_capabilities = {
-            str(item["code"]): item for item in runtime_tool_capabilities(user)
-        }
+        runtime_capabilities = {str(item["code"]): item for item in runtime_tool_capabilities(user)}
         available_tools = (
             []
             if trace_only
@@ -374,9 +366,7 @@ class AgentHarness:
                     content_item_id=content_item.id,
                     task_id=task.id,
                     invocation_id=invocation.id,
-                    trace_id=f"agent-run:{run_id}"
-                    if run_id is not None
-                    else task.thread_id,
+                    trace_id=f"agent-run:{run_id}" if run_id is not None else task.thread_id,
                     project_id=project_id,
                     account_id=account.id,
                     request=purpose,
@@ -710,12 +700,9 @@ class AgentHarness:
         """
         return {
             runtime_code
-            for management_code, permission_mode in management[
-                "tool_permissions"
-            ].items()
+            for management_code, permission_mode in management["tool_permissions"].items()
             if permission_mode == "auto"
-            and (runtime_code := _MANAGEMENT_TO_RUNTIME_TOOL.get(management_code))
-            is not None
+            and (runtime_code := _MANAGEMENT_TO_RUNTIME_TOOL.get(management_code)) is not None
         }
 
     @staticmethod
@@ -736,9 +723,7 @@ class AgentHarness:
         project_id: int | None,
         account_id: int,
     ) -> tuple[Project | None, Account]:
-        account = await require_account_access(
-            session, user, account_id, roles=_OPERATING_ROLES
-        )
+        account = await require_account_access(session, user, account_id, roles=_OPERATING_ROLES)
         if account.status != AccountStatus.ACTIVE:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -752,9 +737,7 @@ class AgentHarness:
         if project_id is None:
             return None, account
 
-        project = await require_project_access(
-            session, user, project_id, roles=_OPERATING_ROLES
-        )
+        project = await require_project_access(session, user, project_id, roles=_OPERATING_ROLES)
         linked_id = await session.scalar(
             select(ProjectAccount.id).where(
                 ProjectAccount.project_id == project.id,
@@ -879,6 +862,16 @@ class AgentHarness:
         task: BrainTask,
         invocation: AgentInvocation,
     ) -> AgentHarnessResult:
+        for item in reversed(invocation.upstream or []):
+            if isinstance(item, dict) and isinstance(item.get("trace_only_output"), dict):
+                return AgentHarnessResult(
+                    task=task,
+                    invocation=invocation,
+                    deliverable=None,
+                    acceptance=None,
+                    knowledge_sources=[],
+                    output=dict(item["trace_only_output"]),
+                )
         if invocation.run_id is not None:
             run = await session.get(AgentRun, invocation.run_id)
             if run is not None:
@@ -895,18 +888,6 @@ class AgentHarness:
                             knowledge_sources=[],
                             output=dict(payload),
                         )
-        for item in reversed(invocation.upstream or []):
-            if isinstance(item, dict) and isinstance(
-                item.get("trace_only_output"), dict
-            ):
-                return AgentHarnessResult(
-                    task=task,
-                    invocation=invocation,
-                    deliverable=None,
-                    acceptance=None,
-                    knowledge_sources=[],
-                    output=dict(item["trace_only_output"]),
-                )
         raise AgentHarnessError("trace-only specialist result is incomplete")
 
     @staticmethod
@@ -917,6 +898,9 @@ class AgentHarness:
         invocation: AgentInvocation,
         payload: dict[str, Any],
     ) -> None:
+        upstream = list(invocation.upstream or [])
+        upstream.append({"trace_only_output": dict(payload)})
+        invocation.upstream = upstream
         if invocation.run_id is None:
             return
         run = await session.get(AgentRun, invocation.run_id)
@@ -934,9 +918,7 @@ class AgentHarness:
         return invocation.step_key or str(invocation.id)
 
     @staticmethod
-    async def _next_version(
-        session: AsyncSession, content_item_id: int, spec: AgentSpec
-    ) -> int:
+    async def _next_version(session: AsyncSession, content_item_id: int, spec: AgentSpec) -> int:
         latest = await session.scalar(
             select(func.max(Deliverable.version)).where(
                 Deliverable.content_item_id == content_item_id,

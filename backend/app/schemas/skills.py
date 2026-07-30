@@ -29,6 +29,8 @@ class SkillDefinition:
     risk_level: Literal["low", "medium", "high"]
     approval_policy: Literal["none", "before_tools", "before_finish"]
     artifact_type: str | None
+    expert_stages: tuple[tuple[str, ...], ...] = ()
+    critic_policy: Literal["none", "required"] = "none"
 
     def __post_init__(self) -> None:
         if not _SKILL_CODE_PATTERN.fullmatch(self.code):
@@ -38,6 +40,13 @@ class SkillDefinition:
         object.__setattr__(self, "supported_platforms", frozenset(self.supported_platforms))
         object.__setattr__(self, "expert_codes", tuple(self.expert_codes))
         object.__setattr__(self, "tool_codes", tuple(self.tool_codes))
+        stages = tuple(tuple(stage) for stage in self.expert_stages)
+        if not stages and self.expert_codes:
+            stages = (tuple(self.expert_codes),)
+        flattened = tuple(code for stage in stages for code in stage)
+        if flattened != self.expert_codes:
+            raise ValueError("expert_stages must flatten to expert_codes in definition order")
+        object.__setattr__(self, "expert_stages", stages)
 
 
 class SkillCatalogItem(BaseModel):
@@ -51,7 +60,9 @@ class SkillCatalogItem(BaseModel):
     description: str
     supported_platforms: list[str]
     expert_codes: list[str]
+    expert_stages: list[list[str]]
     tool_codes: list[str]
+    critic_policy: Literal["none", "required"]
     risk_level: Literal["low", "medium", "high"]
     approval_policy: Literal["none", "before_tools", "before_finish"]
     artifact_type: str | None
@@ -65,7 +76,9 @@ class SkillCatalogItem(BaseModel):
             description=definition.description,
             supported_platforms=sorted(definition.supported_platforms),
             expert_codes=list(definition.expert_codes),
+            expert_stages=[list(stage) for stage in definition.expert_stages],
             tool_codes=list(definition.tool_codes),
+            critic_policy=definition.critic_policy,
             risk_level=definition.risk_level,
             approval_policy=definition.approval_policy,
             artifact_type=definition.artifact_type,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -71,6 +73,18 @@ DataSufficiency = Literal["insufficient", "partial", "sufficient"]
 log = logging.getLogger("dyflow.skill_runtime")
 
 
+def skill_input_hash(snapshot: dict[str, Any]) -> str:
+    """Return the stable SHA-256 identity of one fully frozen Skill input."""
+
+    normalized = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class SkillExecutionResult:
     status: str
@@ -99,6 +113,23 @@ class _SkillLeaseLost(RuntimeError):
     pass
 
 
+class SkillRecoveryConflict(RuntimeError):
+    """A persisted Skill execution cannot be safely resumed."""
+
+
+def resolve_frozen_skill_definition(
+    skill_run: SkillRun,
+    *,
+    registry: Any = skill_registry,
+) -> SkillDefinition:
+    if skill_input_hash(dict(skill_run.input_snapshot or {})) != skill_run.input_hash:
+        raise SkillRecoveryConflict("SKILL_INPUT_INTEGRITY_MISMATCH")
+    try:
+        return registry.get(skill_run.skill_code, version=skill_run.skill_version)
+    except KeyError as exc:
+        raise SkillRecoveryConflict("SKILL_VERSION_UNAVAILABLE") from exc
+
+
 class SkillRuntime:
     """Execute one frozen Skill graph without entering the strategy runtime."""
 
@@ -124,22 +155,53 @@ class SkillRuntime:
         skill_code: str,
         days: int = 30,
         lease_owner: str | None = None,
+        resume_skill_run: SkillRun | None = None,
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
         run_id = run.id
-        definition = skill_registry.get(skill_code)
-        input_payload = (
-            {"days": days} if "days" in definition.input_model.model_fields else {}
+        definition = (
+            resolve_frozen_skill_definition(resume_skill_run)
+            if resume_skill_run is not None
+            else skill_registry.get(skill_code)
         )
-        frozen_input = definition.input_model.model_validate(input_payload)
-        idempotency_key = f"skill:{definition.code}:v{definition.version}"
+        if resume_skill_run is not None:
+            frozen_snapshot = dict(resume_skill_run.input_snapshot or {})
+            model_input = {
+                key: value
+                for key, value in frozen_snapshot.items()
+                if key in definition.input_model.model_fields
+            }
+            frozen_input = definition.input_model.model_validate(model_input)
+        else:
+            input_payload = {"days": days} if "days" in definition.input_model.model_fields else {}
+            frozen_input = definition.input_model.model_validate(input_payload)
+            frozen_snapshot = {
+                "account_id": thread.account_id,
+                **frozen_input.model_dump(mode="json"),
+            }
+        idempotency_key = f"skill:{definition.code}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
-        existing = await session.scalar(
-            select(SkillRun).where(
-                SkillRun.run_id == run_id,
-                SkillRun.idempotency_key == idempotency_key,
+        active = list(
+            await session.scalars(
+                select(SkillRun).where(
+                    SkillRun.run_id == run_id,
+                    SkillRun.skill_code == definition.code,
+                    SkillRun.status.in_({"running", "retry_wait", "waiting_permission"}),
+                )
             )
         )
+        if len(active) > 1:
+            raise SkillRecoveryConflict("SKILL_RECOVERY_AMBIGUOUS")
+        existing = resume_skill_run or (active[0] if active else None)
+        if existing is None:
+            existing = await session.scalar(
+                select(SkillRun).where(
+                    SkillRun.run_id == run_id,
+                    SkillRun.idempotency_key == idempotency_key,
+                )
+            )
+        elif existing.run_id != run_id or existing.skill_code != definition.code:
+            raise SkillRecoveryConflict("SKILL_RECOVERY_SCOPE_CONFLICT")
         if existing is not None and existing.status in {
             "blocked",
             "completed",
@@ -189,18 +251,16 @@ class SkillRuntime:
                 skill_version=definition.version,
                 status="running",
                 input_snapshot={
-                    "account_id": thread.account_id,
-                    **frozen_input.model_dump(mode="json"),
+                    **frozen_snapshot,
                 },
+                input_hash=skill_input_hash(frozen_snapshot),
                 output_snapshot={},
             )
             session.add(skill_run)
             now = utc_now()
             run.attempt += 1
             run.lease_owner = lease_owner
-            run.leased_until = now + timedelta(
-                seconds=max(1, settings.agent_run_lease_seconds)
-            )
+            run.leased_until = now + timedelta(seconds=max(1, settings.agent_run_lease_seconds))
             run.heartbeat_at = now
             run.started_at = run.started_at or now
             run.next_retry_at = None
@@ -235,10 +295,10 @@ class SkillRuntime:
                 if (
                     skill_run.skill_code != definition.code
                     or skill_run.skill_version != definition.version
+                    or skill_run.input_hash != skill_input_hash(frozen_snapshot)
+                    or dict(skill_run.input_snapshot or {}) != frozen_snapshot
                 ):
-                    raise PermissionError(
-                        "concurrent SkillRun winner changed the frozen definition"
-                    ) from exc
+                    raise SkillRecoveryConflict("SKILL_RECOVERY_WINNER_CONFLICT") from exc
                 return self._existing_result(skill_run)
         elif skill_run.task_id != task.id:
             raise PermissionError("SkillRun task ownership does not match")
@@ -276,6 +336,7 @@ class SkillRuntime:
                     content=content,
                     skill_run=skill_run,
                     scope=runtime_scope,
+                    definition=definition,
                     days=frozen_input.days,
                     lease_owner=lease_owner,
                 )
@@ -300,9 +361,7 @@ class SkillRuntime:
                 raise
             return self._existing_result(persisted)
         except Exception as exc:
-            retryable = (
-                classify_runtime_failure(exc) is FailureDisposition.RETRYABLE
-            )
+            retryable = classify_runtime_failure(exc) is FailureDisposition.RETRYABLE
             await session.rollback()
             if retryable:
                 raise
@@ -322,9 +381,7 @@ class SkillRuntime:
             persisted_thread = await session.get(ConversationThread, thread_id)
             scope_mismatch = isinstance(exc, _ToolScopeMismatch)
             terminal_status = "blocked" if scope_mismatch else "failed"
-            error_code = (
-                "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(exc).__name__
-            )
+            error_code = "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(exc).__name__
             response = (
                 "工具返回的数据不属于当前账号，账号体检已停止。"
                 if scope_mismatch
@@ -335,8 +392,7 @@ class SkillRuntime:
                     "status": terminal_status,
                     "task_id": task_id,
                     "artifact_id": None,
-                    "artifact_type": definition.artifact_type
-                    or "account_inspection_report",
+                    "artifact_type": definition.artifact_type or "account_inspection_report",
                     "report": {},
                     "error_code": error_code,
                     "response": response,
@@ -383,12 +439,11 @@ class SkillRuntime:
         content: ContentItem,
         skill_run: SkillRun,
         scope: RuntimeScope,
+        definition: SkillDefinition,
         days: int,
         lease_owner: str,
     ) -> SkillExecutionResult:
-        tool_executor = self._tool_executor or DurableToolExecutor(
-            build_runtime_tool_adapter()
-        )
+        tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
         for tool_code, arguments in (
             ("account.profile", {}),
@@ -431,9 +486,7 @@ class SkillRuntime:
         evidence_refs = _evidence_refs(data_context)
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
-        tool_packet = [
-            {"tool_code": code, "result": value} for code, value in tool_results.items()
-        ]
+        tool_packet = [{"tool_code": code, "result": value} for code, value in tool_results.items()]
         for index, code in enumerate(
             (
                 AgentCode.POSITIONING,
@@ -449,6 +502,10 @@ class SkillRuntime:
                 code=code,
                 purpose="基于所选账号证据完成一键账号体检，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
+                run_id=run.id,
+                skill_run_id=skill_run.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
                 step_key=f"account-inspection:{index}:{code.value}",
                 attempt=0,
                 upstream={
@@ -527,6 +584,7 @@ class SkillRuntime:
                     run=run,
                     report=report,
                     scope=scope,
+                    producer=latest_result.invocation,
                 )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             latest_result = await self._harness.execute(
@@ -536,9 +594,11 @@ class SkillRuntime:
                 code=AgentCode.OPERATOR,
                 purpose="按质量审核意见修订账号体检建议，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                step_key=(
-                    f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"
-                ),
+                run_id=run.id,
+                skill_run_id=skill_run.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                step_key=(f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"),
                 attempt=iteration + 1,
                 upstream={
                     "tool_results": {"items": tool_packet},
@@ -571,17 +631,24 @@ class SkillRuntime:
             )
 
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
+        self._require_formal_producer(
+            latest_result.invocation,
+            scope=scope,
+            definition=definition,
+        )
+        definition.output_model.model_validate(report.model_dump(mode="json"))
         final_deliverable = await write_runtime_deliverable(
             session,
             scope=scope,
             content=content,
-            agent_code=AgentCode.DECISION.value,
+            agent_code=latest_result.invocation.agent_code.value,
             deliverable_type=DeliverableType.REVIEW_REPORT,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
             note=(
                 "business_artifact_type=account_inspection_report; "
+                f"producer_invocation_id={latest_result.invocation.id}; "
                 "generated by account_inspection Skill"
             ),
         )
@@ -636,9 +703,7 @@ class SkillRuntime:
     ) -> SkillExecutionResult:
         """Run one bounded specialist graph and persist its business artifact."""
 
-        tool_executor = self._tool_executor or DurableToolExecutor(
-            build_runtime_tool_adapter()
-        )
+        tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
         for tool_code in definition.tool_codes:
             if tool_code not in {"account.profile", "account.data_context"}:
@@ -698,6 +763,10 @@ class SkillRuntime:
                     "必须遵守当前账号范围，不得编造数据或声称已经发布。"
                 ),
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
+                run_id=run.id,
+                skill_run_id=skill_run.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
                 step_key=f"{definition.code}:{index}:{code.value}",
                 attempt=0,
                 upstream={
@@ -732,25 +801,32 @@ class SkillRuntime:
         report, deliverable_type, deliverable_payload = _build_operating_report(
             definition=definition,
             account_id=thread.account_id,
-            platform=str(
-                tool_results.get("account.profile", {}).get("platform") or "douyin"
-            ),
+            platform=str(tool_results.get("account.profile", {}).get("platform") or "douyin"),
             user_input=turn.user_input,
             frozen_input=frozen_input,
             tool_results=tool_results,
             expert_results=expert_results,
             evidence_refs=evidence_refs,
         )
+        definition.output_model.model_validate(report)
+        self._require_formal_producer(
+            expert_results[-1].invocation,
+            scope=scope,
+            definition=definition,
+        )
         deliverable = await write_runtime_deliverable(
             session,
             scope=scope,
             content=content,
-            agent_code=AgentCode.DECISION.value,
+            agent_code=expert_results[-1].invocation.agent_code.value,
             deliverable_type=deliverable_type,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=deliverable_payload,
-            note=f"generated by {definition.code} Skill",
+            note=(
+                f"producer_invocation_id={expert_results[-1].invocation.id}; "
+                f"generated by {definition.code} Skill"
+            ),
         )
 
         content.status = ContentStatus.DRAFT
@@ -956,6 +1032,29 @@ class SkillRuntime:
         await session.commit()
 
     @staticmethod
+    def _require_formal_producer(
+        invocation: AgentInvocation,
+        *,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
+    ) -> None:
+        agent_code = (
+            invocation.agent_code.value
+            if isinstance(invocation.agent_code, AgentCode)
+            else str(invocation.agent_code)
+        )
+        if (
+            invocation.status is not AgentInvocationStatus.DONE
+            or agent_code == AgentCode.DECISION.value
+            or agent_code not in definition.expert_codes
+            or invocation.run_id != scope.run_id
+            or invocation.skill_run_id != scope.skill_run_id
+            or invocation.thread_id != scope.thread_id
+            or invocation.turn_id != scope.turn_id
+        ):
+            raise SkillRecoveryConflict("SKILL_FORMAL_PRODUCER_INVALID")
+
+    @staticmethod
     async def _complete_for_human_review(
         session: AsyncSession,
         *,
@@ -967,18 +1066,20 @@ class SkillRuntime:
         run: AgentRun,
         report: AccountInspectionReport,
         scope: RuntimeScope,
+        producer: AgentInvocation,
     ) -> SkillExecutionResult:
         deliverable = await write_runtime_deliverable(
             session,
             scope=scope,
             content=content,
-            agent_code=AgentCode.DECISION.value,
+            agent_code=producer.agent_code.value,
             deliverable_type=DeliverableType.REVIEW_REPORT,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
             note=(
                 "business_artifact_type=account_inspection_report; "
+                f"producer_invocation_id={producer.id}; "
                 "critic below auto-pass threshold; requires human review"
             ),
         )
@@ -1028,9 +1129,7 @@ class SkillRuntime:
         skill_name: str = "账号体检",
         artifact_type: str = "account_inspection_report",
     ) -> SkillExecutionResult:
-        paused_status = (
-            "waiting_permission" if status == "waiting_approval" else "failed"
-        )
+        paused_status = "waiting_permission" if status == "waiting_approval" else "failed"
         error_code = (
             "TOOL_PERMISSION_REQUIRED"
             if paused_status == "waiting_permission"
@@ -1231,9 +1330,7 @@ class SkillRuntime:
             skill_run_id=skill_run.id,
             task_id=skill_run.task_id,
             artifact_id=output.get("artifact_id"),
-            artifact_type=str(
-                output.get("artifact_type") or "account_inspection_report"
-            ),
+            artifact_type=str(output.get("artifact_type") or "account_inspection_report"),
             report=dict(output.get("report") or {}),
             response=response,
             error_code=output.get("error_code") or skill_run.error_code,
@@ -1254,8 +1351,7 @@ def _build_operating_report(
     outputs = [dict(item.output or {}) for item in expert_results]
     participants = [str(item.invocation.agent_code) for item in expert_results]
     outputs_by_agent = {
-        str(item.invocation.agent_code): dict(item.output or {})
-        for item in expert_results
+        str(item.invocation.agent_code): dict(item.output or {}) for item in expert_results
     }
     preferred_agent = (
         AgentCode.OPERATOR.value
@@ -1265,11 +1361,7 @@ def _build_operating_report(
     latest = outputs_by_agent.get(preferred_agent, outputs[-1] if outputs else {})
 
     if definition.code == "script_generation":
-        scenes = [
-            str(item).strip()
-            for item in latest.get("scenes", [])
-            if str(item).strip()
-        ]
+        scenes = [str(item).strip() for item in latest.get("scenes", []) if str(item).strip()]
         while len(scenes) < 3:
             scenes.append(
                 "主体：用具体案例解释核心观点。"
@@ -1282,9 +1374,7 @@ def _build_operating_report(
             hook=str(latest.get("hook") or "先说结论：这件事最容易踩的坑在这里。"),
             scenes=scenes,
             duration_seconds=int(
-                latest.get("duration_seconds")
-                or frozen_input.get("duration_seconds")
-                or 60
+                latest.get("duration_seconds") or frozen_input.get("duration_seconds") or 60
             ),
             bgm_suggestion=latest.get("bgm_suggestion"),
             participating_experts=participants,
@@ -1336,9 +1426,7 @@ def _build_operating_report(
             theme=str(latest.get("theme") or latest.get("title") or user_input[:80]),
             topics=topics,
             posting_notes=[
-                str(item)
-                for item in latest.get("posting_notes", [])
-                if str(item).strip()
+                str(item) for item in latest.get("posting_notes", []) if str(item).strip()
             ]
             or ["先小批量发布并根据完播、互动和咨询反馈调整后续选题。"],
             evidence_refs=evidence_refs,
@@ -1361,8 +1449,7 @@ def _build_operating_report(
         metrics = dict(metrics) if isinstance(metrics, dict) else {}
         coverage = data_context.get("coverage")
         has_data = bool(metrics) or (
-            isinstance(coverage, dict)
-            and any(value == "available" for value in coverage.values())
+            isinstance(coverage, dict) and any(value == "available" for value in coverage.values())
         )
         highlights = _string_list(latest.get("highlights"))
         issues = _string_list(latest.get("issues"))
@@ -1422,8 +1509,7 @@ def _build_operating_report(
                     ],
                 }
             ],
-            operating_notes=issues
-            or ["本 Skill 只完成发布准备，不会直接向平台发布。"],
+            operating_notes=issues or ["本 Skill 只完成发布准备，不会直接向平台发布。"],
             participating_experts=participants,
         )
         data = report.model_dump(mode="json")
@@ -1493,8 +1579,7 @@ def _build_report(
         else ("partial" if len(metrics) < 3 else "sufficient")
     )
     summaries = [
-        str(getattr(item.invocation, "output_summary", "") or "").strip()
-        for item in expert_results
+        str(getattr(item.invocation, "output_summary", "") or "").strip() for item in expert_results
     ]
     findings = [item for item in summaries if item]
     operator_payload = next(
@@ -1509,9 +1594,7 @@ def _build_report(
     if sufficiency == "insufficient":
         findings = ["当前只能确认数据缺口，尚不能形成账号表现或内容方向结论。"]
     if sufficiency == "insufficient":
-        summary = (
-            "现有数据不足，无法形成可靠的表现结论；本报告先列出缺失数据和补数动作。"
-        )
+        summary = "现有数据不足，无法形成可靠的表现结论；本报告先列出缺失数据和补数动作。"
         recommendations = ["先补齐账号指标和内容表现快照，再进行趋势与内容诊断。"]
         next_action = "补齐并确认最近30天账号及内容数据"
     else:
