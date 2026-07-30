@@ -1,6 +1,7 @@
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from app.orchestrator import capability_router
 from app.orchestrator.capability_router import SkillUnavailable, route_explicit_request
 from app.orchestrator.skills.registry import SkillRegistry
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
@@ -99,6 +100,78 @@ def test_no_explicit_skill_defers_to_llm_classification(registry: SkillRegistry)
     assert (
         route_explicit_request(
             requested_skill_code=None,
+            platform="douyin",
+            registry=registry,
+            has_account=True,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_mode"),
+    [
+        ("你好", TurnExecutionMode.ANSWER),
+        ("你是谁？", TurnExecutionMode.ANSWER),
+        ("你能做什么？", TurnExecutionMode.ANSWER),
+        ("查询当前账号最近30天的数据", TurnExecutionMode.QUERY),
+        ("只查询当前账号近30天数据", TurnExecutionMode.QUERY),
+    ],
+)
+def test_deterministic_request_routes_clear_safe_requests(
+    registry: SkillRegistry,
+    message: str,
+    expected_mode: TurnExecutionMode,
+) -> None:
+    """Catches removal of the high-confidence task-free routing branches."""
+
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is expected_mode
+    assert decision.requires_operation_task is False
+
+
+def test_deterministic_request_routes_account_inspection_to_published_skill(
+    registry: SkillRegistry,
+) -> None:
+    """Catches an account-inspection request being sent to model classification."""
+
+    decision = capability_router.route_deterministic_request(
+        "给当前账号做一次体检",
+        platform="douyin",
+        registry=registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == "account_inspection"
+    assert decision.requires_operation_task is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "不要给当前账号体检",
+        "只查询",
+        "只查询当前账号数据，再做一次体检",
+        "帮我看看账号怎么样，顺便给个建议",
+    ],
+)
+def test_deterministic_request_defers_negated_or_ambiguous_requests(
+    registry: SkillRegistry, message: str
+) -> None:
+    """Catches broad keyword matching that could trigger an external Skill."""
+
+    assert (
+        capability_router.route_deterministic_request(
+            message,
             platform="douyin",
             registry=registry,
             has_account=True,

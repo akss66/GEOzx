@@ -29,6 +29,7 @@ from app.orchestrator.brain_intelligence import (
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
 from app.orchestrator.capability_router import (
     SkillUnavailable,
+    route_deterministic_request,
     route_explicit_request,
 )
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
@@ -463,6 +464,14 @@ async def _route_turn(
                 reason="requested_skill_not_registered",
             )
         return decision
+    deterministic_decision = route_deterministic_request(
+        request.message,
+        platform=platform,
+        registry=skill_registry,
+        has_account=True,
+    )
+    if deterministic_decision is not None:
+        return deterministic_decision
     decision = await brain_intelligence.classify_turn(
         session,
         user.org_id,

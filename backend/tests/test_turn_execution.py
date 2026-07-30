@@ -164,6 +164,44 @@ async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_deterministic_answer_skips_model_classification(
+    session, admin, monkeypatch
+) -> None:
+    """Catches deterministic hits regressing into unnecessary model classification."""
+
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="deterministic-greeting"
+    )
+    turn.user_input = "你好"
+    await session.commit()
+
+    async def should_not_classify(*_args, **_kwargs):
+        raise AssertionError("deterministic greeting must not classify")
+
+    async def answer(*_args, **_kwargs):
+        return "你好，我是运营大脑。"
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn",
+        should_not_classify,
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.answer_turn", answer
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("deterministic-greeting", "你好"),
+    )
+
+    assert result.mode is TurnExecutionMode.ANSWER
+    assert result.response == "你好，我是运营大脑。"
+
+
+@pytest.mark.asyncio
 async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
     session, admin, monkeypatch
 ) -> None:
