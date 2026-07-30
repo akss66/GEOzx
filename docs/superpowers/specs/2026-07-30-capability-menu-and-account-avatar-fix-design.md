@@ -43,7 +43,7 @@ Portal 使菜单脱离 `.tz-brain-stage` 的裁切上下文；动态高度保证
 
 ## 数据流与错误处理
 
-- 账号接口继续从 `PlatformAccountAuth.raw_profile` 和 `Account.auth` 解析 `avatar_url`。
+- 账号接口和 `/workspace-context` 共用同一个解析函数，从 `PlatformAccountAuth.raw_profile` 和 `Account.auth` 返回一致的 `avatar_url`，确保顶部选择器实际获得同步头像。
 - `AccountContext` 只有在当前账号存在同步头像时才发起鉴权 Blob 请求；切换账号或卸载时取消请求并释放 Object URL。
 - 后端上游读取失败返回 `502`，未同步头像返回 `404`；前端统一回退到昵称首字，不影响账号选择。
 - Portal 仅在浏览器环境且菜单打开时创建；测试和服务端环境不依赖额外 DOM 容器。

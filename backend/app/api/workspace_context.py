@@ -13,10 +13,18 @@ from app.core.workspace_access import (
     require_project_access,
 )
 from app.db import get_session
-from app.models import Account, AccountClient, Client, Project, ProjectAccount
+from app.models import (
+    Account,
+    AccountClient,
+    Client,
+    PlatformAccountAuth,
+    Project,
+    ProjectAccount,
+)
 from app.models.enums import ClientStatus
 from app.schemas.client import ClientOut
 from app.schemas.workspace import AccountOut, ProjectOut, account_out
+from app.services.account_avatar import resolve_account_avatar_url
 
 router = APIRouter(tags=["workspace-context"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -120,6 +128,20 @@ async def get_workspace_context(
     for account_id_value, client_id_value in client_rows:
         client_ids_by_account.setdefault(account_id_value, []).append(client_id_value)
 
+    auth_by_account: dict[int, PlatformAccountAuth] = {}
+    if accounts:
+        auth_rows = (
+            await session.scalars(
+                select(PlatformAccountAuth).where(
+                    PlatformAccountAuth.org_id == user.org_id,
+                    PlatformAccountAuth.account_id.in_(
+                        [account.id for account in accounts]
+                    ),
+                )
+            )
+        ).all()
+        auth_by_account = {row.account_id: row for row in auth_rows}
+
     return WorkspaceContextOut(
         clients=[ClientOut.model_validate(row) for row in clients],
         selected_client=(
@@ -135,6 +157,12 @@ async def get_workspace_context(
             account_out(
                 account,
                 project_ids_by_account.get(account.id),
+                operational={
+                    "avatar_url": resolve_account_avatar_url(
+                        account,
+                        auth_by_account.get(account.id),
+                    )
+                },
                 client_ids=client_ids_by_account.get(account.id),
             )
             for account in accounts

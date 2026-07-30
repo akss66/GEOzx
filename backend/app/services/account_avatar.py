@@ -13,6 +13,7 @@ from app.core.outbound_url import (
     UnsafeOutboundURLError,
     bounded_outbound_request,
 )
+from app.models import Account, PlatformAccountAuth
 
 _ALLOWED_AVATAR_CONTENT_TYPES = frozenset(
     {"image/avif", "image/jpeg", "image/png", "image/webp"}
@@ -35,6 +36,26 @@ class UnsupportedAccountAvatarError(ValueError):
 class AccountAvatarImage:
     content: bytes
     content_type: str
+
+
+def resolve_account_avatar_url(
+    account: Account,
+    platform_auth: PlatformAccountAuth | None,
+) -> str | None:
+    """Resolve the synchronized avatar consistently across account views."""
+    raw_profile = (
+        platform_auth.raw_profile
+        if platform_auth is not None and isinstance(platform_auth.raw_profile, dict)
+        else {}
+    )
+    account_auth = account.auth if isinstance(account.auth, dict) else {}
+    value = (
+        raw_profile.get("avatar")
+        or raw_profile.get("avatar_url")
+        or account_auth.get("avatar")
+        or account_auth.get("avatar_url")
+    )
+    return value if isinstance(value, str) and value else None
 
 
 def normalize_douyin_avatar_url(url: str) -> str:

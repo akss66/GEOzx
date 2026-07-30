@@ -1,6 +1,6 @@
 import pytest
 
-from app.models import Account, ClientMembership
+from app.models import Account, ClientMembership, PlatformAccountAuth
 from app.models.enums import Platform, WorkspaceRole
 
 
@@ -11,6 +11,37 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.asyncio
+async def test_workspace_context_includes_synchronized_account_avatar(
+    client,
+    admin,
+    session,
+) -> None:
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    account = (
+        await client.post(
+            "/accounts",
+            headers=_auth(token),
+            json={"nickname": "Avatar account", "platform": "douyin"},
+        )
+    ).json()
+    avatar_url = "https://p3.douyinpic.com/aweme/100x100/avatar.jpeg"
+    session.add(
+        PlatformAccountAuth(
+            org_id=admin.org_id,
+            account_id=account["id"],
+            platform="douyin",
+            raw_profile={"avatar": avatar_url},
+        )
+    )
+    await session.commit()
+
+    response = await client.get("/workspace-context", headers=_auth(token))
+
+    assert response.status_code == 200
+    assert response.json()["accounts"][0]["avatar_url"] == avatar_url
 
 
 @pytest.mark.asyncio

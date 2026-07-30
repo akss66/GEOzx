@@ -63,31 +63,13 @@ from app.schemas.workspace import (
 from app.services.account_avatar import (
     UnsupportedAccountAvatarError,
     fetch_account_avatar,
+    resolve_account_avatar_url,
 )
 from app.services.ai_coo_evidence import build_account_situation
 
 router = APIRouter(tags=["accounts"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
-
-
-def _resolve_avatar_url(
-    account: Account,
-    platform_auth: PlatformAccountAuth | None,
-) -> str | None:
-    raw_profile = (
-        platform_auth.raw_profile
-        if platform_auth is not None and isinstance(platform_auth.raw_profile, dict)
-        else {}
-    )
-    account_auth = account.auth if isinstance(account.auth, dict) else {}
-    value = (
-        raw_profile.get("avatar")
-        or raw_profile.get("avatar_url")
-        or account_auth.get("avatar")
-        or account_auth.get("avatar_url")
-    )
-    return value if isinstance(value, str) and value else None
 
 
 async def _get_owned_account(session: AsyncSession, account_id: int, org_id: int) -> Account:
@@ -239,7 +221,7 @@ async def _account_operational_context(
             publish_capability = "unavailable"
 
         result[account_id] = {
-            "avatar_url": _resolve_avatar_url(account, auth),
+            "avatar_url": resolve_account_avatar_url(account, auth),
             "positioning_summary": None,
             "current_task": None,
             "risk_count": 0,
@@ -649,7 +631,7 @@ async def get_account_avatar(
             PlatformAccountAuth.account_id == account.id,
         )
     )
-    avatar_url = _resolve_avatar_url(account, platform_auth)
+    avatar_url = resolve_account_avatar_url(account, platform_auth)
     if avatar_url is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
