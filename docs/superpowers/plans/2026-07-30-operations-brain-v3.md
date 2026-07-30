@@ -159,24 +159,41 @@
 
 **Files:**
 - Modify: `backend/app/worker.py`
+- Modify: `backend/app/models/skill_runtime.py`
+- Modify: `backend/app/schemas/skills.py`
+- Modify: `backend/app/services/turn_execution.py`
 - Modify: `backend/app/orchestrator/skill_runtime.py`
+- Modify: `backend/app/orchestrator/skills/registry.py`
 - Modify: `backend/app/orchestrator/skills/account_inspection.py`
 - Modify: `backend/app/orchestrator/skills/operating_tasks.py`
 - Modify: `backend/app/orchestrator/agent_harness.py`
+- Create: `backend/migrations/versions/20260730_0400_skill_recovery_freeze.py`
 - Test: `backend/tests/test_skill_runtime_models.py`
+- Test: `backend/tests/test_skill_registry.py`
 - Test: `backend/tests/test_account_inspection_skill.py`
-- Test: `backend/tests/test_operating_task_skills.py`
+- Test: `backend/tests/test_operating_skills.py`
+- Test: `backend/tests/test_agent_harness.py`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_migrations.py`
 
 **Interfaces:**
 - 恢复使用持久化 `skill_code + skill_version + input_hash`，不得自动升级 Registry 版本。
-- SkillDefinition 明确 `expert_codes`、`tool_codes`、`critic_policy`、`artifact_type`。
+- 逻辑幂等键不含版本；恢复优先使用显式 SkillRun，多个非终态候选必须冲突，不能选择“最新一条”。
+- SkillDefinition 明确 `expert_stages`、`tool_codes`、`critic_policy`、`artifact_type`。
+- 同一专家 stage 使用独立 AsyncSession 有界并行；Invocation 自身保存 trace 输出，父会话只按定义顺序汇总 DTO。
+- 正式成果必须引用已完成的专家 Invocation，producer 不得为 `00-decision`。
 - 普通 ANSWER/QUERY 不进入 Critic。
 
-- [ ] 写测试：v1 运行中部署 v2 后仍恢复 v1；相同幂等键不同输入必须冲突。
-- [ ] 写测试：独立专家可并行；正式成果按策略审核；聊天和查询零 Critic 调用。
-- [ ] 写测试：专家失败时主 Agent 不创建冒充专家的正式成果。
+- [ ] 写测试：v1 运行中部署 v2 后仍恢复 v1 和原始输入；精确版本缺失时阻塞，不回退最新版本。
+- [ ] 写测试：持久化快照 hash 被篡改、相同幂等键不同输入、并发 winner 的 version/hash/scope 不同必须冲突。
+- [ ] 写测试：旧 versioned 幂等键可恢复；多个非终态 legacy SkillRun 必须返回恢复歧义。
+- [ ] 写测试：同 stage 专家用独立 session 真实并行，结果按定义顺序汇总；下一 stage 只读取已完成的前序输出。
+- [ ] 写测试：Invocation 独立保存 trace 输出且可恢复；任一专家失败时正式 Deliverable 数量为 0。
+- [ ] 写测试：正式成果 producer 来自专家 Invocation，不是 `00-decision`；required policy 调 Critic，none/ANSWER/QUERY 零 Critic。
 - [ ] 运行测试确认失败。
-- [ ] 冻结 Skill 恢复参数，实现有界并行和按需质量门。
+- [ ] 迁移 canonical backfill `input_hash`，遇到重复活跃 SkillRun 或坏快照时整体回滚。
+- [ ] 冻结 Skill 恢复参数；实现独立会话有界并行、Invocation trace 权威存储和按需质量门。
+- [ ] Registry 保留所有仍可能恢复的版本；旧 AgentRun trace 只作为兼容读取 fallback。
 - [ ] 运行定向测试并提交 `feat: freeze skill recovery and bound expert quality gates`。
 
 ### Task 7: 对话删除生命周期和外部副作用幂等
