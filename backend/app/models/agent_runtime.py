@@ -40,6 +40,32 @@ class AgentRun(Base, TimestampMixin):
             "org_id",
             name="uq_agent_runs_id_thread_turn_org",
         ),
+        UniqueConstraint(
+            "id",
+            "thread_id",
+            "turn_id",
+            name="uq_agent_runs_id_thread_turn",
+        ),
+        UniqueConstraint(
+            "id",
+            "task_id",
+            "thread_id",
+            "turn_id",
+            name="uq_agent_runs_id_task_thread_turn",
+        ),
+        UniqueConstraint(
+            "id",
+            "task_id",
+            "thread_id",
+            "turn_id",
+            "org_id",
+            name="uq_agent_runs_id_task_thread_turn_org",
+        ),
+        ForeignKeyConstraint(
+            ["task_id", "org_id"],
+            ["brain_tasks.id", "brain_tasks.org_id"],
+            name="fk_agent_runs_task_org",
+        ),
         ForeignKeyConstraint(
             ["thread_id", "org_id"],
             ["conversation_threads.id", "conversation_threads.org_id"],

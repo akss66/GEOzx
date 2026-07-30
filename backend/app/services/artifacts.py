@@ -329,11 +329,10 @@ async def create_artifact_revision(
     payload: dict[str, Any],
     note: str | None,
 ) -> ArtifactOut:
-    source, content, _ = await get_artifact(
+    source, content, _ = await _get_artifact_for_revision(
         session,
         user,
         artifact_id,
-        roles=ARTIFACT_ACTION_ROLES,
     )
     latest_version = await _require_latest_artifact_version(session, source)
     if (
@@ -391,6 +390,43 @@ async def create_artifact_revision(
         expected_org_id=user.org_id,
         expected_account_id=account_id,
     )
+
+
+async def _get_artifact_for_revision(
+    session: AsyncSession,
+    user: User,
+    artifact_id: int,
+) -> tuple[Deliverable, ContentItem, _ArtifactProvenance]:
+    """Authorize ownership, then surface corrupt copied lineage as a conflict."""
+
+    deliverable = await session.get(Deliverable, artifact_id)
+    if deliverable is None:
+        raise _artifact_not_found()
+    content = await session.get(ContentItem, deliverable.content_item_id)
+    if content is None or content.account_id is None:
+        raise _artifact_not_found()
+    account = await require_account_access(
+        session,
+        user,
+        content.account_id,
+        roles=ARTIFACT_ACTION_ROLES,
+    )
+    provenance = await _load_valid_provenance(
+        session,
+        deliverable,
+        content,
+        expected_org_id=account.org_id,
+        expected_account_id=account.id,
+    )
+    if provenance is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ARTIFACT_LINEAGE_CONFLICT",
+                "message": "成果来源链不一致，无法创建修订版本",
+            },
+        )
+    return deliverable, content, provenance
 
 
 async def accept_artifact(

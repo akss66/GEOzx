@@ -373,7 +373,9 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         )
         == 0
     )
-    assert await session.get(BrainTask, run.task_id) is None
+    preserved_task = await session.get(BrainTask, run.task_id)
+    assert preserved_task is not None
+    assert preserved_task.content_item_id == content_item_id
     preserved_content = await session.get(ContentItem, content_item_id)
     preserved_deliverable = await session.get(Deliverable, deliverable_id)
     assert preserved_content is not None

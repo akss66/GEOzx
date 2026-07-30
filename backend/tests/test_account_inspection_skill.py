@@ -181,12 +181,13 @@ class _FakeHarness:
     async def execute(self, *args, **kwargs):
         self.calls.append(kwargs["code"])
         session = args[0]
+        scope = kwargs["scope"]
         invocation = AgentInvocation(
             task_id=kwargs["task"].id,
-            run_id=kwargs["run_id"],
-            skill_run_id=kwargs["skill_run_id"],
-            thread_id=kwargs["thread_id"],
-            turn_id=kwargs["turn_id"],
+            run_id=scope.run_id,
+            skill_run_id=scope.skill_run_id,
+            thread_id=scope.thread_id,
+            turn_id=scope.turn_id,
             step_key=kwargs["step_key"],
             attempt=kwargs["attempt"],
             agent_code=kwargs["code"],

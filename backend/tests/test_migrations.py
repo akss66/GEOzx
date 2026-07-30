@@ -135,6 +135,176 @@ def test_runtime_state_convergence_migrates_history_before_constraints(
         }
 
 
+def test_runtime_scope_migration_backfills_only_canonical_sources_and_preflights_conflicts(
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260730_0300_runtime_scope_constraints"
+    )
+    assert migration.down_revision == "20260730_0200"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    for name, columns in (
+        (
+            "brain_tasks",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("org_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "agent_runs",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("org_id", sa.Integer, nullable=False),
+                sa.Column("task_id", sa.Integer),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+            ),
+        ),
+        (
+            "skill_runs",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("org_id", sa.Integer, nullable=False),
+                sa.Column("task_id", sa.Integer),
+                sa.Column("run_id", sa.Integer, nullable=False),
+                sa.Column("thread_id", sa.Integer, nullable=False),
+                sa.Column("turn_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "agent_invocations",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("task_id", sa.Integer, nullable=False),
+                sa.Column("run_id", sa.Integer),
+                sa.Column("skill_run_id", sa.Integer),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+            ),
+        ),
+        (
+            "agent_tool_calls",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("task_id", sa.Integer, nullable=False),
+                sa.Column("invocation_id", sa.Integer),
+                sa.Column("skill_run_id", sa.Integer),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+            ),
+        ),
+        (
+            "conversation_threads",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("account_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "conversation_turns",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("thread_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "content_items",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("account_id", sa.Integer),
+            ),
+        ),
+        (
+            "deliverables",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("content_item_id", sa.Integer, nullable=False),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+                sa.Column("run_id", sa.Integer),
+                sa.Column("skill_run_id", sa.Integer),
+            ),
+        ),
+    ):
+        sa.Table(name, metadata, *columns)
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(sa.text("INSERT INTO brain_tasks VALUES (1, 7)"))
+        connection.execute(
+            sa.text("INSERT INTO conversation_threads VALUES (10, 99)")
+        )
+        connection.execute(sa.text("INSERT INTO conversation_turns VALUES (20, 10)"))
+        connection.execute(sa.text("INSERT INTO content_items VALUES (30, 99)"))
+        connection.execute(
+            sa.text("INSERT INTO agent_runs VALUES (40, 7, 1, 10, 20)")
+        )
+        connection.execute(
+            sa.text("INSERT INTO skill_runs VALUES (50, 7, 1, 40, 10, 20)")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO agent_invocations VALUES "
+                "(60, 1, NULL, 50, NULL, NULL), "
+                "(61, 1, NULL, NULL, NULL, NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO agent_tool_calls VALUES "
+                "(70, 1, 60, NULL, NULL, NULL), "
+                "(71, 1, 61, NULL, NULL, NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverables VALUES "
+                "(80, 30, NULL, NULL, NULL, 50), "
+                "(81, 30, NULL, NULL, NULL, NULL)"
+            )
+        )
+
+        migration._preflight(connection)
+        migration._backfill_canonical_sources(connection)
+        migration._preflight(connection)
+        assert connection.execute(
+            sa.text(
+                "SELECT run_id, thread_id, turn_id "
+                "FROM agent_invocations WHERE id = 60"
+            )
+        ).one() == (40, 10, 20)
+        assert connection.execute(
+            sa.text(
+                "SELECT skill_run_id, thread_id, turn_id "
+                "FROM agent_tool_calls WHERE id = 70"
+            )
+        ).one() == (50, 10, 20)
+        assert connection.execute(
+            sa.text(
+                "SELECT run_id, thread_id, turn_id "
+                "FROM deliverables WHERE id = 80"
+            )
+        ).one() == (40, 10, 20)
+        assert connection.execute(
+            sa.text(
+                "SELECT run_id, skill_run_id, thread_id, turn_id "
+                "FROM agent_invocations WHERE id = 61"
+            )
+        ).one() == (None, None, None, None)
+
+        connection.execute(
+            sa.text("UPDATE agent_invocations SET thread_id = 999 WHERE id = 60")
+        )
+        with pytest.raises(RuntimeError, match="invocation_graph"):
+            migration._preflight(connection)
+
+    source = inspect.getsource(migration)
+    assert "brain_tasks.thread_id" not in source
+    assert "account_ids" not in source
+
+
 def test_client_workspace_migration_is_additive() -> None:
     module = importlib.import_module("migrations.versions.20260716_0200_client_workspace_shell")
 
@@ -196,8 +366,8 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_runtime_state_convergence() -> None:
-    assert get_head_revision() == "20260730_0200"
+def test_migration_head_is_runtime_scope_constraints() -> None:
+    assert get_head_revision() == "20260730_0300"
 
 
 def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:

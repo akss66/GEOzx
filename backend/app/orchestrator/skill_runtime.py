@@ -24,7 +24,6 @@ from app.models import (
     ContentItem,
     ConversationThread,
     ConversationTurn,
-    Deliverable,
     SkillRun,
     TaskBrief,
     User,
@@ -45,6 +44,7 @@ from app.orchestrator.ai_coo_critic import (
     ai_coo_critic_service,
 )
 from app.orchestrator.brain_intelligence import brain_intelligence
+from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skills.account_inspection import (
     AccountInspectionCriticOutcome,
@@ -62,6 +62,7 @@ from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
+from app.services.runtime_deliverables import write_runtime_deliverable
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 _ACCOUNT_INSPECTION = "account_inspection"
@@ -242,6 +243,15 @@ class SkillRuntime:
         elif skill_run.task_id != task.id:
             raise PermissionError("SkillRun task ownership does not match")
 
+        runtime_scope = await RuntimeScope.from_conversation(
+            session,
+            user=user,
+            thread=thread,
+            turn=turn,
+            run=run,
+        )
+        runtime_scope = await runtime_scope.bind_task(session, task)
+        runtime_scope = await runtime_scope.bind_skill(session, skill_run)
         skill_run_id = skill_run.id
         task_id = task.id
         thread_id = thread.id
@@ -265,6 +275,7 @@ class SkillRuntime:
                     task=task,
                     content=content,
                     skill_run=skill_run,
+                    scope=runtime_scope,
                     days=frozen_input.days,
                     lease_owner=lease_owner,
                 )
@@ -277,6 +288,7 @@ class SkillRuntime:
                 task=task,
                 content=content,
                 skill_run=skill_run,
+                scope=runtime_scope,
                 definition=definition,
                 frozen_input=frozen_input.model_dump(mode="json"),
                 lease_owner=lease_owner,
@@ -370,6 +382,7 @@ class SkillRuntime:
         task: BrainTask,
         content: ContentItem,
         skill_run: SkillRun,
+        scope: RuntimeScope,
         days: int,
         lease_owner: str,
     ) -> SkillExecutionResult:
@@ -392,11 +405,8 @@ class SkillRuntime:
                     idempotency_key=f"{skill_run.id}:{tool_code}",
                 ),
                 project_id=thread.project_id,
-                account_id=thread.account_id,
                 agent_code=AgentCode.DECISION.value,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             if outcome.status != "success" or outcome.result is None:
@@ -439,16 +449,13 @@ class SkillRuntime:
                 code=code,
                 purpose="基于所选账号证据完成一键账号体检，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
                 step_key=f"account-inspection:{index}:{code.value}",
                 attempt=0,
                 upstream={
                     "tool_results": {"items": tool_packet},
                     "expert_outputs": upstream_outputs,
                 },
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
                 trace_only=True,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -519,6 +526,7 @@ class SkillRuntime:
                     turn=turn,
                     run=run,
                     report=report,
+                    scope=scope,
                 )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             latest_result = await self._harness.execute(
@@ -528,7 +536,6 @@ class SkillRuntime:
                 code=AgentCode.OPERATOR,
                 purpose="按质量审核意见修订账号体检建议，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
                 step_key=(
                     f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"
                 ),
@@ -540,9 +547,7 @@ class SkillRuntime:
                         "suggestions": review.suggestions,
                     },
                 },
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
                 trace_only=True,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -566,14 +571,12 @@ class SkillRuntime:
             )
 
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
-        final_deliverable = Deliverable(
-            content_item_id=content.id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            skill_run_id=skill_run.id,
+        final_deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
             agent_code=AgentCode.DECISION.value,
-            type=DeliverableType.REVIEW_REPORT,
+            deliverable_type=DeliverableType.REVIEW_REPORT,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
@@ -582,8 +585,6 @@ class SkillRuntime:
                 "generated by account_inspection Skill"
             ),
         )
-        session.add(final_deliverable)
-        await session.flush()
         quality = await session.scalar(
             select(AgentQualityScore)
             .where(
@@ -628,6 +629,7 @@ class SkillRuntime:
         task: BrainTask,
         content: ContentItem,
         skill_run: SkillRun,
+        scope: RuntimeScope,
         definition: SkillDefinition,
         frozen_input: dict[str, Any],
         lease_owner: str,
@@ -657,11 +659,8 @@ class SkillRuntime:
                     idempotency_key=f"{skill_run.id}:{tool_code}",
                 ),
                 project_id=thread.project_id,
-                account_id=thread.account_id,
                 agent_code=AgentCode.DECISION.value,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
             )
             if outcome.status != "success" or outcome.result is None:
                 return await self._pause_for_tool(
@@ -699,7 +698,6 @@ class SkillRuntime:
                     "必须遵守当前账号范围，不得编造数据或声称已经发布。"
                 ),
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
                 step_key=f"{definition.code}:{index}:{code.value}",
                 attempt=0,
                 upstream={
@@ -711,9 +709,7 @@ class SkillRuntime:
                     },
                     "expert_outputs": upstream_outputs,
                 },
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
                 trace_only=True,
             )
             await self._attach_expert_provenance(
@@ -745,21 +741,17 @@ class SkillRuntime:
             expert_results=expert_results,
             evidence_refs=evidence_refs,
         )
-        deliverable = Deliverable(
-            content_item_id=content.id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            skill_run_id=skill_run.id,
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
             agent_code=AgentCode.DECISION.value,
-            type=deliverable_type,
+            deliverable_type=deliverable_type,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=deliverable_payload,
             note=f"generated by {definition.code} Skill",
         )
-        session.add(deliverable)
-        await session.flush()
 
         content.status = ContentStatus.DRAFT
         output = {
@@ -974,15 +966,14 @@ class SkillRuntime:
         turn: ConversationTurn,
         run: AgentRun,
         report: AccountInspectionReport,
+        scope: RuntimeScope,
     ) -> SkillExecutionResult:
-        deliverable = Deliverable(
-            content_item_id=content.id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            skill_run_id=skill_run.id,
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
             agent_code=AgentCode.DECISION.value,
-            type=DeliverableType.REVIEW_REPORT,
+            deliverable_type=DeliverableType.REVIEW_REPORT,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
@@ -991,8 +982,6 @@ class SkillRuntime:
                 "critic below auto-pass threshold; requires human review"
             ),
         )
-        session.add(deliverable)
-        await session.flush()
         quality = await session.scalar(
             select(AgentQualityScore)
             .where(AgentQualityScore.skill_run_id == skill_run.id)

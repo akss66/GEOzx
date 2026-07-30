@@ -72,6 +72,11 @@ class ConversationTurn(Base, TimestampMixin):
             "org_id",
             name="uq_conversation_turn_id_thread_org",
         ),
+        UniqueConstraint(
+            "id",
+            "thread_id",
+            name="uq_conversation_turn_id_thread",
+        ),
         ForeignKeyConstraint(
             ["thread_id", "org_id"],
             ["conversation_threads.id", "conversation_threads.org_id"],

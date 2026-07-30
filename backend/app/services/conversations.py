@@ -11,7 +11,9 @@ from sqlalchemy.orm import aliased
 
 from app.core.workspace_access import require_account_access
 from app.models import (
+    AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ConversationThread,
     ConversationTurn,
@@ -252,15 +254,14 @@ async def delete_conversation_thread(
             skill_run_id=None,
         )
     )
+    await session.execute(
+        delete(AgentToolCall).where(AgentToolCall.thread_id == thread.id)
+    )
+    await session.execute(
+        delete(AgentInvocation).where(AgentInvocation.thread_id == thread.id)
+    )
     await session.execute(delete(SkillRun).where(SkillRun.thread_id == thread.id))
     await session.execute(delete(AgentRun).where(AgentRun.thread_id == thread.id))
-    if task_ids:
-        await session.execute(
-            delete(BrainTask).where(
-                BrainTask.id.in_(task_ids),
-                BrainTask.org_id == user.org_id,
-            )
-        )
     await session.delete(thread)
     await session.commit()
 

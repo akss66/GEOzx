@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     Numeric,
     String,
@@ -48,6 +49,9 @@ class BrainTask(Base, TimestampMixin):
     """运营大脑统筹的一次目标任务。"""
 
     __tablename__ = "brain_tasks"
+    __table_args__ = (
+        UniqueConstraint("id", "org_id", name="uq_brain_tasks_id_org"),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -89,10 +93,14 @@ class BrainTask(Base, TimestampMixin):
         back_populates="task", cascade="all, delete-orphan", uselist=False
     )
     invocations: Mapped[list["AgentInvocation"]] = relationship(
-        back_populates="task", cascade="all, delete-orphan"
+        back_populates="task",
+        cascade="all, delete-orphan",
+        foreign_keys="AgentInvocation.task_id",
     )
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(
-        back_populates="task", cascade="all, delete-orphan"
+        back_populates="task",
+        cascade="all, delete-orphan",
+        foreign_keys="AgentToolCall.task_id",
     )
     acceptances: Mapped[list["DeliverableAcceptance"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
@@ -112,7 +120,10 @@ class BrainTask(Base, TimestampMixin):
     experience_memories: Mapped[list["ExperienceMemory"]] = relationship(
         back_populates="task"
     )
-    skill_runs: Mapped[list["SkillRun"]] = relationship(back_populates="task")
+    skill_runs: Mapped[list["SkillRun"]] = relationship(
+        back_populates="task",
+        foreign_keys="SkillRun.task_id",
+    )
 
 
 class TaskBrief(Base, TimestampMixin):
@@ -178,6 +189,37 @@ class AgentInvocation(Base, TimestampMixin):
             "attempt",
             name="uq_agent_invocation_run_step",
         ),
+        UniqueConstraint(
+            "id",
+            "task_id",
+            name="uq_agent_invocations_id_task",
+        ),
+        ForeignKeyConstraint(
+            ["turn_id", "thread_id"],
+            ["conversation_turns.id", "conversation_turns.thread_id"],
+            name="fk_agent_invocations_turn_thread",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "task_id", "thread_id", "turn_id"],
+            [
+                "agent_runs.id",
+                "agent_runs.task_id",
+                "agent_runs.thread_id",
+                "agent_runs.turn_id",
+            ],
+            name="fk_agent_invocations_run_task_thread_turn",
+        ),
+        ForeignKeyConstraint(
+            ["skill_run_id", "task_id", "run_id", "thread_id", "turn_id"],
+            [
+                "skill_runs.id",
+                "skill_runs.task_id",
+                "skill_runs.run_id",
+                "skill_runs.thread_id",
+                "skill_runs.turn_id",
+            ],
+            name="fk_agent_invocations_skill_task_run_thread_turn",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -224,13 +266,18 @@ class AgentInvocation(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    task: Mapped[BrainTask] = relationship(back_populates="invocations")
+    task: Mapped[BrainTask] = relationship(
+        back_populates="invocations",
+        foreign_keys=[task_id],
+    )
     skill_run: Mapped["SkillRun | None"] = relationship(
         back_populates="invocations",
         foreign_keys=[skill_run_id],
     )
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(
-        back_populates="invocation", cascade="all, delete-orphan"
+        back_populates="invocation",
+        cascade="all, delete-orphan",
+        foreign_keys="AgentToolCall.invocation_id",
     )
 
 
@@ -245,6 +292,26 @@ class AgentToolCall(Base, TimestampMixin):
             "tool_code",
             "idempotency_key",
             name="uq_agent_tool_call_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["turn_id", "thread_id"],
+            ["conversation_turns.id", "conversation_turns.thread_id"],
+            name="fk_agent_tool_calls_turn_thread",
+        ),
+        ForeignKeyConstraint(
+            ["skill_run_id", "task_id", "thread_id", "turn_id"],
+            [
+                "skill_runs.id",
+                "skill_runs.task_id",
+                "skill_runs.thread_id",
+                "skill_runs.turn_id",
+            ],
+            name="fk_agent_tool_calls_skill_task_thread_turn",
+        ),
+        ForeignKeyConstraint(
+            ["invocation_id", "task_id"],
+            ["agent_invocations.id", "agent_invocations.task_id"],
+            name="fk_agent_tool_calls_invocation_task",
         ),
     )
 
@@ -290,8 +357,14 @@ class AgentToolCall(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    task: Mapped[BrainTask] = relationship(back_populates="tool_calls")
-    invocation: Mapped[AgentInvocation | None] = relationship(back_populates="tool_calls")
+    task: Mapped[BrainTask] = relationship(
+        back_populates="tool_calls",
+        foreign_keys=[task_id],
+    )
+    invocation: Mapped[AgentInvocation | None] = relationship(
+        back_populates="tool_calls",
+        foreign_keys=[invocation_id],
+    )
     skill_run: Mapped["SkillRun | None"] = relationship(
         back_populates="tool_calls",
         foreign_keys=[skill_run_id],

@@ -752,7 +752,8 @@ async def test_corrupt_cross_account_provenance_is_hidden_before_pagination_and_
             json={"artifact_id": corrupt.id},
         )
         assert detail.status_code == 404
-        assert revision.status_code == 404
+        assert revision.status_code == 409
+        assert revision.json()["detail"]["code"] == "ARTIFACT_LINEAGE_CONFLICT"
         assert acceptance.status_code == 404
 
 
