@@ -3396,15 +3396,19 @@ async def runtime_status(session: AsyncSession, task: BrainTask) -> str:
     )
     if latest_stopped_id > latest_started_id:
         return "stopped"
+    latest_ambiguous_id = max(
+        (
+            event.id
+            for event in events
+            if event.type == "brain.runtime.tool_ambiguous"
+        ),
+        default=0,
+    )
     latest_waiting_user_id = max(
         (
             event.id
             for event in events
-            if event.type
-            in {
-                "brain.runtime.clarification_requested",
-                "brain.runtime.tool_ambiguous",
-            }
+            if event.type == "brain.runtime.clarification_requested"
         ),
         default=0,
     )
@@ -3425,6 +3429,8 @@ async def runtime_status(session: AsyncSession, task: BrainTask) -> str:
         default=0,
     )
     pending = await _pending_permissions(session, task.id, task.org_id)
+    if latest_ambiguous_id > latest_started_id:
+        return "waiting_user"
     if pending:
         return "waiting_permission"
     if latest_waiting_decision_id > max(latest_started_id, latest_decision_selected_id):

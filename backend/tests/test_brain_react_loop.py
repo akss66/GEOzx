@@ -256,6 +256,38 @@ async def test_execute_tools_converges_ambiguous_write_without_false_success_or_
         "brain.runtime.tool_ambiguous"
     ) == 1
     assert not any(event.type == "brain.runtime.tool_completed" for event in events)
+    session.add_all(
+        [
+            AgentToolCall(
+                org_id=task.org_id,
+                task_id=task.id,
+                skill_run_id=skill_run.id,
+                thread_id=turn.thread_id,
+                turn_id=turn.id,
+                module="brain",
+                agent_code="00-decision",
+                tool_code="provider.confirmed_prepare",
+                tool_name="Provider Confirmed Prepare",
+                idempotency_key="pending-before-ambiguous-1",
+                side_effect_level="read",
+                status="waiting_approval",
+                permission_mode="confirm",
+                requires_human_confirmation=True,
+                input_summary="prepare after confirmation",
+                output_summary="",
+                meta={},
+            ),
+            Event(
+                type="brain.runtime.decision_requested",
+                payload={"task_id": task.id, "decision_id": "unsafe-resume"},
+            ),
+            Event(
+                type="brain.runtime.clarification_requested",
+                payload={"task_id": task.id, "missing_field": "unsafe-resume"},
+            ),
+        ]
+    )
+    await session.commit()
     assert await brain_runtime_module.runtime_status(session, task) == "waiting_user"
 
 

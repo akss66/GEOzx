@@ -532,6 +532,34 @@ async def test_worker_keeps_ambiguous_post_graph_run_paused_and_unrecoverable(
                         "error_code": "TOOL_RESULT_AMBIGUOUS",
                     },
                 ),
+                Event(
+                    type="brain.runtime.decision_requested",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "decision_id": "unsafe-resume",
+                    },
+                ),
+                Event(
+                    type="brain.runtime.clarification_requested",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "missing_field": "unsafe-resume",
+                    },
+                ),
+                AgentToolCall(
+                    org_id=runtime_task.org_id,
+                    task_id=runtime_task.id,
+                    tool_code="provider.confirmed_prepare",
+                    tool_name="Provider Confirmed Prepare",
+                    idempotency_key="worker-pending-before-ambiguous",
+                    side_effect_level="read",
+                    status="waiting_approval",
+                    permission_mode="confirm",
+                    requires_human_confirmation=True,
+                    input_summary="prepare after confirmation",
+                    output_summary="",
+                    meta={},
+                ),
             ]
         )
         await runtime_session.commit()
