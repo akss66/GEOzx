@@ -11,6 +11,18 @@ _IDENTITY_MESSAGES = frozenset({"你是谁", "你是什么", "你是干什么的
 _CAPABILITY_MESSAGES = frozenset(
     {"你能做什么", "你会做什么", "你有什么能力", "你有哪些能力"}
 )
+_QUESTION_PREFIXES = (
+    "你能",
+    "你会",
+    "为什么",
+    "为何",
+    "怎么",
+    "如何",
+    "能否",
+    "可否",
+    "是否",
+    "请问",
+)
 _NEGATION_TERMS = (
     "不要",
     "不做",
@@ -63,11 +75,13 @@ def route_deterministic_request(
     if normalized in _CAPABILITY_MESSAGES:
         return _answer_route("deterministic_capability_question")
 
+    if _contains_any(normalized, _NEGATION_TERMS):
+        return None
+    if _is_question(normalized):
+        return None
     if _has_only_data_query_intent(normalized):
         if _is_only_data_query(normalized):
             return _query_route("deterministic_only_data_query")
-        return None
-    if _contains_any(normalized, _NEGATION_TERMS):
         return None
     if _is_data_query(normalized):
         return _query_route("deterministic_data_query")
@@ -86,6 +100,10 @@ def _normalize_message(message: str) -> str:
 
 def _contains_any(message: str, terms: tuple[str, ...]) -> bool:
     return any(term in message for term in terms)
+
+
+def _is_question(message: str) -> bool:
+    return message.startswith(_QUESTION_PREFIXES) or message.endswith(("吗", "么", "呢"))
 
 
 def _answer_route(reason: str) -> TurnRouteDecision:

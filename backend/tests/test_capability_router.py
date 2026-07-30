@@ -180,6 +180,54 @@ def test_deterministic_request_defers_negated_or_ambiguous_requests(
     )
 
 
+def test_deterministic_request_defers_negated_only_data_query(
+    registry: SkillRegistry,
+) -> None:
+    """Catches a negated only-query request being routed as a query."""
+
+    assert (
+        capability_router.route_deterministic_request(
+            "不要只查询当前账号数据",
+            platform="douyin",
+            registry=registry,
+            has_account=True,
+        )
+        is None
+    )
+
+
+def test_deterministic_request_defers_data_query_capability_question(
+    registry: SkillRegistry,
+) -> None:
+    """Catches a question about querying data being mistaken for a query command."""
+
+    assert (
+        capability_router.route_deterministic_request(
+            "你能查询当前账号数据吗？",
+            platform="douyin",
+            registry=registry,
+            has_account=True,
+        )
+        is None
+    )
+
+
+def test_deterministic_request_defers_account_inspection_question(
+    registry: SkillRegistry,
+) -> None:
+    """Catches a question about account inspection being mistaken for a Skill command."""
+
+    assert (
+        capability_router.route_deterministic_request(
+            "为什么要给当前账号体检？",
+            platform="douyin",
+            registry=registry,
+            has_account=True,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("confidence", [-0.01, 1.01])
 def test_route_decision_rejects_confidence_outside_unit_interval(confidence: float) -> None:
     with pytest.raises(ValidationError):
