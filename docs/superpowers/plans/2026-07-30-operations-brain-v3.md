@@ -221,17 +221,17 @@
 - `ToolSpec.side_effect_level` 必填：`read`、`idempotent_write`、`non_idempotent_write`。
 - 写 Tool 必须使用服务端 provider idempotency key 与持久化 Attempt；非幂等写 dispatch 后结果不确定时进入 `ambiguous`，不得自动重放。
 
-- [ ] 写参数化测试：active/paused/未知 Turn、Run、SkillRun、Invocation、ToolCall 拒绝删除；terminal/空会话可删；删除与 Worker acquire 竞态安全。
-- [ ] 写测试：非所有者（含管理员）404；跨用户子记录使事务整体冲突；Task/Content/Deliverable/formal Event 保留并解除来源。
-- [ ] 写测试：消息、技术 Event、read ToolCall/Attempt、owned LLMCall 删除；写 ToolCall/Attempt 保留并解除来源；shared Task 的其他用户数据不被删。
-- [ ] 写测试：ToolSpec 必须声明副作用；非幂等写不能 auto；provider key 服务端生成且跨重试稳定。
-- [ ] 写测试：success replay 零 provider 调用；幂等写 timeout 使用同 key 重试；非幂等写 timeout/成功后本地提交失败进入 ambiguous 且不二次调用。
-- [ ] 写测试：相同逻辑键并发只创建一个 ToolCall、最多一个非幂等 dispatch；ambiguous 映射 waiting_user/stopped 而非 Worker 自动重试。
-- [ ] 运行测试确认失败。
-- [ ] 实现锁定式安全删除，复用统一状态族并 fail closed；修正 LLMCall 过宽删除和 write Tool 审计保留。
-- [ ] 实现 ToolCall 业务 outbox、ToolExecutionAttempt 状态机和 provider key；Adapter 不得在 handler 内部 commit。
-- [ ] 当前生产 Runtime Tool 明确标记为 read；不得在本 Task 接真实发布。
-- [ ] 运行定向测试并提交 `fix: protect active conversations and side effects`。
+- [x] 写参数化测试：active/paused/未知 Turn、Run、SkillRun、Invocation、ToolCall 拒绝删除；terminal/空会话可删；删除与 Worker acquire 竞态安全。
+- [x] 写测试：非所有者（含管理员）404；跨用户子记录使事务整体冲突；Task/Content/Deliverable/formal Event 保留并解除来源。
+- [x] 写测试：消息、技术 Event、read ToolCall/Attempt、owned LLMCall 删除；写 ToolCall/Attempt 保留并解除来源；shared Task 的其他用户数据不被删。
+- [x] 写测试：ToolSpec 必须声明副作用；非幂等写不能 auto；provider key 服务端生成且跨重试稳定。
+- [x] 写测试：success replay 零 provider 调用；幂等写 timeout 使用同 key 重试；非幂等写 timeout/成功后本地提交失败进入 ambiguous 且不二次调用。
+- [x] 写测试：相同逻辑键并发只创建一个 ToolCall、最多一个非幂等 dispatch；ambiguous 映射 waiting_user/stopped 而非 Worker 自动重试。
+- [x] 运行测试确认失败。
+- [x] 实现锁定式安全删除，复用统一状态族并 fail closed；修正 LLMCall 过宽删除和 write Tool 审计保留。
+- [x] 实现 ToolCall 业务 outbox、ToolExecutionAttempt 状态机和 provider key；Adapter 不得在 handler 内部 commit。
+- [x] 当前生产 Runtime Tool 明确标记为 read；不得在本 Task 接真实发布。
+- [x] 运行定向测试并提交 `fix: protect active conversations and side effects`。
 
 ### Task 8: 前端单一 Turn 投影和专业技术日志
 
