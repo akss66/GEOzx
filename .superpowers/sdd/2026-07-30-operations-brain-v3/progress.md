@@ -19,3 +19,5 @@ Task 7: fix rounds 1-3/5 (3 Required addressed, 0 open; commits a55d01f..5c6ee44
 Task 7: complete (commits 36ce5ba..5c6ee44, final re-review clean; 150 directed tests before review fixes, 138 after)
 Task 8: fix round 1/5 (3 Important addressed, 0 open; commits fc4debb..8456d3b)
 Task 8: complete (commits 99f751c..8456d3b, re-review clean; 52 directed, 332 frontend full tests passed)
+Task 9: fix rounds 1-2/5 (4 blocking findings addressed, 0 open; commits 70bc0ca..34a1f66)
+Task 9: complete (commits c709561..34a1f66, final re-review clean; backend 970, frontend 333, Playwright mock 4 + real-service smoke 1 passed)

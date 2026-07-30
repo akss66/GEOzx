@@ -302,14 +302,14 @@
 - 明确问候/能力：router 0、answer 1；显式 QUERY/SKILL：router 0；模糊请求：router 1。
 - 技术日志使用强类型 allowlist 摘要，不透传 Prompt、原始工具输入输出、provider body、异常堆栈、密钥或 idempotency key。
 
-- [ ] 写模型/迁移 RED：5 个指标可空且非负；LLMCall 审计原子累计 model_call_count；并行专家不丢计数。
-- [ ] 写 fake-clock RED：route、用户首 token、completion、terminal/paused total 的时间语义；retry/resume 保留首次指标并更新总耗时。
-- [ ] 写预算测试：问候/能力 router0 answer1；显式 query/skill router0；模糊请求 router1；终态 replay零新增调用。
-- [ ] 写恶意 payload 测试：技术摘要严格 allowlist，敏感字段不可见。
-- [ ] 增加 10 类用户提示词后端能力矩阵和 Playwright UI 合同；异步 Worker 使用有界状态轮询，不使用 sleep/waitForTimeout。
-- [ ] 实现 ConversationTurn 指标、ContextVar Turn telemetry、Gateway 原子计数、脱敏投影和前端条件展示。
-- [ ] 迁移门禁使用临时 PostgreSQL online upgrade；offline 数据迁移链明确 fail-fast，不能用 AttributeError 或伪造 SQL 通过。
-- [ ] CI 增加 V3 定向、migration、后端全量有界 job、前端 test/type/build 与 Playwright；输出慢测试。
-- [ ] 编写灰度/回滚/指标/告警 runbook。
-- [ ] 运行后端定向与全量门禁、前端全量、类型检查、Lint、构建、Playwright和迁移 smoke。
-- [ ] 进行代码审查并提交 `test: enforce main-agent v3 capability and latency budgets`。
+- [x] 写模型/迁移 RED：5 个指标可空且非负；LLMCall 审计原子累计 model_call_count；并行专家不丢计数。
+- [x] 写 fake-clock RED：route、用户首 token、completion、terminal/paused total 的时间语义；retry/resume 保留首次指标并更新总耗时。
+- [x] 写预算测试：问候/能力 router0 answer1；显式 query/skill router0；模糊请求 router1；终态 replay零新增调用。
+- [x] 写恶意 payload 测试：技术摘要严格 allowlist，敏感字段不可见。
+- [x] 增加 10 类用户提示词后端能力矩阵和 Playwright UI 合同；异步 Worker 使用有界状态轮询，不使用 sleep/waitForTimeout。
+- [x] 实现 ConversationTurn 指标、ContextVar Turn telemetry、Gateway 原子计数、脱敏投影和前端条件展示。
+- [x] 迁移门禁使用临时 PostgreSQL online upgrade；offline 数据迁移链明确 fail-fast，不能用 AttributeError 或伪造 SQL 通过。
+- [x] CI 增加 V3 定向、migration、后端全量有界 job、前端 test/type/build 与 Playwright；输出慢测试。
+- [x] 编写灰度/回滚/指标/告警 runbook。
+- [x] 运行后端定向与全量门禁、前端全量、类型检查、Lint、构建、Playwright和迁移 smoke。
+- [x] 进行代码审查并提交 `test: enforce main-agent v3 capability and latency budgets`。
