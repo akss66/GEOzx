@@ -135,3 +135,67 @@ Ruff：
 - enqueue 调用失败时当前 HTTP 请求会失败，但 durable Run 已是 `queued`，并由 reconciliation 恢复；客户端使用相同幂等键重放不会重复 enqueue。
 - Task 4 仍需负责 dead-letter 与 Turn 状态全账本收口；本任务没有提前引入这些状态或迁移。
 - 本任务按 brief 只运行指定的定向回归与 Ruff，没有声称执行整个仓库的全量测试。
+
+## 修复轮次 1：FastAPI HTTPException 状态保留
+
+### Important finding
+
+`LLMGateway._provider_runtime_failure()` 原先只从
+`httpx.HTTPStatusError` 提取 status。适配器直接抛出 FastAPI
+`HTTPException`，或包装异常的 cause/context 链中包含该异常时，Gateway
+生成的安全 `ProviderRuntimeFailure` 会丢失 status，并被
+`classify_runtime_failure` 误判为 terminal。
+
+### 修复
+
+- 将 `runtime_failures` 已有的 HTTP status 提取逻辑公开为
+  `http_status_code()`，统一支持：
+  - `ProviderRuntimeFailure`；
+  - FastAPI `HTTPException`；
+  - `httpx.HTTPStatusError`。
+- Gateway 遍历安全异常链时复用该 helper，不读取或保留 provider response
+  body。
+- 最终 cause 链仍只有 `LLMError -> ProviderRuntimeFailure`；原始
+  `HTTPException.detail` 和外层 wrapper 文本不会进入 cause。
+- 状态分类保持窄边界：
+  - `408`、`429`、`503`：retryable；
+  - `400`、`409`：terminal。
+- 未处理本轮审查标记的 recovery job id minor。
+
+### RED
+
+命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest `
+  tests/test_llm_gateway.py::test_gateway_preserves_fastapi_http_status_without_retrying_all_4xx -q
+```
+
+实现前结果：`5 failed in 0.99s`。五个参数的安全 cause 均为
+`status_code=None`。
+
+### GREEN
+
+同一命令实现后结果：`5 passed in 0.74s`。
+
+### 聚焦验证
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest `
+  tests/test_llm_gateway.py `
+  tests/test_worker.py -q
+```
+
+结果：`40 passed in 6.92s`。
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check `
+  app/llm/gateway.py `
+  app/core/runtime_failures.py `
+  tests/test_llm_gateway.py `
+  tests/test_worker.py
+```
+
+结果：`All checks passed!`。
+
+`git diff --check`：通过。

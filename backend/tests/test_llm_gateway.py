@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
 
 from app.config import settings
@@ -400,6 +401,54 @@ async def test_gateway_preserves_safe_retry_metadata_as_the_llm_error_cause(
     assert "sk-provider-secret" not in visible_error
     assert "provider-secret-response-body" not in visible_error
     assert "provider-secret-timeout" not in visible_error
+
+
+@pytest.mark.parametrize(
+    ("status_code", "wrapped", "expected_disposition"),
+    [
+        (408, False, FailureDisposition.RETRYABLE),
+        (429, True, FailureDisposition.RETRYABLE),
+        (503, False, FailureDisposition.RETRYABLE),
+        (400, False, FailureDisposition.TERMINAL),
+        (409, True, FailureDisposition.TERMINAL),
+    ],
+    ids=["408", "wrapped-429", "503", "400", "wrapped-409"],
+)
+@pytest.mark.asyncio
+async def test_gateway_preserves_fastapi_http_status_without_retrying_all_4xx(
+    session,
+    status_code,
+    wrapped,
+    expected_disposition,
+) -> None:
+    provider_http_error = HTTPException(
+        status_code=status_code,
+        detail=f"provider-secret-response-{status_code}",
+    )
+    provider_failure: Exception
+    if wrapped:
+        provider_failure = RuntimeError("provider-secret-wrapper")
+        provider_failure.__cause__ = provider_http_error
+    else:
+        provider_failure = provider_http_error
+
+    class FailingAdapter(FakeAdapter):
+        async def complete(self, *_args, **_kwargs):
+            raise provider_failure
+
+    with pytest.raises(LLMError) as caught:
+        await _gw(FailingAdapter()).chat(session, None, "x", MSG)
+
+    error = caught.value
+    cause = error.__cause__
+    assert cause is not None
+    assert getattr(cause, "status_code", None) == status_code
+    assert getattr(cause, "failure_kind", None) == "http"
+    assert classify_runtime_failure(error) is expected_disposition
+    assert cause.__cause__ is None
+    visible_error = f"{error} {cause}"
+    assert "provider-secret-response" not in visible_error
+    assert "provider-secret-wrapper" not in visible_error
 
 
 @pytest.mark.asyncio

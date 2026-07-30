@@ -58,7 +58,7 @@ def classify_runtime_failure(exc: BaseException) -> FailureDisposition:
     status_codes = [
         status_code
         for item in chain
-        if (status_code := _http_status_code(item)) is not None
+        if (status_code := http_status_code(item)) is not None
     ]
     if any(
         400 <= status_code < 500 and status_code not in {408, 429}
@@ -86,7 +86,7 @@ def describe_runtime_failure(exc: BaseException) -> RuntimeFailure:
         (
             code
             for item in exception_chain(exc)
-            if (code := _http_status_code(item)) is not None
+            if (code := http_status_code(item)) is not None
         ),
         None,
     )
@@ -134,7 +134,9 @@ _RETRYABLE_EXCEPTIONS = (
 )
 
 
-def _http_status_code(exc: BaseException) -> int | None:
+def http_status_code(exc: BaseException) -> int | None:
+    """Extract an HTTP status without reading provider response content."""
+
     if isinstance(exc, ProviderRuntimeFailure):
         return exc.status_code
     if isinstance(exc, HTTPException):

@@ -13,7 +13,11 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.request_context import get_acting_user_id
-from app.core.runtime_failures import ProviderRuntimeFailure, exception_chain
+from app.core.runtime_failures import (
+    ProviderRuntimeFailure,
+    exception_chain,
+    http_status_code,
+)
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.deepseek import DeepSeekAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
@@ -375,9 +379,9 @@ def _provider_runtime_failure(
     chain = exception_chain(exc)
     status_code = next(
         (
-            item.response.status_code
+            code
             for item in chain
-            if isinstance(item, httpx.HTTPStatusError)
+            if (code := http_status_code(item)) is not None
         ),
         None,
     )
