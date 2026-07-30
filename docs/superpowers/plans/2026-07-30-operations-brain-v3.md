@@ -30,11 +30,11 @@
 - Produces: `route_deterministic_request(message, *, platform, registry, has_account) -> TurnRouteDecision | None`
 - Consumes: `SkillRegistry` 与已发布 Skill code。
 
-- [ ] 写测试：问候、身份和能力询问返回 ANSWER；明确数据查询返回 QUERY；自然语言体检返回 SKILL；复杂歧义请求返回 `None`。
-- [ ] 运行 `cd backend && uv run pytest tests/test_capability_router.py tests/test_turn_execution.py -q`，确认新增测试先失败。
-- [ ] 实现高置信度、否定词安全的确定性路由，并在 `_route_turn` 调用模型前使用。
-- [ ] 断言确定性命中时 `BrainIntelligence.classify_turn` 未被调用。
-- [ ] 再次运行定向测试并提交 `feat: add deterministic main-agent routing`。
+- [x] 写测试：问候、身份和能力询问返回 ANSWER；明确数据查询返回 QUERY；自然语言体检返回 SKILL；复杂歧义请求返回 `None`。
+- [x] 运行 `cd backend && uv run pytest tests/test_capability_router.py tests/test_turn_execution.py -q`，确认新增测试先失败。
+- [x] 实现高置信度、否定词安全的确定性路由，并在 `_route_turn` 调用模型前使用。
+- [x] 断言确定性命中时 `BrainIntelligence.classify_turn` 未被调用。
+- [x] 再次运行定向测试并提交 `feat: add deterministic main-agent routing`。
 
 ### Task 2: 路由与回答模型分层
 
