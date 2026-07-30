@@ -260,17 +260,17 @@
 - 实时状态作为当前 Turn 的临时投影，不再作为独立聊天消息列表。
 - 现有来源 Turn 与成果中心继续引用同一 Artifact id。
 
-- [ ] 写测试：HTTP submission 已写入缓存时同一 client id 只渲染一个用户 Turn；新 Thread pending 使用同一 TurnArticle，绑定服务器 ID 后不跳位。
-- [ ] 写测试：start/delta/done 即使复用 transport ID 也不丢帧；delta→late start 不清空；done without start 可完成；done 后 late delta 忽略。
-- [ ] 写测试：durable done 重连去重；跨 Thread/Turn/client 事件忽略；重连后的 durable GET 覆盖 live 临时投影。
-- [ ] 写测试：默认仅显示参与专家摘要；展开显示权威 Turn 状态、route/skill/tool/critic/审计 ID；tool-only/critic-only 也有 execution summary。
-- [ ] 写测试：Turn 内成果与成果中心使用同一 Artifact ID；旧 active task localStorage 不再激活 legacy UI。
-- [ ] 运行前端定向测试确认失败。
-- [ ] 新 Thread 创建后立即写 Conversation query cache；移除独立 PendingConversation，将 pending/running/done 全部投影为同一个 TurnArticle。
-- [ ] 移除聊天页 legacy BrainTask/ConversationStream、active task localStorage 与重复运行态渲染回退。
-- [ ] durable ID 仅去重 durable event；start/delta 为 ephemeral，领域层以 Turn 组合键和 sequence 归并；不得按 delta 文本去重。
-- [ ] 扩展脱敏 execution summary，使 tool-only/critic-only 可见；不暴露 Prompt、原始 Tool 输入输出、堆栈或密钥。
-- [ ] 运行定向测试、TypeScript 和构建并提交 `fix: unify v3 turn streaming and technical details`。
+- [x] 写测试：HTTP submission 已写入缓存时同一 client id 只渲染一个用户 Turn；新 Thread pending 使用同一 TurnArticle，绑定服务器 ID 后不跳位。
+- [x] 写测试：start/delta/done 即使复用 transport ID 也不丢帧；delta→late start 不清空；done without start 可完成；done 后 late delta 忽略。
+- [x] 写测试：durable done 重连去重；跨 Thread/Turn/client 事件忽略；重连后的 durable GET 覆盖 live 临时投影。
+- [x] 写测试：默认仅显示参与专家摘要；展开显示权威 Turn 状态、route/skill/tool/critic/审计 ID；tool-only/critic-only 也有 execution summary。
+- [x] 写测试：Turn 内成果与成果中心使用同一 Artifact ID；旧 active task localStorage 不再激活 legacy UI。
+- [x] 运行前端定向测试确认失败。
+- [x] 新 Thread 创建后立即写 Conversation query cache；移除独立 PendingConversation，将 pending/running/done 全部投影为同一个 TurnArticle。
+- [x] 移除聊天页 legacy BrainTask/ConversationStream、active task localStorage 与重复运行态渲染回退。
+- [x] durable ID 仅去重 durable event；start/delta 为 ephemeral，领域层以 Turn 组合键和 sequence 归并；不得按 delta 文本去重。
+- [x] 扩展脱敏 execution summary，使 tool-only/critic-only 可见；不暴露 Prompt、原始 Tool 输入输出、堆栈或密钥。
+- [x] 运行定向测试、TypeScript 和构建并提交 `fix: unify v3 turn streaming and technical details`。
 
 ### Task 9: 性能预算、可观测性与端到端能力矩阵
 
