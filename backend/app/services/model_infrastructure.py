@@ -17,6 +17,8 @@ from app.core.credential_crypto import CredentialEncryptionError, decrypt_provid
 from app.models import Event, IntegrationConfig, LLMCall, ModelConfig, ModelProvider
 from app.models.enums import AgentCode
 
+ROUTER_AGENT_CODE = "00-router"
+
 AGENT_NAMES: dict[str, str] = {
     AgentCode.DECISION.value: "运营大脑",
     AgentCode.POSITIONING.value: "账号定位专家",
@@ -254,13 +256,17 @@ async def resolve_route_targets(
             ModelConfig.agent_code == agent_code,
         )
     )
-    if cfg is None and agent_code == AgentCode.ROUTER.value:
-        cfg = await session.scalar(
+    if agent_code == ROUTER_AGENT_CODE:
+        decision_cfg = await session.scalar(
             select(ModelConfig).where(
                 ModelConfig.org_id == org_id,
                 ModelConfig.agent_code == AgentCode.DECISION.value,
             )
         )
+        if cfg is None:
+            cfg = decision_cfg
+        elif decision_cfg is not None:
+            return await _resolve_router_route_targets(session, org_id, cfg, decision_cfg)
     if cfg is None:
         return _legacy_target(settings.llm_default_model), None, dict(ROUTING_DEFAULTS)
     params = dict(cfg.params or {})
@@ -279,6 +285,30 @@ async def resolve_route_targets(
         org_id=org_id,
         provider_id=cfg.fallback_provider_id,
         model=cfg.fallback_model,
+    )
+    return primary, fallback, options
+
+
+async def _resolve_router_route_targets(
+    session: AsyncSession,
+    org_id: int,
+    router_cfg: ModelConfig,
+    decision_cfg: ModelConfig,
+) -> tuple[ModelTarget, ModelTarget | None, dict[str, Any]]:
+    decision_routing = dict((decision_cfg.params or {}).get("routing_config") or {})
+    router_routing = dict((router_cfg.params or {}).get("routing_config") or {})
+    options = {**ROUTING_DEFAULTS, **decision_routing, **router_routing}
+    primary = await _candidate_target(
+        session,
+        org_id=org_id,
+        provider_id=router_cfg.primary_provider_id or decision_cfg.primary_provider_id,
+        model=router_cfg.primary_model,
+    )
+    fallback = await _optional_candidate_target(
+        session,
+        org_id=org_id,
+        provider_id=router_cfg.fallback_provider_id or decision_cfg.fallback_provider_id,
+        model=router_cfg.fallback_model or decision_cfg.fallback_model,
     )
     return primary, fallback, options
 

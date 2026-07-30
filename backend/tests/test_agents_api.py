@@ -74,6 +74,15 @@ async def test_list_and_get_agents(client, admin):
 
 
 @pytest.mark.asyncio
+async def test_internal_router_workload_is_not_a_public_agent_code(client, admin):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+
+    response = await client.get("/agents/00-router", headers=_auth(token))
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_agent_profile_includes_tool_call_summary(client, admin, session):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)

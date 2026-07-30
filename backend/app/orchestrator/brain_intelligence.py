@@ -30,6 +30,7 @@ from app.prompts.manifest import LoadedPrompt
 from app.schemas.ai_coo import CriticEvaluation, OperatingStrategyDraft
 from app.schemas.brain import DecisionRequest, IntentDecision, RuntimeNextStep
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
+from app.services.model_infrastructure import ROUTER_AGENT_CODE
 
 
 class IntelligenceUnavailable(RuntimeError):
@@ -214,7 +215,7 @@ class BrainIntelligence:
                         ),
                     },
                 ],
-                agent_code=AgentCode.ROUTER.value,
+                agent_code=ROUTER_AGENT_CODE,
             )
             decision = TurnRouteDecision.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:

@@ -29,3 +29,23 @@ Before implementation, `cd backend && uv run pytest tests/test_turn_intelligence
 
 - The migration-head contract in `backend/tests/test_migrations.py` was updated to `20260730_0100` under explicit task-owner authorization. This is a required migration-contract update, not a scope expansion.
 - A provider selected for `00-router` must support `deepseek-v4-flash`; the migration correctly preserves the main-agent provider association as requested, but provider model availability remains an operations configuration concern.
+
+## Fix round 1: sparse router overlay and migration safety
+
+### RED evidence
+
+Before the fix, `cd backend && uv run pytest tests/test_model_infrastructure.py tests/test_turn_intelligence.py tests/test_agents_api.py tests/test_migrations.py -q` produced the expected three failures:
+
+- A seeded-style sparse `00-router` profile resolved its Flash model with no provider instead of inheriting the provider-backed `00-decision` route, and it lost the decision fallback and route options.
+- The migration downgrade removed both migrated and pre-existing `00-router` rows.
+- `GET /agents/00-router` returned `404`, proving the value was accepted by the public `AgentCode` route schema before the catalog lookup rejected it.
+
+### GREEN implementation and verification
+
+- Replaced the public enum member with the internal `ROUTER_AGENT_CODE` constant. Classification, seed data, and the migration use this workload code without exposing it in the public expert schema.
+- Router resolution now overlays a present but sparse router profile onto `00-decision`: the router’s own Flash primary model is retained, absent provider/fallback fields inherit from decision, and decision routing options are overlaid by explicit router options.
+- The migration still leaves an existing router profile unchanged during upgrade. Its downgrade is now intentionally a data-preserving no-op: older code ignores the internal row, while deletion would risk destroying a pre-existing configuration that cannot be distinguished from a migrated one.
+- `cd backend && uv run pytest tests/test_model_infrastructure.py tests/test_turn_intelligence.py tests/test_agents_api.py tests/test_migrations.py -q` — `46 passed` (one pre-existing Alembic configuration deprecation warning).
+- `cd backend && uv run python -m alembic heads` — `20260730_0100 (head)`.
+- `cd backend && uv run ruff check app/models/enums.py app/orchestrator/brain_intelligence.py app/services/model_infrastructure.py app/seed.py migrations/versions/20260730_0100_main_agent_router_profile.py tests/test_model_infrastructure.py tests/test_turn_intelligence.py tests/test_agents_api.py tests/test_migrations.py` — passed.
+- `git diff --check` — passed.

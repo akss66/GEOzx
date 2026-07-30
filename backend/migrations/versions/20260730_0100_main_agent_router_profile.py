@@ -10,6 +10,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from app.services.model_infrastructure import ROUTER_AGENT_CODE
+
 revision: str = "20260730_0100"
 down_revision: str | None = "20260728_0300"
 branch_labels: str | Sequence[str] | None = None
@@ -31,7 +33,7 @@ def upgrade() -> None:
             )
             SELECT
                 orgs.id,
-                '00-router',
+                :router_agent_code,
                 decision.primary_provider_id,
                 decision.fallback_provider_id,
                 'deepseek-v4-flash',
@@ -45,14 +47,15 @@ def upgrade() -> None:
                 SELECT 1
                 FROM model_configs AS router
                 WHERE router.org_id = orgs.id
-                    AND router.agent_code = '00-router'
+                    AND router.agent_code = :router_agent_code
             )
             """
-        )
+        ).bindparams(router_agent_code=ROUTER_AGENT_CODE)
     )
 
 
 def downgrade() -> None:
-    op.execute(
-        sa.text("DELETE FROM model_configs WHERE agent_code = '00-router'")
-    )
+    """Preserve data rows because pre-existing router profiles are indistinguishable.
+
+    Older code ignores this internal workload config, so retaining it is safe.
+    """
