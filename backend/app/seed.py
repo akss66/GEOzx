@@ -17,6 +17,8 @@ from app.models.enums import UserRole
 # 8 个 Agent 的默认模型绑定（v1 全部 DeepSeek；编导/运营/投流用 reasoner 做更强推理）。
 # agent_code 与 orchestrator pipeline / prompts 文件名前缀一致。
 _AGENT_MODELS: list[tuple[str, str, str | None]] = [
+    ("00-decision", "deepseek-chat", None),
+    ("00-router", "deepseek-v4-flash", None),
     ("01-positioning", "deepseek-chat", None),
     ("02-content", "deepseek-reasoner", "deepseek-chat"),
     ("03-art", "deepseek-chat", None),

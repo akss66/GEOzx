@@ -214,6 +214,7 @@ class BrainIntelligence:
                         ),
                     },
                 ],
+                agent_code=AgentCode.ROUTER.value,
             )
             decision = TurnRouteDecision.model_validate(extract_json(result.content))
         except (ValidationError, ValueError, TypeError, KeyError) as exc:
@@ -529,6 +530,8 @@ async def _structured_chat(
     org_id: int,
     prompt: LoadedPrompt,
     messages: list[dict],
+    *,
+    agent_code: str = AgentCode.DECISION.value,
 ):
     if session is None:
         raise RuntimeError("brain intelligence requires an active database session")
@@ -546,7 +549,7 @@ async def _structured_chat(
             return await gateway.chat(
                 session,
                 org_id,
-                AgentCode.DECISION.value,
+                agent_code,
                 messages,
             )
     finally:

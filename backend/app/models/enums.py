@@ -203,6 +203,7 @@ class MaterialStatus(enum.StrEnum):
 
 
 class AgentCode(enum.StrEnum):
+    ROUTER = "00-router"
     DECISION = "00-decision"
     POSITIONING = "01-positioning"
     CONTENT_DIRECTOR = "02-content-director"

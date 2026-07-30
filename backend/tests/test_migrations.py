@@ -78,8 +78,8 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_turn_provenance() -> None:
-    assert get_head_revision() == "20260728_0300"
+def test_migration_head_is_main_agent_router_profile() -> None:
+    assert get_head_revision() == "20260730_0100"
 
 
 def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:

@@ -106,6 +106,43 @@ async def test_answer_turn_uses_operating_context_and_conversation_history(
 
 
 @pytest.mark.asyncio
+async def test_classification_uses_router_profile_while_answer_uses_decision_profile(monkeypatch):
+    calls: list[str] = []
+    route_payload = {
+        "mode": "query",
+        "intent": "account_metrics",
+        "confidence": 0.97,
+        "reason": "Read-only account data request.",
+        "skill_code": "account_data_query",
+        "requires_account_context": True,
+        "requires_operation_task": False,
+        "missing_field": None,
+        "clarifying_question": None,
+    }
+
+    async def fake_chat(_self, _session, _org_id, agent_code, _messages):
+        calls.append(agent_code)
+        content = json.dumps(route_payload) if agent_code == "00-router" else "Answer from brain"
+        return CompletionResult(content, "test-model", 4, 8, 12), 0.0
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+
+    decision = await _classify("Show my account metrics")
+    answer = await BrainIntelligence().answer_turn(
+        TEST_SESSION,
+        1,
+        "What should I do next?",
+        operating_context="",
+        history=[],
+        scope={"thread_id": 8},
+    )
+
+    assert decision.mode is TurnExecutionMode.QUERY
+    assert answer == "Answer from brain"
+    assert calls == ["00-router", "00-decision"]
+
+
+@pytest.mark.asyncio
 async def test_account_data_question_routes_to_query(monkeypatch):
     payload = {
         "mode": "query",

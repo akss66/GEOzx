@@ -254,6 +254,13 @@ async def resolve_route_targets(
             ModelConfig.agent_code == agent_code,
         )
     )
+    if cfg is None and agent_code == AgentCode.ROUTER.value:
+        cfg = await session.scalar(
+            select(ModelConfig).where(
+                ModelConfig.org_id == org_id,
+                ModelConfig.agent_code == AgentCode.DECISION.value,
+            )
+        )
     if cfg is None:
         return _legacy_target(settings.llm_default_model), None, dict(ROUTING_DEFAULTS)
     params = dict(cfg.params or {})
