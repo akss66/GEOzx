@@ -7,9 +7,20 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models import Deliverable, SkillRun
+from app.models.enums import DeliverableStatus
 from app.orchestrator.skill_runtime import SkillRecoveryConflict, SkillRuntime
 from app.orchestrator.skills.registry import skill_registry
 from tests.test_operating_skills import _Harness, _scope, _Tools
+
+
+class _CountingTools(_Tools):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def execute(self, **kwargs):
+        self.calls.append(str(kwargs["request"].tool_code))
+        return await super().execute(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -59,9 +70,82 @@ async def test_required_generic_skill_cannot_bypass_failed_quality_gate(
     )
 
     assert critic.calls == 1
-    assert result.status == "waiting_permission"
-    assert result.artifact_id is None
-    assert await session.scalar(select(func.count(Deliverable.id))) == 0
+    assert result.status == "completed"
+    assert result.artifact_id is not None
+    deliverable = await session.get(Deliverable, result.artifact_id)
+    assert deliverable is not None
+    assert deliverable.status is DeliverableStatus.PENDING_REVIEW
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_generic_skill_failed_quality_gate_is_terminal_and_idempotent(
+    session, admin, monkeypatch
+) -> None:
+    _account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="required-generic-critic-terminal",
+        message="Plan topics",
+    )
+    required = replace(
+        skill_registry.get("topic_planning"),
+        critic_policy="required",
+    )
+    original_get = skill_registry.get
+    monkeypatch.setattr(
+        skill_registry,
+        "get",
+        lambda code, version=None: (
+            required if code == required.code else original_get(code, version)
+        ),
+    )
+
+    class RejectingCritic:
+        calls = 0
+
+        async def review(self, **_kwargs):
+            self.calls += 1
+            return SimpleNamespace(
+                passed=False,
+                score=55,
+                issues=["needs review"],
+                suggestions=[],
+            )
+
+    tools = _CountingTools()
+    harness = _Harness()
+    critic = RejectingCritic()
+    runtime = SkillRuntime(
+        tool_executor=tools,
+        harness=harness,
+        critic=critic,
+    )
+
+    first = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="topic_planning",
+    )
+    duplicate = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="topic_planning",
+    )
+
+    assert first.status == "completed"
+    assert first.artifact_id is not None
+    assert duplicate == first
+    assert critic.calls == 1
+    assert tools.calls == ["account.profile", "account.data_context"]
+    assert harness.calls == [required.expert_stages[0][0]]
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
 
 
 @pytest.mark.asyncio
