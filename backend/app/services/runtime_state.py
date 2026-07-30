@@ -171,6 +171,7 @@ async def close_runtime_state(
             task=task,
         )
 
+        replaying_terminal = run.status in TERMINAL_STATUSES
         effective_status, effective_message, effective_error, result_payload = (
             _first_terminal_wins(
                 run=run,
@@ -213,7 +214,10 @@ async def close_runtime_state(
             if not preserve_terminal_skill:
                 skill_run.status = _skill_status(effective_status)
                 skill_run.error_code = effective_error
-                if scope.skill_output_snapshot is not None:
+                if (
+                    scope.skill_output_snapshot is not None
+                    and not replaying_terminal
+                ):
                     skill_run.output_snapshot = scope.skill_output_snapshot
 
         if task is not None and not (preserve_terminal_skill and family == "active"):
@@ -426,7 +430,7 @@ async def _record_delivery_events(
         *scope.extra_events,
         RuntimeEventSpec(
             event_type="brain.runtime.message_done",
-            semantic_key="runtime-state-message",
+            semantic_key=f"runtime-state-message:{status}",
             payload={
                 "message": message,
                 "content": message,

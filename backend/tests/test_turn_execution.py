@@ -280,6 +280,136 @@ async def test_close_runtime_state_terminal_message_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_close_runtime_state_pause_then_complete_delivers_both_messages_once(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-pause-then-complete",
+    )
+    base_scope = {
+        "run_id": run.id,
+        "turn_id": turn.id,
+        "skill_run_id": skill_run.id,
+        "task_id": task.id,
+        "account_id": account.id,
+    }
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **base_scope,
+            result_payload={"status": "waiting_permission"},
+        ),
+        status="waiting_permission",
+        message="请先确认工具授权。",
+    )
+    completed_scope = RuntimeStateScope(
+        **base_scope,
+        result_payload={"status": "completed"},
+    )
+    await close_runtime_state(
+        session,
+        scope=completed_scope,
+        status="completed",
+        message="授权后任务已完成。",
+    )
+    await close_runtime_state(
+        session,
+        scope=completed_scope,
+        status="completed",
+        message="授权后任务已完成。",
+    )
+
+    await session.refresh(turn)
+    deliveries = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.run_id == run.id,
+                Event.type == "brain.runtime.message_done",
+            )
+            .order_by(Event.id)
+        )
+    )
+    assert [event.payload["content"] for event in deliveries] == [
+        "请先确认工具授权。",
+        "授权后任务已完成。",
+    ]
+    assert turn.status == "completed"
+    assert turn.assistant_response == "授权后任务已完成。"
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_first_terminal_preserves_skill_snapshot_on_replay(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-terminal-snapshot",
+    )
+    scope_values = {
+        "run_id": run.id,
+        "turn_id": turn.id,
+        "skill_run_id": skill_run.id,
+        "task_id": task.id,
+        "account_id": account.id,
+    }
+    formal_snapshot = {
+        "status": "completed",
+        "artifact_id": 701,
+        "response": "正式成果已生成。",
+    }
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "completed"},
+            skill_output_snapshot=formal_snapshot,
+        ),
+        status="completed",
+        message="正式成果已生成。",
+    )
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "failed"},
+            skill_output_snapshot={
+                "status": "failed",
+                "error_code": "LATE_FAILURE",
+            },
+        ),
+        status="failed",
+        message="迟到的失败不得覆盖正式成果。",
+        error_code="LATE_FAILURE",
+    )
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "completed"},
+            skill_output_snapshot={
+                "status": "completed",
+                "artifact_id": 999,
+                "response": "重复重放的不同快照。",
+            },
+        ),
+        status="completed",
+        message="重复重放不得覆盖正式成果。",
+    )
+
+    await session.refresh(skill_run)
+    assert skill_run.status == "completed"
+    assert skill_run.output_snapshot == formal_snapshot
+
+
+@pytest.mark.asyncio
 async def test_close_runtime_state_rejects_cross_scope_without_partial_commit(
     session,
     admin,
