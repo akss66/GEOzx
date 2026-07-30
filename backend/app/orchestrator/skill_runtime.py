@@ -955,6 +955,7 @@ class SkillRuntime:
         content.status = ContentStatus.DRAFT
         if quality_score is not None:
             skill_run.quality_score = Decimal(str(quality_score / 100))
+        await session.flush()
         output = {
             "status": "completed",
             "task_id": task.id,

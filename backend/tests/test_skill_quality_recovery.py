@@ -1,6 +1,7 @@
 """Task 6 regressions for generic quality gates and legacy recovery."""
 
 from dataclasses import replace
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -75,6 +76,9 @@ async def test_required_generic_skill_cannot_bypass_failed_quality_gate(
     deliverable = await session.get(Deliverable, result.artifact_id)
     assert deliverable is not None
     assert deliverable.status is DeliverableStatus.PENDING_REVIEW
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.id == result.skill_run_id))
+    assert skill_run is not None
+    assert skill_run.quality_score == Decimal("0.55")
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
 
 
@@ -145,6 +149,9 @@ async def test_required_generic_skill_failed_quality_gate_is_terminal_and_idempo
     assert critic.calls == 1
     assert tools.calls == ["account.profile", "account.data_context"]
     assert harness.calls == [required.expert_stages[0][0]]
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.id == first.skill_run_id))
+    assert skill_run is not None
+    assert skill_run.quality_score == Decimal("0.55")
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
 
 
