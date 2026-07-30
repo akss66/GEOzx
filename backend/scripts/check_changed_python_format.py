@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 
+class BaseRevisionUnavailable(RuntimeError):
+    """The requested comparison range cannot be proven from local history."""
+
+
 def changed_python_files(repo: Path, *, base: str | None) -> list[str]:
     repo = repo.resolve()
     candidates: set[str] = set()
@@ -60,12 +64,21 @@ def changed_python_files(repo: Path, *, base: str | None) -> list[str]:
     return sorted(item for item in candidates if (repo / item).is_file())
 
 
-def _effective_base(repo: Path, requested: str | None) -> str | None:
-    if requested and set(requested) != {"0"} and _is_commit(repo, requested):
-        return requested
+def _effective_base(repo: Path, requested: str | None) -> str:
+    requested = (requested or "").strip()
+    if requested and set(requested) != {"0"}:
+        if _is_commit(repo, requested):
+            return requested
+        raise BaseRevisionUnavailable(
+            f"Base revision is unavailable: {requested}. "
+            "Fetch the comparison history before running the format gate."
+        )
     if _is_commit(repo, "HEAD^"):
         return "HEAD^"
-    return None
+    raise BaseRevisionUnavailable(
+        "Base revision is unavailable and HEAD has no locally available parent. "
+        "Pass a valid --base or fetch the comparison history."
+    )
 
 
 def _is_commit(repo: Path, revision: str) -> bool:
@@ -106,7 +119,11 @@ def main() -> int:
     parser.add_argument("--base", default=None)
     args = parser.parse_args()
     repo = _repo_root(Path.cwd())
-    files = changed_python_files(repo, base=args.base)
+    try:
+        files = changed_python_files(repo, base=args.base)
+    except BaseRevisionUnavailable as exc:
+        print(f"Changed-Python format gate refused to run: {exc}", file=sys.stderr)
+        return 2
     if not files:
         print("No changed Python files require Ruff format validation.")
         return 0

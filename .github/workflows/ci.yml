@@ -38,6 +38,8 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -48,7 +50,7 @@ jobs:
         run: ruff check .
       - name: Format check (ruff)
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: python scripts/check_changed_python_format.py --base "$BASE_SHA"
       - name: Tests (pytest)
         run: pytest -q --durations=25

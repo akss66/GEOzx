@@ -58,7 +58,9 @@
   Thread and Turn ownership so approval controls survive history reload.
 - Replaced the unreliable repository-wide Ruff format baseline with a
   changed-Python gate that combines committed, staged, unstaged, and untracked
-  files and fails on the exact changed set.
+  files and fails on the exact changed set. The CI checkout fetches full
+  history, PR and push events select their explicit comparison SHAs, and an
+  unavailable base now fails closed instead of reporting zero changed files.
 - Made Playwright verification deterministic:
   - CI cannot reuse an unrelated server already bound to port 5173;
   - the dev-server command is cross-platform;
@@ -136,6 +138,10 @@ or production database:
   passed.
 - Changed-Python Ruff format gate:
   all 28 changed/new Python files passed.
+- Changed-format CI contract:
+  5 tests passed, including shallow-clone missing-base rejection, no-base
+  rejection, a true zero-Python-change success, and workflow fetch/base
+  selection.
 - `git diff --check`:
   passed.
 
