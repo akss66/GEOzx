@@ -24,6 +24,14 @@
   only the complete output of prior stages. All same-stage work is allowed to settle
   before a failure is raised, retaining Invocation traces while preventing a formal
   Deliverable.
+- Review fix: generic Skills now enforce `critic_policy` at the common formal
+  finalize boundary. `none` performs zero Critic calls; `required` invokes the
+  configured adapter and fails closed to `waiting_permission` with no Deliverable
+  when review does not pass or no safe adapter exists.
+- Review fix: fresh retries discover all persisted rows by `(run_id, skill_code)`,
+  including terminal legacy `skill:{code}:vN` rows. A unique row freezes the exact
+  historical version/input/hash/scope and is reused; multiple rows are an explicit
+  recovery ambiguity rather than a newest-row guess.
 - Added migration `20260730_0400_skill_recovery_freeze`, including ambiguous-active
   preflight, canonical hash backfill, 64-character validation, non-null convergence,
   and downgrade.
@@ -41,6 +49,8 @@
 
 - Directed Task 6 suite:
   `111 passed, 2 warnings in 24.91s`.
+- Review regressions: `4 passed` for generic required/none quality policies,
+  historical-version terminal reuse, and multi-candidate ambiguity.
 - `uv run ruff check app tests migrations/versions/20260730_0400_skill_recovery_freeze.py`
   passed.
 - `uv run alembic heads` -> `20260730_0400 (head)`.

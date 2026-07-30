@@ -189,13 +189,31 @@ class SkillRuntime:
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
         run_id = run.id
-        definition = (
-            resolve_frozen_skill_definition(resume_skill_run)
+        persisted_candidates = (
+            []
             if resume_skill_run is not None
+            else list(
+                await session.scalars(
+                    select(SkillRun).where(
+                        SkillRun.run_id == run_id,
+                        SkillRun.skill_code == skill_code,
+                    )
+                )
+            )
+        )
+        if len(persisted_candidates) > 1:
+            raise SkillRecoveryConflict("SKILL_RECOVERY_AMBIGUOUS")
+        recovery_candidate = (
+            resume_skill_run
+            or (persisted_candidates[0] if persisted_candidates else None)
+        )
+        definition = (
+            resolve_frozen_skill_definition(recovery_candidate)
+            if recovery_candidate is not None
             else skill_registry.get(skill_code)
         )
-        if resume_skill_run is not None:
-            frozen_snapshot = dict(resume_skill_run.input_snapshot or {})
+        if recovery_candidate is not None:
+            frozen_snapshot = dict(recovery_candidate.input_snapshot or {})
             model_input = {
                 key: value
                 for key, value in frozen_snapshot.items()
@@ -208,21 +226,10 @@ class SkillRuntime:
             frozen_snapshot = {
                 "account_id": thread.account_id,
                 **frozen_input.model_dump(mode="json"),
-            }
+        }
         idempotency_key = f"skill:{definition.code}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
-        active = list(
-            await session.scalars(
-                select(SkillRun).where(
-                    SkillRun.run_id == run_id,
-                    SkillRun.skill_code == definition.code,
-                    SkillRun.status.in_({"running", "retry_wait", "waiting_permission"}),
-                )
-            )
-        )
-        if len(active) > 1:
-            raise SkillRecoveryConflict("SKILL_RECOVERY_AMBIGUOUS")
-        existing = resume_skill_run or (active[0] if active else None)
+        existing = recovery_candidate
         if existing is None:
             existing = await session.scalar(
                 select(SkillRun).where(
@@ -230,8 +237,21 @@ class SkillRuntime:
                     SkillRun.idempotency_key == idempotency_key,
                 )
             )
-        elif existing.run_id != run_id or existing.skill_code != definition.code:
-            raise SkillRecoveryConflict("SKILL_RECOVERY_SCOPE_CONFLICT")
+        else:
+            if (
+                existing.org_id != user.org_id
+                or existing.run_id != run_id
+                or existing.thread_id != thread.id
+                or existing.turn_id != turn.id
+                or existing.skill_code != definition.code
+            ):
+                raise SkillRecoveryConflict("SKILL_RECOVERY_SCOPE_CONFLICT")
+            if (
+                existing.skill_version != definition.version
+                or existing.input_hash != skill_input_hash(frozen_snapshot)
+                or dict(existing.input_snapshot or {}) != frozen_snapshot
+            ):
+                raise SkillRecoveryConflict("SKILL_RECOVERY_WINNER_CONFLICT")
         if existing is not None and existing.status in {
             "blocked",
             "completed",
@@ -818,6 +838,39 @@ class SkillRuntime:
             scope=scope,
             definition=definition,
         )
+        if definition.critic_policy == "required":
+            if self._critic is None:
+                return await self._pause_for_quality_review(
+                    session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    definition=definition,
+                    report=report,
+                    reason="No safe Critic adapter is configured.",
+                )
+            review = await self._critic.review(
+                session=session,
+                task=task,
+                invocation=expert_results[-1].invocation,
+                report=report,
+                evidence_refs=evidence_refs,
+                iteration=0,
+            )
+            if not bool(review.passed):
+                return await self._pause_for_quality_review(
+                    session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    definition=definition,
+                    report=report,
+                    reason="Critic review requires human confirmation.",
+                )
         deliverable = await write_runtime_deliverable(
             session,
             scope=scope,
@@ -851,6 +904,43 @@ class SkillRuntime:
             status="completed",
             response=output["response"],
             output_snapshot=output,
+        )
+        return self._existing_result(skill_run)
+
+    async def _pause_for_quality_review(
+        self,
+        session: AsyncSession,
+        *,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        definition: SkillDefinition,
+        report: dict[str, Any],
+        reason: str,
+    ) -> SkillExecutionResult:
+        output = {
+            "status": "waiting_permission",
+            "task_id": task.id,
+            "artifact_id": None,
+            "artifact_type": definition.artifact_type or definition.code,
+            "report": report,
+            "response": "Quality review requires human confirmation.",
+            "error_code": "SKILL_QUALITY_REVIEW_REQUIRED",
+            "review_reason": reason,
+        }
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="waiting_permission",
+            response=output["response"],
+            output_snapshot=output,
+            error_code=output["error_code"],
         )
         return self._existing_result(skill_run)
 
