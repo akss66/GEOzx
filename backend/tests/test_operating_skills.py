@@ -107,12 +107,14 @@ class _Tools:
                         name="account.profile",
                         handler=profile,
                         params_model=EmptyParams,
+                        side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
                     ),
                     ToolSpec(
                         name="account.data_context",
                         handler=data_context,
                         params_model=DaysParams,
+                        side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
                     ),
                 ]

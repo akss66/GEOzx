@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -313,6 +314,11 @@ class AgentToolCall(Base, TimestampMixin):
             ["agent_invocations.id", "agent_invocations.task_id"],
             name="fk_agent_tool_calls_invocation_task",
         ),
+        CheckConstraint(
+            "side_effect_level IN "
+            "('read', 'idempotent_write', 'non_idempotent_write')",
+            name="ck_agent_tool_calls_side_effect_level",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -343,6 +349,12 @@ class AgentToolCall(Base, TimestampMixin):
     tool_code: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     tool_name: Mapped[str] = mapped_column(String(180), nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    provider_idempotency_key: Mapped[str | None] = mapped_column(
+        String(160), nullable=True
+    )
+    side_effect_level: Mapped[str] = mapped_column(
+        String(32), default="read", server_default="read", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(40), default="planned", index=True, nullable=False)
     permission_mode: Mapped[str] = mapped_column(String(40), default="auto", nullable=False)
     requires_human_confirmation: Mapped[bool] = mapped_column(
@@ -369,6 +381,53 @@ class AgentToolCall(Base, TimestampMixin):
         back_populates="tool_calls",
         foreign_keys=[skill_run_id],
     )
+    attempts: Mapped[list["ToolExecutionAttempt"]] = relationship(
+        back_populates="tool_call",
+        cascade="all, delete-orphan",
+        order_by="ToolExecutionAttempt.attempt_no",
+    )
+
+
+class ToolExecutionAttempt(Base, TimestampMixin):
+    """One persisted provider dispatch attempt for a durable ToolCall."""
+
+    __tablename__ = "tool_execution_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "tool_call_id",
+            "attempt_no",
+            name="uq_tool_execution_attempt_call_number",
+        ),
+        CheckConstraint(
+            "status IN "
+            "('planned', 'dispatched', 'success', 'failed', 'ambiguous')",
+            name="ck_tool_execution_attempts_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    tool_call_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_tool_calls.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default="planned", server_default="planned", nullable=False
+    )
+    provider_idempotency_key: Mapped[str | None] = mapped_column(
+        String(160), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    tool_call: Mapped[AgentToolCall] = relationship(back_populates="attempts")
 
 
 class DeliverableAcceptance(Base, TimestampMixin):

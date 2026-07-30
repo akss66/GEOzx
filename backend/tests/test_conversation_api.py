@@ -14,6 +14,7 @@ from app.models import (
     AccountMembership,
     AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     Client,
     ClientMembership,
@@ -22,8 +23,10 @@ from app.models import (
     ConversationTurn,
     Deliverable,
     Event,
+    LLMCall,
     Org,
     SkillRun,
+    ToolExecutionAttempt,
     User,
 )
 from app.models.enums import (
@@ -365,6 +368,251 @@ async def test_owner_cannot_delete_conversation_with_active_skill_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("turn_status", ["running", "waiting_user"])
+async def test_owner_cannot_delete_conversation_with_non_terminal_turn(
+    client,
+    session,
+    admin,
+    monkeypatch,
+    turn_status,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, f"Delete {turn_status} turn")
+    thread = await _create_thread(client, admin, account)
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=f"delete-{turn_status}",
+        user_input="Keep this turn",
+        status=turn_status,
+    )
+    session.add(turn)
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_unknown_tool_state(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete unknown tool state")
+    thread = await _create_thread(client, admin, account)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Unknown tool state",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        tool_code="unknown.state",
+        tool_name="Unknown state",
+        status="provider_mystery",
+        side_effect_level="read",
+    )
+    session.add(tool_call)
+    await session.flush()
+    tool_call_id = tool_call.id
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(AgentToolCall, tool_call_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_active_invocation(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete active invocation")
+    thread = await _create_thread(client, admin, account)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Active invocation",
+    )
+    session.add(task)
+    await session.flush()
+    invocation = AgentInvocation(
+        task_id=task.id,
+        thread_id=thread["id"],
+        step_key="active-invocation",
+        agent_code=AgentCode.OPERATOR,
+        agent_name="Operator",
+        status=AgentInvocationStatus.RUNNING,
+    )
+    session.add(invocation)
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_dispatched_tool_attempt(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete dispatched attempt")
+    thread = await _create_thread(client, admin, account)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Dispatched attempt",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        tool_code="provider.read",
+        tool_name="Provider read",
+        status="success",
+        side_effect_level="read",
+    )
+    session.add(tool_call)
+    await session.flush()
+    session.add(
+        ToolExecutionAttempt(
+            tool_call_id=tool_call.id,
+            attempt_no=1,
+            status="dispatched",
+        )
+    )
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_owner_can_delete_empty_and_terminal_conversations(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete terminal conversations")
+    empty_thread = await _create_thread(client, admin, account)
+    terminal_thread = await _create_thread(client, admin, account)
+    session.add(
+        ConversationTurn(
+            thread_id=terminal_thread["id"],
+            org_id=admin.org_id,
+            created_by_id=admin.id,
+            client_message_id="delete-terminal",
+            user_input="Completed",
+            assistant_response="Done",
+            status="completed",
+        )
+    )
+    await session.commit()
+
+    empty_deleted = await client.delete(
+        f"/brain/conversations/{empty_thread['id']}",
+        headers=_auth(admin),
+    )
+    terminal_deleted = await client.delete(
+        f"/brain/conversations/{terminal_thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert empty_deleted.status_code == terminal_deleted.status_code == 204
+    assert await session.get(ConversationThread, empty_thread["id"]) is None
+    assert await session.get(ConversationThread, terminal_thread["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_cross_user_child_blocks_whole_conversation_delete(
+    client,
+    session,
+    admin,
+    member,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Cross-user child")
+    thread = await _create_thread(client, admin, account)
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="cross-user-child",
+        user_input="Do not partially delete",
+        assistant_response="Done",
+        status="completed",
+    )
+    session.add(turn)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=member.id,
+        thread_id=thread["id"],
+        turn_id=turn.id,
+        client_message_id=turn.client_message_id,
+        status="completed",
+        phase="completed",
+        request_payload={},
+    )
+    session.add(run)
+    await session.flush()
+    turn_id = turn.id
+    run_id = run.id
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+    assert await session.get(ConversationTurn, turn_id) is not None
+    assert await session.get(AgentRun, run_id) is not None
+
+
+@pytest.mark.asyncio
 async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     client,
     session,
@@ -398,6 +646,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     run = await session.get(AgentRun, submitted.json()["run"]["id"])
     assert run is not None
     assert run.task_id is not None
+    task_id = run.task_id
     skill_run = await session.scalar(
         select(SkillRun).where(SkillRun.thread_id == thread["id"])
     )
@@ -450,12 +699,79 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         payload={"tool_code": "account.profile"},
     )
     session.add_all([preserved_event, formal_event, technical_event])
+    owned_llm_call = LLMCall(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        task_id=task.id,
+        trace_id=f"conversation-thread-{thread['id']}",
+        provider="test",
+        model="test-model",
+    )
+    shared_llm_call = LLMCall(
+        org_id=admin.org_id,
+        created_by_id=member.id,
+        task_id=task.id,
+        trace_id="shared-task-call",
+        provider="test",
+        model="test-model",
+    )
+    invocation = await session.scalar(
+        select(AgentInvocation).where(AgentInvocation.thread_id == thread["id"])
+    )
+    if invocation is None:
+        invocation = AgentInvocation(
+            task_id=task.id,
+            run_id=run.id,
+            skill_run_id=skill_run.id,
+            thread_id=thread["id"],
+            turn_id=submitted.json()["turn"]["id"],
+            step_key="delete-history:operator",
+            agent_code=AgentCode.OPERATOR,
+            agent_name="Operator",
+            status=AgentInvocationStatus.DONE,
+        )
+        session.add(invocation)
+        await session.flush()
+    write_tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        invocation_id=invocation.id,
+        skill_run_id=skill_run.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        tool_code="provider.publish",
+        tool_name="Provider publish",
+        idempotency_key="delete-write-audit",
+        provider_idempotency_key="provider-delete-write-audit",
+        side_effect_level="non_idempotent_write",
+        status="success",
+    )
+    session.add_all([owned_llm_call, shared_llm_call, write_tool_call])
     await session.flush()
+    write_attempt = ToolExecutionAttempt(
+        tool_call_id=write_tool_call.id,
+        attempt_no=1,
+        status="success",
+        provider_idempotency_key=write_tool_call.provider_idempotency_key,
+    )
+    session.add(write_attempt)
+    read_tool_ids = set(
+        await session.scalars(
+            select(AgentToolCall.id).where(
+                AgentToolCall.thread_id == thread["id"],
+                AgentToolCall.side_effect_level == "read",
+            )
+        )
+    )
     content_item_id = content_item.id
     deliverable_id = deliverable.id
     preserved_event_id = preserved_event.id
     formal_event_id = formal_event.id
     technical_event_id = technical_event.id
+    owned_llm_call_id = owned_llm_call.id
+    shared_llm_call_id = shared_llm_call.id
+    write_tool_call_id = write_tool_call.id
+    write_attempt_id = write_attempt.id
     await session.commit()
 
     denied = await client.delete(
@@ -469,6 +785,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
 
     assert denied.status_code == 404
     assert deleted.status_code == 204
+    session.expire_all()
     assert await session.get(ConversationThread, thread["id"]) is None
     assert (
         await session.scalar(
@@ -478,7 +795,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         )
         == 0
     )
-    preserved_task = await session.get(BrainTask, run.task_id)
+    preserved_task = await session.get(BrainTask, task_id)
     assert preserved_task is not None
     assert preserved_task.content_item_id == content_item_id
     preserved_content = await session.get(ContentItem, content_item_id)
@@ -523,6 +840,17 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert formal_event_row.skill_run_id is None
     assert formal_event_row.payload == {"deliverable_id": deliverable_id}
     assert await session.get(Event, technical_event_id) is None
+    assert await session.get(LLMCall, owned_llm_call_id) is None
+    assert await session.get(LLMCall, shared_llm_call_id) is not None
+    for read_tool_id in read_tool_ids:
+        assert await session.get(AgentToolCall, read_tool_id) is None
+    retained_write = await session.get(AgentToolCall, write_tool_call_id)
+    assert retained_write is not None
+    assert retained_write.invocation_id is None
+    assert retained_write.skill_run_id is None
+    assert retained_write.thread_id is None
+    assert retained_write.turn_id is None
+    assert await session.get(ToolExecutionAttempt, write_attempt_id) is not None
 
 
 @pytest.mark.asyncio

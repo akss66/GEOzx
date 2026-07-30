@@ -282,6 +282,7 @@ async def test_tool_idempotency_reuse_compares_invocation_and_complete_scope(
                 name="diagnostics.echo",
                 handler=handler,
                 params_model=_EchoParams,
+                side_effect_level="read",
                 allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
             )
         ]

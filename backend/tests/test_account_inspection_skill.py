@@ -158,12 +158,14 @@ class _FakeTools:
                         name="account.profile",
                         handler=profile,
                         params_model=_EmptyParams,
+                        side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
                     ),
                     ToolSpec(
                         name="account.data_context",
                         handler=data_context,
                         params_model=_DaysParams,
+                        side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
                     ),
                 ]

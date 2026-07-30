@@ -256,6 +256,7 @@ _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.profile",
         handler=_tool_handler(AccountProfileParams, _account_profile),
+        side_effect_level="read",
         params_model=AccountProfileParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
@@ -263,6 +264,7 @@ _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.data_context",
         handler=_tool_handler(AccountMetricsParams, _account_data_context),
+        side_effect_level="read",
         params_model=AccountMetricsParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
@@ -270,6 +272,7 @@ _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.metrics_summary",
         handler=_tool_handler(AccountMetricsParams, _account_metrics_summary),
+        side_effect_level="read",
         params_model=AccountMetricsParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",

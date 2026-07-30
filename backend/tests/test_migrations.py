@@ -17,6 +17,65 @@ def get_head_revision() -> str | None:
     return script.get_current_head()
 
 
+def test_tool_side_effect_outbox_migration_is_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260730_0500_tool_side_effect_outbox"
+    )
+    assert migration.down_revision == "20260730_0400"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    tool_calls = sa.Table(
+        "agent_tool_calls",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("tool_code", sa.String(120), nullable=False),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            tool_calls.insert(),
+            [{"id": 1, "tool_code": "account.profile"}],
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {
+            column["name"]: column
+            for column in inspector.get_columns("agent_tool_calls")
+        }
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("agent_tool_calls")
+        }
+        assert columns["side_effect_level"]["nullable"] is False
+        assert connection.execute(
+            sa.text(
+                "SELECT side_effect_level, provider_idempotency_key "
+                "FROM agent_tool_calls WHERE id = 1"
+            )
+        ).one() == ("read", None)
+        assert "ck_agent_tool_calls_side_effect_level" in checks
+        assert inspector.has_table("tool_execution_attempts")
+
+        migration.downgrade()
+
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("tool_execution_attempts") is False
+        assert "side_effect_level" not in {
+            column["name"] for column in inspector.get_columns("agent_tool_calls")
+        }
+        assert "provider_idempotency_key" not in {
+            column["name"] for column in inspector.get_columns("agent_tool_calls")
+        }
+
+
 def test_runtime_state_convergence_migrates_history_before_constraints(
     monkeypatch,
 ) -> None:
@@ -344,8 +403,8 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_skill_recovery_freeze() -> None:
-    assert get_head_revision() == "20260730_0400"
+def test_migration_head_is_tool_side_effect_outbox() -> None:
+    assert get_head_revision() == "20260730_0500"
 
 
 def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:

@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,7 @@ from app.models import (
     ConversationTurn,
     SkillRun,
     TaskBrief,
+    ToolExecutionAttempt,
     User,
 )
 from app.models.enums import (
@@ -1100,6 +1101,79 @@ class SkillRuntime:
         skill_run: SkillRun,
         task: BrainTask,
     ) -> bool:
+        ambiguous_writes = list(
+            await session.scalars(
+                select(AgentToolCall)
+                .outerjoin(
+                    ToolExecutionAttempt,
+                    ToolExecutionAttempt.tool_call_id == AgentToolCall.id,
+                )
+                .where(
+                    AgentToolCall.skill_run_id == skill_run.id,
+                    AgentToolCall.side_effect_level != "read",
+                    or_(
+                        AgentToolCall.status == "ambiguous",
+                        and_(
+                            AgentToolCall.status == "running",
+                            ToolExecutionAttempt.status == "dispatched",
+                        ),
+                    ),
+                )
+                .distinct()
+                .with_for_update(of=AgentToolCall)
+                .execution_options(populate_existing=True)
+            )
+        )
+        if ambiguous_writes:
+            now = datetime.now(UTC)
+            error_code = "TOOL_RESULT_AMBIGUOUS"
+            ambiguous_ids = [tool_call.id for tool_call in ambiguous_writes]
+            for tool_call in ambiguous_writes:
+                tool_call.status = "ambiguous"
+                tool_call.error = error_code
+                tool_call.finished_at = now
+            dispatched_attempts = list(
+                await session.scalars(
+                    select(ToolExecutionAttempt)
+                    .where(
+                        ToolExecutionAttempt.tool_call_id.in_(ambiguous_ids),
+                        ToolExecutionAttempt.status == "dispatched",
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            for attempt in dispatched_attempts:
+                attempt.status = "ambiguous"
+                attempt.error = error_code
+                attempt.finished_at = now
+            response = (
+                "外部写入已经发出，但平台结果暂时无法确认。"
+                "为避免重复操作，本次执行已停止，请人工核对平台状态后再决定下一步。"
+            )
+            output_snapshot = {
+                "status": "stopped",
+                "task_id": task.id,
+                "artifact_id": None,
+                "artifact_type": "account_inspection_report",
+                "report": {},
+                "response": response,
+                "error_code": error_code,
+            }
+            await SkillRuntime._close_skill_state(
+                session,
+                thread=await session.get(ConversationThread, turn.thread_id),
+                turn=turn,
+                run=run,
+                task=task,
+                skill_run=skill_run,
+                status="stopped",
+                response=response,
+                output_snapshot=output_snapshot,
+                error_code=error_code,
+            )
+            return True
+
         tool_calls = list(
             await session.scalars(
                 select(AgentToolCall)
@@ -1287,17 +1361,29 @@ class SkillRuntime:
         skill_name: str = "账号体检",
         artifact_type: str = "account_inspection_report",
     ) -> SkillExecutionResult:
-        paused_status = "waiting_permission" if status == "waiting_approval" else "failed"
+        paused_status = {
+            "waiting_approval": "waiting_permission",
+            "ambiguous": "stopped",
+        }.get(status, "failed")
         error_code = (
             "TOOL_PERMISSION_REQUIRED"
             if paused_status == "waiting_permission"
-            else "TOOL_EXECUTION_FAILED"
+            else (
+                "TOOL_RESULT_AMBIGUOUS"
+                if paused_status == "stopped"
+                else "TOOL_EXECUTION_FAILED"
+            )
         )
         response = (
             f"{skill_name}正在等待工具授权。"
             if paused_status.startswith("waiting")
             else f"{skill_name}工具执行失败。"
         )
+        if paused_status == "stopped":
+            response = (
+                "外部写入结果暂时无法确认。为避免重复操作，本次执行已停止，"
+                "请人工核对平台状态后再决定下一步。"
+            )
         output_snapshot = {
             "status": paused_status,
             "task_id": task.id,

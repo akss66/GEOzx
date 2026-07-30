@@ -21,6 +21,7 @@ from app.models import (
     Event,
     SkillRun,
     TaskBrief,
+    ToolExecutionAttempt,
 )
 from app.models.enums import BrainTaskStatus, BrainTaskType, Platform
 from app.orchestrator.agent_harness import AgentHarnessError
@@ -177,8 +178,8 @@ async def test_worker_executes_a_task_free_conversation_before_legacy_task_looku
             "running",
             True,
             True,
-            "failed",
-            "SKILL_EXECUTION_INTERRUPTED",
+            "stopped",
+            "TOOL_RESULT_AMBIGUOUS",
         ),
         (
             "completed",
@@ -320,10 +321,19 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
             tool_code="account.profile",
             tool_name="Account profile",
             idempotency_key=f"{skill_run.id}:account.profile",
+            side_effect_level="non_idempotent_write",
             status="running",
             meta={"arguments": {}},
         )
         session.add(tool_call)
+        await session.flush()
+        session.add(
+            ToolExecutionAttempt(
+                tool_call_id=tool_call.id,
+                attempt_no=1,
+                status="dispatched",
+            )
+        )
     await session.commit()
 
     @asynccontextmanager
@@ -359,13 +369,13 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
     assert run.status == expected_run_status
     assert run.error_code == expected_error
     assert turn.assistant_response
-    if skill_status == "running":
-        assert task.status is BrainTaskStatus.FAILED
-        assert skill_run.status == "failed"
-        assert skill_run.error_code == "SKILL_EXECUTION_INTERRUPTED"
+    if has_ambiguous_call:
+        assert task.status is BrainTaskStatus.PENDING_CONFIRMATION
+        assert skill_run.status == "stopped"
+        assert skill_run.error_code == "TOOL_RESULT_AMBIGUOUS"
         assert tool_call is not None
-        assert tool_call.status == "failed"
-        assert tool_call.error == "SKILL_EXECUTION_INTERRUPTED"
+        assert tool_call.status == "ambiguous"
+        assert tool_call.error == "TOOL_RESULT_AMBIGUOUS"
     else:
         assert task.status is BrainTaskStatus.COMPLETED
         assert skill_run.status == "completed"

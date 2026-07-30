@@ -2589,6 +2589,7 @@ async def test_smart_runtime_resumes_from_permission_with_decision_in_parent_con
                     name="publish.prepare",
                     handler=controlled_publish_tool,
                     params_model=EmptyParams,
+                    side_effect_level="read",
                     allowed_roles=frozenset({UserRole.ADMIN}),
                     permission_mode="confirm",
                     scope="account",
