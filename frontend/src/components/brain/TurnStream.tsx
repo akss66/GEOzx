@@ -185,11 +185,20 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
       <summary>技术日志</summary>
       {turn.id != null ? <div>消息编号：{turn.id}</div> : null}
       {route ? <div>路由：{route}</div> : null}
+      {turn.intent?.route_source ? <div>路由来源：{turn.intent.route_source}</div> : null}
       <div>状态：{turn.status}</div>
+      {turn.route_ms != null ? <div>路由耗时：{turn.route_ms} ms</div> : null}
+      {turn.first_token_ms != null ? <div>首字延迟：{turn.first_token_ms} ms</div> : null}
+      {turn.completion_ms != null ? <div>完成耗时：{turn.completion_ms} ms</div> : null}
+      {turn.total_ms != null ? <div>总耗时：{turn.total_ms} ms</div> : null}
+      {turn.model_call_count != null ? <div>模型调用：{turn.model_call_count} 次</div> : null}
       {execution?.type === "execution_summary" ? (
         <>
           {execution.run_id ? <div>Agent Run：{execution.run_id}</div> : null}
           {execution.skill_code ? <div>Skill：{execution.skill_code}</div> : null}
+          {execution.skill_version != null ? (
+            <div>Skill 版本：v{execution.skill_version}</div>
+          ) : null}
           {execution.skill_run_id ? <div>Skill Run：{execution.skill_run_id}</div> : null}
           {execution.quality_score != null ? (
             <div>质量门：{Math.round(execution.quality_score * 100)} 分</div>
@@ -202,8 +211,11 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
           {execution.tools.map((tool) => (
             <div key={tool.id}>
               Tool #{tool.id} · {tool.tool_code} · {tool.status}
+              {tool.retry_count != null ? ` · 重试 ${tool.retry_count} 次` : ""}
             </div>
           ))}
+          {execution.error_code ? <div>错误代码：{execution.error_code}</div> : null}
+          {execution.recovery_action ? <div>恢复建议：{execution.recovery_action}</div> : null}
         </>
       ) : null}
     </details>
@@ -420,7 +432,7 @@ function projectionKey(projection: TurnProjection, turnId: number) {
   }
 }
 
-function readableIntent(intent: Record<string, unknown> | null, key: string) {
+function readableIntent(intent: ConversationTurn["intent"], key: "mode") {
   const value = intent?.[key];
   return typeof value === "string" && value.length <= 80 ? value : null;
 }

@@ -18,9 +18,7 @@ def get_head_revision() -> str | None:
 
 
 def test_tool_side_effect_outbox_migration_is_reversible(monkeypatch) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260730_0500_tool_side_effect_outbox"
-    )
+    migration = importlib.import_module("migrations.versions.20260730_0500_tool_side_effect_outbox")
     assert migration.down_revision == "20260730_0400"
 
     engine = sa.create_engine("sqlite://")
@@ -46,13 +44,9 @@ def test_tool_side_effect_outbox_migration_is_reversible(monkeypatch) -> None:
         migration.upgrade()
 
         inspector = sa.inspect(connection)
-        columns = {
-            column["name"]: column
-            for column in inspector.get_columns("agent_tool_calls")
-        }
+        columns = {column["name"]: column for column in inspector.get_columns("agent_tool_calls")}
         checks = {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("agent_tool_calls")
+            constraint["name"] for constraint in inspector.get_check_constraints("agent_tool_calls")
         }
         assert columns["side_effect_level"]["nullable"] is False
         assert connection.execute(
@@ -403,8 +397,78 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_tool_side_effect_outbox() -> None:
-    assert get_head_revision() == "20260730_0500"
+def test_turn_observability_migration_is_additive_nullable_and_reversible(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module("migrations.versions.20260730_0600_turn_observability")
+    assert migration.down_revision == "20260730_0500"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("user_input", sa.Text, nullable=False),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(turns.insert(), [{"id": 1, "user_input": "历史消息"}])
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {column["name"]: column for column in inspector.get_columns("conversation_turns")}
+        metric_names = {
+            "route_ms",
+            "first_token_ms",
+            "completion_ms",
+            "total_ms",
+            "model_call_count",
+        }
+        assert metric_names <= columns.keys()
+        assert all(columns[name]["nullable"] for name in metric_names)
+        assert connection.execute(
+            sa.text(
+                "SELECT route_ms, first_token_ms, completion_ms, total_ms, "
+                "model_call_count FROM conversation_turns WHERE id = 1"
+            )
+        ).one() == (None, None, None, None, None)
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("conversation_turns")
+        }
+        assert {
+            "ck_conversation_turns_route_ms",
+            "ck_conversation_turns_first_token_ms",
+            "ck_conversation_turns_completion_ms",
+            "ck_conversation_turns_total_ms",
+            "ck_conversation_turns_model_call_count",
+        } <= checks
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE conversation_turns SET model_call_count = -1 WHERE id = 1")
+            )
+
+        migration.downgrade()
+        assert metric_names.isdisjoint(
+            {column["name"] for column in sa.inspect(connection).get_columns("conversation_turns")}
+        )
+
+
+def test_migration_head_is_turn_observability() -> None:
+    assert get_head_revision() == "20260730_0600"
+
+
+def test_offline_migrations_fail_fast_for_data_dependent_chain() -> None:
+    source = __import__("pathlib").Path("migrations/env.py").read_text(encoding="utf-8")
+    assert "CommandError" in source
+    assert "offline SQL is unsupported for data-dependent migrations" in source
 
 
 def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:

@@ -466,7 +466,7 @@ function persistedTurn(
     client_message_id: clientMessageId,
     user_input: userInput,
     assistant_response: assistantResponse,
-    intent: { mode: "ANSWER" },
+    intent: { mode: "ANSWER", route_source: "deterministic", skill_code: null },
     status,
     projections: [],
     created_at: "2026-07-28T00:00:00Z",

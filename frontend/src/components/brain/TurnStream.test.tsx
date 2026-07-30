@@ -51,8 +51,13 @@ const thread: ConversationThread = {
       client_message_id: "turn-101",
       user_input: "Inspect my account",
       assistant_response: "Inspection has started.",
-      intent: { mode: "SKILL", status: "completed" },
+      intent: { mode: "SKILL", route_source: "explicit", skill_code: "account_inspection" },
       status: "completed",
+      route_ms: 12,
+      first_token_ms: 120,
+      completion_ms: 420,
+      total_ms: 430,
+      model_call_count: 2,
       projections: [
         {
           type: "artifact",
@@ -78,7 +83,7 @@ const thread: ConversationThread = {
       client_message_id: "turn-102",
       user_input: "Hello again",
       assistant_response: "Hello! What would you like to do next?",
-      intent: { mode: "ANSWER" },
+      intent: { mode: "ANSWER", route_source: "deterministic", skill_code: null },
       status: "completed",
       projections: [],
       created_at: "2026-07-28T00:01:00Z",
@@ -92,7 +97,7 @@ const thread: ConversationThread = {
       client_message_id: "turn-103",
       user_input: "Retry the review",
       assistant_response: "Retry is queued.",
-      intent: { mode: "SKILL", status: "running" },
+      intent: { mode: "SKILL", route_source: "explicit", skill_code: "account_inspection" },
       status: "running",
       projections: [
         {
@@ -158,7 +163,7 @@ describe("TurnStream", () => {
           turns: [{
             ...thread.turns[1],
             status: "failed",
-            intent: { mode: "SKILL", status: "completed" },
+            intent: { mode: "SKILL", route_source: "model", skill_code: "account_inspection" },
           }],
         }}
       />,
@@ -183,6 +188,22 @@ describe("TurnStream", () => {
     expect(within(assistantMessage).getByRole("img", { name: "运营大脑" })).toBeInTheDocument();
     expect(within(assistantMessage).getByText("运营大脑")).toBeInTheDocument();
     expect(assistantMessage.querySelector(".dy-chat-bubble")).not.toBeNull();
+  });
+
+  it("shows only persisted latency and model-attempt metrics in collapsed technical details", () => {
+    render(<TurnStream thread={{ ...thread, turns: [thread.turns[0]] }} />);
+
+    const technicalSummary = screen.getByText("技术日志");
+    expect(technicalSummary.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(technicalSummary);
+
+    expect(screen.getByText("路由来源：explicit")).toBeVisible();
+    expect(screen.getByText("路由耗时：12 ms")).toBeVisible();
+    expect(screen.getByText("首字延迟：120 ms")).toBeVisible();
+    expect(screen.getByText("完成耗时：420 ms")).toBeVisible();
+    expect(screen.getByText("总耗时：430 ms")).toBeVisible();
+    expect(screen.getByText("模型调用：2 次")).toBeVisible();
+    expect(screen.queryByText(/prompt|provider body|idempotency/i)).not.toBeInTheDocument();
   });
 
   it("shows called experts professionally and keeps technical identifiers collapsed", () => {

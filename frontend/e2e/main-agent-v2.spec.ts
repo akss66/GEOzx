@@ -42,6 +42,27 @@ const inspectionSkill = {
   is_available: true,
   unavailable_reason: null,
 };
+const publicSkills = [
+  inspectionSkill,
+  {
+    ...inspectionSkill,
+    code: "performance_review",
+    name: "运营复盘",
+    description: "复盘账号表现并生成正式复盘成果",
+  },
+  {
+    ...inspectionSkill,
+    code: "topic_planning",
+    name: "选题策划",
+    description: "生成可执行选题成果",
+  },
+  {
+    ...inspectionSkill,
+    code: "publishing_preparation",
+    name: "发布准备",
+    description: "生成发布准备包但不真实发布",
+  },
+];
 
 const expertInvocation = {
   id: 9101,
@@ -196,11 +217,10 @@ test("main agent v2 preserves the completed Artifact on its source Turn after la
   await expect(sourceTurn).toContainText(inspectionSkill.name);
   await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.title);
 
-  await page.locator(".tz-brain-toolbar-actions button").nth(1).click();
-  const detailsDrawer = page.locator(".tz-brain-details-drawer");
-  await expect(detailsDrawer).toContainText("专家接力");
-  await expect(detailsDrawer).toContainText(expertInvocation.agent_name);
-  await detailsDrawer.locator(".ant-drawer-close").click();
+  await sourceTurn.getByText("技术日志").click();
+  const technicalDetails = sourceTurn.locator(".tz-conversation-turn__technical");
+  await expect(technicalDetails).toContainText(expertInvocation.agent_code);
+  await expect(technicalDetails).not.toContainText(artifact.summary);
 
   await sourceTurn.locator(".tz-artifact-card__actions button").first().click();
   await expect(sourceTurn.locator(".tz-artifact-card__sections--remaining"))
@@ -257,12 +277,12 @@ test("main agent v2 remains usable with runtime details at responsive widths", a
 
   for (const width of [320, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
-    await page.locator(".tz-brain-toolbar-actions button").nth(1).click();
-
-    const detailsDrawer = page.locator(".tz-brain-details-drawer");
-    await expect(detailsDrawer).toContainText(expertInvocation.agent_name);
-    await expect(detailsDrawer).toBeInViewport();
-    await detailsDrawer.locator(".ant-drawer-close").click();
+    const technicalDetails = sourceTurn.locator(".tz-conversation-turn__technical");
+    if ((await technicalDetails.getAttribute("open")) == null) {
+      await sourceTurn.getByText("技术日志").click();
+    }
+    await expect(technicalDetails).toContainText(expertInvocation.agent_code);
+    await expect(technicalDetails).toBeInViewport();
 
     await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
   }
@@ -298,6 +318,49 @@ test("empty main agent workspace keeps actions compact and content above the fol
   expect(actionsBox!.height).toBeLessThanOrEqual(64);
   expect(stageBox!.y).toBeLessThanOrEqual(130);
   await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
+});
+
+test("main agent v3 exposes the ten-case capability matrix through one Turn UI", async ({
+  page,
+}) => {
+  await installBrowserState(page);
+  const unexpectedApiCalls = await mockApi(page);
+  await loginAsAdmin(page);
+  await page.locator(".tz-account-trigger").click();
+  await page.locator(".tz-account-panel button", { hasText: account.nickname }).click();
+
+  const cases = [
+    ["你好", "answer", "completed"],
+    ["你能做什么", "answer", "completed"],
+    ["只查询账号数据，不生成策略", "query", "completed"],
+    ["一键账号体检", "skill", "completed"],
+    ["performance_review", "skill", "completed"],
+    ["topic_planning", "skill", "completed"],
+    ["publishing_preparation", "skill", "completed"],
+    ["现在真实发布", "action", "waiting_permission"],
+    ["强制专家失败", "skill", "failed"],
+    ["继续刚才的账号，不要发布", "answer", "completed"],
+  ] as const;
+
+  for (const [prompt, mode, status] of cases) {
+    await page.locator(".dy-brain-input textarea").fill(prompt);
+    await page.locator(".dy-brain-send-button").click();
+    await expect.poll(async () =>
+      page.locator(".tz-conversation-turn").count()
+    ).toBe(cases.findIndex(([item]) => item === prompt) + 1);
+    const turn = page.locator(".tz-conversation-turn").last();
+    await expect(turn).toContainText(prompt);
+    await expect(turn).toHaveAttribute("data-turn-status", status);
+    await turn.getByText("技术日志").click();
+    await expect(turn).toContainText(`路由：${mode}`);
+    await expect(turn).not.toContainText(/provider body|idempotency|Traceback|sk-secret/i);
+  }
+
+  const approvalTurn = page.locator(".tz-conversation-turn").nth(7);
+  await expect(approvalTurn).toContainText("任务已暂停，等待你确认");
+  const failureTurn = page.locator(".tz-conversation-turn").nth(8);
+  await expect(failureTurn).toContainText("执行失败，未生成伪造成果");
+  expect(unexpectedApiCalls).toEqual([]);
 });
 
 async function loginAsAdmin(page: Page) {
@@ -373,7 +436,7 @@ async function mockApi(page: Page) {
     if (method === "GET" && path === "/account-groups") return json(route, []);
     if (method === "GET" && path === "/accounts") return json(route, [account]);
     if (method === "GET" && path === "/clients") return json(route, []);
-    if (method === "GET" && path === "/skills") return json(route, { data: [inspectionSkill] });
+    if (method === "GET" && path === "/skills") return json(route, { data: publicSkills });
     if (method === "GET" && path === "/brain/tasks") return json(route, [inspectionTask]);
     if (method === "GET" && path === `/brain/tasks/${inspectionTaskId}/runtime`) {
       return json(route, inspectionRuntime);
@@ -405,11 +468,10 @@ async function mockApi(page: Page) {
         message: string;
         requested_skill_code?: string;
       };
-      const isSourceTurn = !sourceTurnSubmitted;
-      const turnId = isSourceTurn ? sourceTurnId : followUpTurnId;
-      const projections = isSourceTurn
-        ? sourceTurnProjections()
-        : [];
+      const isSourceTurn = !sourceTurnSubmitted && body.requested_skill_code === inspectionSkill.code;
+      const turnId = sourceTurnId + turns.length;
+      const capability = matrixTurn(body.message, turnId);
+      const projections = isSourceTurn ? sourceTurnProjections() : capability.projections;
       const turn = {
         id: turnId,
         thread_id: threadBase.id,
@@ -419,12 +481,13 @@ async function mockApi(page: Page) {
         user_input: body.message,
         assistant_response: isSourceTurn
           ? "账号体检已经完成，正式报告已生成。"
-          : "你好，我们继续聊。",
+          : capability.response,
         intent: {
-          mode: isSourceTurn ? "skill" : "answer",
-          status: "completed",
-          requested_skill_code: body.requested_skill_code ?? null,
+          mode: isSourceTurn ? "skill" : capability.mode,
+          route_source: body.requested_skill_code ? "explicit" : "deterministic",
+          skill_code: body.requested_skill_code ?? capability.skillCode,
         },
+        status: isSourceTurn ? "completed" : capability.status,
         projections,
         created_at: createdAt,
         updated_at: createdAt,
@@ -441,8 +504,8 @@ async function mockApi(page: Page) {
           thread_id: threadBase.id,
           turn_id: turnId,
           client_message_id: body.client_message_id,
-          status: "completed",
-          phase: "execution",
+          status: isSourceTurn ? "completed" : capability.status,
+          phase: isSourceTurn ? "completed" : capability.status,
           created_at: createdAt,
           updated_at: createdAt,
         },
@@ -467,8 +530,130 @@ async function mockApi(page: Page) {
   return unexpectedApiCalls;
 }
 
+function matrixTurn(message: string, turnId: number) {
+  const baseSummary = (skillCode: string | null, status: string) => ({
+    type: "execution_summary",
+    turn_id: turnId,
+    run_id: turnId + 5000,
+    mode: skillCode ? "skill" : "answer",
+    route_source: "deterministic",
+    skill_code: skillCode,
+    skill_version: skillCode ? 1 : null,
+    skill_run_id: skillCode ? turnId + 6000 : null,
+    status,
+    quality_score: skillCode ? 0.91 : null,
+    experts: skillCode
+      ? [{
+          id: turnId + 7000,
+          agent_code: "06-operator",
+          agent_name: "运营专家",
+          status,
+          attempt: 0,
+          duration_ms: 28,
+        }]
+      : [],
+    tools: [],
+    error_code: null,
+    recovery_action: null,
+    artifact_ids: [],
+    evidence_ids: [],
+  });
+  if (message.includes("只查询")) {
+    return {
+      mode: "query",
+      status: "completed",
+      skillCode: "account_data_query",
+      response: "已读取当前账号数据，未生成策略。",
+      projections: [{
+        type: "account_data",
+        turn_id: turnId,
+        account_id: account.id,
+        skill_code: "account_data_query",
+        skill_run_id: turnId + 6000,
+        data: {},
+      }],
+    };
+  }
+  if (message === "一键账号体检") {
+    return {
+      mode: "skill",
+      status: "completed",
+      skillCode: "account_inspection",
+      response: "账号体检完成。",
+      projections: [baseSummary("account_inspection", "completed")],
+    };
+  }
+  if (["performance_review", "topic_planning", "publishing_preparation"].includes(message)) {
+    return {
+      mode: "skill",
+      status: "completed",
+      skillCode: message,
+      response: `${message} 成果已生成，未执行真实发布。`,
+      projections: [baseSummary(message, "completed")],
+    };
+  }
+  if (message === "现在真实发布") {
+    return {
+      mode: "action",
+      status: "waiting_permission",
+      skillCode: null,
+      response: "任务已暂停，等待你确认；审批前不会真实发布。",
+      projections: [],
+    };
+  }
+  if (message === "强制专家失败") {
+    return {
+      mode: "skill",
+      status: "failed",
+      skillCode: "account_inspection",
+      response: "执行失败，未生成伪造成果。",
+      projections: [{
+        type: "execution_blocked",
+        turn_id: turnId,
+        skill_run_id: turnId + 6000,
+        code: "EXPERT_EXECUTION_FAILED",
+        recovery_action: "稍后重试。",
+      }],
+    };
+  }
+  return {
+    mode: "answer",
+    status: "completed",
+    skillCode: null,
+    response: message.includes("继续刚才")
+      ? `继续使用当前账号 ${account.nickname}；本轮不会发布。`
+      : "你好，我是运营大脑。",
+    projections: [],
+  };
+}
+
 function sourceTurnProjections() {
   return [
+    {
+      type: "execution_summary",
+      turn_id: sourceTurnId,
+      run_id: 8001,
+      mode: "skill",
+      route_source: "explicit",
+      skill_code: inspectionSkill.code,
+      skill_version: inspectionSkill.version,
+      skill_run_id: artifact.skill_run_id,
+      status: "completed",
+      quality_score: 0.92,
+      experts: [{
+        id: expertInvocation.id,
+        agent_code: expertInvocation.agent_code,
+        agent_name: expertInvocation.agent_name,
+        status: expertInvocation.status,
+        attempt: 0,
+        duration_ms: 25,
+      }],
+      tools: [],
+      error_code: null,
+      recovery_action: null,
+      artifact_ids: [artifact.id],
+      evidence_ids: [],
+    },
     {
       type: "progress",
       turn_id: sourceTurnId,

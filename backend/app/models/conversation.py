@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -23,9 +24,7 @@ class ConversationThread(Base, TimestampMixin):
     """A durable conversation scoped to the user's active account context."""
 
     __tablename__ = "conversation_threads"
-    __table_args__ = (
-        UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),
-    )
+    __table_args__ = (UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),)
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -90,6 +89,20 @@ class ConversationTurn(Base, TimestampMixin):
             ")",
             name="ck_conversation_turns_status",
         ),
+        CheckConstraint("route_ms IS NULL OR route_ms >= 0", name="ck_conversation_turns_route_ms"),
+        CheckConstraint(
+            "first_token_ms IS NULL OR first_token_ms >= 0",
+            name="ck_conversation_turns_first_token_ms",
+        ),
+        CheckConstraint(
+            "completion_ms IS NULL OR completion_ms >= 0",
+            name="ck_conversation_turns_completion_ms",
+        ),
+        CheckConstraint("total_ms IS NULL OR total_ms >= 0", name="ck_conversation_turns_total_ms"),
+        CheckConstraint(
+            "model_call_count IS NULL OR model_call_count >= 0",
+            name="ck_conversation_turns_model_call_count",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -114,6 +127,15 @@ class ConversationTurn(Base, TimestampMixin):
         server_default="queued",
         index=True,
         nullable=False,
+    )
+    route_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_call_count: Mapped[int | None] = mapped_column(
+        Integer,
+        default=0,
+        nullable=True,
     )
 
     thread: Mapped[ConversationThread] = relationship(

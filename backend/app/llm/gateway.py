@@ -32,6 +32,10 @@ from app.services.model_infrastructure import (
     redact_error,
     resolve_route_targets,
 )
+from app.services.turn_observability import (
+    increment_model_call_count,
+    record_first_user_token,
+)
 
 StreamObserver = Callable[[dict[str, Any]], Awaitable[None]]
 _stream_observer: ContextVar[StreamObserver | None] = ContextVar(
@@ -242,6 +246,11 @@ class LLMGateway:
                 )
                 async for chunk in adapter.stream(target.model, messages, options):
                     chunks.append(chunk)
+                    await record_first_user_token(
+                        session,
+                        agent_code=agent_code,
+                        delta=chunk,
+                    )
                     await observer(
                         {
                             "phase": "delta",
@@ -350,6 +359,7 @@ class LLMGateway:
                 error=error,
             )
         )
+        await increment_model_call_count(session)
         await session.commit()
 
 
@@ -378,24 +388,14 @@ def _provider_runtime_failure(
 ) -> ProviderRuntimeFailure:
     chain = exception_chain(exc)
     status_code = next(
-        (
-            code
-            for item in chain
-            if (code := http_status_code(item)) is not None
-        ),
+        (code for item in chain if (code := http_status_code(item)) is not None),
         None,
     )
     if status_code is not None:
         failure_kind = "http"
-    elif any(
-        isinstance(item, (TimeoutError, httpx.TimeoutException))
-        for item in chain
-    ):
+    elif any(isinstance(item, (TimeoutError, httpx.TimeoutException)) for item in chain):
         failure_kind = "timeout"
-    elif any(
-        isinstance(item, (ConnectionError, httpx.NetworkError))
-        for item in chain
-    ):
+    elif any(isinstance(item, (ConnectionError, httpx.NetworkError)) for item in chain):
         failure_kind = "connection"
     else:
         failure_kind = "unknown"
@@ -403,9 +403,7 @@ def _provider_runtime_failure(
         status_code=status_code,
         failure_kind=failure_kind,
         safe_message=(
-            safe_error
-            if "[REDACTED]" in safe_error
-            else "model provider request failed"
+            safe_error if "[REDACTED]" in safe_error else "model provider request failed"
         ),
     )
 

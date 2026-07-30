@@ -577,6 +577,8 @@ export interface TurnExecutionExpert {
   agent_code: string;
   agent_name: string;
   status: string;
+  attempt?: number;
+  duration_ms?: number | null;
 }
 
 export interface TurnExecutionTool {
@@ -584,6 +586,10 @@ export interface TurnExecutionTool {
   tool_code: string;
   tool_name: string;
   status: string;
+  duration_ms?: number | null;
+  retry_count?: number;
+  requires_confirmation?: boolean;
+  side_effect_level?: "read" | "idempotent_write" | "non_idempotent_write";
 }
 
 export type TurnProjection =
@@ -599,12 +605,19 @@ export type TurnProjection =
       type: "execution_summary";
       turn_id: number;
       run_id: number | null;
+      mode?: string | null;
+      route_source?: "deterministic" | "explicit" | "model" | "recovery" | "system";
       skill_code: string | null;
+      skill_version?: number | null;
       skill_run_id: number | null;
       status: string | null;
       quality_score: number | null;
       experts: TurnExecutionExpert[];
       tools: TurnExecutionTool[];
+      error_code?: string | null;
+      recovery_action?: string | null;
+      artifact_ids?: number[];
+      evidence_ids?: number[];
     }
   | { type: "approval"; turn_id: number; approval: ConversationApproval }
   | {
@@ -643,8 +656,17 @@ export interface ConversationTurn {
   client_message_id: string | null;
   user_input: string;
   assistant_response: string | null;
-  intent: Record<string, unknown> | null;
+  intent: {
+    mode: string | null;
+    route_source: "deterministic" | "explicit" | "model" | "recovery" | "system";
+    skill_code: string | null;
+  } | null;
   status: string;
+  route_ms?: number | null;
+  first_token_ms?: number | null;
+  completion_ms?: number | null;
+  total_ms?: number | null;
+  model_call_count?: number | null;
   projections: TurnProjection[];
   stream_state?: {
     messageId: string;

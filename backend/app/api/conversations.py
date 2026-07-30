@@ -1,9 +1,10 @@
 """Additive Thread and Turn endpoints for the main-Agent V2 runtime."""
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -15,11 +16,14 @@ from app.models import (
     AgentToolCall,
     ConversationThread,
     ConversationTurn,
+    Deliverable,
     SkillRun,
+    ToolExecutionAttempt,
 )
 from app.schemas.conversation import (
     ConversationAgentRunOut,
     ConversationApprovalOut,
+    ConversationExecutionSummaryOut,
     ConversationThreadListOut,
     ConversationThreadOut,
     ConversationThreadSummaryOut,
@@ -48,6 +52,8 @@ _MAIN_AGENT_V2_DISABLED_DETAIL = {
     "code": "MAIN_AGENT_V2_DISABLED",
     "message": "Main Agent V2 is disabled",
 }
+
+
 def _require_v2_enabled() -> None:
     if settings.main_agent_v2_enabled:
         return
@@ -65,9 +71,26 @@ def _turn_out(
     turn: ConversationTurn,
     projections: list[dict] | None = None,
 ) -> ConversationTurnOut:
-    values = ConversationTurnOut.model_validate(turn)
-    return values.model_copy(
-        update={"projections": _bind_projections_to_turn(turn.id, projections)}
+    return ConversationTurnOut.model_validate(
+        {
+            "id": turn.id,
+            "thread_id": turn.thread_id,
+            "org_id": turn.org_id,
+            "created_by_id": turn.created_by_id,
+            "client_message_id": turn.client_message_id,
+            "user_input": turn.user_input,
+            "assistant_response": turn.assistant_response,
+            "intent": _safe_turn_intent(turn.intent),
+            "status": turn.status,
+            "route_ms": turn.route_ms,
+            "first_token_ms": turn.first_token_ms,
+            "completion_ms": turn.completion_ms,
+            "total_ms": turn.total_ms,
+            "model_call_count": turn.model_call_count,
+            "projections": _bind_projections_to_turn(turn.id, projections),
+            "created_at": turn.created_at,
+            "updated_at": turn.updated_at,
+        }
     )
 
 
@@ -95,10 +118,7 @@ async def _thread_out(
         project_id=thread.project_id,
         account_id=thread.account_id,
         title=thread.title,
-        turns=[
-            _turn_out(turn, await _turn_projections(session, turn))
-            for turn in turns
-        ],
+        turns=[_turn_out(turn, await _turn_projections(session, turn)) for turn in turns],
         created_at=thread.created_at,
         updated_at=thread.updated_at,
     )
@@ -152,9 +172,7 @@ async def _approval_projections(
     return [
         {
             "type": "approval",
-            "approval": ConversationApprovalOut.model_validate(approval).model_dump(
-                mode="json"
-            ),
+            "approval": ConversationApprovalOut.model_validate(approval).model_dump(mode="json"),
         }
         for approval in approvals
     ]
@@ -166,8 +184,8 @@ async def _execution_summary_projection(
 ) -> dict | None:
     """Expose business provenance while keeping raw execution traces collapsed."""
 
-    run_id = await session.scalar(
-        select(AgentRun.id)
+    run = await session.scalar(
+        select(AgentRun)
         .where(
             AgentRun.org_id == turn.org_id,
             AgentRun.thread_id == turn.thread_id,
@@ -207,38 +225,170 @@ async def _execution_summary_projection(
             .order_by(AgentToolCall.id)
         )
     )
+    deliverables = list(
+        await session.scalars(
+            select(Deliverable)
+            .where(
+                Deliverable.thread_id == turn.thread_id,
+                Deliverable.turn_id == turn.id,
+            )
+            .order_by(Deliverable.id)
+        )
+    )
     if skill_run is None and not invocations and not tool_calls:
         return None
-    return {
-        "type": "execution_summary",
-        "run_id": run_id,
-        "skill_code": skill_run.skill_code if skill_run is not None else None,
-        "skill_run_id": skill_run.id if skill_run is not None else None,
-        "status": skill_run.status if skill_run is not None else None,
-        "quality_score": (
+    safe_intent = _safe_turn_intent(turn.intent)
+    attempt_counts: dict[int, int] = {}
+    if tool_calls:
+        attempt_counts = {
+            tool_call_id: attempt_count
+            for tool_call_id, attempt_count in (
+                await session.execute(
+                    select(
+                        ToolExecutionAttempt.tool_call_id,
+                        func.count(ToolExecutionAttempt.id),
+                    )
+                    .where(
+                        ToolExecutionAttempt.tool_call_id.in_(
+                            [tool_call.id for tool_call in tool_calls]
+                        )
+                    )
+                    .group_by(ToolExecutionAttempt.tool_call_id)
+                )
+            ).all()
+        }
+    retry_counts = {
+        tool_call.id: max(0, attempt_counts.get(tool_call.id, 0) - 1) for tool_call in tool_calls
+    }
+    summary = ConversationExecutionSummaryOut(
+        run_id=run.id if run is not None else None,
+        mode=safe_intent.mode if safe_intent is not None else None,
+        route_source=(safe_intent.route_source if safe_intent is not None else "system"),
+        skill_code=skill_run.skill_code if skill_run is not None else None,
+        skill_version=skill_run.skill_version if skill_run is not None else None,
+        skill_run_id=skill_run.id if skill_run is not None else None,
+        status=skill_run.status if skill_run is not None else None,
+        quality_score=(
             float(skill_run.quality_score)
             if skill_run is not None and skill_run.quality_score is not None
             else None
         ),
-        "experts": [
+        experts=[
             {
                 "id": invocation.id,
                 "agent_code": invocation.agent_code.value,
                 "agent_name": invocation.agent_name,
                 "status": invocation.status.value,
+                "attempt": invocation.attempt,
+                "duration_ms": _duration_ms(
+                    invocation.started_at,
+                    invocation.finished_at,
+                ),
             }
             for invocation in invocations
         ],
-        "tools": [
+        tools=[
             {
                 "id": tool_call.id,
                 "tool_code": tool_call.tool_code,
                 "tool_name": tool_call.tool_name,
                 "status": tool_call.status,
+                "duration_ms": tool_call.latency_ms,
+                "retry_count": retry_counts[tool_call.id],
+                "requires_confirmation": tool_call.requires_human_confirmation,
+                "side_effect_level": tool_call.side_effect_level,
             }
             for tool_call in tool_calls
         ],
-    }
+        error_code=_public_error_code(run.error_code if run is not None else None),
+        recovery_action=_recovery_action(run.error_code if run is not None else None),
+        artifact_ids=[deliverable.id for deliverable in deliverables],
+        evidence_ids=_evidence_ids(deliverables),
+    )
+    return summary.model_dump(mode="json")
+
+
+def _safe_turn_intent(raw: dict | None):
+    from app.schemas.conversation import ConversationTurnIntentOut
+
+    if not isinstance(raw, dict):
+        return None
+    mode = raw.get("mode")
+    mode = mode if isinstance(mode, str) and len(mode) <= 40 else None
+    skill_code = raw.get("skill_code")
+    skill_code = skill_code if isinstance(skill_code, str) and len(skill_code) <= 120 else None
+    intent = raw.get("intent")
+    reason = raw.get("reason")
+    if isinstance(reason, str) and (
+        reason.startswith("fast_route:") or reason.startswith("deterministic_")
+    ):
+        source = "deterministic"
+    elif isinstance(reason, str) and reason.startswith("Resume the persisted"):
+        source = "recovery"
+    elif intent in {"explicit_skill", "account_data_query"}:
+        source = "explicit"
+    elif intent in {"intelligence_unavailable"}:
+        source = "system"
+    else:
+        source = "model"
+    return ConversationTurnIntentOut(
+        mode=mode,
+        route_source=source,
+        skill_code=skill_code,
+    )
+
+
+def _duration_ms(started_at: datetime | None, finished_at: datetime | None) -> int | None:
+    if started_at is None or finished_at is None:
+        return None
+    return max(0, round((finished_at - started_at).total_seconds() * 1000))
+
+
+def _public_error_code(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if not normalized or len(normalized) > 120:
+        return "RUNTIME_FAILED"
+    if not all(character.isalnum() or character == "_" for character in normalized):
+        return "RUNTIME_FAILED"
+    return normalized
+
+
+_RECOVERY_ACTIONS = {
+    "INTELLIGENCE_UNAVAILABLE": "稍后重试，或明确说明只查询数据还是创建正式任务。",
+    "ANSWER_MODEL_UNAVAILABLE": "稍后重试本轮对话。",
+    "SKILL_EXECUTOR_UNAVAILABLE": "稍后重试，或改为查询账号数据。",
+    "QUERY_TOOL_UNAVAILABLE": "检查账号授权和数据同步状态后重试。",
+    "TOOL_RESULT_SCOPE_MISMATCH": "刷新当前账号后重试。",
+    "RUN_CANCELLED": "调整要求后重新发起。",
+}
+_DEFAULT_RECOVERY_ACTION = "请稍后重试；持续失败时联系管理员并提供消息编号。"
+
+
+def _recovery_action(error_code: str | None) -> str | None:
+    public_code = _public_error_code(error_code)
+    if public_code is None:
+        return None
+    return _RECOVERY_ACTIONS.get(public_code, _DEFAULT_RECOVERY_ACTION)
+
+
+def _evidence_ids(deliverables: list[Deliverable]) -> list[int]:
+    values: list[int] = []
+    for deliverable in deliverables:
+        refs = deliverable.payload.get("evidence_refs")
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            ref_id = ref.get("id") if isinstance(ref, dict) else None
+            if (
+                isinstance(ref_id, int)
+                and not isinstance(ref_id, bool)
+                and ref_id > 0
+                and ref_id not in values
+            ):
+                values.append(ref_id)
+    return values
 
 
 async def _ordered_turns(

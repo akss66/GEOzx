@@ -32,7 +32,12 @@ from app.models.enums import (
     Platform,
 )
 from app.orchestrator.skill_runtime import SkillExecutionResult
-from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
+from app.schemas.conversation import (
+    CreateConversationTurnRequest,
+    TurnExecutionMode,
+    TurnRouteDecision,
+)
+from app.services.turn_execution import execute_conversation_turn
 
 
 def _auth(user) -> dict[str, str]:
@@ -89,6 +94,7 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
     """A greeting after an Artifact must not steal or duplicate its provenance."""
 
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "agent_runtime_async_enabled", False)
     account = Account(
         org_id=admin.org_id,
         platform=Platform.DOUYIN,
@@ -296,6 +302,14 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
         completed_status,
     )
 
+    async def enqueue_agent_runtime(*, run_id: int) -> None:
+        del run_id
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        enqueue_agent_runtime,
+    )
+
     requests = [
         ("flow-1", "你好", None),
         ("flow-2", "查看最近七天数据", None),
@@ -315,6 +329,22 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
             ),
         )
         assert response.status_code == 202, response.text
+        payload = response.json()
+        queued_turn = await session.get(ConversationTurn, payload["turn"]["id"])
+        queued_run = await session.get(AgentRun, payload["run"]["id"])
+        assert queued_turn is not None
+        assert queued_run is not None
+        await execute_conversation_turn(
+            session,
+            admin,
+            queued_turn,
+            queued_run,
+            CreateConversationTurnRequest(
+                client_message_id=client_message_id,
+                message=message,
+                requested_skill_code=requested_skill_code,
+            ),
+        )
 
     turns = list(
         await session.scalars(
@@ -333,9 +363,7 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
             Deliverable.turn_id == turns[3].id,
         )
     )
-    strategy = await session.scalar(
-        select(StrategyPlan).where(StrategyPlan.turn_id == turns[4].id)
-    )
+    strategy = await session.scalar(select(StrategyPlan).where(StrategyPlan.turn_id == turns[4].id))
 
     assert len(turns) == 6
     assert [len(turn.agent_runs) for turn in turns] == [1, 1, 1, 1, 1, 1]

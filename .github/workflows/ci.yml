@@ -6,8 +6,32 @@ on:
   pull_request:
 
 jobs:
+  main-agent-v3-directed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: uv pip install --system ".[dev]"
+      - name: Capability, telemetry, safety, and budget contracts
+        run: >-
+          pytest -q
+          tests/test_main_agent_v3_performance.py
+          tests/test_llm_gateway.py
+          tests/test_conversation_api.py
+          tests/test_conversation_models.py
+          tests/test_migrations.py
+
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -24,10 +48,50 @@ jobs:
       - name: Format check (ruff)
         run: ruff format --check .
       - name: Tests (pytest)
-        run: pytest -q
+        run: pytest -q --durations=25
+
+  migration-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dyflow
+          POSTGRES_PASSWORD: dyflow_ci_pw
+          POSTGRES_DB: dyflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dyflow -d dyflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://dyflow:dyflow_ci_pw@localhost:5432/dyflow
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: uv pip install --system ".[dev]"
+      - name: Upgrade from production revision to head
+        run: |
+          alembic upgrade 20260730_0500
+          alembic upgrade head
+      - name: Prove V3 revision is reversible online
+        run: |
+          alembic downgrade 20260730_0500
+          alembic upgrade head
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -42,5 +106,29 @@ jobs:
         run: pnpm install
       - name: Lint (eslint)
         run: pnpm lint
+      - name: Unit tests
+        run: pnpm test
       - name: Build
         run: pnpm build
+
+  main-agent-v3-playwright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Ten-case browser matrix
+        run: pnpm exec playwright test main-agent-v2.spec.ts

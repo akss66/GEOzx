@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.models.enums import AgentCode, BrainTaskStatus
 from app.orchestrator.agent_identity import OPERATIONS_BRAIN_DISPLAY_NAME
+from app.services.turn_observability import apply_turn_closure_metrics
 
 TURN_STATUSES = frozenset(
     {
@@ -53,15 +54,9 @@ SKILL_RUN_STATUSES = frozenset(
     }
 )
 
-ACTIVE_STATUSES = frozenset(
-    {"claimed", "waiting_predecessor", "queued", "running", "retry_wait"}
-)
-PAUSED_STATUSES = frozenset(
-    {"waiting_permission", "waiting_decision", "waiting_user", "stopped"}
-)
-TERMINAL_STATUSES = frozenset(
-    {"completed", "blocked", "failed", "dead_letter", "cancelled"}
-)
+ACTIVE_STATUSES = frozenset({"claimed", "waiting_predecessor", "queued", "running", "retry_wait"})
+PAUSED_STATUSES = frozenset({"waiting_permission", "waiting_decision", "waiting_user", "stopped"})
+TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "dead_letter", "cancelled"})
 
 
 @dataclass(frozen=True)
@@ -172,15 +167,13 @@ async def close_runtime_state(
         )
 
         replaying_terminal = run.status in TERMINAL_STATUSES
-        effective_status, effective_message, effective_error, result_payload = (
-            _first_terminal_wins(
-                run=run,
-                turn=turn,
-                requested_status=status,
-                requested_message=message,
-                requested_error=error_code,
-                requested_payload=scope.result_payload,
-            )
+        effective_status, effective_message, effective_error, result_payload = _first_terminal_wins(
+            run=run,
+            turn=turn,
+            requested_status=status,
+            requested_message=message,
+            requested_error=error_code,
+            requested_payload=scope.result_payload,
         )
         now = datetime.now(UTC)
         run.status = effective_status
@@ -204,6 +197,12 @@ async def close_runtime_state(
                 turn.intent = scope.intent
             if _writes_user_message(effective_status):
                 turn.assistant_response = effective_message
+            if runtime_status_family(effective_status) in {"paused", "terminal"}:
+                apply_turn_closure_metrics(
+                    turn,
+                    now=now,
+                    writes_user_message=_writes_user_message(effective_status),
+                )
 
         preserve_terminal_skill = False
         if skill_run is not None:
@@ -214,10 +213,7 @@ async def close_runtime_state(
             if not preserve_terminal_skill:
                 skill_run.status = _skill_status(effective_status)
                 skill_run.error_code = effective_error
-                if (
-                    scope.skill_output_snapshot is not None
-                    and not replaying_terminal
-                ):
+                if scope.skill_output_snapshot is not None and not replaying_terminal:
                     skill_run.output_snapshot = scope.skill_output_snapshot
 
         if task is not None and not (preserve_terminal_skill and family == "active"):
@@ -318,15 +314,10 @@ def _validate_scope(
     if scope.task_id is not None and task is None:
         raise ValueError("runtime state BrainTask ownership is missing")
     if turn is not None and (
-        run.turn_id != turn.id
-        or run.thread_id != turn.thread_id
-        or run.org_id != turn.org_id
+        run.turn_id != turn.id or run.thread_id != turn.thread_id or run.org_id != turn.org_id
     ):
         raise ValueError("runtime state Turn and AgentRun ownership do not match")
-    if task is not None and (
-        run.task_id != task.id
-        or run.org_id != task.org_id
-    ):
+    if task is not None and (run.task_id != task.id or run.org_id != task.org_id):
         raise ValueError("runtime state BrainTask and AgentRun ownership do not match")
     if skill_run is not None and (
         skill_run.run_id != run.id
@@ -529,8 +520,7 @@ async def _publish_delivery_events(
 def _realtime_text_chunks(content: str, size: int = 2) -> list[str]:
     bounded_size = max(size, (len(content) + 39) // 40)
     return [
-        content[offset : offset + bounded_size]
-        for offset in range(0, len(content), bounded_size)
+        content[offset : offset + bounded_size] for offset in range(0, len(content), bounded_size)
     ]
 
 
@@ -559,9 +549,7 @@ async def _record_run_only_terminal_event(
         event_type=event_type,
         semantic_key=semantic_key,
     )
-    existing = await session.scalar(
-        select(Event).where(Event.idempotency_key == idempotency_key)
-    )
+    existing = await session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
     if existing is not None:
         return []
     payload = {
@@ -580,7 +568,9 @@ async def _record_run_only_terminal_event(
                 content_item_id=(
                     scope.content_item_id
                     if scope.content_item_id is not None
-                    else task.content_item_id if task is not None else None
+                    else task.content_item_id
+                    if task is not None
+                    else None
                 ),
                 project_id=scope.project_id,
                 run_id=run.id,

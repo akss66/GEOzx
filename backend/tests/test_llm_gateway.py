@@ -1,5 +1,6 @@
 """LLMGateway 测试：路由 / 兜底 / 成本记账（全 mock，无真实网络）。"""
 
+import asyncio
 import sys
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
@@ -20,8 +22,22 @@ from app.llm.gateway import (
     bind_llm_call_context,
     provider_for,
 )
-from app.models import IntegrationConfig, LLMCall, ModelConfig, ModelProvider, Org
+from app.models import (
+    Account,
+    ConversationThread,
+    ConversationTurn,
+    IntegrationConfig,
+    LLMCall,
+    ModelConfig,
+    ModelProvider,
+    Org,
+)
+from app.models.enums import Platform
 from app.services.model_provider_registry import replace_provider_key
+from app.services.turn_observability import (
+    TurnObservabilityScope,
+    bind_turn_observability,
+)
 
 
 class FakeAdapter:
@@ -239,6 +255,118 @@ async def test_fallback_on_primary_failure(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_atomically_counts_every_real_provider_attempt(
+    session,
+    admin,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Provider attempt counter",
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Gateway telemetry",
+    )
+    turn = ConversationTurn(
+        thread=thread,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        user_input="模糊请求",
+    )
+    session.add_all(
+        [
+            thread,
+            turn,
+            ModelConfig(
+                org_id=admin.org_id,
+                agent_code="00-router",
+                primary_model="bad",
+                fallback_model="deepseek-chat",
+            ),
+        ]
+    )
+    await session.commit()
+    adapter = FakeAdapter(fail_models={"bad"})
+    scope = TurnObservabilityScope(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=501,
+        turn_created_at=turn.created_at,
+    )
+
+    with bind_turn_observability(scope):
+        await _gw(adapter).chat(session, admin.org_id, "00-router", MSG)
+
+    await session.refresh(turn)
+    assert adapter.calls == ["bad", "deepseek-chat"]
+    assert turn.model_call_count == 2
+    calls = list(
+        await session.scalars(
+            select(LLMCall).where(LLMCall.org_id == admin.org_id).order_by(LLMCall.id)
+        )
+    )
+    assert [call.agent_code for call in calls] == ["00-router", "00-router"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_gateway_attempts_do_not_lose_turn_counts(
+    session,
+    admin,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Parallel provider counter",
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Parallel gateway telemetry",
+    )
+    turn = ConversationTurn(
+        thread=thread,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        user_input="并行专家",
+    )
+    session.add_all([thread, turn])
+    await session.commit()
+    maker = async_sessionmaker(session.bind, expire_on_commit=False)
+    scope = TurnObservabilityScope(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=502,
+        turn_created_at=turn.created_at,
+    )
+
+    async def invoke_provider() -> None:
+        async with maker() as isolated:
+            with bind_turn_observability(scope):
+                await _gw(FakeAdapter()).chat(
+                    isolated,
+                    admin.org_id,
+                    "01-positioning",
+                    MSG,
+                )
+
+    await asyncio.gather(*(invoke_provider() for _ in range(6)))
+
+    session.expire(turn)
+    await session.refresh(turn)
+    assert turn.model_call_count == 6
+
+
+@pytest.mark.asyncio
 async def test_gateway_uses_provider_reference_and_route_options(session, monkeypatch) -> None:
     org = Org(name="Runtime config")
     session.add(org)
@@ -287,9 +415,7 @@ async def test_gateway_uses_provider_reference_and_route_options(session, monkey
 
     monkeypatch.setattr("app.llm.gateway.DeepSeekAdapter", RuntimeDeepSeekAdapter)
 
-    result, _ = await LLMGateway().chat(
-        session, org.id, "02-content-director", MSG
-    )
+    result, _ = await LLMGateway().chat(session, org.id, "02-content-director", MSG)
 
     assert result.content == "ok"
     assert captured == {
@@ -309,17 +435,13 @@ async def test_gateway_rejects_a_disabled_provider(session) -> None:
     org = Org(name="Disabled provider")
     session.add(org)
     await session.flush()
-    session.add(
-        IntegrationConfig(org_id=org.id, provider="deepseek", enabled=False)
-    )
+    session.add(IntegrationConfig(org_id=org.id, provider="deepseek", enabled=False))
     await session.commit()
 
     with pytest.raises(LLMError, match="all candidate models failed"):
         await LLMGateway().chat(session, org.id, "01-positioning", MSG)
 
-    call = await session.scalar(
-        select(LLMCall).where(LLMCall.org_id == org.id)
-    )
+    call = await session.scalar(select(LLMCall).where(LLMCall.org_id == org.id))
     assert call is not None
     assert call.status == "error"
     assert "disabled" in (call.error or "")
@@ -613,9 +735,7 @@ async def test_gateway_stream_preserves_observer_semantics_with_provider_backed_
 
 
 @pytest.mark.asyncio
-async def test_gateway_rejects_unverified_provider_backed_route(
-    session, monkeypatch
-) -> None:
+async def test_gateway_rejects_unverified_provider_backed_route(session, monkeypatch) -> None:
     org = Org(name="Pending Provider")
     session.add(org)
     await session.flush()
@@ -725,9 +845,7 @@ async def test_gateway_redacts_secret_bearing_adapter_errors_before_storage_and_
         async def stream(self, model, messages, options=None):
             if False:
                 yield ""
-            raise RuntimeError(
-                "Authorization Bearer sk-sensitive-provider-key-4321 failed"
-            )
+            raise RuntimeError("Authorization Bearer sk-sensitive-provider-key-4321 failed")
 
     events: list[dict] = []
 

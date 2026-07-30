@@ -63,6 +63,53 @@ async def test_thread_keeps_each_turn_input_independent(session, admin) -> None:
     assert turns[1].client_message_id == "message-2"
     assert turns[0].assistant_response == "最近七天数据如下。"
     assert turns[0].intent == {"intent": "analysis", "confidence": 0.98}
+    assert turns[0].route_ms is None
+    assert turns[0].first_token_ms is None
+    assert turns[0].completion_ms is None
+    assert turns[0].total_ms is None
+    assert turns[0].model_call_count == 0
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "route_ms",
+        "first_token_ms",
+        "completion_ms",
+        "total_ms",
+        "model_call_count",
+    ],
+)
+@pytest.mark.asyncio
+async def test_turn_rejects_negative_observability_metrics(
+    session,
+    admin,
+    field: str,
+) -> None:
+    account = models.Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname=f"指标约束-{field}",
+    )
+    session.add(account)
+    await session.flush()
+    thread = models.ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="指标约束",
+    )
+    values = {
+        "thread": thread,
+        "org_id": admin.org_id,
+        "created_by_id": admin.id,
+        "user_input": "检查负数指标",
+        field: -1,
+    }
+    session.add(models.ConversationTurn(**values))
+
+    with pytest.raises(IntegrityError):
+        await session.commit()
 
 
 @pytest.mark.asyncio

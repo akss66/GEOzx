@@ -8,9 +8,7 @@ from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 _TRAILING_PUNCTUATION = "。！？!?，,；;：:~～"
 _GREETING_MESSAGES = frozenset({"你好", "您好", "嗨", "哈喽", "hello", "hi"})
 _IDENTITY_MESSAGES = frozenset({"你是谁", "你是什么", "你是干什么的"})
-_CAPABILITY_MESSAGES = frozenset(
-    {"你能做什么", "你会做什么", "你有什么能力", "你有哪些能力"}
-)
+_CAPABILITY_MESSAGES = frozenset({"你能做什么", "你会做什么", "你有什么能力", "你有哪些能力"})
 _QUESTION_PREFIXES = (
     "你能",
     "你会",
@@ -128,9 +126,7 @@ def _query_route(reason: str) -> TurnRouteDecision:
 
 
 def _is_only_data_query(message: str) -> bool:
-    return (
-        _has_only_data_query_intent(message) and not _has_positive_operation(message)
-    )
+    return _has_only_data_query_intent(message) and not _has_positive_operation(message)
 
 
 def _has_only_data_query_intent(message: str) -> bool:
@@ -156,8 +152,11 @@ def _is_account_inspection(message: str) -> bool:
 def _has_positive_operation(message: str) -> bool:
     for operation in _OPERATION_TERMS:
         position = message.find(operation)
-        if position >= 0 and not _contains_any(
-            message[max(0, position - 8) : position], _NEGATION_TERMS
+        prefix = message[max(0, position - 8) : position] if position >= 0 else ""
+        if (
+            position >= 0
+            and not prefix.endswith("不")
+            and not _contains_any(prefix, _NEGATION_TERMS)
         ):
             return True
     return False

@@ -22,6 +22,78 @@ class CreateConversationTurnRequest(BaseModel):
     attachment_ids: list[int] = Field(default_factory=list)
 
 
+class ConversationTurnIntentOut(BaseModel):
+    """Allowlisted route metadata safe for conversation history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str | None = None
+    route_source: Literal[
+        "deterministic",
+        "explicit",
+        "model",
+        "recovery",
+        "system",
+    ] = "model"
+    skill_code: str | None = None
+
+
+class ConversationExecutionExpertOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    agent_code: str
+    agent_name: str
+    status: str
+    attempt: int = Field(ge=0)
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class ConversationExecutionToolOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    tool_code: str
+    tool_name: str
+    status: str
+    duration_ms: int | None = Field(default=None, ge=0)
+    retry_count: int = Field(ge=0)
+    requires_confirmation: bool
+    side_effect_level: Literal[
+        "read",
+        "idempotent_write",
+        "non_idempotent_write",
+    ]
+
+
+class ConversationExecutionSummaryOut(BaseModel):
+    """Strongly typed public execution projection; raw ledgers stay server-side."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["execution_summary"] = "execution_summary"
+    run_id: int | None
+    mode: str | None
+    route_source: Literal[
+        "deterministic",
+        "explicit",
+        "model",
+        "recovery",
+        "system",
+    ]
+    skill_code: str | None
+    skill_version: int | None
+    skill_run_id: int | None
+    status: str | None
+    quality_score: float | None
+    experts: list[ConversationExecutionExpertOut] = Field(default_factory=list)
+    tools: list[ConversationExecutionToolOut] = Field(default_factory=list)
+    error_code: str | None = None
+    recovery_action: str | None = None
+    artifact_ids: list[int] = Field(default_factory=list)
+    evidence_ids: list[int] = Field(default_factory=list)
+
+
 class ConversationTurnOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -32,8 +104,13 @@ class ConversationTurnOut(BaseModel):
     client_message_id: str | None
     user_input: str
     assistant_response: str | None
-    intent: dict[str, Any] | None
+    intent: ConversationTurnIntentOut | None
     status: str
+    route_ms: int | None = Field(default=None, ge=0)
+    first_token_ms: int | None = Field(default=None, ge=0)
+    completion_ms: int | None = Field(default=None, ge=0)
+    total_ms: int | None = Field(default=None, ge=0)
+    model_call_count: int | None = Field(default=None, ge=0)
     projections: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

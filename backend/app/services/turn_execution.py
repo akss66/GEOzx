@@ -48,6 +48,12 @@ from app.services.runtime_state import (
     RuntimeStateScope,
     close_runtime_state,
 )
+from app.services.turn_observability import (
+    TurnObservabilityScope,
+    bind_turn_observability,
+    mark_execution_started,
+    record_route_completed,
+)
 from app.tools import ToolExecutionContext
 
 _TERMINAL_RUN_STATUSES = {
@@ -97,6 +103,38 @@ async def execute_conversation_turn(
     persisted = _terminal_result(run)
     if persisted is not None:
         return persisted
+    with bind_turn_observability(
+        TurnObservabilityScope(
+            org_id=turn.org_id,
+            thread_id=turn.thread_id,
+            turn_id=turn.id,
+            run_id=run.id,
+            turn_created_at=turn.created_at,
+        )
+    ):
+        mark_execution_started()
+        return await _execute_conversation_turn(
+            session,
+            user,
+            turn,
+            run,
+            request,
+            execution_owner=execution_owner,
+            resume_skill_run=resume_skill_run,
+        )
+
+
+async def _execute_conversation_turn(
+    session: AsyncSession,
+    user: User,
+    turn: ConversationTurn,
+    run: AgentRun,
+    request: CreateConversationTurnRequest,
+    *,
+    execution_owner: str | None = None,
+    resume_skill_run: SkillRun | None = None,
+) -> TurnExecutionResult:
+    """Bound implementation for one non-terminal Turn."""
 
     thread = await session.scalar(
         select(ConversationThread).where(
@@ -120,6 +158,7 @@ async def execute_conversation_turn(
             )
         )
     except SkillUnavailable as skill_unavailable:
+        await record_route_completed(session)
         return await _block_invalid_explicit_skill(
             session,
             thread=thread,
@@ -129,6 +168,7 @@ async def execute_conversation_turn(
             unavailable=skill_unavailable,
         )
     except IntelligenceUnavailable:
+        await record_route_completed(session)
         unavailable = TurnRouteDecision(
             mode=TurnExecutionMode.ANSWER,
             intent="intelligence_unavailable",
@@ -145,6 +185,7 @@ async def execute_conversation_turn(
             status="blocked",
             error_code="INTELLIGENCE_UNAVAILABLE",
         )
+    await record_route_completed(session)
 
     if request.execution_preference == "DISCUSS_ONLY" and decision.mode in {
         TurnExecutionMode.SKILL,

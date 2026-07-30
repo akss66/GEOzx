@@ -139,9 +139,7 @@ async def _execute_queued_turn(
 
 
 @pytest.mark.asyncio
-async def test_every_conversation_route_is_disabled_by_default(
-    client, admin, monkeypatch
-) -> None:
+async def test_every_conversation_route_is_disabled_by_default(client, admin, monkeypatch) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", False)
     headers = _auth(admin)
     requests = [
@@ -160,9 +158,9 @@ async def test_every_conversation_route_is_disabled_by_default(
     ]
 
     assert [response.status_code for response in requests] == [503, 503, 503, 503]
-    assert {
-        response.json()["detail"]["code"] for response in requests
-    } == {"MAIN_AGENT_V2_DISABLED"}
+    assert {response.json()["detail"]["code"] for response in requests} == {
+        "MAIN_AGENT_V2_DISABLED"
+    }
 
 
 @pytest.mark.asyncio
@@ -218,6 +216,11 @@ async def test_create_and_get_thread_with_ordered_turn_history(
     ]
     assert [turn["status"] for turn in history["turns"]] == ["queued", "queued"]
     assert all(turn["projections"] == [] for turn in history["turns"])
+    assert all(turn["model_call_count"] == 0 for turn in history["turns"])
+    assert all(turn["route_ms"] is None for turn in history["turns"])
+    assert all(turn["first_token_ms"] is None for turn in history["turns"])
+    assert all(turn["completion_ms"] is None for turn in history["turns"])
+    assert all(turn["total_ms"] is None for turn in history["turns"])
 
 
 @pytest.mark.asyncio
@@ -282,12 +285,8 @@ async def test_history_lists_only_the_current_users_selected_account_threads(
 
     assert admin_history.status_code == 200
     assert member_history.status_code == 200
-    assert [item["id"] for item in admin_history.json()["data"]] == [
-        admin_thread["id"]
-    ]
-    assert [item["id"] for item in member_history.json()["data"]] == [
-        member_thread["id"]
-    ]
+    assert [item["id"] for item in admin_history.json()["data"]] == [admin_thread["id"]]
+    assert [item["id"] for item in member_history.json()["data"]] == [member_thread["id"]]
     assert member_history.json()["data"][0]["title"] == "运营成员自己的会话"
     assert member_history.json()["data"][0]["turn_count"] == 1
 
@@ -350,9 +349,7 @@ async def test_owner_cannot_delete_conversation_with_active_skill_run(
         requested_skill_code="account_inspection",
     )
     run = await session.get(AgentRun, submitted.json()["run"]["id"])
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
-    )
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert run is not None
     assert skill_run is not None
     run.status = "completed"
@@ -649,9 +646,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert run is not None
     assert run.task_id is not None
     task_id = run.task_id
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
-    )
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert skill_run is not None
     content_item = ContentItem(
         account_id=account_id,
@@ -810,24 +805,18 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert preserved_deliverable.skill_run_id is None
     assert (
         await session.scalar(
-            select(func.count(AgentRun.id)).where(
-                AgentRun.thread_id == thread["id"]
-            )
+            select(func.count(AgentRun.id)).where(AgentRun.thread_id == thread["id"])
         )
         == 0
     )
     assert (
         await session.scalar(
-            select(func.count(SkillRun.id)).where(
-                SkillRun.thread_id == thread["id"]
-            )
+            select(func.count(SkillRun.id)).where(SkillRun.thread_id == thread["id"])
         )
         == 0
     )
     assert (
-        await session.scalar(
-            select(func.count(Event.id)).where(Event.thread_id == thread["id"])
-        )
+        await session.scalar(select(func.count(Event.id)).where(Event.thread_id == thread["id"]))
         == 0
     )
     preserved_event_row = await session.get(Event, preserved_event_id)
@@ -1020,9 +1009,7 @@ async def test_queue_submission_failure_keeps_a_durable_queued_run(
 
     assert recovered == 1
     assert enqueued[0][0] == ("execute_agent_run", run.id)
-    assert enqueued[0][1]["_job_id"].startswith(
-        f"agent-run:{run.id}:recovery:"
-    )
+    assert enqueued[0][1]["_job_id"].startswith(f"agent-run:{run.id}:recovery:")
 
 
 @pytest.mark.asyncio
@@ -1061,7 +1048,8 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     response_events = [
         (event_type, payload)
         for event_type, payload in realtime_events
-        if event_type in {
+        if event_type
+        in {
             "brain.runtime.message_start",
             "brain.runtime.message_delta",
             "brain.runtime.message_done",
@@ -1079,9 +1067,7 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     ]
     assert response_deltas
     assert all(len(delta) <= 2 for delta in response_deltas)
-    assert "".join(
-        response_deltas
-    ) == response_text
+    assert "".join(response_deltas) == response_text
     assert all(
         payload["client_message_id"] == "task-free-stream-1"
         and payload["thread_id"] == thread["id"]
@@ -1179,15 +1165,11 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
     )
     assert (
         await session.scalar(
-            select(func.count(AgentRun.id)).where(
-                AgentRun.thread_id == thread["id"]
-            )
+            select(func.count(AgentRun.id)).where(AgentRun.thread_id == thread["id"])
         )
         == 1
     )
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
-    )
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert skill_run is not None
     run = await session.get(AgentRun, skill_run.run_id)
     assert run is not None
@@ -1231,6 +1213,8 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
     assert execution["experts"]
     assert all(expert["agent_name"] for expert in execution["experts"])
     assert all("input_summary" not in expert for expert in execution["experts"])
+    assert all("attempt" in expert for expert in execution["experts"])
+    assert all("duration_ms" in expert for expert in execution["experts"])
 
 
 @pytest.mark.asyncio
@@ -1256,9 +1240,7 @@ async def test_blocked_turn_still_projects_called_experts(
         message="体检这个账号",
         requested_skill_code="account_inspection",
     )
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
-    )
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert skill_run is not None
     run = await session.get(AgentRun, skill_run.run_id)
     assert run is not None
@@ -1295,9 +1277,7 @@ async def test_blocked_turn_still_projects_called_experts(
     assert history_response.status_code == 200
     projections = history_response.json()["turns"][0]["projections"]
     assert any(item["type"] == "execution_blocked" for item in projections)
-    execution = next(
-        item for item in projections if item["type"] == "execution_summary"
-    )
+    execution = next(item for item in projections if item["type"] == "execution_summary")
     assert execution["experts"][0]["agent_name"] == "账号定位专家"
 
 
@@ -1316,6 +1296,19 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
         message="读取账号资料",
     )
     body = submitted.json()
+    turn = await session.get(ConversationTurn, body["turn"]["id"])
+    assert turn is not None
+    turn.route_ms = 12
+    turn.first_token_ms = 120
+    turn.completion_ms = 420
+    turn.total_ms = 430
+    turn.model_call_count = 2
+    turn.intent = {
+        "mode": "query",
+        "reason": "SECRET_MODEL_REASON",
+        "prompt": "SECRET_PROMPT",
+        "provider_body": {"token": "sk-secret"},
+    }
     task = BrainTask(
         org_id=admin.org_id,
         created_by_id=admin.id,
@@ -1323,20 +1316,39 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
     )
     session.add(task)
     await session.flush()
-    session.add(
-        AgentToolCall(
-            org_id=admin.org_id,
-            task_id=task.id,
-            thread_id=thread["id"],
-            turn_id=body["turn"]["id"],
-            tool_code="account.profile",
-            tool_name="账号资料",
-            status="success",
-            side_effect_level="read",
-            input_summary="SECRET_INPUT",
-            output_summary="SECRET_OUTPUT",
-            error="Traceback: SHOULD_NOT_LEAK",
-        )
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        turn_id=body["turn"]["id"],
+        tool_code="account.profile",
+        tool_name="账号资料",
+        status="success",
+        side_effect_level="read",
+        input_summary="SECRET_INPUT",
+        output_summary="SECRET_OUTPUT",
+        error="Traceback: SHOULD_NOT_LEAK",
+        provider_idempotency_key="provider-key-MUST_NOT_LEAK",
+        meta={"raw_input": "MUST_NOT_LEAK", "api_key": "sk-secret"},
+        latency_ms=37,
+        requires_human_confirmation=False,
+    )
+    session.add(tool_call)
+    await session.flush()
+    session.add_all(
+        [
+            ToolExecutionAttempt(
+                tool_call_id=tool_call.id,
+                attempt_no=1,
+                status="failed",
+                error="raw provider body MUST_NOT_LEAK",
+            ),
+            ToolExecutionAttempt(
+                tool_call_id=tool_call.id,
+                attempt_no=2,
+                status="success",
+            ),
+        ]
     )
     await session.commit()
 
@@ -1350,7 +1362,20 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
         for projection in history.json()["turns"][0]["projections"]
         if projection["type"] == "execution_summary"
     )
+    returned_turn = history.json()["turns"][0]
+    assert returned_turn["route_ms"] == 12
+    assert returned_turn["first_token_ms"] == 120
+    assert returned_turn["completion_ms"] == 420
+    assert returned_turn["total_ms"] == 430
+    assert returned_turn["model_call_count"] == 2
+    assert returned_turn["intent"] == {
+        "mode": "query",
+        "route_source": "model",
+        "skill_code": None,
+    }
     assert summary["run_id"] == body["run"]["id"]
+    assert summary["mode"] == "query"
+    assert summary["route_source"] == "model"
     assert summary["experts"] == []
     assert summary["tools"] == [
         {
@@ -1358,12 +1383,20 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
             "tool_code": "account.profile",
             "tool_name": "账号资料",
             "status": "success",
+            "duration_ms": 37,
+            "retry_count": 1,
+            "requires_confirmation": False,
+            "side_effect_level": "read",
         }
     ]
     serialized = json.dumps(summary, ensure_ascii=False)
     assert "SECRET_INPUT" not in serialized
     assert "SECRET_OUTPUT" not in serialized
     assert "Traceback" not in serialized
+    assert "SECRET_MODEL_REASON" not in json.dumps(returned_turn, ensure_ascii=False)
+    assert "SECRET_PROMPT" not in json.dumps(returned_turn, ensure_ascii=False)
+    assert "MUST_NOT_LEAK" not in serialized
+    assert "sk-secret" not in serialized
 
 
 @pytest.mark.asyncio
@@ -1630,8 +1663,7 @@ async def test_account_scoped_member_cannot_enumerate_or_append_thread_or_turn(
 
     assert [response.status_code for response in responses] == [404, 404, 404]
     assert all(
-        "MAIN_AGENT_V2_ROLLOUT_RESTRICTED" not in str(response.json())
-        for response in responses
+        "MAIN_AGENT_V2_ROLLOUT_RESTRICTED" not in str(response.json()) for response in responses
     )
     assert (
         await session.scalar(
@@ -1788,9 +1820,7 @@ async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
     assert record.task_id is None
     assert record.artifact_ids == []
     assert record.status == "completed"
-    custom_keys = (
-        set(record.__dict__) - set(logging.makeLogRecord({}).__dict__) - {"message"}
-    )
+    custom_keys = set(record.__dict__) - set(logging.makeLogRecord({}).__dict__) - {"message"}
     assert custom_keys == {
         "artifact_ids",
         "event",
@@ -1899,9 +1929,7 @@ async def test_feature_flag_turn_submission_emits_json_route_diagnostics(
     body = response.json()
     skill_run_id = result.projections[0]["skill_run_id"]
     record = next(
-        entry
-        for entry in caplog.records
-        if "main_agent_turn_completed" in entry.getMessage()
+        entry for entry in caplog.records if "main_agent_turn_completed" in entry.getMessage()
     )
     payload = json.loads(record.getMessage())
 

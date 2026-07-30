@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const testPort = process.env.PLAYWRIGHT_PORT ?? "5173";
 const baseURL = `http://127.0.0.1:${testPort}`;
+const packageManager = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -14,9 +15,9 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: `npm.cmd run dev -- --host 127.0.0.1 --port ${testPort}`,
+    command: `${packageManager} dev --host 127.0.0.1 --port ${testPort}`,
     url: baseURL,
-    reuseExistingServer: true,
+    reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
   projects: [
