@@ -48,6 +48,7 @@ from app.models import (
     DeliverableAcceptance,
     Event,
     ReflectionRecord,
+    SkillRun,
     StrategyPlan,
     TaskBrief,
     User,
@@ -75,7 +76,7 @@ from app.orchestrator.capability_registry import runtime_capabilities
 from app.orchestrator.main_kernel import MainKernelActionExecutor, MainKernelRoute
 from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLimits
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
-from app.orchestrator.tool_executor import DurableToolExecutor
+from app.orchestrator.tool_executor import DurableToolExecutor, ToolExecutionOutcome
 from app.prompts import prompt_registry
 from app.schemas.brain import (
     DecisionRequest,
@@ -88,6 +89,11 @@ from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.ai_coo_evidence import build_account_situation
 from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.runtime_memory import runtime_memory_service
+from app.services.runtime_state import (
+    RuntimeEventSpec,
+    RuntimeStateScope,
+    close_runtime_state,
+)
 
 
 class BrainRuntimeState(TypedDict, total=False):
@@ -620,7 +626,11 @@ class BrainRuntimeGraph:
                 "finish": "smart_summarize",
             },
         )
-        smart_graph.add_edge("execute_tools", "collect_permissions")
+        smart_graph.add_conditional_edges(
+            "execute_tools",
+            self._route_after_tool_execution,
+            {"waiting": END, "continue": "collect_permissions"},
+        )
         smart_graph.add_conditional_edges(
             "decision_gate",
             self._route_after_decision_gate,
@@ -682,7 +692,11 @@ class BrainRuntimeGraph:
                 "finish": "smart_summarize",
             },
         )
-        smart_resume_graph.add_edge("execute_tools", "smart_permission_gate")
+        smart_resume_graph.add_conditional_edges(
+            "execute_tools",
+            self._route_after_tool_execution,
+            {"waiting": END, "continue": "smart_permission_gate"},
+        )
         smart_resume_graph.add_conditional_edges(
             "decision_gate",
             self._route_after_decision_gate,
@@ -1724,6 +1738,17 @@ class BrainRuntimeGraph:
                 )
                 if outcome.status == "waiting_approval":
                     continue
+                if outcome.status == "ambiguous":
+                    return await self._converge_ambiguous_tool_result(
+                        session=session,
+                        state=state,
+                        task=task,
+                        request=request,
+                        outcome=outcome,
+                        account_id=account_id,
+                        project_id=project_id,
+                        observations=observations,
+                    )
                 observation = {
                     "kind": "tool_result",
                     "tool_call_id": outcome.tool_call.id,
@@ -1744,6 +1769,147 @@ class BrainRuntimeGraph:
         return {
             **state,
             "status": "tools_executed",
+            "selected_tool_calls": [],
+            "observations": observations,
+        }
+
+    async def _converge_ambiguous_tool_result(
+        self,
+        *,
+        session: AsyncSession,
+        state: BrainRuntimeState,
+        task: BrainTask,
+        request: RuntimeToolCall,
+        outcome: ToolExecutionOutcome,
+        account_id: int | None,
+        project_id: int | None,
+        observations: list[dict[str, Any]],
+    ) -> BrainRuntimeState:
+        """Pause an uncertain external write without replaying or claiming success."""
+
+        tool_call = outcome.tool_call
+        if tool_call.task_id != task.id:
+            raise ValueError("ambiguous ToolCall does not belong to the active BrainTask")
+
+        error_code = "TOOL_RESULT_AMBIGUOUS"
+        message = (
+            "外部操作的最终结果暂时无法确认。为避免重复执行，系统已停止自动重试；"
+            "请先核对平台实际状态，再决定下一步。"
+        )
+        run_id = int(state.get("agent_run_id") or 0)
+        run: AgentRun | None = None
+        if run_id:
+            run = await session.scalar(
+                select(AgentRun)
+                .where(AgentRun.id == run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                run is None
+                or run.task_id != task.id
+                or run.org_id != task.org_id
+                or (
+                    tool_call.thread_id is not None
+                    and tool_call.thread_id != run.thread_id
+                )
+                or (
+                    tool_call.turn_id is not None
+                    and tool_call.turn_id != run.turn_id
+                )
+            ):
+                raise ValueError(
+                    "ambiguous ToolCall AgentRun provenance does not match"
+                )
+        skill_run_id = int(tool_call.skill_run_id or 0)
+        skill_run: SkillRun | None = None
+        if skill_run_id:
+            if run is None:
+                raise ValueError("ambiguous SkillRun requires an active AgentRun")
+            skill_run = await session.scalar(
+                select(SkillRun)
+                .where(SkillRun.id == skill_run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                skill_run is None
+                or skill_run.task_id != task.id
+                or skill_run.run_id != run.id
+                or skill_run.thread_id != tool_call.thread_id
+                or skill_run.turn_id != tool_call.turn_id
+                or skill_run.org_id != task.org_id
+            ):
+                raise ValueError(
+                    "ambiguous ToolCall SkillRun provenance does not match"
+                )
+            skill_run.status = "stopped"
+            skill_run.error_code = error_code
+            skill_run.output_snapshot = {
+                **dict(skill_run.output_snapshot or {}),
+                "status": "ambiguous",
+                "tool_call_id": tool_call.id,
+                "tool_code": request.tool_code,
+                "error_code": error_code,
+            }
+
+        ambiguous_payload = {
+            "message": message,
+            "status": "ambiguous",
+            "error_code": error_code,
+            "tool_call_id": tool_call.id,
+            "tool_code": request.tool_code,
+            **({"skill_run_id": skill_run.id} if skill_run is not None else {}),
+        }
+        if run_id:
+            closure = await close_runtime_state(
+                session,
+                scope=RuntimeStateScope(
+                    run_id=run_id,
+                    turn_id=run.turn_id,
+                    task_id=task.id,
+                    account_id=account_id,
+                    project_id=project_id,
+                    content_item_id=task.content_item_id,
+                    result_payload={
+                        **ambiguous_payload,
+                        "runtime_status": "waiting_user",
+                    },
+                    error_detail=message,
+                    extra_events=(
+                        RuntimeEventSpec(
+                            event_type="brain.runtime.tool_ambiguous",
+                            semantic_key=f"tool-ambiguous:{tool_call.id}",
+                            payload=ambiguous_payload,
+                        ),
+                    ),
+                ),
+                status="waiting_user",
+                message=message,
+                error_code=error_code,
+            )
+            if closure.turn is None:
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.tool_ambiguous",
+                    ambiguous_payload,
+                )
+        else:
+            task.status = BrainTaskStatus.PENDING_CONFIRMATION
+            task.current_focus = message[:500]
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.tool_ambiguous",
+                ambiguous_payload,
+            )
+
+        return {
+            **state,
+            "status": "waiting_user",
+            "kernel_route": MainKernelRoute.WAITING.value,
+            "termination_reason": "tool_result_ambiguous",
             "selected_tool_calls": [],
             "observations": observations,
         }
@@ -2541,6 +2707,10 @@ class BrainRuntimeGraph:
     @staticmethod
     def _route_after_smart_permission(state: BrainRuntimeState) -> str:
         return "waiting" if state.get("pending_permissions") else "continue"
+
+    @staticmethod
+    def _route_after_tool_execution(state: BrainRuntimeState) -> str:
+        return "waiting" if state.get("status") == "waiting_user" else "continue"
 
     @staticmethod
     def _route_after_critic(state: BrainRuntimeState) -> str:

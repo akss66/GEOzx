@@ -12,8 +12,11 @@ from app.models import (
     AgentRun,
     AgentToolCall,
     BrainTask,
+    ConversationThread,
+    ConversationTurn,
     Event,
     OrchestrationPlan,
+    SkillRun,
     TaskBrief,
 )
 from app.models.enums import (
@@ -26,6 +29,7 @@ from app.models.enums import (
 from app.orchestrator import brain_runtime as brain_runtime_module
 from app.orchestrator.brain_runtime import BrainRuntimeGraph
 from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLimits
+from app.orchestrator.tool_executor import ToolExecutionOutcome
 from app.schemas.brain import RuntimeNextStep, RuntimeToolCall
 
 
@@ -95,6 +99,163 @@ async def _runtime_retry_fixture(session, admin, *, client_message_id: str):
     await session.refresh(task, attribute_names=["brief", "plan"])
     await session.refresh(run)
     return account, task, run
+
+
+async def _ambiguous_tool_fixture(session, admin, *, client_message_id: str):
+    account, task, run = await _runtime_retry_fixture(
+        session,
+        admin,
+        client_message_id=client_message_id,
+    )
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title=f"Ambiguous tool {client_message_id}",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=client_message_id,
+        user_input="执行一个可能已经提交的外部写操作",
+        status="running",
+    )
+    session.add(turn)
+    await session.flush()
+    run.thread_id = thread.id
+    run.turn_id = turn.id
+    run.status = "running"
+    run.phase = "execute_tools"
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=f"ambiguous-tool:{client_message_id}",
+        skill_code="publish_prepare",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(skill_run)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        skill_run_id=skill_run.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        module="brain",
+        agent_code="00-decision",
+        tool_code="provider.publish",
+        tool_name="Provider Publish",
+        idempotency_key=f"publish:{client_message_id}",
+        provider_idempotency_key=f"provider:{client_message_id}",
+        side_effect_level="non_idempotent_write",
+        status="ambiguous",
+        permission_mode="auto",
+        input_summary="publish externally",
+        output_summary="",
+        error="ToolTimeoutError",
+        meta={},
+    )
+    session.add(tool_call)
+    await session.commit()
+    await session.refresh(task, attribute_names=["brief", "plan"])
+    return account, task, run, turn, skill_run, tool_call
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_converges_ambiguous_write_without_false_success_or_retry(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account, task, run, turn, skill_run, tool_call = (
+        await _ambiguous_tool_fixture(
+            session,
+            admin,
+            client_message_id="ambiguous-provider-write-1",
+        )
+    )
+    request = RuntimeToolCall(
+        tool_code=tool_call.tool_code,
+        arguments={"external_id": "post-1"},
+        purpose="发布外部内容",
+        idempotency_key=tool_call.idempotency_key,
+    )
+    follow_up_request = request.model_copy(
+        update={"idempotency_key": f"{tool_call.idempotency_key}:follow-up"}
+    )
+    execute_count = 0
+
+    async def return_ambiguous(_executor, **_kwargs):
+        nonlocal execute_count
+        execute_count += 1
+        return ToolExecutionOutcome(
+            status="ambiguous",
+            tool_call=tool_call,
+            result=None,
+        )
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.DurableToolExecutor.execute",
+        return_ambiguous,
+    )
+    runtime = BrainRuntimeGraph()
+    identity = brain_runtime_module._runtime_event_identity.set(
+        (task.org_id, account.id, run.id, run.client_message_id)
+    )
+    try:
+        with brain_runtime_module.bind_runtime_session(session):
+            next_state = await runtime._execute_tools(
+                _state(
+                    task_id=task.id,
+                    agent_run_id=run.id,
+                    status="tools_selected",
+                    selected_tool_calls=[
+                        request.model_dump(mode="json"),
+                        follow_up_request.model_dump(mode="json"),
+                    ],
+                    observations=[],
+                )
+            )
+    finally:
+        brain_runtime_module._runtime_event_identity.reset(identity)
+
+    await session.refresh(turn)
+    await session.refresh(run)
+    await session.refresh(skill_run)
+    await session.refresh(task)
+    events = [
+        event
+        for event in (
+            await session.scalars(select(Event).order_by(Event.id))
+        ).all()
+        if (event.payload or {}).get("task_id") == task.id
+    ]
+
+    assert next_state["status"] == "waiting_user"
+    assert next_state["kernel_route"] == "waiting"
+    assert next_state["termination_reason"] == "tool_result_ambiguous"
+    assert next_state["observations"] == []
+    assert execute_count == 1
+    assert runtime._route_after_tool_execution(next_state) == "waiting"
+    assert turn.status == "waiting_user"
+    assert run.status == "waiting_user"
+    assert run.error_code == "TOOL_RESULT_AMBIGUOUS"
+    assert skill_run.status == "stopped"
+    assert skill_run.error_code == "TOOL_RESULT_AMBIGUOUS"
+    assert task.status is BrainTaskStatus.PENDING_CONFIRMATION
+    assert [event.type for event in events].count(
+        "brain.runtime.tool_ambiguous"
+    ) == 1
+    assert not any(event.type == "brain.runtime.tool_completed" for event in events)
 
 
 def test_same_expert_requires_new_purpose_or_evidence_before_repeat():
