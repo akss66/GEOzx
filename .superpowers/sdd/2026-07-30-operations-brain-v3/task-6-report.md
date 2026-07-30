@@ -16,6 +16,14 @@
 - Formal Skill deliverables now validate their output model, require a completed
   in-scope expert Invocation, record that producer id, and use the producer expert
   code rather than `00-decision`.
+- Added `AgentHarness.execute_trace_isolated`: every production expert reloads
+  User/Task from IDs inside its own `async_session` and returns an immutable
+  `AgentTraceResult` DTO. Skill stages use a semaphore capped at three and
+  `gather(return_exceptions=True)`; stage order and definition order remain stable.
+- Same-stage experts receive identical frozen upstream input. A later stage receives
+  only the complete output of prior stages. All same-stage work is allowed to settle
+  before a failure is raised, retaining Invocation traces while preventing a formal
+  Deliverable.
 - Added migration `20260730_0400_skill_recovery_freeze`, including ambiguous-active
   preflight, canonical hash backfill, 64-character validation, non-null convergence,
   and downgrade.
@@ -32,7 +40,7 @@
 ## Verification
 
 - Directed Task 6 suite:
-  `108 passed, 1 warning in 22.43s`.
+  `111 passed, 2 warnings in 24.91s`.
 - `uv run ruff check app tests migrations/versions/20260730_0400_skill_recovery_freeze.py`
   passed.
 - `uv run alembic heads` -> `20260730_0400 (head)`.
@@ -40,12 +48,9 @@
 
 ## Concerns / follow-up
 
-- `expert_stages` is now a validated execution contract and formal producer/trace
-  boundaries are enforced, but the current runtime still executes experts
-  sequentially on the request session. The independent-`AsyncSession`, bounded
-  same-stage parallel executor requested by the brief remains to be completed in
-  the review/fix loop; enabling `asyncio.gather` on the current shared session would
-  be unsafe and was intentionally not done.
+- Injected test Harness implementations retain a sequential compatibility path so
+  existing request-transaction fixtures never enter `gather` with a shared session.
+  The production `agent_harness` path always uses the isolated ID-based entry.
 - The migration rejects malformed JSON and ambiguous active runs transactionally.
   Exact Registry-version availability is enforced at recovery time rather than
   hard-coded into the migration, so deployments can retain organization-specific

@@ -9,12 +9,14 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agents.base import AgentContext
 from app.agents.registry import AGENT_SPECS, AgentSpec, get_agent_spec
 from app.core.approval_audit import add_approval_requested
 from app.core.events import publish_realtime_event, record_runtime_event_once
 from app.core.workspace_access import require_account_access, require_project_access
+from app.db import async_session
 from app.models import (
     Account,
     AgentInvocation,
@@ -80,6 +82,14 @@ class AgentHarnessResult:
 
 
 @dataclass(frozen=True)
+class AgentTraceResult:
+    invocation_id: int
+    agent_code: str
+    output_summary: str
+    output: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _RuntimeLifecycleBroadcast:
     event_id: int
     event_type: str
@@ -98,6 +108,61 @@ _MANAGEMENT_TO_RUNTIME_TOOL = {
 
 class AgentHarness:
     """Execute a specialist with scope, prompt, trace, and idempotency controls."""
+
+    async def execute_trace_isolated(
+        self,
+        *,
+        scope: RuntimeScope,
+        code: AgentCode,
+        purpose: str,
+        evidence_refs: list[str],
+        step_key: str,
+        attempt: int,
+        upstream: dict,
+        session_factory: Any = async_session,
+    ) -> AgentTraceResult:
+        """Reload the complete scope and execute one trace in its own session."""
+
+        async with session_factory() as session:
+            user = await session.scalar(
+                select(User).where(
+                    User.id == scope.user_id,
+                    User.org_id == scope.org_id,
+                )
+            )
+            task = await session.scalar(
+                select(BrainTask)
+                .options(selectinload(BrainTask.brief))
+                .where(
+                    BrainTask.id == scope.task_id,
+                    BrainTask.org_id == scope.org_id,
+                )
+            )
+            if user is None or task is None:
+                raise RuntimeScopeConflict("isolated expert scope is unavailable")
+            result = await self.execute(
+                session,
+                user=user,
+                task=task,
+                code=code,
+                purpose=purpose,
+                evidence_refs=list(evidence_refs),
+                run_id=scope.run_id,
+                skill_run_id=scope.skill_run_id,
+                thread_id=scope.thread_id,
+                turn_id=scope.turn_id,
+                step_key=step_key,
+                attempt=attempt,
+                upstream=dict(upstream),
+                scope=scope,
+                trace_only=True,
+            )
+            return AgentTraceResult(
+                invocation_id=result.invocation.id,
+                agent_code=code.value,
+                output_summary=result.invocation.output_summary,
+                output=dict(result.output or {}),
+            )
 
     async def execute(
         self,

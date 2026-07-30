@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -73,6 +74,29 @@ DataSufficiency = Literal["insufficient", "partial", "sufficient"]
 log = logging.getLogger("dyflow.skill_runtime")
 
 
+async def run_bounded_stage(
+    operations: list[Any],
+    *,
+    limit: int = 3,
+) -> list[Any]:
+    """Run one expert stage concurrently without sharing execution state."""
+
+    semaphore = asyncio.Semaphore(max(1, min(3, limit)))
+
+    async def run(operation: Any) -> Any:
+        async with semaphore:
+            return await operation()
+
+    results = await asyncio.gather(
+        *(run(operation) for operation in operations),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return results
+
+
 def skill_input_hash(snapshot: dict[str, Any]) -> str:
     """Return the stable SHA-256 identity of one fully frozen Skill input."""
 
@@ -103,6 +127,12 @@ class _CriticResult:
     score: int
     issues: list[str]
     suggestions: list[str]
+
+
+@dataclass(frozen=True)
+class _ExpertResult:
+    invocation: AgentInvocation
+    output: dict[str, Any]
 
 
 class _ToolScopeMismatch(PermissionError):
@@ -487,53 +517,36 @@ class SkillRuntime:
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
         tool_packet = [{"tool_code": code, "result": value} for code, value in tool_results.items()]
-        for index, code in enumerate(
-            (
-                AgentCode.POSITIONING,
-                AgentCode.CONTENT_DIRECTOR,
-                AgentCode.OPERATOR,
-            )
-        ):
+        definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
+        for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            result = await self._harness.execute(
+            stage_results = await self._execute_expert_stage(
                 session,
                 user=user,
                 task=task,
-                code=code,
+                scope=scope,
+                codes=tuple(AgentCode(code) for code in stage),
                 purpose="基于所选账号证据完成一键账号体检，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
-                step_key=f"account-inspection:{index}:{code.value}",
-                attempt=0,
+                step_keys={
+                    AgentCode(code): (f"account-inspection:{definition_index[code]}:{code}")
+                    for code in stage
+                },
                 upstream={
                     "tool_results": {"items": tool_packet},
-                    "expert_outputs": upstream_outputs,
+                    "expert_outputs": list(upstream_outputs),
                 },
-                scope=scope,
-                trace_only=True,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            await self._attach_expert_provenance(
-                session,
-                result=result,
-                thread=thread,
-                turn=turn,
-                run=run,
-                skill_run=skill_run,
-            )
-            expert_results.append(result)
-            upstream_outputs.append(
-                {
-                    "agent_code": code.value,
-                    "summary": result.invocation.output_summary
-                    if hasattr(result.invocation, "output_summary")
-                    else "",
-                    "payload": dict(result.output or {}),
-                }
-            )
+            for result in stage_results:
+                expert_results.append(result)
+                upstream_outputs.append(
+                    {
+                        "agent_code": result.invocation.agent_code.value,
+                        "summary": result.invocation.output_summary,
+                        "payload": dict(result.output),
+                    }
+                )
 
         latest_result = expert_results[-1]
         critic_history: list[_CriticResult] = []
@@ -750,25 +763,24 @@ class SkillRuntime:
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
         evidence_refs = _evidence_refs(tool_results.get("account.data_context", {}))
-        for index, raw_code in enumerate(definition.expert_codes):
-            code = AgentCode(raw_code)
+        definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
+        for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            result = await self._harness.execute(
+            stage_results = await self._execute_expert_stage(
                 session,
                 user=user,
                 task=task,
-                code=code,
+                scope=scope,
+                codes=tuple(AgentCode(code) for code in stage),
                 purpose=(
                     f"完成“{definition.name}”：{turn.user_input}。"
                     "必须遵守当前账号范围，不得编造数据或声称已经发布。"
                 ),
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
-                step_key=f"{definition.code}:{index}:{code.value}",
-                attempt=0,
+                step_keys={
+                    AgentCode(code): f"{definition.code}:{definition_index[code]}:{code}"
+                    for code in stage
+                },
                 upstream={
                     "tool_results": {
                         "items": [
@@ -776,27 +788,19 @@ class SkillRuntime:
                             for key, value in tool_results.items()
                         ]
                     },
-                    "expert_outputs": upstream_outputs,
+                    "expert_outputs": list(upstream_outputs),
                 },
-                scope=scope,
-                trace_only=True,
             )
-            await self._attach_expert_provenance(
-                session,
-                result=result,
-                thread=thread,
-                turn=turn,
-                run=run,
-                skill_run=skill_run,
-            )
-            expert_results.append(result)
-            upstream_outputs.append(
-                {
-                    "agent_code": code.value,
-                    "summary": result.invocation.output_summary,
-                    "payload": dict(result.output or {}),
-                }
-            )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
+            for result in stage_results:
+                expert_results.append(result)
+                upstream_outputs.append(
+                    {
+                        "agent_code": result.invocation.agent_code.value,
+                        "summary": result.invocation.output_summary,
+                        "payload": dict(result.output),
+                    }
+                )
 
         report, deliverable_type, deliverable_payload = _build_operating_report(
             definition=definition,
@@ -828,7 +832,6 @@ class SkillRuntime:
                 f"generated by {definition.code} Skill"
             ),
         )
-
         content.status = ContentStatus.DRAFT
         output = {
             "status": "completed",
@@ -836,7 +839,7 @@ class SkillRuntime:
             "artifact_id": deliverable.id,
             "artifact_type": definition.artifact_type or definition.code,
             "report": report,
-            "response": f"{definition.name}已完成，正式成果已生成。",
+            "response": f"{definition.name} completed.",
         }
         await self._close_skill_state(
             session,
@@ -850,6 +853,71 @@ class SkillRuntime:
             output_snapshot=output,
         )
         return self._existing_result(skill_run)
+
+    async def _execute_expert_stage(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        task: BrainTask,
+        scope: RuntimeScope,
+        codes: tuple[AgentCode, ...],
+        purpose: str,
+        evidence_refs: list[str],
+        step_keys: dict[AgentCode, str],
+        upstream: dict[str, Any],
+    ) -> list[_ExpertResult]:
+        frozen_upstream = json.loads(json.dumps(upstream))
+        if self._harness is not agent_harness:
+            results: list[_ExpertResult] = []
+            for code in codes:
+                result = await self._harness.execute(
+                    session,
+                    user=user,
+                    task=task,
+                    code=code,
+                    purpose=purpose,
+                    evidence_refs=evidence_refs,
+                    run_id=scope.run_id,
+                    skill_run_id=scope.skill_run_id,
+                    thread_id=scope.thread_id,
+                    turn_id=scope.turn_id,
+                    step_key=step_keys[code],
+                    attempt=0,
+                    upstream=json.loads(json.dumps(frozen_upstream)),
+                    scope=scope,
+                    trace_only=True,
+                )
+                results.append(
+                    _ExpertResult(
+                        invocation=result.invocation,
+                        output=dict(result.output or {}),
+                    )
+                )
+            return results
+
+        operations = [
+            (
+                lambda code=code: self._harness.execute_trace_isolated(
+                    scope=scope,
+                    code=code,
+                    purpose=purpose,
+                    evidence_refs=evidence_refs,
+                    step_key=step_keys[code],
+                    attempt=0,
+                    upstream=json.loads(json.dumps(frozen_upstream)),
+                )
+            )
+            for code in codes
+        ]
+        trace_results = await run_bounded_stage(operations, limit=3)
+        results = []
+        for trace in trace_results:
+            invocation = await session.get(AgentInvocation, trace.invocation_id)
+            if invocation is None:
+                raise SkillRecoveryConflict("SKILL_INVOCATION_TRACE_MISSING")
+            results.append(_ExpertResult(invocation=invocation, output=dict(trace.output)))
+        return results
 
     async def _review(
         self,

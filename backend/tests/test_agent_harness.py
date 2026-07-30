@@ -1,6 +1,9 @@
 """Unified expert harness contracts."""
 
+import asyncio
+from contextlib import asynccontextmanager
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -34,12 +37,98 @@ from app.models.enums import (
 from app.orchestrator.agent_harness import AgentHarness, AgentHarnessError
 from app.orchestrator.agent_kernel import KernelAction, SpecialistKernelDecision
 from app.orchestrator.brain_runtime import BrainRuntimeGraph, bind_runtime_session
+from app.orchestrator.runtime_scope import RuntimeScope
+from app.orchestrator.skill_runtime import run_bounded_stage
 from app.schemas.brain import AgentInvocationOut, RuntimeToolCall
 from app.schemas.deliverable import (
     AdPlanPayload,
     DeliverablePayload,
     PositioningStrategyPayload,
 )
+
+
+@pytest.mark.asyncio
+async def test_isolated_trace_entry_uses_distinct_sessions_and_frozen_stage_input(
+    monkeypatch,
+) -> None:
+    harness = AgentHarness()
+    created_sessions: list[object] = []
+    active = 0
+    peak = 0
+    observed_upstream: list[dict] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+
+        async def scalar(self, _query):
+            self.scalar_calls += 1
+            return (
+                SimpleNamespace(id=11, org_id=7)
+                if self.scalar_calls == 1
+                else SimpleNamespace(id=21, org_id=7)
+            )
+
+    @asynccontextmanager
+    async def factory():
+        session = FakeSession()
+        created_sessions.append(session)
+        yield session
+
+    async def fake_execute(session, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        observed_upstream.append(kwargs["upstream"])
+        await asyncio.sleep(0.02)
+        active -= 1
+        code = kwargs["code"]
+        return SimpleNamespace(
+            invocation=SimpleNamespace(
+                id=len(created_sessions),
+                output_summary=code.value,
+            ),
+            output={"agent": code.value},
+        )
+
+    monkeypatch.setattr(harness, "execute", fake_execute)
+    scope = RuntimeScope(
+        org_id=7,
+        user_id=11,
+        account_id=12,
+        thread_id=13,
+        turn_id=14,
+        run_id=15,
+        task_id=21,
+        skill_run_id=22,
+    )
+    codes = [AgentCode.POSITIONING, AgentCode.CONTENT_DIRECTOR]
+    results = await run_bounded_stage(
+        [
+            lambda code=code: harness.execute_trace_isolated(
+                scope=scope,
+                code=code,
+                purpose="stage",
+                evidence_refs=[],
+                step_key=f"stage:{code.value}",
+                attempt=0,
+                upstream={"expert_outputs": []},
+                session_factory=factory,
+            )
+            for code in codes
+        ]
+    )
+
+    assert peak == 2
+    assert len(created_sessions) == 2
+    assert created_sessions[0] is not created_sessions[1]
+    assert [result.agent_code for result in results] == [
+        code.value for code in codes
+    ]
+    assert observed_upstream == [
+        {"expert_outputs": []},
+        {"expert_outputs": []},
+    ]
 
 
 @pytest.mark.asyncio

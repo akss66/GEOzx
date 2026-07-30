@@ -1,5 +1,7 @@
 """Execution contracts for the first account-operations Skill loop."""
 
+import asyncio
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +25,7 @@ from app.models.enums import (
     Platform,
     UserRole,
 )
-from app.orchestrator.skill_runtime import SkillRuntime
+from app.orchestrator.skill_runtime import SkillRuntime, run_bounded_stage
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
@@ -171,6 +173,53 @@ class _Harness:
         )
 
 
+@pytest.mark.asyncio
+async def test_bounded_stage_overlaps_isolated_work_and_preserves_definition_order():
+    active = 0
+    peak = 0
+    session_ids: set[int] = set()
+
+    async def execute(index: int) -> str:
+        nonlocal active, peak
+        session_id = index + 100
+        session_ids.add(session_id)
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.04 if index == 0 else 0.01)
+        active -= 1
+        return f"expert-{index}"
+
+    started = monotonic()
+    results = await run_bounded_stage(
+        [lambda index=index: execute(index) for index in range(4)],
+        limit=3,
+    )
+
+    assert results == ["expert-0", "expert-1", "expert-2", "expert-3"]
+    assert peak == 3
+    assert len(session_ids) == 4
+    assert monotonic() - started < 0.075
+
+
+@pytest.mark.asyncio
+async def test_bounded_stage_waits_for_all_failures_before_raising():
+    completed: list[str] = []
+
+    async def fail() -> str:
+        await asyncio.sleep(0.01)
+        raise RuntimeError("expert failed")
+
+    async def finish() -> str:
+        await asyncio.sleep(0.02)
+        completed.append("audited")
+        return "done"
+
+    with pytest.raises(RuntimeError, match="expert failed"):
+        await run_bounded_stage([fail, finish], limit=3)
+
+    assert completed == ["audited"]
+
+
 @pytest.mark.parametrize(
     ("skill_code", "message", "artifact_type", "expert_codes"),
     [
@@ -231,9 +280,7 @@ async def test_operating_skill_executes_bounded_experts_and_persists_artifact(
     assert result.artifact_type == artifact_type
     assert result.artifact_id is not None
     assert result.report["account_id"] == account.id
-    assert result.report["participating_experts"] == [
-        code.value for code in expert_codes
-    ]
+    assert result.report["participating_experts"] == [code.value for code in expert_codes]
     assert harness.calls == expert_codes
     assert await session.scalar(select(func.count(BrainTask.id))) == 1
     assert await session.scalar(select(func.count(SkillRun.id))) == 1
