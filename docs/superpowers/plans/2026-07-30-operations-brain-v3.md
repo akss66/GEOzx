@@ -118,27 +118,41 @@
 ### Task 5: 账号、会话、轮次和成果来源约束
 
 **Files:**
+- Modify: `backend/app/models/conversation.py`
+- Modify: `backend/app/models/agent_runtime.py`
+- Modify: `backend/app/models/skill_runtime.py`
 - Modify: `backend/app/models/content.py`
 - Modify: `backend/app/models/brain.py`
 - Modify: `backend/app/services/conversations.py`
 - Modify: `backend/app/services/artifacts.py`
 - Modify: `backend/app/orchestrator/agent_harness.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
 - Modify: `backend/app/orchestrator/tool_executor.py`
 - Create: `backend/app/orchestrator/runtime_scope.py`
+- Create: `backend/app/services/runtime_deliverables.py`
 - Create: `backend/migrations/versions/20260730_0300_runtime_scope_constraints.py`
 - Test: `backend/tests/test_artifacts_api.py`
 - Test: `backend/tests/test_agent_harness.py`
 - Test: `backend/tests/test_runtime_tool_executor.py`
+- Test: `backend/tests/test_skill_runtime_models.py`
 - Test: `backend/tests/test_turn_provenance.py`
+- Test: `backend/tests/test_migrations.py`
 
 **Interfaces:**
-- Produces: `RuntimeScope(org_id, user_id, account_id, thread_id, turn_id, run_id, skill_run_id=None)`。
-- Produces: `validate_runtime_scope(session, scope) -> None`。
+- Produces: `RuntimeScope(org_id, user_id, account_id, thread_id, turn_id, run_id, task_id, skill_run_id=None)`。
+- Produces: `RuntimeScope.from_conversation(...)`、`bind_task(...)`、`bind_skill(...)`；V3 写路径不得继续散传裸来源 ID。
+- Produces: `write_runtime_deliverable(session, *, scope, content, ...)`，由 Harness 与 Skill Runtime 共用。
+- 数据库仅强制“非空复合来源必须一致”；nullable legacy provenance 继续兼容，V3 的完整性由 `RuntimeScope` 在 flush 前拒绝。
+- `BrainTask.thread_id` 是图运行字符串，不是 ConversationThread 外键；不得据此推断会话。
 
-- [ ] 写跨用户、跨账号、跨 Thread、跨 Turn、跨 Run 和跨 SkillRun 挂载测试，全部必须拒绝。
-- [ ] 写数据库约束测试，直接构造交叉来源 Deliverable/Invocation/ToolCall 也必须失败。
+- [ ] 写跨用户、跨组织、跨账号、跨 Thread、跨 Turn、跨 Task、跨 Run 和跨 SkillRun 挂载测试，全部必须在写入前拒绝。
+- [ ] 写数据库约束测试：Run↔Task/org、SkillRun↔Run/Task/Turn、Invocation↔Run/SkillRun、ToolCall↔Invocation/SkillRun、Deliverable↔Turn/Run/SkillRun 的完整复合来源不一致时必须失败。
+- [ ] 写 legacy 回归：来源全空仍可写；半 scope 在 V3 路径拒绝；不得按标题、时间、JSON account_ids 或图 thread_id 猜测回填。
+- [ ] 写迁移 preflight：只允许从唯一 canonical SkillRun/Invocation 确定性补齐；任何冲突必须报告并使迁移事务回滚。
 - [ ] 运行测试确认失败。
-- [ ] 在专家、Tool、Artifact 写入边界应用完整 scope 校验并增加可行的组合来源约束。
+- [ ] 在 Harness、ToolExecutor、Skill Runtime 和 Artifact writer 边界应用完整 scope 校验；幂等 ToolCall 必须比较 invocation_id 与完整 scope。
+- [ ] 增加可行的组合来源约束并保持现有删除顺序：正式成果保留，删除会话后 provenance 置空。
+- [ ] 人工 Artifact revision 复制 provenance 前先验证历史来源自洽；坏 lineage 返回 409，不能继续复制。
 - [ ] 运行迁移与定向测试并提交 `fix: enforce runtime scope and lineage constraints`。
 
 ### Task 6: Skill 恢复、专家编排与按需质量门
