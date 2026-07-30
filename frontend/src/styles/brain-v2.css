@@ -997,13 +997,10 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--tz-brand-red) 38%, transparent);
 }
 
-.tz-brain-thread .dy-brain-capability-menu {
-  position: absolute;
-  bottom: calc(100% + 9px);
-  left: 0;
+.dy-brain-capability-menu {
+  z-index: 1000;
   display: grid;
-  width: 236px;
-  max-height: min(460px, calc(100vh - 112px));
+  width: min(236px, calc(100vw - 24px));
   overflow-y: auto;
   padding: 8px;
   border: 1px solid var(--tz-line);
@@ -1012,17 +1009,17 @@
   box-shadow: 0 14px 32px rgba(42, 35, 27, 0.16);
 }
 
-.tz-brain-thread .dy-brain-capability-group {
+.dy-brain-capability-menu .dy-brain-capability-group {
   display: grid;
   gap: 3px;
   padding: 7px 0;
 }
 
-.tz-brain-thread .dy-brain-capability-group + .dy-brain-capability-group {
+.dy-brain-capability-menu .dy-brain-capability-group + .dy-brain-capability-group {
   border-top: 1px solid var(--tz-line-subtle);
 }
 
-.tz-brain-thread .dy-brain-capability-group h3 {
+.dy-brain-capability-menu .dy-brain-capability-group h3 {
   margin: 0;
   padding: 0 8px;
   color: var(--tz-muted);
@@ -1031,12 +1028,12 @@
   line-height: 1.6;
 }
 
-.tz-brain-thread .dy-brain-capability-items {
+.dy-brain-capability-menu .dy-brain-capability-items {
   display: grid;
   gap: 2px;
 }
 
-.tz-brain-thread .dy-brain-capability-item {
+.dy-brain-capability-menu .dy-brain-capability-item {
   display: grid;
   width: 100%;
   gap: 2px;
@@ -1050,28 +1047,28 @@
   text-align: left;
 }
 
-.tz-brain-thread .dy-brain-capability-item:hover,
-.tz-brain-thread .dy-brain-capability-item:focus-visible {
+.dy-brain-capability-menu .dy-brain-capability-item:hover,
+.dy-brain-capability-menu .dy-brain-capability-item:focus-visible {
   background: var(--tz-surface-soft);
   outline: none;
 }
 
-.tz-brain-thread .dy-brain-capability-item:focus-visible {
+.dy-brain-capability-menu .dy-brain-capability-item:focus-visible {
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--tz-brand-red) 30%, transparent);
 }
 
-.tz-brain-thread .dy-brain-capability-item > span {
+.dy-brain-capability-menu .dy-brain-capability-item > span {
   font-size: 12px;
   font-weight: 600;
 }
 
-.tz-brain-thread .dy-brain-capability-item small {
+.dy-brain-capability-menu .dy-brain-capability-item small {
   color: var(--tz-muted);
   font-size: 10px;
   line-height: 1.45;
 }
 
-.tz-brain-thread .dy-brain-capability-item:disabled {
+.dy-brain-capability-menu .dy-brain-capability-item:disabled {
   cursor: not-allowed;
   opacity: 0.58;
 }

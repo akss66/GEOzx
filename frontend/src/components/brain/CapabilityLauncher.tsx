@@ -1,5 +1,7 @@
 import { PlusOutlined } from "@ant-design/icons";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { createPortal } from "react-dom";
 
 import type { PublicSkill } from "../../types";
 
@@ -7,6 +9,12 @@ type ContextAction = {
   label: string;
   callback?: () => void;
 };
+
+type CapabilityMenuPosition = Pick<CSSProperties, "top" | "bottom" | "left" | "maxHeight">;
+
+const MENU_WIDTH = 236;
+const MENU_GAP = 9;
+const VIEWPORT_GUTTER = 12;
 
 export type CapabilityLauncherContextCallbacks = {
   onAddFilesAndMaterials?: () => void;
@@ -37,6 +45,7 @@ export function CapabilityLauncher({
   disabled = false,
 }: CapabilityLauncherProps) {
   const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<CapabilityMenuPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -50,9 +59,27 @@ export function CapabilityLauncher({
     { label: "选择账号", callback: onSelectAccount },
   ];
 
-  useEffect(() => {
-    if (!open) return;
+  const updateMenuPosition = useCallback(() => {
+    if (!triggerRef.current) return;
+    setMenuPosition(measureCapabilityMenuPosition(triggerRef.current));
+  }, []);
 
+  useEffect(() => {
+    if (!open) {
+      setMenuPosition(null);
+      return;
+    }
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open, updateMenuPosition]);
+
+  useEffect(() => {
+    if (!open || !menuPosition) return;
     const firstItem = menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)");
     firstItem?.focus();
 
@@ -63,7 +90,7 @@ export function CapabilityLauncher({
     };
     document.addEventListener("mousedown", closeOnOutsidePointer);
     return () => document.removeEventListener("mousedown", closeOnOutsidePointer);
-  }, [open]);
+  }, [menuPosition, open]);
 
   useEffect(() => {
     if (disabled) setOpen(false);
@@ -101,33 +128,15 @@ export function CapabilityLauncher({
     }
   };
 
-  return (
-    <div className="dy-brain-capability-launcher">
-      <button
-        ref={triggerRef}
-        type="button"
-        className="dy-brain-capability-trigger"
-        aria-label="添加能力或材料"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && open) {
-            event.preventDefault();
-            closeMenu(true);
-            return;
-          }
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          setOpen(true);
-        }}
-      >
-        <PlusOutlined aria-hidden="true" />
-      </button>
-
-      {open ? (
-        <div ref={menuRef} className="dy-brain-capability-menu" role="menu" aria-label="能力与材料">
+  const menu = open && menuPosition && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          ref={menuRef}
+          className="dy-brain-capability-menu"
+          role="menu"
+          aria-label="能力与材料"
+          style={{ position: "fixed", ...menuPosition }}
+        >
           <CapabilityGroup label={groupLabels.quick_operations}>
             {quickOperations.map((skill) => (
               <SkillMenuItem
@@ -181,10 +190,67 @@ export function CapabilityLauncher({
               />
             ))}
           </CapabilityGroup>
-        </div>
-      ) : null}
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <div className="dy-brain-capability-launcher">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="dy-brain-capability-trigger"
+        aria-label="添加能力或材料"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && open) {
+            event.preventDefault();
+            closeMenu(true);
+            return;
+          }
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          setOpen(true);
+        }}
+      >
+        <PlusOutlined aria-hidden="true" />
+      </button>
+      {menu}
     </div>
   );
+}
+
+function measureCapabilityMenuPosition(trigger: HTMLButtonElement): CapabilityMenuPosition {
+  const triggerRect = trigger.getBoundingClientRect();
+  const boundaryRect = trigger.closest(".tz-brain-stage")?.getBoundingClientRect();
+  const boundaryTop = Math.max(boundaryRect?.top ?? VIEWPORT_GUTTER, VIEWPORT_GUTTER);
+  const boundaryBottom = Math.min(
+    boundaryRect?.bottom ?? window.innerHeight - VIEWPORT_GUTTER,
+    window.innerHeight - VIEWPORT_GUTTER,
+  );
+  const availableAbove = Math.max(0, triggerRect.top - boundaryTop - MENU_GAP);
+  const availableBelow = Math.max(0, boundaryBottom - triggerRect.bottom - MENU_GAP);
+  const left = Math.max(
+    VIEWPORT_GUTTER,
+    Math.min(triggerRect.left, window.innerWidth - MENU_WIDTH - VIEWPORT_GUTTER),
+  );
+
+  if (availableAbove >= availableBelow) {
+    return {
+      left,
+      bottom: window.innerHeight - triggerRect.top + MENU_GAP,
+      maxHeight: availableAbove,
+    };
+  }
+  return {
+    left,
+    top: triggerRect.bottom + MENU_GAP,
+    maxHeight: availableBelow,
+  };
 }
 
 function CapabilityGroup({ label, children }: { label: string; children: React.ReactNode }) {

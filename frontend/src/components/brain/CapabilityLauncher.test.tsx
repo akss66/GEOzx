@@ -2,13 +2,18 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PublicSkill } from "../../types";
 import { CapabilityLauncher } from "./CapabilityLauncher";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const accountInspection: PublicSkill = {
   code: "account_inspection",
@@ -47,6 +52,56 @@ const contextSkill: PublicSkill = {
 };
 
 describe("CapabilityLauncher", () => {
+  it("portals the menu outside the clipped brain stage and constrains it above the trigger", async () => {
+    const stage = document.createElement("main");
+    stage.className = "tz-brain-stage";
+    document.body.appendChild(stage);
+
+    render(
+      <CapabilityLauncher skills={[accountInspection]} onSelectSkill={vi.fn()} />,
+      { container: stage },
+    );
+
+    vi.stubGlobal("innerHeight", 900);
+    vi.stubGlobal("innerWidth", 1200);
+    const trigger = screen.getByRole("button", { name: "添加能力或材料" });
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 430,
+      y: 550,
+      top: 550,
+      right: 464,
+      bottom: 584,
+      left: 430,
+      width: 34,
+      height: 34,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 122,
+      top: 122,
+      right: 1200,
+      bottom: 900,
+      left: 0,
+      width: 1200,
+      height: 778,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.click(trigger);
+
+    const menu = await screen.findByRole("menu", { name: "能力与材料" });
+    expect(menu.parentElement).toBe(document.body);
+    await waitFor(() => {
+      expect(menu).toHaveStyle({
+        position: "fixed",
+        left: "430px",
+        bottom: "359px",
+        maxHeight: "419px",
+      });
+    });
+  });
+
   it("renders business groups in order and selects account inspection without showing its code", () => {
     const onSelectSkill = vi.fn();
     render(
