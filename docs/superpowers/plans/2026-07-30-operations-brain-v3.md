@@ -56,70 +56,126 @@
 - [ ] 增加路由 workload、种子和迁移；配置不存在时安全回退到 `00-decision`，不能使生产请求不可用。
 - [ ] 运行定向测试并提交 `feat: separate router and answer model profiles`。
 
-### Task 3: Runtime 错误分类、重试与状态收口
+### Task 3: Conversation Worker 化与可分类故障
 
 **Files:**
+- Modify: `backend/app/api/conversations.py`
 - Modify: `backend/app/worker.py`
+- Modify: `backend/app/llm/gateway.py`
+- Modify: `backend/app/core/runtime_failures.py`
+- Modify: `backend/app/services/agent_runs.py`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_llm_gateway.py`
+- Test: `backend/tests/test_worker.py`
+
+**Interfaces:**
+- Conversation API 只负责持久化 Turn/Run 并入队，Worker 负责正式执行。
+- `classify_runtime_failure(exc) -> FailureDisposition` 必须保留供应商 HTTP 状态和超时原因。
+
+- [ ] 写测试：提交 Turn 返回已入队 Run，不能在 HTTP 请求线程内执行完整 Runtime。
+- [ ] 写测试：409、权限和校验错误不重试；429、5xx、连接和响应超时有界重试。
+- [ ] 写测试：LLM Gateway 包装异常后仍可识别原始状态码与 cause。
+- [ ] 运行定向测试确认失败。
+- [ ] 将 Conversation 初次执行接入现有 durable Worker；保留 SSE 通过 Run/Turn 关联推送。
+- [ ] 调整 Gateway 安全异常包装，在不暴露供应商正文的同时保留类型化故障元数据。
+- [ ] 运行定向测试并提交 `feat: execute conversation turns through durable workers`。
+
+### Task 4: 统一 Turn/Run/SkillRun/Task 状态机
+
+**Files:**
+- Modify: `backend/app/models/conversation.py`
+- Modify: `backend/app/models/agent_runtime.py`
+- Modify: `backend/app/models/skill_runtime.py`
+- Modify: `backend/app/services/agent_runs.py`
 - Modify: `backend/app/services/turn_execution.py`
 - Modify: `backend/app/orchestrator/skill_runtime.py`
-- Create: `backend/app/orchestrator/runtime_failures.py`
-- Test: `backend/tests/test_worker.py`
+- Create: `backend/app/services/runtime_state.py`
+- Create: `backend/migrations/versions/20260730_0200_runtime_state_convergence.py`
+- Test: `backend/tests/test_agent_runs.py`
 - Test: `backend/tests/test_turn_execution.py`
 - Test: `backend/tests/test_account_inspection_skill.py`
 
 **Interfaces:**
-- Produces: `FailureDisposition(code, retryable, terminal_status, user_message)`。
-- Produces: `classify_runtime_failure(exc) -> FailureDisposition`。
+- Produces: `close_runtime_state(session, *, scope, status, message, error_code=None)`。
+- 状态族固定为 active、paused、terminal；等待审批属于 paused，不得继续显示 running。
 
-- [ ] 写测试：409/权限/缺少作用域不重试，网络超时/限流有界重试。
-- [ ] 写测试：失败后 Turn、Run、SkillRun、BrainTask 均退出 running，且只写一条用户可见终态消息。
+- [ ] 写参数化测试：completed、failed、dead_letter、cancelled、waiting_permission 在四类账本中的映射一致。
+- [ ] 写测试：失败/取消只产生一条终态用户消息，重放不会重复写。
 - [ ] 运行测试确认失败。
-- [ ] 实现集中错误分类和原子状态收口；重试复用现有幂等键。
-- [ ] 运行定向测试并提交 `fix: classify retries and close runtime state atomically`。
+- [ ] 增加 Turn 状态和数据库约束，集中收口服务在一个事务中更新所有账本。
+- [ ] 将 Worker、Skill 和 operation 的分散状态写入替换为集中收口调用。
+- [ ] 运行迁移与定向测试并提交 `fix: converge runtime state across turn ledgers`。
 
-### Task 4: 账号、会话、轮次和成果隔离
+### Task 5: 账号、会话、轮次和成果来源约束
 
 **Files:**
+- Modify: `backend/app/models/content.py`
+- Modify: `backend/app/models/brain.py`
 - Modify: `backend/app/services/conversations.py`
 - Modify: `backend/app/services/artifacts.py`
 - Modify: `backend/app/orchestrator/agent_harness.py`
-- Modify: `backend/app/orchestrator/skill_runtime.py`
+- Modify: `backend/app/orchestrator/tool_executor.py`
 - Create: `backend/app/orchestrator/runtime_scope.py`
-- Test: `backend/tests/test_conversation_api.py`
+- Create: `backend/migrations/versions/20260730_0300_runtime_scope_constraints.py`
 - Test: `backend/tests/test_artifacts_api.py`
 - Test: `backend/tests/test_agent_harness.py`
+- Test: `backend/tests/test_runtime_tool_executor.py`
+- Test: `backend/tests/test_turn_provenance.py`
 
 **Interfaces:**
 - Produces: `RuntimeScope(org_id, user_id, account_id, thread_id, turn_id, run_id, skill_run_id=None)`。
 - Produces: `validate_runtime_scope(session, scope) -> None`。
 
-- [ ] 写跨用户、跨账号、跨 Thread、跨 Turn 读取与挂载测试，全部必须拒绝。
-- [ ] 写成果来源字段一致性测试。
+- [ ] 写跨用户、跨账号、跨 Thread、跨 Turn、跨 Run 和跨 SkillRun 挂载测试，全部必须拒绝。
+- [ ] 写数据库约束测试，直接构造交叉来源 Deliverable/Invocation/ToolCall 也必须失败。
 - [ ] 运行测试确认失败。
-- [ ] 在专家执行、成果创建和会话读取边界应用统一 scope 校验。
-- [ ] 运行定向测试并提交 `fix: enforce runtime scope across conversations and artifacts`。
+- [ ] 在专家、Tool、Artifact 写入边界应用完整 scope 校验并增加可行的组合来源约束。
+- [ ] 运行迁移与定向测试并提交 `fix: enforce runtime scope and lineage constraints`。
 
-### Task 5: 专家编排与按需质量门
+### Task 6: Skill 恢复、专家编排与按需质量门
 
 **Files:**
+- Modify: `backend/app/worker.py`
 - Modify: `backend/app/orchestrator/skill_runtime.py`
 - Modify: `backend/app/orchestrator/skills/account_inspection.py`
 - Modify: `backend/app/orchestrator/skills/operating_tasks.py`
 - Modify: `backend/app/orchestrator/agent_harness.py`
+- Test: `backend/tests/test_skill_runtime_models.py`
 - Test: `backend/tests/test_account_inspection_skill.py`
 - Test: `backend/tests/test_operating_task_skills.py`
 
 **Interfaces:**
+- 恢复使用持久化 `skill_code + skill_version + input_hash`，不得自动升级 Registry 版本。
 - SkillDefinition 明确 `expert_codes`、`tool_codes`、`critic_policy`、`artifact_type`。
 - 普通 ANSWER/QUERY 不进入 Critic。
 
+- [ ] 写测试：v1 运行中部署 v2 后仍恢复 v1；相同幂等键不同输入必须冲突。
 - [ ] 写测试：独立专家可并行；正式成果按策略审核；聊天和查询零 Critic 调用。
 - [ ] 写测试：专家失败时主 Agent 不创建冒充专家的正式成果。
 - [ ] 运行测试确认失败。
-- [ ] 实现有界并行和按需质量门，保留现有成果契约。
-- [ ] 运行定向测试并提交 `feat: bound expert orchestration and quality gates`。
+- [ ] 冻结 Skill 恢复参数，实现有界并行和按需质量门。
+- [ ] 运行定向测试并提交 `feat: freeze skill recovery and bound expert quality gates`。
 
-### Task 6: 前端单一 Turn 投影和专业技术日志
+### Task 7: 对话删除生命周期和外部副作用幂等
+
+**Files:**
+- Modify: `backend/app/services/conversations.py`
+- Modify: `backend/app/orchestrator/tool_executor.py`
+- Modify: `backend/app/tools/adapter.py`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_runtime_tool_executor.py`
+
+**Interfaces:**
+- 运行中会话删除返回稳定 409；终态后只能永久删除所属用户的对话消息和技术日志。
+- 写 Tool 必须声明副作用等级并提供 provider idempotency key；结果不确定时不得自动重放。
+
+- [ ] 写测试：active Run 拒绝删除，正式 Artifact 与 Task 保留并解除会话来源。
+- [ ] 写测试：外部成功、本地提交失败时写 Tool 不会二次执行；ambiguous 进入人工处理。
+- [ ] 运行测试确认失败。
+- [ ] 实现安全删除生命周期和写 Tool exactly-once/outbox 边界。
+- [ ] 运行定向测试并提交 `fix: protect active conversations and side effects`。
+
+### Task 8: 前端单一 Turn 投影和专业技术日志
 
 **Files:**
 - Modify: `frontend/src/pages/BrainHome.tsx`
@@ -144,7 +200,7 @@
 - [ ] 实现单一投影与技术日志展示。
 - [ ] 运行定向测试、TypeScript 和构建并提交 `fix: unify v3 turn streaming and technical details`。
 
-### Task 7: 性能预算、可观测性与端到端能力矩阵
+### Task 9: 性能预算、可观测性与端到端能力矩阵
 
 **Files:**
 - Modify: `backend/app/orchestrator/brain_runtime.py`
