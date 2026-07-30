@@ -2,7 +2,7 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Account } from "../../types";
@@ -41,6 +41,39 @@ const accounts: Account[] = [
 afterEach(cleanup);
 
 describe("AccountContext", () => {
+  it("shows the synchronized avatar in the selected-account trigger", () => {
+    render(
+      <AccountContext
+        accounts={accounts}
+        platform="douyin"
+        accountId={1}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "当前账号" });
+    expect(within(trigger).getByRole("img", { name: "账号一" })).toHaveAttribute(
+      "src",
+      "https://example.com/account-one.png",
+    );
+  });
+
+  it("falls back to the account initial when the selected avatar fails", () => {
+    render(
+      <AccountContext
+        accounts={accounts}
+        platform="douyin"
+        accountId={1}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "当前账号" });
+    fireEvent.error(within(trigger).getByRole("img", { name: "账号一" }));
+    expect(within(trigger).queryByRole("img", { name: "账号一" })).not.toBeInTheDocument();
+    expect(within(trigger).getByText("账")).toBeVisible();
+  });
+
   it("does not display the first account until the user explicitly selects one", () => {
     render(
       <AccountContext

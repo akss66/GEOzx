@@ -34,7 +34,11 @@ export function AccountContext({
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="tz-platform-mark">抖</span>
+        {current ? (
+          <AccountAvatar account={current} compact />
+        ) : (
+          <span className="tz-platform-mark">抖</span>
+        )}
         <strong>{current?.nickname ?? "选择抖音账号"}</strong>
         {current?.auth_status === "authorized" ? <span className="tz-live-dot" /> : null}
         <DownOutlined />
@@ -61,7 +65,7 @@ export function AccountContext({
   );
 }
 
-function AccountAvatar({ account }: { account: Account }) {
+function AccountAvatar({ account, compact = false }: { account: Account; compact?: boolean }) {
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
@@ -69,7 +73,7 @@ function AccountAvatar({ account }: { account: Account }) {
   }, [account.avatar_url]);
 
   return (
-    <span className="tz-account-avatar">
+    <span className={`tz-account-avatar${compact ? " is-compact" : ""}`}>
       {account.avatar_url && !failed ? (
         <img
           src={account.avatar_url}
