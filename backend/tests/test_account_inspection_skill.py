@@ -567,18 +567,19 @@ async def test_account_inspection_concurrent_creator_reuses_unique_winner(
     harness = _FakeHarness()
     critic = _PassingCritic()
     runtime = SkillRuntime(tool_executor=tools, harness=harness, critic=critic)
+    original_flush = session.flush
     original_commit = session.commit
     injected = False
     account_id = thread.account_id
 
-    async def commit_with_concurrent_winner():
+    async def flush_with_concurrent_winner(*args, **kwargs):
         nonlocal injected
         pending = next(
             (item for item in session.new if isinstance(item, SkillRun)),
             None,
         )
         if pending is None or injected:
-            return await original_commit()
+            return await original_flush(*args, **kwargs)
         injected = True
         values = {
             "org_id": pending.org_id,
@@ -609,7 +610,7 @@ async def test_account_inspection_concurrent_creator_reuses_unique_winner(
         await original_commit()
         raise IntegrityError("INSERT skill_runs", {}, RuntimeError("unique"))
 
-    monkeypatch.setattr(session, "commit", commit_with_concurrent_winner)
+    monkeypatch.setattr(session, "flush", flush_with_concurrent_winner)
     result = await runtime.execute(
         session,
         user=admin,

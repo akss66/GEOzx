@@ -2,7 +2,14 @@
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -70,6 +77,14 @@ class ConversationTurn(Base, TimestampMixin):
             ["conversation_threads.id", "conversation_threads.org_id"],
             name="fk_conversation_turn_thread_org",
         ),
+        CheckConstraint(
+            "status IN ("
+            "'queued', 'running', 'retry_wait', 'waiting_permission', "
+            "'waiting_decision', 'waiting_user', 'completed', 'blocked', "
+            "'failed', 'dead_letter', 'cancelled', 'stopped'"
+            ")",
+            name="ck_conversation_turns_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -88,6 +103,13 @@ class ConversationTurn(Base, TimestampMixin):
     user_input: Mapped[str] = mapped_column(Text, nullable=False)
     assistant_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     intent: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(40),
+        default="queued",
+        server_default="queued",
+        index=True,
+        nullable=False,
+    )
 
     thread: Mapped[ConversationThread] = relationship(
         back_populates="turns",

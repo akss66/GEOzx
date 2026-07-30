@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition
-from app.models import AgentRun, BrainTask, Event
-from app.models.enums import BrainTaskStatus
+from app.models import AgentRun, BrainTask, SkillRun
+from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 ACTIVE_TASK_RUN_STATUSES = {
     "claimed",
@@ -294,12 +294,13 @@ async def acquire_agent_run(
 
     now = utc_now()
     if run.cancel_requested_at is not None:
-        run.status = "cancelled"
-        run.phase = "cancelled"
-        run.finished_at = now
-        run.lease_owner = None
-        run.leased_until = None
-        await session.commit()
+        await close_runtime_state(
+            session,
+            scope=await _runtime_state_scope(session, run),
+            status="cancelled",
+            message="本轮执行已取消。",
+            error_code="RUN_CANCELLED",
+        )
         return None
     if run.status in {"completed", "cancelled", "dead_letter", "failed"}:
         return None
@@ -309,16 +310,19 @@ async def acquire_agent_run(
         if _is_future(run.leased_until, now):
             return None
 
-    run.status = "running"
-    run.phase = "runtime"
     run.attempt += 1
     run.lease_owner = worker_id
     run.leased_until = now + timedelta(seconds=max(1, lease_seconds))
     run.heartbeat_at = now
     run.started_at = run.started_at or now
     run.next_retry_at = None
-    await session.commit()
-    return run
+    closure = await close_runtime_state(
+        session,
+        scope=await _runtime_state_scope(session, run),
+        status="running",
+        message="AgentRun acquired by worker.",
+    )
+    return closure.run
 
 
 async def heartbeat_agent_run(
@@ -363,55 +367,65 @@ async def release_agent_run_failure(
         return False, 0
 
     now = utc_now()
-    run.error_code = error_code[:120]
-    run.error_detail = error_detail[:4000]
-    run.lease_owner = None
-    run.leased_until = None
     run.heartbeat_at = now
     if disposition is FailureDisposition.TERMINAL:
-        run.status = "failed"
-        run.phase = "failed"
-        run.finished_at = now
-        run.next_retry_at = None
-        task = None
-        if run.task_id is not None:
-            task = await session.scalar(
-                select(BrainTask).where(BrainTask.id == run.task_id).with_for_update()
-            )
-        if task is not None:
-            message = user_message or "任务未能继续执行，请检查配置后重试。"
-            task.status = BrainTaskStatus.FAILED
-            task.progress = 0
-            task.current_focus = message[:500]
-            session.add(
-                Event(
-                    type="brain.runtime.failed",
-                    content_item_id=task.content_item_id,
-                    payload={
-                        "task_id": task.id,
-                        "agent_run_id": run.id,
+        message = user_message or "任务未能继续执行，请检查配置后重试。"
+        await close_runtime_state(
+            session,
+            scope=(
+                await _runtime_state_scope(
+                    session,
+                    run,
+                    result_payload={
+                        "status": "failed",
+                        "response": message,
                         "error_code": error_code[:120],
-                        "message": message,
                         "recovery_action": recovery_action
                         or "请检查任务配置、权限和可用资源后重新提交。",
                     },
+                    error_detail=error_detail[:4000],
                 )
-            )
-        await session.commit()
+            ),
+            status="failed",
+            message=message,
+            error_code=error_code[:120],
+        )
         return False, 0
     if run.attempt >= run.max_attempts:
-        run.status = "dead_letter"
-        run.phase = "dead_letter"
-        run.finished_at = now
-        run.next_retry_at = None
-        await session.commit()
+        message = user_message or "任务多次重试仍未成功，本轮已停止。"
+        await close_runtime_state(
+            session,
+            scope=(
+                await _runtime_state_scope(
+                    session,
+                    run,
+                    result_payload={
+                        "status": "dead_letter",
+                        "response": message,
+                        "error_code": error_code[:120],
+                    },
+                    error_detail=error_detail[:4000],
+                )
+            ),
+            status="dead_letter",
+            message=message,
+            error_code=error_code[:120],
+        )
         return False, 0
 
     retry_delay = min(5 * (2 ** max(0, run.attempt - 1)), 300)
-    run.status = "retry_wait"
-    run.phase = "retry_wait"
     run.next_retry_at = now + timedelta(seconds=retry_delay)
-    await session.commit()
+    await close_runtime_state(
+        session,
+        scope=await _runtime_state_scope(
+            session,
+            run,
+            error_detail=error_detail[:4000],
+        ),
+        status="retry_wait",
+        message=user_message or "任务暂时失败，系统稍后自动重试。",
+        error_code=error_code[:120],
+    )
     return True, retry_delay
 
 
@@ -432,12 +446,13 @@ async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
     run = await session.get(AgentRun, run_id)
     if run is None:
         return
-    run.status = "cancelled"
-    run.phase = "cancelled"
-    run.finished_at = utc_now()
-    run.lease_owner = None
-    run.leased_until = None
-    await session.commit()
+    await close_runtime_state(
+        session,
+        scope=await _runtime_state_scope(session, run),
+        status="cancelled",
+        message="本轮执行已取消。",
+        error_code="RUN_CANCELLED",
+    )
 
 
 def _is_future(value: datetime | None, now: datetime) -> bool:
@@ -457,15 +472,21 @@ async def complete_agent_run(
     run = await session.get(AgentRun, run_id)
     if run is None:
         return
+    task = await session.get(BrainTask, task_id)
+    if task is None:
+        raise ValueError(f"BrainTask not found: {task_id}")
     run.task_id = task_id
-    run.status = status
-    run.phase = "complete"
-    run.finished_at = utc_now()
-    run.lease_owner = None
-    run.leased_until = None
-    run.next_retry_at = None
-    run.result_payload = {"task_id": task_id, "task_status": status}
-    await session.commit()
+    await session.flush()
+    await close_runtime_state(
+        session,
+        scope=await _runtime_state_scope(
+            session,
+            run,
+            result_payload={"task_id": task_id, "task_status": status},
+        ),
+        status=status,
+        message=task.current_focus or f"任务状态：{status}",
+    )
 
 
 async def fail_agent_run(session: AsyncSession, run_id: int, exc: Exception) -> None:
@@ -473,12 +494,42 @@ async def fail_agent_run(session: AsyncSession, run_id: int, exc: Exception) -> 
     run = await session.get(AgentRun, run_id)
     if run is None:
         return
-    run.status = "failed"
-    run.phase = "failed"
-    run.finished_at = utc_now()
-    run.error_code = type(exc).__name__
-    run.error_detail = str(exc)[:4000]
-    run.lease_owner = None
-    run.leased_until = None
-    run.next_retry_at = None
-    await session.commit()
+    await close_runtime_state(
+        session,
+        scope=await _runtime_state_scope(
+            session,
+            run,
+            error_detail=str(exc)[:4000],
+        ),
+        status="failed",
+        message="任务未能继续执行，请检查配置后重试。",
+        error_code=type(exc).__name__,
+    )
+
+
+async def _runtime_state_scope(
+    session: AsyncSession,
+    run: AgentRun,
+    *,
+    result_payload: dict | None = None,
+    error_detail: str | None = None,
+) -> RuntimeStateScope:
+    skill_run_id = await session.scalar(
+        select(SkillRun.id)
+        .where(SkillRun.run_id == run.id)
+        .order_by(SkillRun.id.desc())
+        .limit(1)
+    )
+    request_payload = dict(run.request_payload or {})
+    account_id = request_payload.get("account_id")
+    project_id = request_payload.get("project_id")
+    return RuntimeStateScope(
+        run_id=run.id,
+        turn_id=run.turn_id,
+        skill_run_id=skill_run_id,
+        task_id=run.task_id,
+        account_id=account_id if isinstance(account_id, int) else None,
+        project_id=project_id if isinstance(project_id, int) else None,
+        result_payload=result_payload,
+        error_detail=error_detail,
+    )

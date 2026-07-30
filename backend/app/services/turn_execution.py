@@ -43,6 +43,11 @@ from app.schemas.conversation import (
     TurnExecutionResult,
     TurnRouteDecision,
 )
+from app.services.runtime_state import (
+    RuntimeEventSpec,
+    RuntimeStateScope,
+    close_runtime_state,
+)
 from app.tools import ToolExecutionContext
 
 _TERMINAL_RUN_STATUSES = {
@@ -322,32 +327,30 @@ async def _execute_composite_skill(
     )
     if task is None:
         raise RuntimeError("composite Skill did not persist its compatibility task")
+    persisted_skill_run = await session.get(SkillRun, executed.skill_run_id)
     # The Skill runtime commits multiple durable ledgers. Callers and tests may
     # expire the request-scoped ORM objects across those commits, so explicitly
     # refresh instead of allowing scalar attribute access to trigger async IO.
     await session.refresh(user)
     await session.refresh(turn)
     await session.refresh(run)
-    task_status = (
-        BrainTaskStatus.COMPLETED
-        if executed.status == "completed"
-        else (
-            BrainTaskStatus.FAILED
-            if executed.status in {"blocked", "failed", "stopped"}
-            else BrainTaskStatus.RUNNING
-        )
-    )
-    await runtime_graph.deliver_operation_turn_state(
+    await close_runtime_state(
         session,
-        task=task,
-        turn=turn,
-        run=run,
-        account_id=account_id,
-        project_id=project_id,
-        response=executed.response,
-        result_payload=result.model_dump(mode="json"),
-        run_status=executed.status,
-        task_status=task_status,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=(
+                persisted_skill_run.id if persisted_skill_run is not None else None
+            ),
+            task_id=task.id,
+            account_id=account_id,
+            project_id=project_id,
+            content_item_id=task.content_item_id,
+            result_payload=result.model_dump(mode="json"),
+            intent=decision.model_dump(mode="json"),
+        ),
+        status=executed.status,
+        message=executed.response,
         error_code=executed.error_code,
     )
     _log_turn_completion(turn, run, result)
@@ -538,6 +541,8 @@ async def _deliver_task_free(
     error_code: str | None = None,
     response_streamed: bool = False,
     extra_events: list[tuple[str, str, dict[str, Any]]] | None = None,
+    skill_run_id: int | None = None,
+    skill_output_snapshot: dict[str, Any] | None = None,
 ) -> TurnExecutionResult:
     result = TurnExecutionResult(
         mode=decision.mode,
@@ -547,18 +552,45 @@ async def _deliver_task_free(
         projections=projections or [],
         error_code=error_code,
     )
-    await runtime_graph.deliver_task_free_turn(
+    runtime_events = [
+        RuntimeEventSpec(
+            event_type="brain.runtime.started",
+            semantic_key="turn-started",
+            payload={"message": "Main Agent received this conversation Turn."},
+        ),
+        RuntimeEventSpec(
+            event_type="brain.runtime.intent_classified",
+            semantic_key="turn-route",
+            payload={
+                "message": "Main Agent selected the execution route.",
+                "route_decision": decision.model_dump(mode="json"),
+            },
+        ),
+        *(
+            RuntimeEventSpec(
+                event_type=event_type,
+                semantic_key=semantic_key,
+                payload=payload,
+            )
+            for event_type, semantic_key, payload in (extra_events or [])
+        ),
+    ]
+    await close_runtime_state(
         session,
-        turn=turn,
-        run=run,
-        account_id=account_id,
-        route_decision=decision,
-        response=response,
-        result_payload=result.model_dump(mode="json"),
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=skill_run_id,
+            account_id=account_id,
+            result_payload=result.model_dump(mode="json"),
+            skill_output_snapshot=skill_output_snapshot,
+            intent=decision.model_dump(mode="json"),
+            response_streamed=response_streamed,
+            extra_events=tuple(runtime_events),
+        ),
         status=status,
+        message=response,
         error_code=error_code,
-        response_streamed=response_streamed,
-        extra_events=extra_events,
     )
     _log_turn_completion(turn, run, result)
     return result
@@ -689,11 +721,6 @@ async def _execute_query(
                 error_code="TOOL_RESULT_SCOPE_MISMATCH",
                 response="账号数据返回范围与当前对话账号不一致，本轮已停止。请刷新账号后重试。",
             )
-        skill_run.status = "completed"
-        skill_run.output_snapshot = data
-        skill_run.error_code = None
-        await session.commit()
-
     projection = {
         "type": "account_data",
         "account_id": thread.account_id,
@@ -709,6 +736,8 @@ async def _execute_query(
         decision=decision,
         response=_format_account_data_summary(data),
         projections=[projection],
+        skill_run_id=skill_run.id,
+        skill_output_snapshot=data,
         extra_events=[
             (
                 "brain.runtime.tool_completed",
@@ -752,12 +781,10 @@ async def _close_query_failure(
         persisted_skill_run = await session.get(SkillRun, skill_run_id)
     if persisted_turn is None or persisted_run is None or persisted_skill_run is None:
         raise RuntimeError("query execution ownership disappeared")
-    persisted_skill_run.status = "failed"
-    persisted_skill_run.output_snapshot = {
+    skill_output_snapshot = {
         "code": error_code,
         "message": response,
     }
-    persisted_skill_run.error_code = error_code
     return await _deliver_task_free(
         session,
         turn=persisted_turn,
@@ -767,6 +794,8 @@ async def _close_query_failure(
         response=response,
         status="failed",
         error_code=error_code,
+        skill_run_id=persisted_skill_run.id,
+        skill_output_snapshot=skill_output_snapshot,
         extra_events=[
             (
                 "brain.runtime.tool_failed",
@@ -846,7 +875,7 @@ async def _block_unavailable_skill(
             idempotency_key=f"skill:{code}:v1",
             skill_code=code,
             skill_version=1,
-            status="blocked",
+            status="running",
             input_snapshot={"account_id": thread.account_id},
             output_snapshot={
                 "code": "SKILL_EXECUTOR_UNAVAILABLE",
@@ -855,7 +884,7 @@ async def _block_unavailable_skill(
             error_code="SKILL_EXECUTOR_UNAVAILABLE",
         )
         session.add(skill_run)
-        await session.commit()
+        await session.flush()
     return await _deliver_task_free(
         session,
         turn=turn,
@@ -865,6 +894,11 @@ async def _block_unavailable_skill(
         response="该能力尚未接入执行器，暂时无法执行。请稍后重试或改为查询账号数据。",
         status="blocked",
         error_code="SKILL_EXECUTOR_UNAVAILABLE",
+        skill_run_id=skill_run.id,
+        skill_output_snapshot={
+            "code": "SKILL_EXECUTOR_UNAVAILABLE",
+            "message": "该能力尚未接入执行器。",
+        },
         projections=[
             {
                 "type": "execution_blocked",
@@ -988,49 +1022,42 @@ async def _close_operation_state(
     decision: TurnRouteDecision,
     runtime_state: str,
 ) -> TurnExecutionResult:
-    states: dict[str, tuple[str, BrainTaskStatus, str | None, str]] = {
+    states: dict[str, tuple[str, str | None, str]] = {
         "completed": (
             "completed",
-            BrainTaskStatus.COMPLETED,
             None,
             task.current_focus or "本轮运营任务已完成。",
         ),
         "waiting_permission": (
             "waiting_permission",
-            BrainTaskStatus.PENDING_CONFIRMATION,
             None,
             "任务已暂停，正在等待你确认受控工具或外部动作。",
         ),
         "waiting_decision": (
             "waiting_decision",
-            BrainTaskStatus.PENDING_CONFIRMATION,
             None,
             "任务已暂停，正在等待你选择下一步方案。",
         ),
         "waiting_user": (
             "waiting_user",
-            BrainTaskStatus.PENDING_CONFIRMATION,
             None,
             "任务已暂停，正在等待你补充必要信息。",
         ),
         "failed": (
             "failed",
-            BrainTaskStatus.FAILED,
             "OPERATION_RUNTIME_FAILED",
             "正式任务未能完成。请检查账号授权、数据范围和专家配置后重试。",
         ),
         "stopped": (
             "stopped",
-            BrainTaskStatus.PENDING_CONFIRMATION,
             "OPERATION_STOPPED",
             "本轮生成已停止。你可以调整要求后重新发起。",
         ),
     }
-    run_status, task_status, error_code, response = states.get(
+    run_status, error_code, response = states.get(
         runtime_state,
         (
             "failed",
-            BrainTaskStatus.FAILED,
             "OPERATION_RUNTIME_INCOMPLETE",
             "正式任务没有形成可确认的结束状态，本轮已安全停止。请重试。",
         ),
@@ -1043,21 +1070,23 @@ async def _close_operation_state(
         projections=[],
         error_code=error_code,
     )
-    turn.intent = decision.model_dump(mode="json")
-    await runtime_graph.deliver_operation_turn_state(
+    await close_runtime_state(
         session,
-        task=task,
-        turn=turn,
-        run=run,
-        account_id=account_id,
-        project_id=project_id,
-        response=response,
-        result_payload={
-            **result.model_dump(mode="json"),
-            "task_status": runtime_state,
-        },
-        run_status=run_status,
-        task_status=task_status,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            task_id=task.id,
+            account_id=account_id,
+            project_id=project_id,
+            content_item_id=task.content_item_id,
+            result_payload={
+                **result.model_dump(mode="json"),
+                "task_status": runtime_state,
+            },
+            intent=decision.model_dump(mode="json"),
+        ),
+        status=run_status,
+        message=response,
         error_code=error_code,
     )
     _log_turn_completion(turn, run, result)

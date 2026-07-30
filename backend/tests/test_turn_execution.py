@@ -29,6 +29,7 @@ from app.schemas.conversation import (
     TurnExecutionMode,
     TurnRouteDecision,
 )
+from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_execution import execute_conversation_turn
 
 
@@ -71,6 +72,258 @@ async def _turn_context(session, admin, *, key: str):
     session.add(run)
     await session.commit()
     return account, thread, turn, run
+
+
+async def _four_ledger_context(session, admin, *, key: str):
+    account, thread, turn, run = await _turn_context(session, admin, key=key)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title=f"task-{key}",
+        status=BrainTaskStatus.RUNNING,
+        progress=17,
+        current_focus="running",
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=f"runtime-state:{key}",
+        skill_code="account_inspection",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(skill_run)
+    await session.commit()
+    return account, thread, turn, run, task, skill_run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "runtime_status",
+        "expected_turn_status",
+        "expected_run_status",
+        "expected_skill_status",
+        "expected_task_status",
+    ),
+    [
+        (
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            BrainTaskStatus.COMPLETED,
+        ),
+        ("failed", "failed", "failed", "failed", BrainTaskStatus.FAILED),
+        (
+            "dead_letter",
+            "dead_letter",
+            "dead_letter",
+            "failed",
+            BrainTaskStatus.FAILED,
+        ),
+        (
+            "cancelled",
+            "cancelled",
+            "cancelled",
+            "cancelled",
+            BrainTaskStatus.FAILED,
+        ),
+        (
+            "waiting_permission",
+            "waiting_permission",
+            "waiting_permission",
+            "waiting_permission",
+            BrainTaskStatus.PENDING_CONFIRMATION,
+        ),
+    ],
+)
+async def test_close_runtime_state_maps_all_four_ledgers_consistently(
+    session,
+    admin,
+    runtime_status,
+    expected_turn_status,
+    expected_run_status,
+    expected_skill_status,
+    expected_task_status,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key=f"state-{runtime_status}",
+    )
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=skill_run.id,
+            task_id=task.id,
+            account_id=account.id,
+            result_payload={"status": runtime_status},
+        ),
+        status=runtime_status,
+        message=f"message-{runtime_status}",
+        error_code="TEST_ERROR" if runtime_status != "completed" else None,
+    )
+
+    await session.refresh(turn)
+    await session.refresh(run)
+    await session.refresh(skill_run)
+    await session.refresh(task)
+    assert turn.status == expected_turn_status
+    assert run.status == expected_run_status
+    assert skill_run.status == expected_skill_status
+    assert task.status == expected_task_status
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_retry_wait_does_not_write_terminal_response(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-retry-wait",
+    )
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=skill_run.id,
+            task_id=task.id,
+            account_id=account.id,
+        ),
+        status="retry_wait",
+        message="本次失败，稍后重试。",
+        error_code="TRANSIENT",
+    )
+
+    await session.refresh(turn)
+    await session.refresh(task)
+    assert turn.status == "retry_wait"
+    assert turn.assistant_response is None
+    assert task.status == BrainTaskStatus.RUNNING
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.run_id == run.id,
+                Event.type == "brain.runtime.message_done",
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_status", ["failed", "cancelled"])
+async def test_close_runtime_state_terminal_message_is_idempotent(
+    session,
+    admin,
+    runtime_status,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key=f"state-idempotent-{runtime_status}",
+    )
+    scope = RuntimeStateScope(
+        run_id=run.id,
+        turn_id=turn.id,
+        skill_run_id=skill_run.id,
+        task_id=task.id,
+        account_id=account.id,
+        result_payload={
+            "status": runtime_status,
+            "projections": [{"type": "execution_blocked", "code": "TEST"}],
+        },
+    )
+
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status=runtime_status,
+        message="只允许写入一次的终态消息。",
+        error_code="TEST_ERROR",
+    )
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status=runtime_status,
+        message="只允许写入一次的终态消息。",
+        error_code="TEST_ERROR",
+    )
+
+    await session.refresh(turn)
+    assert turn.assistant_response == "只允许写入一次的终态消息。"
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.run_id == run.id,
+                Event.type == "brain.runtime.message_done",
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_rejects_cross_scope_without_partial_commit(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, _skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-scope-owner",
+    )
+    (
+        _other_account,
+        _other_thread,
+        _other_turn,
+        _other_run,
+        _other_task,
+        other_skill_run,
+    ) = await _four_ledger_context(
+        session,
+        admin,
+        key="state-scope-other",
+    )
+
+    with pytest.raises(ValueError, match="ownership"):
+        await close_runtime_state(
+            session,
+            scope=RuntimeStateScope(
+                run_id=run.id,
+                turn_id=turn.id,
+                skill_run_id=other_skill_run.id,
+                task_id=task.id,
+                account_id=account.id,
+            ),
+            status="failed",
+            message="不得部分写入。",
+            error_code="SCOPE_MISMATCH",
+        )
+
+    await session.refresh(turn)
+    await session.refresh(run)
+    await session.refresh(task)
+    assert turn.status == "queued"
+    assert turn.assistant_response is None
+    assert run.status == "claimed"
+    assert task.status == BrainTaskStatus.RUNNING
 
 
 def _request(

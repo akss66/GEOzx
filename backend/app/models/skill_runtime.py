@@ -33,6 +33,13 @@ class SkillRun(Base, TimestampMixin):
             "skill_version > 0",
             name="ck_skill_runs_skill_version_positive",
         ),
+        CheckConstraint(
+            "status IN ("
+            "'running', 'retry_wait', 'waiting_permission', 'completed', "
+            "'blocked', 'failed', 'cancelled', 'stopped'"
+            ")",
+            name="ck_skill_runs_status",
+        ),
         UniqueConstraint(
             "run_id",
             "idempotency_key",

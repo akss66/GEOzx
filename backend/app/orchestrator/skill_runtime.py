@@ -62,6 +62,7 @@ from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
+from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 _ACCOUNT_INSPECTION = "account_inspection"
 _MAX_CRITIC_IMPROVEMENTS = 2
@@ -194,8 +195,6 @@ class SkillRuntime:
             )
             session.add(skill_run)
             now = utc_now()
-            run.status = "running"
-            run.phase = "skill_runtime"
             run.attempt += 1
             run.lease_owner = lease_owner
             run.leased_until = now + timedelta(
@@ -205,7 +204,22 @@ class SkillRuntime:
             run.started_at = run.started_at or now
             run.next_retry_at = None
             try:
-                await session.commit()
+                await session.flush()
+                await close_runtime_state(
+                    session,
+                    scope=RuntimeStateScope(
+                        run_id=run.id,
+                        turn_id=turn.id,
+                        skill_run_id=skill_run.id,
+                        task_id=task.id,
+                        account_id=thread.account_id,
+                        project_id=thread.project_id,
+                        content_item_id=task.content_item_id,
+                        skill_output_snapshot={},
+                    ),
+                    status="running",
+                    message=f"{definition.name}正在执行。",
+                )
                 await session.refresh(skill_run)
             except IntegrityError as exc:
                 await session.rollback()
@@ -230,6 +244,8 @@ class SkillRuntime:
 
         skill_run_id = skill_run.id
         task_id = task.id
+        thread_id = thread.id
+        turn_id = turn.id
         if recovering and await self._interrupt_ambiguous_side_effects(
             session,
             run=run,
@@ -289,6 +305,9 @@ class SkillRuntime:
             )
             persisted = await session.get(SkillRun, skill_run_id)
             persisted_task = await session.get(BrainTask, task_id)
+            persisted_run = await session.get(AgentRun, run_id)
+            persisted_turn = await session.get(ConversationTurn, turn_id)
+            persisted_thread = await session.get(ConversationThread, thread_id)
             scope_mismatch = isinstance(exc, _ToolScopeMismatch)
             terminal_status = "blocked" if scope_mismatch else "failed"
             error_code = (
@@ -300,18 +319,35 @@ class SkillRuntime:
                 else "账号体检执行失败，请稍后重试。"
             )
             if persisted is not None:
-                persisted.status = terminal_status
-                persisted.error_code = error_code
-                persisted.output_snapshot = {
+                output_snapshot = {
                     "status": terminal_status,
+                    "task_id": task_id,
+                    "artifact_id": None,
+                    "artifact_type": definition.artifact_type
+                    or "account_inspection_report",
+                    "report": {},
                     "error_code": error_code,
                     "response": response,
-                    "artifact_type": definition.artifact_type,
                 }
-            if persisted_task is not None:
-                persisted_task.status = BrainTaskStatus.FAILED
-                persisted_task.progress = 0
-            await session.commit()
+                if (
+                    persisted_task is None
+                    or persisted_run is None
+                    or persisted_turn is None
+                    or persisted_thread is None
+                ):
+                    raise RuntimeError("Skill execution scope disappeared") from exc
+                await self._close_skill_state(
+                    session,
+                    thread=persisted_thread,
+                    turn=persisted_turn,
+                    run=persisted_run,
+                    task=persisted_task,
+                    skill_run=persisted,
+                    status=terminal_status,
+                    response=response,
+                    output_snapshot=output_snapshot,
+                    error_code=error_code,
+                )
             return SkillExecutionResult(
                 status=terminal_status,
                 skill_run_id=skill_run_id,
@@ -366,6 +402,9 @@ class SkillRuntime:
             if outcome.status != "success" or outcome.result is None:
                 return await self._pause_for_tool(
                     session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
                     skill_run=skill_run,
                     task=task,
                     status=outcome.status,
@@ -556,11 +595,6 @@ class SkillRuntime:
         if quality is not None:
             quality.deliverable_id = final_deliverable.id
 
-        task.status = BrainTaskStatus.COMPLETED
-        task.progress = 100
-        task.current_focus = "一键账号体检已完成。"
-        skill_run.status = "completed"
-        skill_run.error_code = None
         skill_run.quality_score = Decimal(str(report.critic.score / 100))
         output = {
             "status": "completed",
@@ -570,8 +604,17 @@ class SkillRuntime:
             "report": report.model_dump(mode="json"),
             "response": "账号体检已完成，正式体检报告已生成。",
         }
-        skill_run.output_snapshot = output
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output["response"],
+            output_snapshot=output,
+        )
         return self._existing_result(skill_run)
 
     async def _execute_operating_skill(
@@ -623,6 +666,9 @@ class SkillRuntime:
             if outcome.status != "success" or outcome.result is None:
                 return await self._pause_for_tool(
                     session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
                     skill_run=skill_run,
                     task=task,
                     status=outcome.status,
@@ -715,12 +761,7 @@ class SkillRuntime:
         session.add(deliverable)
         await session.flush()
 
-        task.status = BrainTaskStatus.COMPLETED
-        task.progress = 100
-        task.current_focus = f"{definition.name}已完成。"
         content.status = ContentStatus.DRAFT
-        skill_run.status = "completed"
-        skill_run.error_code = None
         output = {
             "status": "completed",
             "task_id": task.id,
@@ -729,8 +770,17 @@ class SkillRuntime:
             "report": report,
             "response": f"{definition.name}已完成，正式成果已生成。",
         }
-        skill_run.output_snapshot = output
-        await session.commit()
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output["response"],
+            output_snapshot=output,
+        )
         return self._existing_result(skill_run)
 
     async def _review(
@@ -868,11 +918,6 @@ class SkillRuntime:
             invocation.status = AgentInvocationStatus.FAILED
             invocation.failure_reason = error_code
             invocation.finished_at = now
-        task.status = BrainTaskStatus.FAILED
-        task.progress = 0
-        task.current_focus = response
-        skill_run.status = "failed"
-        skill_run.error_code = error_code
         output_snapshot = {
             "status": "failed",
             "task_id": task.id,
@@ -882,33 +927,19 @@ class SkillRuntime:
             "response": response,
             "error_code": error_code,
         }
-        skill_run.output_snapshot = output_snapshot
-        turn.assistant_response = response
-        run.status = "failed"
-        run.phase = "failed"
-        run.finished_at = now
-        run.lease_owner = None
-        run.leased_until = None
-        run.next_retry_at = None
         run.heartbeat_at = now
-        run.error_code = error_code
-        run.error_detail = None
-        run.result_payload = {
-            "mode": "skill",
-            "status": "failed",
-            "response": response,
-            "task_id": task.id,
-            "projections": [
-                {
-                    "type": "execution_blocked",
-                    "artifact_type": "account_inspection_report",
-                    "skill_run_id": skill_run.id,
-                    "code": error_code,
-                }
-            ],
-            "error_code": error_code,
-        }
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=await session.get(ConversationThread, turn.thread_id),
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="failed",
+            response=response,
+            output_snapshot=output_snapshot,
+            error_code=error_code,
+        )
         return True
 
     @staticmethod
@@ -970,13 +1001,8 @@ class SkillRuntime:
         if quality is not None:
             quality.deliverable_id = deliverable.id
 
-        task.status = BrainTaskStatus.COMPLETED
-        task.progress = 100
-        task.current_focus = "体检报告已生成，需人工确认。"
-        skill_run.status = "completed"
-        skill_run.error_code = None
         skill_run.quality_score = Decimal(str(report.critic.score / 100))
-        skill_run.output_snapshot = {
+        output_snapshot = {
             "status": "completed",
             "task_id": task.id,
             "artifact_id": deliverable.id,
@@ -987,13 +1013,26 @@ class SkillRuntime:
                 "未达到自动通过标准，请人工确认后采用。"
             ),
         }
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output_snapshot["response"],
+            output_snapshot=output_snapshot,
+        )
         return SkillRuntime._existing_result(skill_run)
 
     @staticmethod
     async def _pause_for_tool(
         session: AsyncSession,
         *,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
         skill_run: SkillRun,
         task: BrainTask,
         status: str,
@@ -1008,26 +1047,101 @@ class SkillRuntime:
             if paused_status == "waiting_permission"
             else "TOOL_EXECUTION_FAILED"
         )
-        task.current_focus = (
+        response = (
             f"{skill_name}正在等待工具授权。"
             if paused_status.startswith("waiting")
             else f"{skill_name}工具执行失败。"
         )
-        if paused_status == "failed":
-            task.status = BrainTaskStatus.FAILED
-        skill_run.status = paused_status
-        skill_run.error_code = error_code
-        skill_run.output_snapshot = {
+        output_snapshot = {
             "status": paused_status,
             "task_id": task.id,
             "artifact_id": None,
             "artifact_type": artifact_type,
             "report": {},
-            "response": task.current_focus,
+            "response": response,
             "error_code": error_code,
         }
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status=paused_status,
+            response=response,
+            output_snapshot=output_snapshot,
+            error_code=error_code,
+        )
         return SkillRuntime._existing_result(skill_run)
+
+    @staticmethod
+    async def _close_skill_state(
+        session: AsyncSession,
+        *,
+        thread: ConversationThread | None,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        status: str,
+        response: str,
+        output_snapshot: dict[str, Any],
+        error_code: str | None = None,
+    ) -> None:
+        if thread is None:
+            raise RuntimeError("Skill execution ConversationThread disappeared")
+        artifact_id = output_snapshot.get("artifact_id")
+        projections = (
+            [
+                {
+                    "type": "artifact",
+                    "artifact_id": artifact_id,
+                    "artifact_type": output_snapshot.get("artifact_type"),
+                    "skill_run_id": skill_run.id,
+                    "account_id": thread.account_id,
+                    "report": output_snapshot.get("report") or {},
+                }
+            ]
+            if isinstance(artifact_id, int)
+            else (
+                [
+                    {
+                        "type": "execution_blocked",
+                        "artifact_type": output_snapshot.get("artifact_type"),
+                        "skill_run_id": skill_run.id,
+                        "account_id": thread.account_id,
+                        "code": error_code,
+                    }
+                ]
+                if error_code is not None
+                else []
+            )
+        )
+        await close_runtime_state(
+            session,
+            scope=RuntimeStateScope(
+                run_id=run.id,
+                turn_id=turn.id,
+                skill_run_id=skill_run.id,
+                task_id=task.id,
+                account_id=thread.account_id,
+                project_id=thread.project_id,
+                content_item_id=task.content_item_id,
+                result_payload={
+                    "mode": "skill",
+                    "status": status,
+                    "response": response,
+                    "task_id": task.id,
+                    "projections": projections,
+                    "error_code": error_code,
+                },
+                skill_output_snapshot=output_snapshot,
+            ),
+            status=status,
+            message=response,
+            error_code=error_code,
+        )
 
     @staticmethod
     async def _compatibility_task(

@@ -17,6 +17,124 @@ def get_head_revision() -> str | None:
     return script.get_current_head()
 
 
+def test_runtime_state_convergence_migrates_history_before_constraints(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260730_0200_runtime_state_convergence"
+    )
+    assert migration.down_revision == "20260730_0100"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("assistant_response", sa.Text, nullable=True),
+    )
+    runs = sa.Table(
+        "agent_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("turn_id", sa.Integer, nullable=True),
+        sa.Column("status", sa.String(40), nullable=False),
+    )
+    skills = sa.Table(
+        "skill_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(40), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            turns.insert(),
+            [
+                {"id": 1, "assistant_response": "正式成功回复"},
+                {"id": 2, "assistant_response": None},
+                {"id": 3, "assistant_response": None},
+                {"id": 4, "assistant_response": None},
+                {"id": 5, "assistant_response": None},
+            ],
+        )
+        connection.execute(
+            runs.insert(),
+            [
+                {"id": 10, "turn_id": 1, "status": "error"},
+                {"id": 20, "turn_id": 2, "status": "retry_scheduled"},
+                {"id": 30, "turn_id": 3, "status": "error"},
+                {"id": 50, "turn_id": 5, "status": "mystery"},
+            ],
+        )
+        connection.execute(
+            skills.insert(),
+            [
+                {"id": 100, "status": "waiting_approval"},
+                {"id": 101, "status": "dead_letter"},
+                {"id": 102, "status": "mystery"},
+            ],
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        assert connection.execute(
+            sa.text(
+                "SELECT id, status FROM conversation_turns ORDER BY id"
+            )
+        ).all() == [
+            (1, "completed"),
+            (2, "retry_wait"),
+            (3, "failed"),
+            (4, "queued"),
+            (5, "queued"),
+        ]
+        assert connection.execute(
+            sa.text("SELECT id, status FROM agent_runs ORDER BY id")
+        ).all() == [
+            (10, "failed"),
+            (20, "retry_wait"),
+            (30, "failed"),
+            (50, "failed"),
+        ]
+        assert connection.execute(
+            sa.text("SELECT id, status FROM skill_runs ORDER BY id")
+        ).all() == [
+            (100, "waiting_permission"),
+            (101, "failed"),
+            (102, "failed"),
+        ]
+        inspector = sa.inspect(connection)
+        assert {
+            item["name"]
+            for item in inspector.get_check_constraints("conversation_turns")
+        } >= {"ck_conversation_turns_status"}
+        assert {
+            item["name"] for item in inspector.get_check_constraints("agent_runs")
+        } >= {"ck_agent_runs_status"}
+        assert {
+            item["name"] for item in inspector.get_check_constraints("skill_runs")
+        } >= {"ck_skill_runs_status"}
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "UPDATE conversation_turns SET status = 'mystery' WHERE id = 4"
+                )
+            )
+
+        migration.downgrade()
+        assert "status" not in {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("conversation_turns")
+        }
+
+
 def test_client_workspace_migration_is_additive() -> None:
     module = importlib.import_module("migrations.versions.20260716_0200_client_workspace_shell")
 
@@ -78,8 +196,8 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_main_agent_router_profile() -> None:
-    assert get_head_revision() == "20260730_0100"
+def test_migration_head_is_runtime_state_convergence() -> None:
+    assert get_head_revision() == "20260730_0200"
 
 
 def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:

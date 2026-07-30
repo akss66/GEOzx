@@ -58,6 +58,15 @@ class AgentRun(Base, TimestampMixin):
             "turn_id IS NULL OR thread_id IS NOT NULL",
             name="ck_agent_runs_turn_requires_thread",
         ),
+        CheckConstraint(
+            "status IN ("
+            "'claimed', 'waiting_predecessor', 'queued', 'running', "
+            "'retry_wait', 'waiting_permission', 'waiting_decision', "
+            "'waiting_user', 'completed', 'blocked', 'failed', "
+            "'dead_letter', 'cancelled', 'stopped'"
+            ")",
+            name="ck_agent_runs_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
