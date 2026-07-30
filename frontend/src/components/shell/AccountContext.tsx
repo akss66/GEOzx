@@ -1,6 +1,7 @@
 import { CheckOutlined, DownOutlined } from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
 
+import { getAccountAvatar } from "../../api/workspace";
 import {
   listSelectableWorkspaceAccounts,
   resolveWorkspaceAccount,
@@ -35,7 +36,7 @@ export function AccountContext({
         onClick={() => setOpen((value) => !value)}
       >
         {current ? (
-          <AccountAvatar account={current} compact />
+          <AccountAvatar key={current.id} account={current} compact />
         ) : (
           <span className="tz-platform-mark">抖</span>
         )}
@@ -66,17 +67,50 @@ export function AccountContext({
 }
 
 function AccountAvatar({ account, compact = false }: { account: Account; compact?: boolean }) {
+  const [source, setSource] = useState<string | null>(
+    compact ? null : (account.avatar_url ?? null),
+  );
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     setFailed(false);
-  }, [account.avatar_url]);
+    if (!compact) {
+      setSource(account.avatar_url ?? null);
+      return;
+    }
+    setSource(null);
+    if (!account.avatar_url) {
+      return;
+    }
+
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    void getAccountAvatar(account.id, controller.signal)
+      .then((blob) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        objectUrl = URL.createObjectURL(blob);
+        setSource(objectUrl);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setFailed(true);
+        }
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [account.avatar_url, account.id, compact]);
 
   return (
     <span className={`tz-account-avatar${compact ? " is-compact" : ""}`}>
-      {account.avatar_url && !failed ? (
+      {source && !failed ? (
         <img
-          src={account.avatar_url}
+          src={source}
           alt={account.nickname}
           onError={() => setFailed(true)}
         />

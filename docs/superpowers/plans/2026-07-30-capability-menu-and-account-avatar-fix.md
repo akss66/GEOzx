@@ -4,7 +4,7 @@
 
 **Goal:** Make the operations-brain capability menu fully visible inside the usable page area and show the synchronized Douyin avatar in the selected-account trigger.
 
-**Architecture:** Render the capability menu through a React Portal so it is no longer clipped by `.tz-brain-stage`, and calculate a fixed viewport position from the trigger and stage bounds. Reuse the existing `AccountAvatar` component in the account trigger; the backend and account API remain unchanged because production data already contains `avatar_url`.
+**Architecture:** Render the capability menu through a React Portal so it is no longer clipped by `.tz-brain-stage`, and calculate a fixed viewport position from the trigger and stage bounds. Reuse the existing `AccountAvatar` component in the account trigger. Production acceptance proved that direct third-party embedding still fails, so the final avatar flow uses an authenticated account-id endpoint, a strict Douyin image-domain allowlist, bounded server-side retrieval, and a frontend Blob URL for the currently selected account only.
 
 **Tech Stack:** React 18, TypeScript 5.6, React DOM Portal, Vitest, Testing Library, Vite, CSS.
 
@@ -12,7 +12,7 @@
 
 - Preserve all existing capability labels, callbacks, keyboard navigation, and focus return behavior.
 - Prefer upward menu placement; constrain the menu to the brain-stage boundary and use internal scrolling when necessary.
-- Do not add an avatar synchronization request or change the backend account API.
+- Do not add an avatar synchronization request. The avatar endpoint must preserve workspace authorization, accept only account IDs, and never proxy a caller-supplied URL.
 - Keep nickname-initial fallback behavior when an avatar is absent or fails to load.
 - Deploy only the exact verified commit through a new immutable release directory and atomic `/home/admin/dyflow` symlink switch.
 

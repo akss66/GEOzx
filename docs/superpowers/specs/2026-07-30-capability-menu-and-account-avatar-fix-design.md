@@ -5,7 +5,7 @@
 线上运营大脑存在两个前端显示问题：
 
 1. 能力菜单固定向上展开，高度为 460px。菜单实际顶部约为 81.6px，而承载对话区的 `.tz-brain-stage` 顶部约为 122px，并设置了 `overflow: hidden`，因此菜单顶部约 40px 被裁切。
-2. 抖音账号头像已经由授权与同步流程写入 `platform_account_auths.raw_profile.avatar` 和 `accounts.auth.avatar`，账号接口也会返回 `avatar_url`；但顶部 `AccountContext` 触发按钮固定渲染“抖”字方块，没有使用当前账号的头像。
+2. 抖音账号头像已经由授权与同步流程写入 `platform_account_auths.raw_profile.avatar` 和 `accounts.auth.avatar`，账号接口也会返回 `avatar_url`；顶部 `AccountContext` 原先固定渲染“抖”字方块。首次前端修复上线后，生产浏览器进一步证明第三方头像 URL 可直接打开、服务端也可读取，但嵌入平台页面时会触发图片错误并回退为昵称首字。因此最终显示链路必须改为平台同源、鉴权读取。
 
 ## 目标
 
@@ -31,26 +31,29 @@ Portal 使菜单脱离 `.tz-brain-stage` 的裁切上下文；动态高度保证
 
 ### 账号头像
 
-顶部账号触发按钮在已选择账号时复用现有 `AccountAvatar`：
+顶部账号触发按钮在已选择账号时复用现有 `AccountAvatar`，并通过鉴权 API 获取同源图片 Blob：
 
-- 有可用头像：显示 `avatar_url` 对应图片。
+- 有可用头像：前端请求 `/accounts/{account_id}/avatar`，生成短生命周期 Blob URL 后显示。
 - 图片加载失败：显示账号昵称首字。
 - 未选择账号：继续显示“抖”平台标识和“选择抖音账号”文案。
 
-下拉账号列表维持现有头像行为，不增加新的数据请求，也不改变后端同步链路。
+后端先执行现有账号访问权限校验，再从同步数据中解析头像地址。只允许 HTTPS `douyinpic.com` 子域，删除远端跟踪查询参数，执行 DNS 公网校验与地址固定，禁止重定向，并限制为 512 KiB 内的 JPEG、PNG、WebP 或 AVIF。接口不接收 URL 参数，因此不是开放代理。
+
+下拉账号列表维持现有头像行为，不为所有账号增加批量代理请求；只有当前选中账号发起同源头像请求，也不改变抖音授权与同步链路。
 
 ## 数据流与错误处理
 
 - 账号接口继续从 `PlatformAccountAuth.raw_profile` 和 `Account.auth` 解析 `avatar_url`。
-- `AccountContext` 仅消费现有 `Account.avatar_url`，不在前端发起图片同步。
-- 图片请求失败由组件本地状态处理，立即回退到昵称首字，不影响账号选择。
+- `AccountContext` 只有在当前账号存在同步头像时才发起鉴权 Blob 请求；切换账号或卸载时取消请求并释放 Object URL。
+- 后端上游读取失败返回 `502`，未同步头像返回 `404`；前端统一回退到昵称首字，不影响账号选择。
 - Portal 仅在浏览器环境且菜单打开时创建；测试和服务端环境不依赖额外 DOM 容器。
 
 ## 测试与验收
 
 ### 自动化测试
 
-- `AccountContext`：当前账号已选择时，顶部触发按钮包含真实头像；未选择和图片失败状态仍有降级展示。
+- `AccountContext`：当前账号已选择时，通过鉴权 API 生成 Blob 头像；未选择和请求失败状态仍有降级展示，并释放 Object URL。
+- 头像 API：验证登录和账号权限，拒绝非抖音图片域名、非图片响应和超限响应。
 - `CapabilityLauncher`：菜单打开后挂载到 `document.body`，位置样式来自触发按钮和内容区边界；关闭时移除菜单。
 - 保留并运行现有键盘导航、菜单操作、输入框和运营大脑页面测试。
 

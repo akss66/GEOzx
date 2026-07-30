@@ -110,6 +110,17 @@ export async function getAccount(id: number): Promise<Account> {
   return data;
 }
 
+export async function getAccountAvatar(
+  id: number,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const { data } = await api.get<Blob>(`/accounts/${id}/avatar`, {
+    responseType: "blob",
+    signal,
+  });
+  return data;
+}
+
 export async function replaceAccountAssignments(
   id: number,
   input: AccountAssignmentsInput,

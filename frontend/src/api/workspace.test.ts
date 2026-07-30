@@ -4,6 +4,7 @@ import { api } from "./client";
 import {
   batchUpdateAccounts,
   createDouyinIncrementalAuthorizeUrl,
+  getAccountAvatar,
   getDouyinAccountCapabilities,
 } from "./workspace";
 
@@ -57,6 +58,19 @@ describe("workspace api", () => {
     expect(apiGet).toHaveBeenCalledWith(
       "/platform-integrations/douyin/accounts/9/capabilities",
     );
+  });
+
+  it("loads one account avatar as an authenticated blob request", async () => {
+    const avatar = new Blob(["avatar"], { type: "image/jpeg" });
+    const signal = new AbortController().signal;
+    apiGet.mockResolvedValueOnce({ data: avatar });
+
+    await expect(getAccountAvatar(9, signal)).resolves.toBe(avatar);
+
+    expect(apiGet).toHaveBeenCalledWith("/accounts/9/avatar", {
+      responseType: "blob",
+      signal,
+    });
   });
 
   it("requests only the missing account authorization for a capability", async () => {
