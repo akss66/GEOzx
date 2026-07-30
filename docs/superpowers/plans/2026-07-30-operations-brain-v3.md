@@ -108,12 +108,12 @@
 - AgentRun 保留 `claimed`、`waiting_predecessor` 以及上述状态；SkillRun 允许 `running`、`retry_wait`、`waiting_permission`、`completed`、`blocked`、`failed`、`cancelled`、`stopped`。
 - BrainTask 映射：active/retry 为 `RUNNING`；waiting/stopped 为 `PENDING_CONFIRMATION`；completed 为 `COMPLETED`；blocked/failed/dead_letter/cancelled 为 `FAILED`。
 
-- [ ] 写参数化测试：completed、failed、dead_letter、cancelled、waiting_permission 在四类账本中的映射一致。
-- [ ] 写测试：失败/取消只产生一条终态用户消息，重放不会重复写。
-- [ ] 运行测试确认失败。
-- [ ] 增加 Turn 状态和数据库约束，集中收口服务在一个事务中更新所有账本。
-- [ ] 将 Worker、Skill 和 operation 的分散状态写入替换为集中收口调用。
-- [ ] 运行迁移与定向测试并提交 `fix: converge runtime state across turn ledgers`。
+- [x] 写参数化测试：completed、failed、dead_letter、cancelled、waiting_permission 在四类账本中的映射一致。
+- [x] 写测试：失败/取消只产生一条终态用户消息，重放不会重复写。
+- [x] 运行测试确认失败。
+- [x] 增加 Turn 状态和数据库约束，集中收口服务在一个事务中更新所有账本。
+- [x] 将 Worker、Skill 和 operation 的分散状态写入替换为集中收口调用。
+- [x] 运行迁移与定向测试并提交 `fix: converge runtime state across turn ledgers`。
 
 ### Task 5: 账号、会话、轮次和成果来源约束
 
