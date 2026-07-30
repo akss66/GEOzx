@@ -244,4 +244,26 @@ describe("CapabilityLauncher", () => {
     expect(trigger).toHaveFocus();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
+
+  it("keeps the current menu focus when scrolling recalculates portal position", async () => {
+    render(
+      <CapabilityLauncher
+        skills={[accountInspection]}
+        onSelectSkill={vi.fn()}
+        onAddFilesAndMaterials={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "添加能力或材料" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    const firstItem = await screen.findByRole("menuitem", { name: /一键账号体检/ });
+    const secondItem = screen.getByRole("menuitem", { name: "添加文件或素材" });
+    expect(firstItem).toHaveFocus();
+
+    fireEvent.keyDown(firstItem, { key: "ArrowDown" });
+    expect(secondItem).toHaveFocus();
+    fireEvent.scroll(window);
+
+    await waitFor(() => expect(secondItem).toHaveFocus());
+  });
 });

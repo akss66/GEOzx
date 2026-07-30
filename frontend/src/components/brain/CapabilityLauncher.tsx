@@ -52,6 +52,7 @@ export function CapabilityLauncher({
   const quickOperations = orderedSkills(skills, "quick_operations");
   const contextSkills = orderedSkills(skills, "context");
   const expertHelp = orderedSkills(skills, "expert_help");
+  const menuReady = open && menuPosition !== null;
   const contextActions: ContextAction[] = [
     { label: "添加文件或素材", callback: onAddFilesAndMaterials },
     { label: "添加账号数据包", callback: onAddAccountDataPackage },
@@ -79,7 +80,7 @@ export function CapabilityLauncher({
   }, [open, updateMenuPosition]);
 
   useEffect(() => {
-    if (!open || !menuPosition) return;
+    if (!menuReady) return;
     const firstItem = menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)");
     firstItem?.focus();
 
@@ -90,7 +91,7 @@ export function CapabilityLauncher({
     };
     document.addEventListener("mousedown", closeOnOutsidePointer);
     return () => document.removeEventListener("mousedown", closeOnOutsidePointer);
-  }, [menuPosition, open]);
+  }, [menuReady]);
 
   useEffect(() => {
     if (disabled) setOpen(false);
