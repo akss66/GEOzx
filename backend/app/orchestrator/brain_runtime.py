@@ -3400,7 +3400,11 @@ async def runtime_status(session: AsyncSession, task: BrainTask) -> str:
         (
             event.id
             for event in events
-            if event.type == "brain.runtime.clarification_requested"
+            if event.type
+            in {
+                "brain.runtime.clarification_requested",
+                "brain.runtime.tool_ambiguous",
+            }
         ),
         default=0,
     )

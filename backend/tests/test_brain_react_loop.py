@@ -256,6 +256,34 @@ async def test_execute_tools_converges_ambiguous_write_without_false_success_or_
         "brain.runtime.tool_ambiguous"
     ) == 1
     assert not any(event.type == "brain.runtime.tool_completed" for event in events)
+    assert await brain_runtime_module.runtime_status(session, task) == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_ignores_ambiguous_event_from_an_older_run(
+    session,
+    admin,
+) -> None:
+    _account, task, _run = await _runtime_retry_fixture(
+        session,
+        admin,
+        client_message_id="old-ambiguous-status-1",
+    )
+    session.add_all(
+        [
+            Event(
+                type="brain.runtime.tool_ambiguous",
+                payload={"task_id": task.id, "tool_call_id": 11},
+            ),
+            Event(
+                type="brain.runtime.started",
+                payload={"task_id": task.id, "client_message_id": "new-run"},
+            ),
+        ]
+    )
+    await session.commit()
+
+    assert await brain_runtime_module.runtime_status(session, task) == "running"
 
 
 def test_same_expert_requires_new_purpose_or_evidence_before_repeat():

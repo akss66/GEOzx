@@ -34,7 +34,7 @@ from app.schemas.conversation import (
     TurnRouteDecision,
 )
 from app.services.agent_runs import claim_agent_run, mark_agent_run_queued
-from app.worker import execute_agent_run
+from app.worker import execute_agent_run, recover_agent_runs
 
 
 @pytest.mark.asyncio
@@ -465,6 +465,106 @@ async def test_worker_validates_persisted_route_and_passes_it_to_routed_start(
     assert result == task.id
     assert captured_routes == [TurnRouteDecision.model_validate(route_payload)]
     assert captured_routes[0].mode is TurnExecutionMode.SKILL
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_ambiguous_post_graph_run_paused_and_unrecoverable(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Ambiguous post-graph task",
+        type=BrainTaskType.CONTENT_CREATION,
+        status=BrainTaskStatus.RUNNING,
+        current_focus="执行外部写操作",
+        runtime_mode="langgraph",
+    )
+    session.add(task)
+    await session.commit()
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id="ambiguous-post-graph-worker",
+        request_payload={},
+    )
+    await mark_agent_run_queued(
+        session,
+        run.id,
+        task_id=task.id,
+        request_payload={
+            "operation": "start",
+            "task_id": task.id,
+            "intent": IntentDecision(
+                intent="workflow",
+                confidence=1,
+                reason="execute provider write",
+                suggested_expert_codes=[],
+                requires_account_context=False,
+            ).model_dump(mode="json"),
+        },
+    )
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def finish_graph_with_ambiguous_tool(runtime_session, runtime_task, **_kwargs):
+        runtime_task.status = BrainTaskStatus.PENDING_CONFIRMATION
+        runtime_task.current_focus = "外部操作结果待确认"
+        runtime_session.add_all(
+            [
+                Event(
+                    type="brain.runtime.started",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "client_message_id": run.client_message_id,
+                    },
+                ),
+                Event(
+                    type="brain.runtime.tool_ambiguous",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "tool_call_id": 91,
+                        "error_code": "TOOL_RESULT_AMBIGUOUS",
+                    },
+                ),
+            ]
+        )
+        await runtime_session.commit()
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.runtime_graph.start_routed",
+        finish_graph_with_ambiguous_tool,
+    )
+
+    result = await execute_agent_run({"worker_id": "ambiguous-worker"}, run.id)
+
+    await session.refresh(run)
+    await session.refresh(task)
+    assert result == task.id
+    assert run.status == "waiting_user"
+    assert run.phase == "waiting_user"
+    assert run.next_retry_at is None
+    assert run.lease_owner is None
+    assert run.leased_until is None
+    assert task.status is BrainTaskStatus.PENDING_CONFIRMATION
+
+    jobs: list[tuple] = []
+
+    class FakePool:
+        async def enqueue_job(self, *args, **kwargs):
+            jobs.append((*args, kwargs["_job_id"]))
+            return object()
+
+    recovered = await recover_agent_runs({"redis": FakePool()})
+
+    assert recovered == 0
+    assert jobs == []
 
 
 @pytest.mark.asyncio
