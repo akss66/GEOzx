@@ -273,6 +273,33 @@ test("main agent v2 remains usable with runtime details at responsive widths", a
   ).toEqual([]);
 });
 
+test("empty main agent workspace keeps actions compact and content above the fold", async ({
+  page,
+}) => {
+  await installBrowserState(page);
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "tongzhouxing_brain_active_tasks",
+      JSON.stringify({ version: 1, accounts: {} }),
+    );
+  });
+  await mockApi(page);
+  await loginAsAdmin(page);
+
+  await page.locator(".tz-account-trigger").click();
+  await page.locator(".tz-account-panel button", { hasText: account.nickname }).click();
+  await expect(page.getByRole("heading", { name: "今天，想推进什么？" })).toBeVisible();
+
+  const actionsBox = await page.locator(".tz-brain-empty-actions").boundingBox();
+  const stageBox = await page.locator(".tz-brain-stage").boundingBox();
+
+  expect(actionsBox).not.toBeNull();
+  expect(stageBox).not.toBeNull();
+  expect(actionsBox!.height).toBeLessThanOrEqual(64);
+  expect(stageBox!.y).toBeLessThanOrEqual(130);
+  await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
+});
+
 async function loginAsAdmin(page: Page) {
   await page.goto("/login");
   await page.locator('input[autocomplete="email"]').fill(user.email);

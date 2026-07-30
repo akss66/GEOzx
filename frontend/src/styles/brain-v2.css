@@ -18,6 +18,19 @@
   grid-template-rows: 58px minmax(0, 1fr);
 }
 
+.tz-brain-page.is-empty {
+  grid-template-rows: 58px minmax(0, 1fr);
+}
+
+.tz-brain-empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--tz-line-subtle);
+  background: color-mix(in srgb, var(--tz-work-canvas) 94%, white);
+}
+
 .tz-brain-toolbar {
   display: flex;
   align-items: center;
