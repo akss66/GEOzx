@@ -560,3 +560,11 @@ body {
     padding-inline: 28px;
   }
 }
+
+@media (max-width: 980px) {
+  html,
+  body,
+  #root {
+    min-width: 0;
+  }
+}

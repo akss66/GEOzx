@@ -151,7 +151,7 @@ describe("ManualDataEntry", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /确认截图数据/ }));
     expect(onConfirmRow).toHaveBeenCalledWith(1);
-    expect(screen.getByRole("button", { name: "确认写入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认写入 1 条" })).toBeDisabled();
   });
 
   it("switches to audience entry without hiding the evidence workspace", () => {
@@ -193,12 +193,13 @@ describe("ManualDataEntry", () => {
       />,
     );
 
-    expect(screen.getByText("manual_account_period_v1")).toBeInTheDocument();
+    expect(screen.getByText("人工账号周期数据")).toBeInTheDocument();
+    expect(screen.queryByText("manual_account_period_v1")).not.toBeInTheDocument();
     expect(screen.getByText("preview ready")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "粉丝画像" }));
 
-    expect(screen.queryByText("manual_account_period_v1")).not.toBeInTheDocument();
+    expect(screen.queryByText("人工账号周期数据")).not.toBeInTheDocument();
     expect(screen.queryByText("preview ready")).not.toBeInTheDocument();
   });
 });

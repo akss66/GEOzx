@@ -1191,7 +1191,7 @@ git commit -m "fix: harden account data center states"
 - Consumes: Tasks 1–7.
 - Produces: a locally verified release candidate; no production deployment.
 
-- [ ] **Step 1: Update mocked E2E routes**
+- [x] **Step 1: Update mocked E2E routes**
 
 Add:
 
@@ -1211,7 +1211,7 @@ if (
 
 Update selectors from card classes to roles and operator-facing labels.
 
-- [ ] **Step 2: Add the approved visual acceptance scenario**
+- [x] **Step 2: Add the approved visual acceptance scenario**
 
 The scenario must verify:
 
@@ -1223,7 +1223,7 @@ The scenario must verify:
 6. The API technical code is not visible.
 7. History renders as a table after switching tabs.
 
-- [ ] **Step 3: Add responsive browser assertions**
+- [x] **Step 3: Add responsive browser assertions**
 
 At desktop and mobile widths, assert:
 
@@ -1241,7 +1241,7 @@ const hasOverflow = await page.evaluate(
 expect(hasOverflow).toBe(false);
 ```
 
-- [ ] **Step 4: Run the focused E2E test**
+- [x] **Step 4: Run the focused E2E test**
 
 Run:
 
@@ -1265,7 +1265,12 @@ uv run mypy app
 
 Expected: all commands exit `0`.
 
-- [ ] **Step 6: Run frontend quality gates**
+Verification note (2026-07-31): the 32 focused account-data tests and `ruff`
+pass, and `mypy app/api/account_data.py` passes. The repository-wide
+`mypy app` gate remains open because it reports 30 existing errors in nine
+unrelated main-Agent, LLM, conversation, and worker files.
+
+- [x] **Step 6: Run frontend quality gates**
 
 Run:
 
@@ -1279,7 +1284,7 @@ pnpm test:e2e -- e2e/account-data-import.spec.ts
 
 Expected: all commands exit `0`; existing bundle-size warnings may remain, but no new error is accepted.
 
-- [ ] **Step 7: Inspect the final diff**
+- [x] **Step 7: Inspect the final diff**
 
 Run:
 
@@ -1295,7 +1300,7 @@ Confirm:
 - Every behavior change has a test.
 - The branch contains only account-data-center redesign work.
 
-- [ ] **Step 8: Commit E2E acceptance changes**
+- [x] **Step 8: Commit E2E acceptance changes**
 
 ```powershell
 git add -- frontend/e2e/account-data-import.spec.ts

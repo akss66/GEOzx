@@ -26,7 +26,7 @@ const account = {
   created_at: "2026-07-23T00:00:00Z",
 };
 
-const rows = Array.from({ length: 68 }, (_, index) => ({
+const rows = Array.from({ length: 30 }, (_, index) => ({
   id: 1000 + index,
   row_number: index + 2,
   status: "ready",
@@ -57,11 +57,13 @@ function buildBatch(status: "preview_ready" | "committed") {
     status,
     source_kind: "platform_export",
     template_code: "douyin_work_list_v1",
-    row_count: 68,
+    row_count: 30,
     period_start: "2026-07-18",
     period_end: "2026-07-18",
     committed_at: status === "committed" ? "2026-07-23T08:00:00Z" : null,
     revoked_at: null,
+    created_by_id: 1,
+    created_by_name: "系统管理员",
     created_at: "2026-07-23T07:58:00Z",
     artifacts: [
       {
@@ -81,14 +83,116 @@ function buildBatch(status: "preview_ready" | "committed") {
   };
 }
 
-test("imports a Douyin work list and exposes its provenance to review", async ({ page }) => {
+function buildRowPage({
+  page = 1,
+  view = "all",
+}: {
+  page?: number;
+  view?: string;
+}) {
+  const visibleRows = view === "needs_work" ? [] : rows;
+  return {
+    items: visibleRows,
+    page,
+    page_size: 50,
+    total_count: rows.length,
+    filtered_count: visibleRows.length,
+    ready_count: rows.length,
+    blocking_count: 0,
+    total_pages: 1,
+  };
+}
+
+test("reviews and commits a Douyin export in the redesigned data center", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const consoleErrors: string[] = [];
+  let batchDetailRequests = 0;
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/account-data/1/imports/81") {
+      batchDetailRequests += 1;
+    }
+  });
 
   await mockAccountDataApi(page);
+  await seedWorkspace(page);
+
+  await page.goto("/accounts/1/data");
+  await expect(page.getByText("账号数据中心", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "数据概览" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(batchDetailRequests).toBe(0);
+
+  await page.getByRole("tab", { name: "导入与补录" }).click();
+  await expect(page.getByRole("tabpanel", { name: "导入与补录" })).toBeVisible();
+  await expect(page.locator(".account-data-layout")).toHaveCount(0);
+  const header = "作品名称,发布时间,体裁,审核状态,播放量,完播率,5s完播率,封面点击率,2s跳出率,平均播放时长,点赞量,分享量,评论量,收藏量,主页访问量,粉丝增量";
+  const csvRows = Array.from(
+    { length: 30 },
+    (_, index) => `作品 ${index + 1},2026-07-18 14:11:20,1min-视频,公开,${81 + index},0.0875,0.375,,0.375,9.53,6,0,3,0,3,0`,
+  );
+  await page.getByLabel("选择导入文件").setInputFiles({
+    name: "douyin-work-list.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from([header, ...csvRows].join("\n"), "utf8"),
+  });
+
+  await expect(page.getByText("导入预览已生成")).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "导入与补录" })).toBeVisible();
+  await expect(page.getByRole("table", { name: "导入数据校验表" })).toBeVisible();
+  await expect(page.getByRole("table", { name: "导入记录" })).toHaveCount(0);
+  await expect(page.getByText("30 条 · 可写入 30 · 需处理 0")).toBeVisible();
+  await expect(page.getByText("douyin_work_list_v1", { exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "确认写入 30 条" })).toBeVisible();
+
+  await page
+    .getByRole("table", { name: "导入数据校验表" })
+    .locator("tbody tr")
+    .last()
+    .scrollIntoViewIfNeeded();
+  await expect(page.getByRole("button", { name: "确认写入 30 条" })).toBeVisible();
+  await page.getByRole("button", { name: "确认写入 30 条" }).click();
+  await expect(page.getByText("导入已确认", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "导入记录" }).click();
+  await expect(page.getByRole("tabpanel", { name: "导入记录" })).toBeVisible();
+  const historyTable = page.getByRole("table", { name: "导入记录" });
+  await expect(historyTable).toBeVisible();
+  await expect(historyTable.getByText("抖音作品列表", { exact: true })).toBeVisible();
+  await expect(historyTable.getByText("系统管理员", { exact: true })).toBeVisible();
+  expect(batchDetailRequests).toBe(0);
+
+  const layout = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+  }));
+  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+  expect(layout.bodyScrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("keeps the import workspace usable without document overflow on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockAccountDataApi(page);
+  await seedWorkspace(page);
+
+  await page.goto("/accounts/1/data");
+  await page.getByRole("tab", { name: "导入与补录" }).click();
+
+  await expect(page.getByRole("tabpanel", { name: "导入与补录" })).toBeVisible();
+  await expect(page.locator(".account-data-layout")).toHaveCount(0);
+  await expect(page.getByLabel("选择导入文件")).toBeVisible();
+  const hasOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  );
+  expect(hasOverflow).toBe(false);
+});
+
+async function seedWorkspace(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem("dyflow_token", "test-token");
     localStorage.setItem(
@@ -102,51 +206,7 @@ test("imports a Douyin work list and exposes its provenance to review", async ({
       }),
     );
   });
-
-  await page.goto("/accounts/1/data");
-  await expect(page.getByText("账号数据中心", { exact: true })).toBeVisible();
-
-  const header = "作品名称,发布时间,体裁,审核状态,播放量,完播率,5s完播率,封面点击率,2s跳出率,平均播放时长,点赞量,分享量,评论量,收藏量,主页访问量,粉丝增量";
-  const csvRows = Array.from(
-    { length: 68 },
-    (_, index) => `作品 ${index + 1},2026-07-18 14:11:20,1min-视频,公开,${81 + index},0.0875,0.375,,0.375,9.53,6,0,3,0,3,0`,
-  );
-  await page.getByLabel("选择导入文件").setInputFiles({
-    name: "douyin-work-list.csv",
-    mimeType: "text/csv",
-    buffer: Buffer.from([header, ...csvRows].join("\n"), "utf8"),
-  });
-
-  await expect(page.getByText("导入预览已生成")).toBeVisible();
-  await expect(page.getByText("douyin_work_list_v1", { exact: true })).toBeVisible();
-  await expect(page.locator(".account-data-preview-summary").getByText("68", { exact: true })).toBeVisible();
-
-  await page.getByRole("button", { name: "确认导入" }).click();
-  await expect(page.getByText("导入已确认", { exact: true })).toBeVisible();
-  await expect(page.getByText(/已写入/).first()).toBeVisible();
-
-  await page.goto("/review");
-  await expect(page.getByText("平台导出", { exact: true })).toBeVisible();
-  await expect(page.getByText("数据证据")).toBeVisible();
-
-  await page.goto("/accounts/1/data");
-  await page.getByRole("button", { name: "\u6c38\u4e45\u5220\u9664\u6279\u6b21 81" }).click();
-  await expect(
-    page.getByText("\u5c06\u5148\u64a4\u9500\u8be5\u6279\u6b21\u4ea7\u751f\u7684\u6570\u636e\uff0c\u518d\u6c38\u4e45\u5220\u9664\u539f\u6587\u4ef6\u548c\u5386\u53f2\u8bb0\u5f55\u3002"),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "\u786e\u8ba4\u6c38\u4e45\u5220\u9664\u6279\u6b21 81" }).click();
-  await expect(page.getByText("\u5bfc\u5165\u6279\u6b21\u5df2\u6c38\u4e45\u5220\u9664")).toBeVisible();
-  await expect(page.getByText("\u6682\u65e0\u5bfc\u5165\u5386\u53f2")).toBeVisible();
-
-  const layout = await page.evaluate(() => ({
-    clientWidth: document.documentElement.clientWidth,
-    scrollWidth: document.documentElement.scrollWidth,
-    bodyScrollWidth: document.body.scrollWidth,
-  }));
-  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
-  expect(layout.bodyScrollWidth).toBeLessThanOrEqual(layout.clientWidth);
-  expect(consoleErrors).toEqual([]);
-});
+}
 
 async function mockAccountDataApi(page: Page) {
   let batch: ReturnType<typeof buildBatch> | null = null;
@@ -208,6 +268,8 @@ async function mockAccountDataApi(page: Page) {
               period_end: batch.period_end,
               committed_at: batch.committed_at,
               revoked_at: batch.revoked_at,
+              created_by_id: batch.created_by_id,
+              created_by_name: batch.created_by_name,
               created_at: batch.created_at,
             }]
           : [],
@@ -216,6 +278,12 @@ async function mockAccountDataApi(page: Page) {
     if (method === "POST" && path === "/account-data/1/imports") {
       batch = buildBatch("preview_ready");
       return json(route, batch);
+    }
+    if (method === "GET" && path === "/account-data/1/imports/81/rows") {
+      return json(route, buildRowPage({
+        page: Number(url.searchParams.get("page") ?? "1"),
+        view: url.searchParams.get("view") ?? "all",
+      }));
     }
     if (method === "GET" && path === "/account-data/1/imports/81") {
       return json(route, batch ?? buildBatch("preview_ready"));

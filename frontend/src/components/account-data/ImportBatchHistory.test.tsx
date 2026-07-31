@@ -52,14 +52,16 @@ describe("ImportBatchHistory", () => {
     (status) => {
       renderHistory(status);
 
-      expect(screen.getByRole("button", { name: "永久删除批次 81" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "更多操作 批次 81" }));
+      expect(screen.getByRole("menuitem", { name: /永久删除/ })).toBeEnabled();
     },
   );
 
   it("warns that a committed batch will be revoked before permanent deletion", () => {
     renderHistory("committed");
 
-    fireEvent.click(screen.getByRole("button", { name: "永久删除批次 81" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作 批次 81" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /永久删除/ }));
 
     expect(
       screen.getByText("将先撤销该批次产生的数据，再永久删除原文件和历史记录。"),
