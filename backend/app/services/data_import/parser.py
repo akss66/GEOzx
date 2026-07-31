@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from math import isfinite
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile, ZipFile
@@ -28,6 +30,10 @@ MAX_ARCHIVE_ENTRY_COUNT = 2_048
 MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 MAX_ARCHIVE_ENTRY_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 100
+FORMULA_ELEMENT_PATTERN = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?f(?=[\s/>])")
+GROUPED_NUMBER_PATTERN = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?$")
+SQL_INTEGER_MIN = -(2**31)
+SQL_INTEGER_MAX = 2**31 - 1
 
 
 class ParseFailure(ValueError):
@@ -158,31 +164,38 @@ def _parse_xlsx(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
     except Exception as exc:  # pragma: no cover
         raise ParseFailure("invalid_xlsx", f"Unable to read workbook: {exc}") from exc
 
-    worksheet = workbook.worksheets[0] if workbook.worksheets else None
-    if worksheet is None:
-        raise ParseFailure("empty_workbook", "The workbook does not contain any worksheets")
+    try:
+        if not workbook.worksheets:
+            raise ParseFailure("empty_workbook", "The workbook does not contain any worksheets")
+        if len(workbook.worksheets) != 1:
+            raise ParseFailure(
+                "multiple_worksheets_unsupported",
+                "Workbooks must contain exactly one worksheet",
+            )
+        worksheet = workbook.worksheets[0]
+        rows: list[list[Any]] = []
+        for row in worksheet.iter_rows(values_only=True):
+            values = list(row)
+            last_index = max(
+                (
+                    index
+                    for index, value in enumerate(values)
+                    if value is not None and str(value).strip() != ""
+                ),
+                default=-1,
+            )
+            if last_index < 0:
+                continue
+            trimmed = values[: last_index + 1]
+            if len(trimmed) > MAX_COLUMNS:
+                raise ParseFailure("too_many_columns", TOO_MANY_COLUMNS_MESSAGE)
+            rows.append(trimmed)
+            if len(rows) - 1 > MAX_DATA_ROWS:
+                raise ParseFailure("too_many_rows", TOO_MANY_ROWS_MESSAGE)
 
-    rows: list[list[Any]] = []
-    for row in worksheet.iter_rows(values_only=True):
-        values = list(row)
-        last_index = max(
-            (
-                index
-                for index, value in enumerate(values)
-                if value is not None and str(value).strip() != ""
-            ),
-            default=-1,
-        )
-        if last_index < 0:
-            continue
-        trimmed = values[: last_index + 1]
-        if len(trimmed) > MAX_COLUMNS:
-            raise ParseFailure("too_many_columns", TOO_MANY_COLUMNS_MESSAGE)
-        rows.append(trimmed)
-        if len(rows) - 1 > MAX_DATA_ROWS:
-            raise ParseFailure("too_many_rows", TOO_MANY_ROWS_MESSAGE)
-
-    return _rows_to_table(rows)
+        return _rows_to_table(rows, reject_extra_cells=True)
+    finally:
+        workbook.close()
 
 
 def _scan_xlsx_archive(data: bytes) -> None:
@@ -219,6 +232,7 @@ def _rows_to_table(
     rows: list[list[Any]],
     *,
     strict_row_width: bool = False,
+    reject_extra_cells: bool = False,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     if not rows:
         raise ParseFailure("empty_file", "The file does not contain any rows")
@@ -230,6 +244,14 @@ def _rows_to_table(
             raise ParseFailure(
                 "csv_row_width_mismatch",
                 f"CSV row {row_number} has {len(values)} fields; expected {len(headers)} fields",
+            )
+        if reject_extra_cells and len(values) > len(headers):
+            raise ParseFailure(
+                "xlsx_row_width_mismatch",
+                (
+                    f"XLSX row {row_number} has {len(values)} fields; "
+                    f"expected at most {len(headers)}"
+                ),
             )
         trimmed = list(values if strict_row_width else values[: len(headers)])
         if not strict_row_width and len(trimmed) < len(headers):
@@ -311,23 +333,34 @@ def _parse_column_value(
 ) -> tuple[dict[str, Any], list[RowIssue]]:
     field_name = column.field_name
     if column.value_type == "string":
-        return {field_name: _normalize_string(raw_value)}, []
-    if column.value_type == "int":
-        return _parse_int(field_name, raw_value)
-    if column.value_type == "float":
-        return _parse_float(field_name, raw_value)
-    if column.value_type == "ratio":
-        return _parse_ratio(field_name, raw_value)
-    if column.value_type == "date":
-        return _parse_date(field_name, raw_value)
-    if column.value_type == "datetime":
-        return _parse_datetime(field_name, raw_value)
-    if column.value_type == "date_range":
-        return _parse_date_range(raw_value)
-    raise ParseFailure(
-        "unsupported_column_type",
-        f"Unsupported column type: {column.value_type}",
-    )
+        normalized_string = _normalize_string(raw_value)
+        parsed_value, issues = {field_name: normalized_string}, []
+        if (
+            normalized_string is not None
+            and column.max_length is not None
+            and len(normalized_string) > column.max_length
+        ):
+            issues.append(_issue("value_too_long", field_name))
+    elif column.value_type == "int":
+        parsed_value, issues = _parse_int(field_name, raw_value, minimum=column.minimum)
+    elif column.value_type == "float":
+        parsed_value, issues = _parse_float(field_name, raw_value, minimum=column.minimum)
+    elif column.value_type == "ratio":
+        parsed_value, issues = _parse_ratio(field_name, raw_value)
+    elif column.value_type == "date":
+        parsed_value, issues = _parse_date(field_name, raw_value)
+    elif column.value_type == "datetime":
+        parsed_value, issues = _parse_datetime(field_name, raw_value)
+    elif column.value_type == "date_range":
+        parsed_value, issues = _parse_date_range(raw_value)
+    else:
+        raise ParseFailure(
+            "unsupported_column_type",
+            f"Unsupported column type: {column.value_type}",
+        )
+    if column.required and _coerce_text(raw_value) is None:
+        issues.append(_issue("required_value_missing", field_name))
+    return parsed_value, issues
 
 
 def _normalize_string(value: Any) -> str | None:
@@ -335,27 +368,46 @@ def _normalize_string(value: Any) -> str | None:
     return None if text is None else text.strip()
 
 
-def _parse_int(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowIssue]]:
+def _parse_int(
+    field_name: str,
+    value: Any,
+    *,
+    minimum: float | None = None,
+) -> tuple[dict[str, Any], list[RowIssue]]:
     text = _coerce_text(value)
     if text is None:
         return {field_name: None}, []
     try:
-        number = float(text)
+        number = _parse_number_text(text)
     except ValueError:
         return {field_name: None}, [_issue("invalid_integer", field_name)]
-    if not number.is_integer():
+    if not isfinite(number) or not number.is_integer():
         return {field_name: None}, [_issue("invalid_integer", field_name)]
+    if number < SQL_INTEGER_MIN or number > SQL_INTEGER_MAX:
+        return {field_name: None}, [_issue("integer_out_of_range", field_name)]
+    if minimum is not None and number < minimum:
+        return {field_name: None}, [_issue("below_minimum", field_name)]
     return {field_name: int(number)}, []
 
 
-def _parse_float(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowIssue]]:
+def _parse_float(
+    field_name: str,
+    value: Any,
+    *,
+    minimum: float | None = None,
+) -> tuple[dict[str, Any], list[RowIssue]]:
     text = _coerce_text(value)
     if text is None:
         return {field_name: None}, []
     try:
-        return {field_name: float(text)}, []
+        number = _parse_number_text(text)
     except ValueError:
         return {field_name: None}, [_issue("invalid_number", field_name)]
+    if not isfinite(number):
+        return {field_name: None}, [_issue("invalid_number", field_name)]
+    if minimum is not None and number < minimum:
+        return {field_name: None}, [_issue("below_minimum", field_name)]
+    return {field_name: number}, []
 
 
 def _parse_ratio(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowIssue]]:
@@ -363,8 +415,14 @@ def _parse_ratio(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowI
     if text is None:
         return {field_name: None}, []
     try:
-        number = float(text[:-1]) / 100 if text.endswith("%") else float(text)
+        number = (
+            _parse_number_text(text[:-1]) / 100
+            if text.endswith("%")
+            else _parse_number_text(text)
+        )
     except ValueError:
+        return {field_name: None}, [_issue("invalid_number", field_name)]
+    if not isfinite(number):
         return {field_name: None}, [_issue("invalid_number", field_name)]
     if not 0 <= number <= 1:
         return {field_name: None}, [_issue("out_of_range", field_name)]
@@ -372,6 +430,10 @@ def _parse_ratio(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowI
 
 
 def _parse_date(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowIssue]]:
+    if isinstance(value, datetime):
+        return {field_name: value.date()}, []
+    if isinstance(value, date):
+        return {field_name: value}, []
     text = _coerce_text(value)
     if text is None:
         return {field_name: None}, []
@@ -384,6 +446,10 @@ def _parse_date(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowIs
 
 
 def _parse_datetime(field_name: str, value: Any) -> tuple[dict[str, Any], list[RowIssue]]:
+    if isinstance(value, datetime):
+        return {field_name: value}, []
+    if isinstance(value, date):
+        return {field_name: datetime.combine(value, datetime.min.time())}, []
     text = _coerce_text(value)
     if text is None:
         return {field_name: None}, []
@@ -408,7 +474,18 @@ def _parse_date_range(value: Any) -> tuple[dict[str, Any], list[RowIssue]]:
         )
     start_value, start_errors = _parse_date("period_start", parts[0])
     end_value, end_errors = _parse_date("period_end", parts[1])
-    return {**start_value, **end_value}, [*start_errors, *end_errors]
+    errors = [*start_errors, *end_errors]
+    start = start_value["period_start"]
+    end = end_value["period_end"]
+    if not errors and start is not None and end is not None and start > end:
+        errors.append(
+            RowIssue(
+                code="reversed_date_range",
+                message="Date range start must not be later than its end",
+                field="period",
+            )
+        )
+    return {**start_value, **end_value}, errors
 
 
 def _coerce_text(value: Any) -> str | None:
@@ -424,6 +501,14 @@ def _coerce_text(value: Any) -> str | None:
     return text
 
 
+def _parse_number_text(text: str) -> float:
+    if "," in text:
+        if not GROUPED_NUMBER_PATTERN.fullmatch(text):
+            raise ValueError("invalid thousands separators")
+        text = text.replace(",", "")
+    return float(text)
+
+
 def _row_is_blank(values: list[Any]) -> bool:
     return all(_coerce_text(value) is None for value in values)
 
@@ -433,6 +518,10 @@ def _issue(code: str, field_name: str) -> RowIssue:
         "invalid_integer": f"Invalid integer for {field_name}",
         "invalid_number": f"Invalid number for {field_name}",
         "out_of_range": f"{field_name} must be between 0 and 1",
+        "below_minimum": f"{field_name} must not be negative",
+        "integer_out_of_range": f"{field_name} is outside the supported integer range",
+        "required_value_missing": f"{field_name} is required",
+        "value_too_long": f"{field_name} is too long",
         "invalid_date": f"Invalid date for {field_name}",
         "invalid_datetime": f"Invalid datetime for {field_name}",
     }
@@ -484,7 +573,6 @@ def _compression_ratio(info: Any) -> float:
 
 
 def _entry_contains_formula(archive: ZipFile, info: Any) -> bool:
-    needle = b"<f"
     tail = b""
     with archive.open(info, "r") as entry:
         while True:
@@ -492,6 +580,6 @@ def _entry_contains_formula(archive: ZipFile, info: Any) -> bool:
             if not chunk:
                 return False
             haystack = tail + chunk
-            if needle in haystack:
+            if FORMULA_ELEMENT_PATTERN.search(haystack):
                 return True
-            tail = haystack[-1:]
+            tail = haystack[-64:]

@@ -1192,13 +1192,49 @@ def _conversation_operating_context(account: Any) -> str:
 
 
 def _format_account_data_summary(data: dict[str, Any]) -> str:
-    period = data.get("period")
+    data_status = data.get("data_status")
+    pending_imports = data.get("pending_imports")
+    pending_imports = pending_imports if isinstance(pending_imports, list) else []
+    if data_status == "pending_import":
+        lines = ["当前账号暂无已正式写入的可分析数据。"]
+        first = next((item for item in pending_imports if isinstance(item, dict)), None)
+        if first is not None:
+            batch_id = first.get("batch_id")
+            row_count = first.get("row_count")
+            period_start = first.get("period_start")
+            period_end = first.get("period_end")
+            detail_parts: list[str] = []
+            if isinstance(row_count, int) and not isinstance(row_count, bool):
+                detail_parts.append(f"{row_count} 行")
+            if isinstance(period_start, str) and isinstance(period_end, str):
+                detail_parts.append(f"数据范围 {period_start} 至 {period_end}")
+            details = f"：{'，'.join(detail_parts)}" if detail_parts else ""
+            lines.append(f"发现待确认导入批次 #{batch_id}{details}。")
+        lines.append("请先在数据中心完成校验并正式写入，写入后我才能读取和分析这些指标。")
+        return "\n".join(lines)
+    if data_status == "empty":
+        return "当前账号暂无可分析数据。请先在数据中心同步或导入账号数据。"
+
+    period = data.get("data_period")
+    uses_observed_period = isinstance(period, dict)
+    if not uses_observed_period:
+        period = data.get("period")
     period = period if isinstance(period, dict) else {}
     days = period.get("days")
     start = period.get("start")
     end = period.get("end")
     if isinstance(start, str) and isinstance(end, str):
-        day_suffix = f"（近 {days} 天）" if isinstance(days, int) and days > 0 else ""
+        query_window = data.get("query_window")
+        query_window = query_window if isinstance(query_window, dict) else {}
+        query_days = query_window.get("days", days)
+        if isinstance(query_days, int) and query_days > 0:
+            day_suffix = (
+                f"（查询近 {query_days} 天）"
+                if uses_observed_period
+                else f"（近 {query_days} 天）"
+            )
+        else:
+            day_suffix = ""
         period_text = f"{start} 至 {end}{day_suffix}"
     else:
         period_text = f"近 {days} 天" if isinstance(days, int) and days > 0 else "当前周期"

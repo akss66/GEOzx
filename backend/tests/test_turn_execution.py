@@ -771,6 +771,72 @@ async def test_query_uses_authorized_account_and_records_one_skill_run(
 
 
 @pytest.mark.asyncio
+async def test_query_explains_pending_import_instead_of_claiming_data_was_read(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account, _thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="query-pending-import",
+    )
+
+    async def classify(*_args, **_kwargs):
+        return _decision(
+            TurnExecutionMode.QUERY,
+            skill_code="account_data_query",
+            requires_operation_task=False,
+        )
+
+    class Adapter:
+        async def invoke(self, _name, _params, context):
+            return {
+                "account_id": context.account_id,
+                "data_status": "pending_import",
+                "query_window": {
+                    "days": 30,
+                    "start": "2026-07-02",
+                    "end": "2026-07-31",
+                },
+                "data_period": None,
+                "metrics": {},
+                "sources": [],
+                "coverage": {},
+                "pending_imports": [
+                    {
+                        "batch_id": 8,
+                        "status": "preview_ready",
+                        "template_code": "douyin_period_aggregate_v1",
+                        "row_count": 1,
+                        "period_start": "2026-05-02",
+                        "period_end": "2026-07-31",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter())
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("query-pending-import"),
+    )
+
+    assert result.projections[0]["data"]["data_status"] == "pending_import"
+    assert "当前账号暂无已正式写入的可分析数据" in result.response
+    assert "待确认导入批次 #8" in result.response
+    assert "2026-05-02 至 2026-07-31" in result.response
+    assert "请先在数据中心完成校验并正式写入" in result.response
+    assert "数据周期：" not in result.response
+    assert "已读取当前账号的数据" not in result.response
+    assert result.projections[0]["account_id"] == account.id
+
+
+@pytest.mark.asyncio
 async def test_completed_query_duplicate_does_not_reclassify_or_reinvoke(
     session, admin, monkeypatch
 ) -> None:

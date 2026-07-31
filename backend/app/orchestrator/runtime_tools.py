@@ -12,15 +12,18 @@ from datetime import date, timedelta
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.workspace_access import require_account_access
-from app.models import User
-from app.models.enums import UserRole
+from app.models import DataImportBatch, User
+from app.models.enums import ImportBatchStatus, UserRole
 from app.services.account_data_view import (
     ACCOUNT_METRICS,
     CONTENT_METRICS,
     AccountDataMetric,
+    AccountDataView,
     AccountDataViewService,
 )
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
@@ -122,9 +125,35 @@ async def _account_data_context(
         period_start,
         period_end,
     )
+    pending_imports = await _pending_imports(
+        context.session,
+        org_id=account.org_id,
+        account_id=account.id,
+    )
+    data_period = _observed_data_period(view)
+    has_available_data = bool(
+        view.source_summary
+        or view.content_snapshots
+        or view.account_snapshots
+        or view.audience
+        or view.benchmarks
+    )
+    data_status = (
+        "available"
+        if has_available_data
+        else ("pending_import" if pending_imports else "empty")
+    )
     metric_context = _aggregate_data_metrics(view.content_snapshots, view.account_snapshots)
     return {
         "account_id": account.id,
+        "data_status": data_status,
+        "query_window": {
+            "days": params.days,
+            "start": period_start.isoformat(),
+            "end": period_end.isoformat(),
+        },
+        "data_period": data_period,
+        "pending_imports": pending_imports,
         "period": {
             "days": params.days,
             "start": period_start.isoformat(),
@@ -156,6 +185,65 @@ async def _account_data_context(
         "review_statuses": _dimension_counts(view.content_snapshots, "review_status"),
         "audience_dimension_count": len(view.audience),
         "benchmark_count": len(view.benchmarks),
+    }
+
+
+async def _pending_imports(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+) -> list[dict[str, Any]]:
+    batches = list(
+        await session.scalars(
+            select(DataImportBatch)
+            .where(
+                DataImportBatch.org_id == org_id,
+                DataImportBatch.account_id == account_id,
+                DataImportBatch.committed_at.is_(None),
+                DataImportBatch.revoked_at.is_(None),
+                DataImportBatch.status.notin_(
+                    [ImportBatchStatus.COMMITTED, ImportBatchStatus.REVOKED]
+                ),
+            )
+            .order_by(DataImportBatch.id.desc())
+            .limit(5)
+        )
+    )
+    return [
+        {
+            "batch_id": batch.id,
+            "status": batch.status.value,
+            "template_code": batch.template_code,
+            "row_count": batch.row_count,
+            "period_start": _iso(batch.period_start),
+            "period_end": _iso(batch.period_end),
+        }
+        for batch in batches
+    ]
+
+
+def _observed_data_period(view: AccountDataView) -> dict[str, str] | None:
+    observed_dates = [
+        item.stat_date
+        for collection in (
+            view.content_snapshots,
+            view.account_snapshots,
+            view.audience,
+            view.benchmarks,
+        )
+        for item in collection
+    ]
+    for source in view.source_summary:
+        if source.period_start is not None:
+            observed_dates.append(source.period_start)
+        if source.period_end is not None:
+            observed_dates.append(source.period_end)
+    if not observed_dates:
+        return None
+    return {
+        "start": min(observed_dates).isoformat(),
+        "end": max(observed_dates).isoformat(),
     }
 
 

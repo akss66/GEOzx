@@ -3,6 +3,7 @@
 from datetime import date, datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -29,6 +30,8 @@ from app.models.enums import (
     Platform,
 )
 
+CURRENT_IMPORT_PARSER_VERSION = 2
+
 
 class DataImportBatch(Base, TimestampMixin):
     __tablename__ = "data_import_batches"
@@ -50,6 +53,10 @@ class DataImportBatch(Base, TimestampMixin):
             sqlite_where=text("committed_at IS NULL AND revoked_at IS NULL"),
             postgresql_where=text("committed_at IS NULL AND revoked_at IS NULL"),
         ),
+        CheckConstraint(
+            "parser_version >= 1",
+            name="ck_data_import_batches_parser_version_positive",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -70,6 +77,12 @@ class DataImportBatch(Base, TimestampMixin):
     )
     template_code: Mapped[str] = mapped_column(String(80), nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_version: Mapped[int] = mapped_column(
+        Integer,
+        default=CURRENT_IMPORT_PARSER_VERSION,
+        server_default="1",
+        nullable=False,
+    )
     period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)

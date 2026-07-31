@@ -3,10 +3,12 @@ from datetime import date, timedelta
 import pytest
 
 from app.config import settings
-from app.models import Account, MetricSnapshot, PlatformContentRecord
+from app.models import Account, DataImportBatch, MetricSnapshot, PlatformContentRecord
 from app.models.enums import (
     AccountStatus,
     ContentIdentityConfidence,
+    DataSourceKind,
+    ImportBatchStatus,
     MetricSource,
     Platform,
 )
@@ -172,6 +174,12 @@ async def test_account_data_context_exposes_quality_period_and_evidence(session,
     )
 
     assert result["account_id"] == account.id
+    assert result["data_status"] == "available"
+    assert result["data_period"] == {
+        "start": date.today().isoformat(),
+        "end": date.today().isoformat(),
+    }
+    assert result["pending_imports"] == []
     assert result["period"]["days"] == 30
     assert result["period"]["end"] == date.today().isoformat()
     assert result["coverage"]["content_metrics"] == "available"
@@ -181,6 +189,66 @@ async def test_account_data_context_exposes_quality_period_and_evidence(session,
     assert result["metrics"]["play"]["source"] == "official_api"
     assert result["metrics"]["play"]["evidence_refs"]
     assert result["metrics"]["play"]["evidence_refs"][0]["kind"] == "metric_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_account_data_context_reports_preview_without_claiming_available_data(
+    session,
+    admin,
+) -> None:
+    account = await _account(session, admin, nickname="待确认导入账号")
+    batch = DataImportBatch(
+        org_id=account.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.PREVIEW_READY,
+        template_code="douyin_period_aggregate_v1",
+        content_sha256="8" * 64,
+        period_start=date(2026, 5, 2),
+        period_end=date(2026, 7, 31),
+        row_count=1,
+    )
+    session.add(batch)
+    await session.commit()
+    await session.refresh(batch)
+
+    result = await build_runtime_tool_adapter().invoke(
+        "account.data_context",
+        {"days": 30},
+        ToolExecutionContext(session=session, user=admin, account_id=account.id),
+    )
+
+    assert result["data_status"] == "pending_import"
+    assert result["data_period"] is None
+    assert result["pending_imports"] == [
+        {
+            "batch_id": batch.id,
+            "status": "preview_ready",
+            "template_code": "douyin_period_aggregate_v1",
+            "row_count": 1,
+            "period_start": "2026-05-02",
+            "period_end": "2026-07-31",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_account_data_context_reports_empty_when_no_data_or_import_exists(
+    session,
+    admin,
+) -> None:
+    account = await _account(session, admin, nickname="空账号")
+
+    result = await build_runtime_tool_adapter().invoke(
+        "account.data_context",
+        {"days": 30},
+        ToolExecutionContext(session=session, user=admin, account_id=account.id),
+    )
+
+    assert result["data_status"] == "empty"
+    assert result["data_period"] is None
+    assert result["pending_imports"] == []
 
 
 @pytest.mark.asyncio

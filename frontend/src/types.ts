@@ -635,6 +635,17 @@ export type TurnProjection =
       account_id: number;
       skill_code: string;
       skill_run_id: number;
+      data?: {
+        data_status?: "available" | "pending_import" | "empty";
+        pending_imports?: Array<{
+          batch_id: number;
+          status: string;
+          template_code: string;
+          row_count: number;
+          period_start?: string | null;
+          period_end?: string | null;
+        }>;
+      };
       turn_id?: number;
     }
   | {
