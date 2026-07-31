@@ -310,6 +310,38 @@ def test_period_aggregate_template_parses_date_range_and_numeric_fields(
     assert parsed.rows[0].normalized["avg_share_count"] == 1
 
 
+def test_period_aggregate_accepts_fractional_median_and_average_counts():
+    parsed = parse_source_file(
+        "aggregate.xlsx",
+        workbook_bytes(
+            PERIOD_AGGREGATE_HEADERS,
+            [
+                [
+                    "2026-05-02 ~ 2026-07-31",
+                    "1min-视频,图文",
+                    "科技,随拍",
+                    "2",
+                    "0.1354",
+                    "0.1630",
+                    "0.6135",
+                    "3.2148",
+                    "398.5000",
+                    "8.2500",
+                    "1.5000",
+                    "0.5000",
+                ]
+            ],
+        ),
+    )
+
+    row = parsed.rows[0]
+    assert row.errors == []
+    assert row.normalized["median_play"] == 398.5
+    assert row.normalized["avg_like_count"] == 8.25
+    assert row.normalized["avg_comment_count"] == 1.5
+    assert row.normalized["avg_share_count"] == 0.5
+
+
 @pytest.mark.parametrize(
     ("filename", "payload"),
     [
