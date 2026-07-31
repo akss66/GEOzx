@@ -122,10 +122,10 @@ describe("BulkImportQueue", () => {
     expect(await screen.findByText("已写入")).toBeInTheDocument();
     expect(screen.getByText("导入失败")).toBeInTheDocument();
     expect(screen.getByText("作品列表 · 30 行")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "重试 损坏数据.xlsx" })).toBeInTheDocument();
+    expect(screen.getByLabelText("重新上传 损坏数据.xlsx")).toBeInTheDocument();
   });
 
-  it("retries only the selected failed file", async () => {
+  it("reuploads only the selected failed file", async () => {
     createJob.mockResolvedValue(jobFixture());
     retryFile.mockResolvedValue({
       ...jobFixture(),
@@ -146,10 +146,14 @@ describe("BulkImportQueue", () => {
     fireEvent.change(screen.getByLabelText("选择账号数据文件"), {
       target: { files: [new File(["b"], "损坏数据.xlsx")] },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "重试 损坏数据.xlsx" }));
+    const replacement = new File(["fixed"], "修正数据.xlsx");
+    fireEvent.change(
+      await screen.findByLabelText("重新上传 损坏数据.xlsx"),
+      { target: { files: [replacement] } },
+    );
 
     await waitFor(() => {
-      expect(retryFile).toHaveBeenCalledWith(7, 41, 102);
+      expect(retryFile).toHaveBeenCalledWith(7, 41, 102, replacement);
     });
   });
 

@@ -265,6 +265,7 @@ async def retry_import_file(
     account_id: int,
     job_id: int,
     file_id: int,
+    replacement_upload: JobUpload | None = None,
 ) -> DataImportFile:
     job = await load_import_job(
         session,
@@ -280,6 +281,8 @@ async def retry_import_file(
         ImportFileStatus.PARTIALLY_COMPLETED,
     }:
         raise ValueError("only failed or partially completed files can be retried")
+    if replacement_upload is not None:
+        _validate_upload(replacement_upload)
     ordinal = int(
         await session.scalar(
             select(func.max(DataImportFile.ordinal)).where(
@@ -288,17 +291,35 @@ async def retry_import_file(
         )
         or 0
     ) + 1
+    filename = source.filename
+    content_type = source.content_type
+    byte_size = source.byte_size
+    digest = source.sha256
+    storage_key = source.storage_key
+    replacement_storage_key: str | None = None
+    if replacement_upload is not None:
+        extension = Path(replacement_upload.filename).suffix.lower()
+        digest = hashlib.sha256(replacement_upload.content).hexdigest()
+        replacement_storage_key = (
+            f"orgs/{job.org_id}/accounts/{job.account_id}/import-jobs/"
+            f"{job.id}/{ordinal}-{digest[:16]}-{uuid4().hex}{extension}"
+        )
+        storage.save_bytes(replacement_storage_key, replacement_upload.content)
+        filename = _safe_filename(replacement_upload.filename, extension)
+        content_type = replacement_upload.content_type or "application/octet-stream"
+        byte_size = len(replacement_upload.content)
+        storage_key = replacement_storage_key
     retried = DataImportFile(
         org_id=job.org_id,
         account_id=job.account_id,
         job_id=job.id,
         retry_of_file_id=source.id,
         ordinal=ordinal,
-        filename=source.filename,
-        content_type=source.content_type,
-        byte_size=source.byte_size,
-        sha256=source.sha256,
-        storage_key=source.storage_key,
+        filename=filename,
+        content_type=content_type,
+        byte_size=byte_size,
+        sha256=digest,
+        storage_key=storage_key,
         status=ImportFileStatus.QUEUED,
         error_payload={},
     )
@@ -306,7 +327,13 @@ async def retry_import_file(
     job.file_count += 1
     job.status = ImportJobStatus.QUEUED
     job.completed_at = None
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        if replacement_storage_key is not None:
+            storage.resolve(replacement_storage_key).unlink(missing_ok=True)
+        raise
     await session.refresh(retried)
     return retried
 

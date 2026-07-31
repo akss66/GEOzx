@@ -196,7 +196,7 @@ async def test_get_import_job_is_account_scoped(
 
 
 @pytest.mark.asyncio
-async def test_retry_endpoint_queues_only_a_failed_file(
+async def test_retry_endpoint_reuploads_only_a_failed_file(
     client,
     session,
     admin,
@@ -250,15 +250,25 @@ async def test_retry_endpoint_queues_only_a_failed_file(
     files[1].status = ImportFileStatus.FAILED
     await session.commit()
 
+    replacement = workbook_bytes(DAILY_HEADERS, [["2026-07-31", 25]])
     response = await client.post(
         f"/account-data/{account.id}/import-jobs/{job_id}/files/{files[1].id}/retry",
         headers=_auth(token),
+        files={
+            "file": (
+                "corrected.xlsx",
+                replacement,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
     )
 
     assert response.status_code == 202
     payload = response.json()
     assert len(payload["files"]) == 3
     assert payload["files"][-1]["retry_of_file_id"] == files[1].id
+    assert payload["files"][-1]["filename"] == "corrected.xlsx"
+    assert payload["files"][-1]["sha256"] != files[1].sha256
     assert payload["files"][-1]["status"] == "queued"
     assert enqueued == [job_id, job_id]
 

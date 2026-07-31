@@ -323,9 +323,14 @@ export async function retryAccountDataImportFile(
   accountId: number,
   jobId: number,
   fileId: number,
+  replacement: File,
 ): Promise<AccountDataImportJob> {
+  const formData = new FormData();
+  formData.append("file", replacement);
   const { data } = await api.post<AccountDataImportJob>(
     `/account-data/${accountId}/import-jobs/${jobId}/files/${fileId}/retry`,
+    formData,
+    { headers: { "Content-Type": "multipart/form-data" } },
   );
   return data;
 }

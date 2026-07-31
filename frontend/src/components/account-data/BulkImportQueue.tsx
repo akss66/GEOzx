@@ -139,11 +139,16 @@ export function BulkImportQueue({
     }
   }
 
-  async function retry(jobId: number, fileId: number) {
+  async function retry(jobId: number, fileId: number, replacement: File) {
     setRetryingFileId(fileId);
     setError(null);
     try {
-      const job = await retryAccountDataImportFile(accountId, jobId, fileId);
+      const job = await retryAccountDataImportFile(
+        accountId,
+        jobId,
+        fileId,
+        replacement,
+      );
       setJobs((current) => mergeJob(current, job));
       notifiedRef.current.delete(job.id);
     } catch (retryError) {
@@ -221,14 +226,24 @@ export function BulkImportQueue({
               ) : null}
               {message ? <p className="account-data-import-file__error">{message}</p> : null}
               {canRetry ? (
-                <button
-                  type="button"
-                  aria-label={`重试 ${file.filename}`}
-                  disabled={retryingFileId === file.id}
-                  onClick={() => void retry(job.id, file.id)}
+                <label
+                  className={`account-data-import-file__retry${retryingFileId === file.id ? " is-disabled" : ""}`}
                 >
-                  {retryingFileId === file.id ? "正在重试…" : "重试此文件"}
-                </button>
+                  {retryingFileId === file.id ? "正在重新上传…" : "重新上传此文件"}
+                  <input
+                    type="file"
+                    accept=".xlsx,.csv"
+                    aria-label={`重新上传 ${file.filename}`}
+                    disabled={retryingFileId === file.id}
+                    onChange={(event) => {
+                      const replacement = event.target.files?.[0];
+                      if (replacement) {
+                        void retry(job.id, file.id, replacement);
+                      }
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
               ) : null}
             </article>
           );

@@ -205,8 +205,18 @@ async def retry_bulk_import_file(
     file_id: int,
     user: CurrentUser,
     session: SessionDep,
+    file: Annotated[UploadFile | None, File()] = None,
 ) -> ImportJobOut:
     account = await require_account_access(session, user, account_id, roles=OPERATE_ROLES)
+    replacement_upload = (
+        JobUpload(
+            filename=file.filename or "upload.xlsx",
+            content_type=file.content_type or "application/octet-stream",
+            content=await file.read(MAX_FILE_BYTES + 1),
+        )
+        if file is not None
+        else None
+    )
     try:
         await retry_import_file(
             session,
@@ -214,6 +224,7 @@ async def retry_bulk_import_file(
             account_id=account.id,
             job_id=job_id,
             file_id=file_id,
+            replacement_upload=replacement_upload,
         )
         job = await load_import_job(
             session,
