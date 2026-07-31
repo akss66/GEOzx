@@ -689,6 +689,51 @@ class DataFieldObservation(Base, TimestampMixin):
     )
 
 
+class AccountDataBackfillCheckpoint(Base, TimestampMixin):
+    __tablename__ = "account_data_backfill_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "checkpoint_name",
+            name="uq_account_data_backfill_checkpoint_scope",
+        ),
+        CheckConstraint(
+            "processed_batch_count >= 0",
+            name="ck_account_data_backfill_processed_nonnegative",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    checkpoint_name: Mapped[str] = mapped_column(
+        String(120),
+        default="field_observation_v1",
+        server_default="field_observation_v1",
+        nullable=False,
+    )
+    last_committed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_batch_id: Mapped[int | None] = mapped_column(BigIntPK, nullable=True)
+    processed_batch_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
 class AccountMetricSnapshot(Base, TimestampMixin):
     __tablename__ = "account_metric_snapshots"
     __table_args__ = (

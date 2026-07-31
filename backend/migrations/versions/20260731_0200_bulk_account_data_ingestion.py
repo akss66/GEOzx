@@ -303,9 +303,66 @@ def upgrade() -> None:
         "data_field_observations",
         ["stat_date"],
     )
+    op.create_table(
+        "account_data_backfill_checkpoints",
+        sa.Column("id", sa.BigInteger(), nullable=False),
+        sa.Column("org_id", sa.BigInteger(), nullable=False),
+        sa.Column("account_id", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "checkpoint_name",
+            sa.String(length=120),
+            server_default="field_observation_v1",
+            nullable=False,
+        ),
+        sa.Column("last_committed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_batch_id", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "processed_batch_count",
+            sa.Integer(),
+            server_default="0",
+            nullable=False,
+        ),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "processed_batch_count >= 0",
+            name="ck_account_data_backfill_processed_nonnegative",
+        ),
+        sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "org_id",
+            "account_id",
+            "checkpoint_name",
+            name="uq_account_data_backfill_checkpoint_scope",
+        ),
+    )
+    op.create_index(
+        "ix_account_data_backfill_checkpoints_account_id",
+        "account_data_backfill_checkpoints",
+        ["account_id"],
+    )
+    op.create_index(
+        "ix_account_data_backfill_checkpoints_org_id",
+        "account_data_backfill_checkpoints",
+        ["org_id"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("account_data_backfill_checkpoints")
     op.drop_table("data_field_observations")
 
     with op.batch_alter_table("data_import_batches") as batch_op:

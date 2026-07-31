@@ -4,6 +4,7 @@
 """
 
 from app.models.account_data import (
+    AccountDataBackfillCheckpoint,
     AccountMetricSnapshot,
     AudienceProfileItem,
     AudienceProfileSnapshot,
@@ -68,6 +69,7 @@ from app.models.skill_runtime import SkillRun
 from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
+    "AccountDataBackfillCheckpoint",
     "DataImportBatch",
     "DataImportJob",
     "DataImportFile",

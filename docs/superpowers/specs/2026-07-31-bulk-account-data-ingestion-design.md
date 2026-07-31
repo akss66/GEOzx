@@ -627,6 +627,43 @@ fans.xlsx        未识别                              需要处理
 
 回滚代码时保留新增账本和观察值，不执行破坏性数据库降级。
 
+### 17.1 历史数据回填操作
+
+数据库迁移完成后，先对单一账号演练：
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m scripts.backfill_account_data_observations `
+  --org-id <ORG_ID> --account-id <ACCOUNT_ID> --batch-size 100
+```
+
+确认无误后移除 `--account-id`，按组织逐账号执行。命令按批次提交并在
+`account_data_backfill_checkpoints` 保存最后确认时间和批次 ID；中断后可执行同一命令，
+已完成账号会直接返回零处理量。回填只读取已提交批次，撤销批次会记录为跳过。
+
+上线前核对：
+
+```sql
+SELECT account_id, COUNT(*) AS observation_count
+FROM data_field_observations
+WHERE active = TRUE
+GROUP BY account_id
+ORDER BY account_id;
+
+SELECT account_id, processed_batch_count, last_batch_id, completed_at
+FROM account_data_backfill_checkpoints
+ORDER BY account_id;
+
+SELECT account_id, stat_date, COUNT(*) AS duplicate_count
+FROM account_metric_snapshots
+GROUP BY account_id, stat_date
+HAVING COUNT(*) > 1;
+```
+
+回填期间读取继续兼容旧快照：有观察值时使用规范化来源与字段证据，没有观察值的账号仍读取
+旧快照。回滚边界是应用 release，不删除观察值或 checkpoint；若出现差异，停止后续账号回填，
+保留现场并切回上一 release。
+
 ## 18. 验收标准
 
 以下条件全部满足才算完成：

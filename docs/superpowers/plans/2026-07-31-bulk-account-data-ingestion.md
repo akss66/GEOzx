@@ -288,7 +288,7 @@ export async function createAccountDataImportJob(
 - [x] Add a clear explanation that several platform exports together form the account dataset.
 - [x] Run `cd backend; python -m pytest tests/test_account_data_import_api.py -q`.
 - [x] Run `cd frontend; npm test -- --run src/components/account-data/statusMeta.test.ts src/pages/AccountDataCenter.test.tsx`.
-- [ ] Commit: `fix(account-data): show dataset coverage without completeness claims`.
+- [x] Commit: `fix(account-data): show dataset coverage without completeness claims`.
 
 ## Task 10: Backfill Existing Imports and Verify Compatibility
 
@@ -299,13 +299,13 @@ export async function createAccountDataImportJob(
 - Modify: `backend/migrations/versions/20260731_0200_bulk_account_data_ingestion.py`
 - Modify: `docs/superpowers/specs/2026-07-31-bulk-account-data-ingestion-design.md`
 
-- [ ] Add failing backfill tests for duplicate legacy snapshots, revoked batches, missing values, and explicit zero.
-- [ ] Implement an idempotent batched backfill from committed, non-revoked legacy batches into observations.
-- [ ] Rebuild canonical records account-by-account after observation backfill.
-- [ ] Record backfill checkpoints so production migration can resume safely.
-- [ ] Keep reads compatible during rollout: canonical projection first, legacy fallback only for accounts not yet backfilled.
-- [ ] Document operational commands, expected row counts, verification queries, and rollback boundaries.
-- [ ] Run `cd backend; python -m pytest tests/test_data_import_backfill.py -q`.
+- [x] Add failing backfill tests for duplicate legacy snapshots, revoked batches, missing values, and explicit zero.
+- [x] Implement an idempotent batched backfill from committed, non-revoked legacy batches into observations.
+- [x] Rebuild canonical records account-by-account after observation backfill.
+- [x] Record backfill checkpoints so production migration can resume safely.
+- [x] Keep reads compatible during rollout: canonical projection first, legacy fallback only for accounts not yet backfilled.
+- [x] Document operational commands, expected row counts, verification queries, and rollback boundaries.
+- [x] Run `cd backend; python -m pytest tests/test_data_import_backfill.py -q`.
 - [ ] Commit: `feat(account-data): backfill canonical observations`.
 
 ## Task 11: Full Verification and Production Rollout
