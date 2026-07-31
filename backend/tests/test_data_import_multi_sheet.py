@@ -139,4 +139,3 @@ def test_row_limit_is_enforced_across_all_worksheets(
 
     with pytest.raises(ParseFailure, match="10,000 rows"):
         parse_source_file("too-many.xlsx", payload)
-

@@ -95,4 +95,3 @@ def test_missing_required_headers_does_not_false_positive_as_a_template():
             "incomplete.csv",
             csv_bytes(["日期", "来源备注"], [["2026-07-18", "后台导出"]]),
         )
-

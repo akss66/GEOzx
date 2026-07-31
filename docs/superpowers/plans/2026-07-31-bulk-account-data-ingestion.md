@@ -201,7 +201,7 @@ class ParsedSourceFile:
 - [x] Permanently delete ledger rows only after collecting affected keys and rebuilding from survivors.
 - [x] Return actionable conflict responses if committed downstream records prevent deletion.
 - [x] Run `cd backend; python -m pytest tests/test_data_import_rebuild.py tests/test_account_data_import_api.py -q`.
-- [ ] Commit: `fix(account-data): rebuild canonical values after source removal`.
+- [x] Commit: `fix(account-data): rebuild canonical values after source removal`.
 
 ## Task 7: Add the Durable Bulk Job Service and API
 
@@ -233,7 +233,7 @@ POST   /account-data/{account_id}/import-jobs/{job_id}/files/{file_id}/retry
 - [x] Publish progress events using account/job-scoped payloads without leaking filenames across accounts.
 - [x] Preserve the legacy preview/commit endpoints for manual review flows.
 - [x] Run `cd backend; python -m pytest tests/test_account_data_import_jobs_api.py tests/test_account_data_import_jobs_worker.py -q`.
-- [ ] Commit: `feat(account-data): add resilient bulk import jobs`.
+- [x] Commit: `feat(account-data): add resilient bulk import jobs`.
 
 ## Task 8: Add Multi-File Frontend Contracts and Queue
 
@@ -306,7 +306,7 @@ export async function createAccountDataImportJob(
 - [x] Keep reads compatible during rollout: canonical projection first, legacy fallback only for accounts not yet backfilled.
 - [x] Document operational commands, expected row counts, verification queries, and rollback boundaries.
 - [x] Run `cd backend; python -m pytest tests/test_data_import_backfill.py -q`.
-- [ ] Commit: `feat(account-data): backfill canonical observations`.
+- [x] Commit: `feat(account-data): backfill canonical observations`.
 
 ## Task 11: Full Verification and Production Rollout
 
@@ -315,18 +315,18 @@ export async function createAccountDataImportJob(
 - Modify: deployment configuration only if a feature flag or worker registration requires it.
 - Create: `docs/superpowers/plans/2026-07-31-bulk-account-data-ingestion-verification.md`
 
-- [ ] Run focused backend tests for parser, merge, projection, job API, job worker, revoke/delete, and backfill.
-- [ ] Run the complete backend suite: `cd backend; python -m pytest -q`.
-- [ ] Run frontend tests: `cd frontend; npm test -- --run`.
-- [ ] Run frontend typecheck/build: `cd frontend; npm run build`.
-- [ ] Run lint in both projects using the repository's existing commands.
-- [ ] Apply migrations in a production-like database and verify one account with:
+- [x] Run focused backend tests for parser, merge, projection, job API, job worker, revoke/delete, and backfill.
+- [x] Run the complete backend suite: `cd backend; python -m pytest -q`.
+- [x] Run frontend tests: `cd frontend; npm test -- --run`.
+- [x] Run frontend typecheck/build: `cd frontend; npm run build`.
+- [x] Run lint in both projects using the repository's existing commands.
+- [x] Apply migrations in a production-like database and verify one account with:
   - four different supported exports uploaded together;
   - one malformed fifth file;
   - a second overlapping period import;
   - revoke and permanent delete fallback.
-- [ ] Verify browser behavior at desktop and narrow widths: drag/drop, picker, progress, isolated retry, history, coverage, and account switching.
-- [ ] Confirm cross-account isolation by switching accounts while a job runs.
+- [x] Verify browser behavior at desktop and narrow widths: drag/drop, picker, progress, isolated retry, history, coverage, and account switching.
+- [x] Confirm cross-account isolation by switching accounts while a job runs.
 - [ ] Deploy using the repository's existing release workflow, inspect health and worker logs, and run the same smoke scenario in production.
 - [ ] Record exact commands, release identifier, migration result, and evidence in the verification document.
 - [ ] Commit: `docs(account-data): record bulk ingestion verification`.
