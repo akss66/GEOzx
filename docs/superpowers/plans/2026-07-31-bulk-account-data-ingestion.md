@@ -109,8 +109,8 @@ def benchmark_entity_key(account_id: int, benchmark_code: str) -> str:
 - Modify: `backend/tests/test_data_import_preview.py`
 - Create: `backend/tests/test_data_import_header_matching.py`
 
-- [ ] Add failing tests for reordered columns, optional missing columns, supported headers with unrelated extra columns, duplicate aliases, and missing required headers.
-- [ ] Replace positional template matching with normalized header-to-column matching:
+- [x] Add failing tests for reordered columns, optional missing columns, supported headers with unrelated extra columns, duplicate aliases, and missing required headers.
+- [x] Replace positional template matching with normalized header-to-column matching:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -120,13 +120,13 @@ class TemplateMatch:
     ignored_headers: tuple[str, ...]
 ```
 
-- [ ] Implement `TemplateDefinition.match_headers(headers)` by building one normalized accepted-header lookup per template, resolving each source header to at most one canonical field, verifying every `required=True` field exists, and returning the matched indexes plus ignored headers.
-- [ ] Reject ambiguous mappings when two source columns resolve to the same canonical field.
-- [ ] Normalize rows using the resolved source-column indexes, not `enumerate(template.columns)`.
-- [ ] Store ignored extra headers as dataset warnings and preserve their raw values in the audit row.
-- [ ] Keep exact current templates valid to avoid a compatibility regression.
-- [ ] Run `cd backend; python -m pytest tests/test_data_import_preview.py tests/test_data_import_header_matching.py -q`.
-- [ ] Commit: `feat(account-data): detect templates by required headers`.
+- [x] Implement `TemplateDefinition.match_headers(headers)` by building one normalized accepted-header lookup per template, resolving each source header to at most one canonical field, verifying every `required=True` field exists, and returning the matched indexes plus ignored headers.
+- [x] Reject ambiguous mappings when two source columns resolve to the same canonical field.
+- [x] Normalize rows using the resolved source-column indexes, not `enumerate(template.columns)`.
+- [x] Store ignored extra headers as dataset warnings and preserve their raw values in the audit row.
+- [x] Keep exact current templates valid to avoid a compatibility regression.
+- [x] Run `cd backend; python -m pytest tests/test_data_import_preview.py tests/test_data_import_header_matching.py -q`.
+- [x] Commit: `feat(account-data): detect templates by required headers`.
 
 ## Task 4: Parse Multiple Worksheets and Multiple Files Safely
 

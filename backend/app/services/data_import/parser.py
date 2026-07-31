@@ -14,7 +14,7 @@ from openpyxl import load_workbook
 
 from app.services.data_import.templates import (
     ColumnDefinition,
-    TemplateDefinition,
+    TemplateMatch,
     detect_template,
     normalize_header_value,
 )
@@ -78,20 +78,31 @@ class ParsedDataset:
     headers: list[str]
     rows: list[ValidatedRow]
     preview: ImportPreview
+    warnings: list[RowIssue] = field(default_factory=list)
 
 
 def parse_source_file(filename: str, data: bytes) -> ParsedDataset:
     extension = _validate_source(filename, data)
     headers, raw_rows = _parse_xlsx(data) if extension == ".xlsx" else _parse_csv(data)
-    template = _detect_template_or_fail(headers)
-    rows = _normalize_rows(template, raw_rows)
+    match = _detect_template_or_fail(headers)
+    template = match.template
+    rows = _normalize_rows(match, headers, raw_rows)
     preview = build_preview(rows, template_code=template.code)
+    warnings = [
+        RowIssue(
+            code="ignored_column",
+            message=f"Unrecognized column was preserved for audit: {header}",
+            field=header,
+        )
+        for header in match.ignored_headers
+    ]
     return ParsedDataset(
         template_code=template.code,
         template_name=template.display_name,
         headers=headers,
         rows=rows,
         preview=preview,
+        warnings=warnings,
     )
 
 
@@ -287,31 +298,52 @@ def _validate_headers(headers: list[str]) -> None:
         raise ParseFailure("blank_headers", "Blank headers are not supported")
 
 
-def _detect_template_or_fail(headers: list[str]) -> TemplateDefinition:
+def _detect_template_or_fail(headers: list[str]) -> TemplateMatch:
     try:
         return detect_template(headers)
     except ValueError as exc:
         if str(exc) == "ambiguous":
             raise ParseFailure("ambiguous_template", "Ambiguous template signature") from exc
+        if str(exc) == "duplicate_canonical_field":
+            raise ParseFailure(
+                "duplicate_canonical_field",
+                "Multiple columns map to the same field",
+            ) from exc
         raise ParseFailure("unknown_template", "Unknown or unsupported template") from exc
 
 
 def _normalize_rows(
-    template: TemplateDefinition,
+    match: TemplateMatch,
+    headers: list[str],
     raw_rows: list[dict[str, Any]],
 ) -> list[ValidatedRow]:
+    template = match.template
+    ignored_warnings = [
+        RowIssue(
+            code="ignored_column",
+            message=f"Unrecognized column was preserved for audit: {header}",
+            field=header,
+        )
+        for header in match.ignored_headers
+    ]
     rows: list[ValidatedRow] = []
     for row in raw_rows:
         row_values = row["values"]
         raw = {
-            column.canonical_header: row_values[index] if index < len(row_values) else None
-            for index, column in enumerate(template.columns)
+            header: row_values[index] if index < len(row_values) else None
+            for index, header in enumerate(headers)
         }
         normalized: dict[str, Any] = {}
         errors: list[RowIssue] = []
-        warnings: list[RowIssue] = []
+        warnings = list(ignored_warnings)
         for column in template.columns:
-            parsed_value, issues = _parse_column_value(column, raw[column.canonical_header])
+            source_index = match.column_indexes.get(column.field_name)
+            raw_value = (
+                row_values[source_index]
+                if source_index is not None and source_index < len(row_values)
+                else None
+            )
+            parsed_value, issues = _parse_column_value(column, raw_value)
             normalized.update(parsed_value)
             errors.extend(issues)
         rows.append(

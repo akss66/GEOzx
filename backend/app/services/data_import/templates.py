@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 MAX_IMPORT_TITLE_CHARS = 230  # Leaves room for the timestamp in the 255-char weak key.
 
@@ -28,6 +29,21 @@ class ColumnDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class TemplateMatch:
+    template: TemplateDefinition
+    column_indexes: dict[str, int]
+    ignored_headers: tuple[str, ...]
+
+    @property
+    def recognized_count(self) -> int:
+        return len(self.column_indexes)
+
+    @property
+    def coverage(self) -> Fraction:
+        return Fraction(self.recognized_count, len(self.template.columns))
+
+
+@dataclass(frozen=True, slots=True)
 class TemplateDefinition:
     code: str
     display_name: str
@@ -42,15 +58,43 @@ class TemplateDefinition:
     def field_map(self) -> dict[str, str]:
         return {column.canonical_header: column.field_name for column in self.columns}
 
-    def matches(self, headers: list[str]) -> bool:
-        if len(headers) != len(self.columns):
-            return False
-        for header, column in zip(headers, self.columns, strict=True):
-            normalized = normalize_header_value(header)
-            accepted = {normalize_header_value(item) for item in column.accepted_headers}
-            if normalized not in accepted:
-                return False
-        return True
+    def match_headers(self, headers: list[str]) -> TemplateMatch | None:
+        accepted_columns: dict[str, ColumnDefinition] = {}
+        for column in self.columns:
+            for accepted_header in column.accepted_headers:
+                normalized = normalize_header_value(accepted_header)
+                existing = accepted_columns.get(normalized)
+                if existing is not None and existing.field_name != column.field_name:
+                    raise RuntimeError(
+                        f"Template {self.code} maps one header to multiple fields"
+                    )
+                accepted_columns[normalized] = column
+
+        column_indexes: dict[str, int] = {}
+        ignored_headers: list[str] = []
+        duplicate_fields: set[str] = set()
+        for index, header in enumerate(headers):
+            column = accepted_columns.get(normalize_header_value(header))
+            if column is None:
+                ignored_headers.append(header)
+                continue
+            if column.field_name in column_indexes:
+                duplicate_fields.add(column.field_name)
+                continue
+            column_indexes[column.field_name] = index
+
+        required_fields = {
+            column.field_name for column in self.columns if column.required
+        }
+        if not required_fields.issubset(column_indexes):
+            return None
+        if duplicate_fields:
+            raise ValueError("duplicate_canonical_field")
+        return TemplateMatch(
+            template=self,
+            column_indexes=column_indexes,
+            ignored_headers=tuple(ignored_headers),
+        )
 
 
 DAILY_PLAY_TEMPLATE = TemplateDefinition(
@@ -149,10 +193,30 @@ KNOWN_TEMPLATES: tuple[TemplateDefinition, ...] = (
 )
 
 
-def detect_template(headers: list[str]) -> TemplateDefinition:
-    matches = [template for template in KNOWN_TEMPLATES if template.matches(headers)]
+def detect_template(headers: list[str]) -> TemplateMatch:
+    matches: list[TemplateMatch] = []
+    has_duplicate_canonical_field = False
+    for template in KNOWN_TEMPLATES:
+        try:
+            match = template.match_headers(headers)
+        except ValueError as exc:
+            if str(exc) != "duplicate_canonical_field":
+                raise
+            has_duplicate_canonical_field = True
+            continue
+        if match is not None:
+            matches.append(match)
     if not matches:
+        if has_duplicate_canonical_field:
+            raise ValueError("duplicate_canonical_field")
         raise ValueError("unknown")
-    if len(matches) > 1:
+
+    best_score = max((match.coverage, match.recognized_count) for match in matches)
+    best_matches = [
+        match
+        for match in matches
+        if (match.coverage, match.recognized_count) == best_score
+    ]
+    if len(best_matches) > 1:
         raise ValueError("ambiguous")
-    return matches[0]
+    return best_matches[0]
