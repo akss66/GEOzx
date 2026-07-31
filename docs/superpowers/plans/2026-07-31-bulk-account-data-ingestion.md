@@ -33,12 +33,12 @@
 - Modify: `backend/tests/test_account_data_models.py`
 - Create: `backend/tests/test_bulk_import_models.py`
 
-- [ ] Add failing model tests proving that one job owns many files, one file owns many dataset batches, and field observations are account-scoped.
-- [ ] Add enums for job/file lifecycle states without changing existing `ImportBatchStatus` values.
-- [ ] Add `DataImportJob` with `org_id`, `account_id`, `created_by_id`, `client_request_id`, aggregate counts, timestamps, and unique `(org_id, account_id, client_request_id)`.
-- [ ] Add `DataImportFile` with job ownership, artifact identity, status, error payload, retry lineage, and unique `(job_id, ordinal)`.
-- [ ] Extend `DataImportBatch` with nullable `job_id`, `job_file_id`, `sheet_name`, `dataset_ordinal`, and `confirmed_sequence`.
-- [ ] Add `DataFieldObservation` with:
+- [x] Add failing model tests proving that one job owns many files, one file owns many dataset batches, and field observations are account-scoped.
+- [x] Add enums for job/file lifecycle states without changing existing `ImportBatchStatus` values.
+- [x] Add `DataImportJob` with `org_id`, `account_id`, `created_by_id`, `client_request_id`, aggregate counts, timestamps, and unique `(org_id, account_id, client_request_id)`.
+- [x] Add `DataImportFile` with job ownership, artifact identity, status, error payload, retry lineage, and unique `(job_id, ordinal)`.
+- [x] Extend `DataImportBatch` with nullable `job_id`, `job_file_id`, `sheet_name`, `dataset_ordinal`, and `confirmed_sequence`.
+- [x] Add `DataFieldObservation` with:
 
 ```python
 class DataFieldObservation(Base, TimestampMixin):
@@ -59,10 +59,10 @@ class DataFieldObservation(Base, TimestampMixin):
     active: Mapped[bool]
 ```
 
-- [ ] Add indexes for `(account_id, domain, entity_key, stat_date, field_name, active)` and idempotency uniqueness on `(import_batch_id, import_row_id, domain, entity_key, stat_date, field_name)`.
-- [ ] Write forward and downgrade Alembic operations, including PostgreSQL enum creation guards and SQLite-compatible test behavior.
-- [ ] Run `cd backend; python -m pytest tests/test_account_data_models.py tests/test_bulk_import_models.py -q`.
-- [ ] Commit: `feat(account-data): add bulk import job and observation models`.
+- [x] Add indexes for `(account_id, domain, entity_key, stat_date, field_name, active)` and idempotency uniqueness on `(import_batch_id, import_row_id, domain, entity_key, stat_date, field_name)`.
+- [x] Write forward and downgrade Alembic operations, including PostgreSQL enum creation guards and SQLite-compatible test behavior.
+- [x] Run `cd backend; python -m pytest tests/test_account_data_models.py tests/test_bulk_import_models.py -q`.
+- [x] Commit: `feat(account-data): add bulk import job and observation models`.
 
 ## Task 2: Build the Deterministic Merge Kernel
 
@@ -71,14 +71,14 @@ class DataFieldObservation(Base, TimestampMixin):
 - Create: `backend/app/services/data_import/merge.py`
 - Create: `backend/tests/test_data_import_merge.py`
 
-- [ ] Add failing table-driven tests for account, content, audience, and benchmark business keys.
-- [ ] Add failing tests proving:
+- [x] Add failing table-driven tests for account, content, audience, and benchmark business keys.
+- [x] Add failing tests proving:
   - absent/blank input creates no observation;
   - explicit `0` creates an observation;
   - higher source priority wins;
   - later confirmation wins at equal priority;
   - stable ID breaks an otherwise exact tie.
-- [ ] Implement pure business-key builders:
+- [x] Implement pure business-key builders:
 
 ```python
 def account_entity_key(account_id: int) -> str:
@@ -94,11 +94,11 @@ def benchmark_entity_key(account_id: int, benchmark_code: str) -> str:
     return f"account:{account_id}:benchmark:{benchmark_code}"
 ```
 
-- [ ] Implement `iter_present_fields(normalized: Mapping[str, Any])` so `None` and missing markers are ignored while `0`, `0.0`, and `False` are preserved.
-- [ ] Implement `choose_winner(observations)` ordered by source priority, confirmation sequence, and observation ID.
-- [ ] Keep the module independent of SQLAlchemy so unit tests exercise the real merge semantics without database mocks.
-- [ ] Run `cd backend; python -m pytest tests/test_data_import_merge.py -q`.
-- [ ] Commit: `feat(account-data): add deterministic field merge kernel`.
+- [x] Implement `iter_present_fields(normalized: Mapping[str, Any])` so `None` and missing markers are ignored while `0`, `0.0`, and `False` are preserved.
+- [x] Implement `choose_winner(observations)` ordered by source priority, confirmation sequence, and observation ID.
+- [x] Keep the module independent of SQLAlchemy so unit tests exercise the real merge semantics without database mocks.
+- [x] Run `cd backend; python -m pytest tests/test_data_import_merge.py -q`.
+- [x] Commit: `feat(account-data): add deterministic field merge kernel`.
 
 ## Task 3: Make Template Detection Header-Driven
 
