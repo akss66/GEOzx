@@ -26,9 +26,9 @@ export function getSourceKindLabel(sourceKind: AccountDataSourceKind) {
 }
 
 export function getCoverageLabel(coverage: AccountDataCoverage) {
-  if (coverage === "available") return "数据完整";
-  if (coverage === "partial") return "部分数据";
-  return "待补齐";
+  if (coverage === "available") return "已有可用数据";
+  if (coverage === "partial") return "已有部分数据";
+  return "尚未导入";
 }
 
 export function getBatchStatusLabel(status: AccountDataImportBatchStatus) {

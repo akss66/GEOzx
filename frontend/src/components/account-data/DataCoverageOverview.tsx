@@ -1,10 +1,10 @@
 import type {
-  AccountDataCoverage,
+  AccountDataDatasetInventoryItem,
+  AccountDataDatasetStatus,
   AccountDataStatus,
   AccountDataStatusSource,
 } from "../../api/accountData";
 import {
-  getCoverageLabel,
   getSourceKindLabel,
   getTemplateLabel,
 } from "./statusMeta";
@@ -30,6 +30,28 @@ function formatSourcePeriod(source: AccountDataStatusSource | undefined) {
   }).format(date);
 }
 
+function getDatasetStatusLabel(status: AccountDataDatasetStatus) {
+  if (status === "available") return "已有可用数据";
+  if (status === "stale") return "数据需要更新";
+  if (status === "processing") return "正在导入";
+  if (status === "failed") return "最近导入失败";
+  return "尚未导入";
+}
+
+function inventoryFallback(
+  status: AccountDataStatus,
+  dataDomain: string,
+): AccountDataDatasetInventoryItem {
+  const source = status.sources.find((item) => item.data_domain === dataDomain) ?? null;
+  return {
+    data_domain: dataDomain,
+    status: status.coverage[dataDomain] === "available" ? "available" : "not_imported",
+    confirmed_period_start: source?.period_start ?? null,
+    confirmed_period_end: source?.period_end ?? null,
+    latest_source: source,
+  };
+}
+
 type DataCoverageOverviewProps = {
   status: AccountDataStatus;
   onImportDomain: (domain: string) => void;
@@ -41,14 +63,19 @@ export function DataCoverageOverview({
   onImportDomain,
   onAnalyze,
 }: DataCoverageOverviewProps) {
-  const availableCount = Object.values(status.coverage).filter(
-    (coverage) => coverage !== "missing",
+  const inventory = domains.map((domain) => (
+    status.dataset_inventory?.find((item) => item.data_domain === domain.key)
+    ?? inventoryFallback(status, domain.key)
+  ));
+  const availableCount = inventory.filter(
+    (item) => item.status === "available" || item.status === "stale",
   ).length;
+  const hasExplicitInventory = Boolean(status.dataset_inventory?.length);
   const conclusion = availableCount === 0
     ? "当前账号还没有可供运营分析的数据。"
-    : availableCount === domains.length
-      ? "当前账号已有完整可用数据"
-      : "当前账号已有部分可用数据";
+    : hasExplicitInventory
+      ? `已导入 ${availableCount}/${status.dataset_inventory!.length} 类数据，当前账号已有可用数据`
+      : `已导入 ${availableCount} 类数据，当前账号已有可用数据`;
 
   return (
     <section className="account-data-overview" aria-labelledby="account-data-overview-title">
@@ -56,7 +83,10 @@ export function DataCoverageOverview({
         <div>
           <span>数据健康度</span>
           <h2 id="account-data-overview-title">{conclusion}</h2>
-          <p>这里只统计已确认写入的数据，待确认批次不会提前进入分析口径。</p>
+          <p>
+            账号数据由多类平台导出共同组成；这里只统计已确认写入的数据，
+            待确认或处理中的文件不会提前进入分析口径。
+          </p>
         </div>
         {availableCount === 0 ? (
           <button type="button" onClick={() => onImportDomain("account_metrics")}>
@@ -67,34 +97,39 @@ export function DataCoverageOverview({
 
       <div className="account-data-domain-grid">
         {domains.map((domain) => {
-          const coverage = status.coverage[domain.key] ?? "missing";
-          const source = status.sources.find((item) => item.data_domain === domain.key);
+          const dataset = inventory.find((item) => item.data_domain === domain.key)!;
+          const source = dataset.latest_source ?? undefined;
+          const needsImport = dataset.status !== "available";
           return (
-            <article key={domain.key} className={`account-data-domain-row is-${coverage}`}>
+            <article key={domain.key} className={`account-data-domain-row is-${dataset.status}`}>
               <div>
                 <span>{domain.label}</span>
-                <strong>{getCoverageLabel(coverage as AccountDataCoverage)}</strong>
+                <strong>{getDatasetStatusLabel(dataset.status)}</strong>
               </div>
               <div>
                 <span>数据时间</span>
-                <strong>{formatSourcePeriod(source)}</strong>
+                <strong>
+                  {dataset.confirmed_period_start && dataset.confirmed_period_end
+                    ? `${dataset.confirmed_period_start} 至 ${dataset.confirmed_period_end}`
+                    : formatSourcePeriod(source)}
+                </strong>
               </div>
               <div>
                 <span>最近来源</span>
                 <strong>
                   {source
                     ? `${getSourceKindLabel(source.source_kind)} · ${getTemplateLabel(source.template_code)}`
-                    : "待补齐"}
+                    : "尚未导入"}
                 </strong>
               </div>
               <button
                 type="button"
                 onClick={() => {
-                  if (coverage === "missing") onImportDomain(domain.key);
+                  if (needsImport) onImportDomain(domain.key);
                   else onAnalyze(domain.key);
                 }}
               >
-                {coverage === "missing" ? "补齐数据" : "交给运营大脑分析"}
+                {needsImport ? "添加此类数据" : "交给运营大脑分析"}
               </button>
             </article>
           );

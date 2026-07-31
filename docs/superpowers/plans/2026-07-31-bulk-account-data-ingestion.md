@@ -265,7 +265,7 @@ export async function createAccountDataImportJob(
 - [x] Keep manual entry under `其他录入方式`; do not replace the active multi-file queue when additional files are selected.
 - [x] Preserve keyboard access, visible focus, and screen-reader status announcements.
 - [x] Run `cd frontend; npm test -- --run src/components/account-data/BulkImportQueue.test.tsx src/components/account-data/ManualDataEntry.test.tsx src/components/account-data/ImportBatchHistory.test.tsx`, then `npm run lint` and `npm run build`.
-- [ ] Commit: `feat(account-data): add multi-file import queue`.
+- [x] Commit: `feat(account-data): add multi-file import queue`.
 
 ## Task 9: Correct Coverage Semantics and Operator Copy
 
@@ -280,14 +280,14 @@ export async function createAccountDataImportJob(
 - Modify: `frontend/src/components/account-data/statusMeta.test.ts`
 - Modify: `frontend/src/pages/AccountDataCenter.test.tsx`
 
-- [ ] Add failing backend tests that coverage reports each dataset type independently and never infers “complete account data” from one imported template.
-- [ ] Return supported dataset inventory with statuses `not_imported`, `available`, `stale`, `processing`, and `failed`, plus confirmed date range and latest source.
-- [ ] Replace `数据完整` with `已有可用数据`, `补齐数据` with `添加此类数据`, and `更新数据/更换文件` with `添加数据文件`.
-- [ ] Show `已导入 N/M 类数据` only when M is the explicit supported dataset inventory; otherwise show `已导入 N 类数据`.
-- [ ] Make pending jobs visible without counting them as confirmed coverage.
-- [ ] Add a clear explanation that several platform exports together form the account dataset.
-- [ ] Run `cd backend; python -m pytest tests/test_account_data_import_api.py -q`.
-- [ ] Run `cd frontend; npm test -- --run src/components/account-data/statusMeta.test.ts src/pages/AccountDataCenter.test.tsx`.
+- [x] Add failing backend tests that coverage reports each dataset type independently and never infers “complete account data” from one imported template.
+- [x] Return supported dataset inventory with statuses `not_imported`, `available`, `stale`, `processing`, and `failed`, plus confirmed date range and latest source.
+- [x] Replace `数据完整` with `已有可用数据`, `补齐数据` with `添加此类数据`, and `更新数据/更换文件` with `添加数据文件`.
+- [x] Show `已导入 N/M 类数据` only when M is the explicit supported dataset inventory; otherwise show `已导入 N 类数据`.
+- [x] Make pending jobs visible without counting them as confirmed coverage.
+- [x] Add a clear explanation that several platform exports together form the account dataset.
+- [x] Run `cd backend; python -m pytest tests/test_account_data_import_api.py -q`.
+- [x] Run `cd frontend; npm test -- --run src/components/account-data/statusMeta.test.ts src/pages/AccountDataCenter.test.tsx`.
 - [ ] Commit: `fix(account-data): show dataset coverage without completeness claims`.
 
 ## Task 10: Backfill Existing Imports and Verify Compatibility

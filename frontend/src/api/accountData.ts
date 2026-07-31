@@ -7,6 +7,12 @@ export type AccountDataSourceKind =
   | "manual_entry";
 
 export type AccountDataCoverage = "available" | "partial" | "missing";
+export type AccountDataDatasetStatus =
+  | "not_imported"
+  | "available"
+  | "stale"
+  | "processing"
+  | "failed";
 export type AccountDataImportBatchStatus =
   | "uploaded"
   | "preview_ready"
@@ -169,6 +175,15 @@ export interface AccountDataStatus {
   latest_confirmed_at: string | null;
   coverage: Record<string, AccountDataCoverage>;
   sources: AccountDataStatusSource[];
+  dataset_inventory?: AccountDataDatasetInventoryItem[];
+}
+
+export interface AccountDataDatasetInventoryItem {
+  data_domain: string;
+  status: AccountDataDatasetStatus;
+  confirmed_period_start: string | null;
+  confirmed_period_end: string | null;
+  latest_source: AccountDataStatusSource | null;
 }
 
 export interface ManualAccountMetrics {

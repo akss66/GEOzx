@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePath
 from typing import TypedDict
 from urllib.parse import quote, unquote
@@ -323,12 +323,12 @@ async def create_job_dataset_preview(
         sheet_name=dataset.sheet_name,
         dataset_ordinal=dataset.dataset_ordinal,
         row_count=dataset.preview.total_rows,
-        period_start=_derive_period_boundary(
+        period_start=_derive_effective_period_boundary(
             dataset.rows,
             field_name="period_start",
             reducer=min,
         ),
-        period_end=_derive_period_boundary(
+        period_end=_derive_effective_period_boundary(
             dataset.rows,
             field_name="period_end",
             reducer=max,
@@ -715,7 +715,7 @@ async def account_status_summary(
     org_id: int,
     account_id: int,
 ) -> dict[str, object]:
-    batches = await session.scalars(
+    batches = list(await session.scalars(
         select(DataImportBatch)
         .where(
             DataImportBatch.org_id == org_id,
@@ -724,7 +724,7 @@ async def account_status_summary(
             DataImportBatch.revoked_at.is_(None),
         )
         .order_by(DataImportBatch.committed_at.desc(), DataImportBatch.id.desc())
-    )
+    ))
     latest_confirmed_at = None
     coverage = {
         "account_metrics": "missing",
@@ -758,11 +758,72 @@ async def account_status_summary(
                 "period_end": batch.period_end,
             }
         )
+    pending_batches = list(
+        await session.scalars(
+            select(DataImportBatch)
+            .where(
+                DataImportBatch.org_id == org_id,
+                DataImportBatch.account_id == account_id,
+                DataImportBatch.committed_at.is_(None),
+                DataImportBatch.revoked_at.is_(None),
+            )
+            .order_by(DataImportBatch.updated_at.desc(), DataImportBatch.id.desc())
+        )
+    )
+    pending_by_domain: dict[str, str] = {}
+    for batch in pending_batches:
+        data_domain = template_domains.get(batch.template_code)
+        if data_domain is None or data_domain in pending_by_domain:
+            continue
+        pending_by_domain[data_domain] = (
+            "failed"
+            if batch.status is ImportBatchStatus.FAILED
+            else "processing"
+        )
+    stale_before = datetime.now(UTC) - timedelta(days=45)
+    dataset_inventory: list[dict[str, object]] = []
+    for data_domain in coverage:
+        domain_sources = [
+            source for source in sources if source["data_domain"] == data_domain
+        ]
+        latest_source = domain_sources[0] if domain_sources else None
+        if latest_source is not None:
+            committed_at = latest_source["committed_at"]
+            inventory_status = (
+                "stale"
+                if (
+                    isinstance(committed_at, datetime)
+                    and committed_at.date() < stale_before.date()
+                )
+                else "available"
+            )
+        else:
+            inventory_status = pending_by_domain.get(data_domain, "not_imported")
+        period_starts = [
+            source["period_start"]
+            for source in domain_sources
+            if isinstance(source["period_start"], date)
+        ]
+        period_ends = [
+            source["period_end"]
+            for source in domain_sources
+            if isinstance(source["period_end"], date)
+        ]
+        dataset_inventory.append(
+            {
+                "data_domain": data_domain,
+                "status": inventory_status,
+                "confirmed_period_start": min(period_starts) if period_starts else None,
+                "confirmed_period_end": max(period_ends) if period_ends else None,
+                "latest_source": latest_source,
+            }
+        )
     return {
         "account_id": account_id,
         "latest_confirmed_at": latest_confirmed_at,
         "coverage": coverage,
         "sources": sources,
+        "dataset_inventory": dataset_inventory,
     }
 
 
@@ -966,8 +1027,16 @@ async def _insert_preview_graph(
             content_sha256=content_sha256,
             parser_version=CURRENT_IMPORT_PARSER_VERSION,
             row_count=preview_row_count,
-            period_start=_derive_period_boundary(rows, field_name="period_start", reducer=min),
-            period_end=_derive_period_boundary(rows, field_name="period_end", reducer=max),
+            period_start=_derive_effective_period_boundary(
+                rows,
+                field_name="period_start",
+                reducer=min,
+            ),
+            period_end=_derive_effective_period_boundary(
+                rows,
+                field_name="period_end",
+                reducer=max,
+            ),
         )
         session.add(batch)
         await session.flush()
@@ -2652,6 +2721,18 @@ def _derive_period_boundary(rows: list, *, field_name: str, reducer):
         elif isinstance(value, date):
             values.append(value)
     return reducer(values) if values else None
+
+
+def _derive_effective_period_boundary(rows: list, *, field_name: str, reducer):
+    return _derive_period_boundary(
+        rows,
+        field_name=field_name,
+        reducer=reducer,
+    ) or _derive_period_boundary(
+        rows,
+        field_name="stat_date",
+        reducer=reducer,
+    )
 
 
 def _manual_normalized_values(payload: dict) -> dict:

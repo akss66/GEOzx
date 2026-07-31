@@ -61,7 +61,7 @@ export function AccountDataHeader({
         </div>
       </div>
       <Button type="primary" loading={updating} onClick={onUpdateData}>
-        更新数据
+        添加数据文件
       </Button>
     </header>
   );

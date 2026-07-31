@@ -471,6 +471,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           latest_confirmed_at: null,
           coverage: {},
           sources: [],
+          dataset_inventory: [],
         }}
         pendingBatch={pendingBatch}
         updating={statusQuery.isFetching || historyQuery.isFetching}

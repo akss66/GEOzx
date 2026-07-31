@@ -26,8 +26,8 @@ describe("account data business labels", () => {
     expect(getSourceKindLabel("screenshot_verified")).toBe("截图佐证");
     expect(getSourceKindLabel("manual_entry")).toBe("人工录入");
 
-    expect(getCoverageLabel("available")).toBe("数据完整");
-    expect(getCoverageLabel("partial")).toBe("部分数据");
-    expect(getCoverageLabel("missing")).toBe("待补齐");
+    expect(getCoverageLabel("available")).toBe("已有可用数据");
+    expect(getCoverageLabel("partial")).toBe("已有部分数据");
+    expect(getCoverageLabel("missing")).toBe("尚未导入");
   });
 });

@@ -850,6 +850,27 @@ async def test_commit_projects_daily_play_into_account_metric_snapshots_and_stat
         "audience_profiles": "missing",
         "benchmarks": "missing",
     }
+    inventory = {
+        item["data_domain"]: item
+        for item in coverage.json()["dataset_inventory"]
+    }
+    assert inventory["account_metrics"]["status"] == "available"
+    assert inventory["account_metrics"]["confirmed_period_start"] == "2026-07-18"
+    assert inventory["account_metrics"]["confirmed_period_end"] == "2026-07-18"
+    assert inventory["account_metrics"]["latest_source"] | {"committed_at": None} == {
+        "batch_id": batch_id,
+        "source_kind": "platform_export",
+        "template_code": "douyin_daily_play_v1",
+        "data_domain": "account_metrics",
+        "committed_at": None,
+        "period_start": "2026-07-18",
+        "period_end": "2026-07-18",
+    }
+    assert [
+        item["status"]
+        for item in coverage.json()["dataset_inventory"]
+        if item["data_domain"] != "account_metrics"
+    ] == ["not_imported", "not_imported", "not_imported"]
 
 
 @pytest.mark.asyncio

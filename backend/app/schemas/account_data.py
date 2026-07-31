@@ -152,8 +152,17 @@ class AccountDataStatusSourceOut(BaseModel):
     period_end: date | None = None
 
 
+class AccountDataDatasetStatusOut(BaseModel):
+    data_domain: str
+    status: Literal["not_imported", "available", "stale", "processing", "failed"]
+    confirmed_period_start: date | None = None
+    confirmed_period_end: date | None = None
+    latest_source: AccountDataStatusSourceOut | None = None
+
+
 class AccountDataStatusOut(BaseModel):
     account_id: int
     latest_confirmed_at: datetime | None = None
     coverage: dict[str, str]
     sources: list[AccountDataStatusSourceOut] = Field(default_factory=list)
+    dataset_inventory: list[AccountDataDatasetStatusOut] = Field(default_factory=list)
