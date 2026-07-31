@@ -461,8 +461,70 @@ def test_turn_observability_migration_is_additive_nullable_and_reversible(
         )
 
 
-def test_migration_head_is_turn_observability() -> None:
-    assert get_head_revision() == "20260730_0600"
+def test_data_import_parser_version_migration_is_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260731_0100_data_import_parser_version"
+    )
+    assert migration.down_revision == "20260730_0600"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    batches = sa.Table(
+        "data_import_batches",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("template_code", sa.String(80), nullable=False),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            batches.insert(),
+            [{"id": 1, "template_code": "douyin_period_aggregate_v1"}],
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {
+            column["name"]: column
+            for column in inspector.get_columns("data_import_batches")
+        }
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("data_import_batches")
+        }
+        assert columns["parser_version"]["nullable"] is False
+        assert connection.execute(
+            sa.text("SELECT parser_version FROM data_import_batches WHERE id = 1")
+        ).scalar_one() == 1
+        connection.execute(
+            sa.text(
+                "INSERT INTO data_import_batches (id, template_code) "
+                "VALUES (2, 'douyin_daily_play_v1')"
+            )
+        )
+        assert connection.execute(
+            sa.text("SELECT parser_version FROM data_import_batches WHERE id = 2")
+        ).scalar_one() == 1
+        assert "ck_data_import_batches_parser_version_positive" in checks
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE data_import_batches SET parser_version = 0 WHERE id = 1")
+            )
+
+        migration.downgrade()
+        assert "parser_version" not in {
+            column["name"] for column in sa.inspect(connection).get_columns("data_import_batches")
+        }
+
+
+def test_migration_head_is_data_import_parser_version() -> None:
+    assert get_head_revision() == "20260731_0100"
 
 
 def test_offline_migrations_fail_fast_for_data_dependent_chain() -> None:

@@ -4,8 +4,10 @@ import json
 from datetime import UTC, date, datetime
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.api.account_data import upload_import
 from app.core.security import hash_password
 from app.models import (
     Account,
@@ -32,6 +34,7 @@ from app.models.enums import (
     UserRole,
     WorkspaceRole,
 )
+from app.services.data_import.parser import MAX_FILE_BYTES
 from tests.test_data_import_templates import (
     DAILY_HEADERS,
     PERIOD_AGGREGATE_HEADERS,
@@ -323,6 +326,151 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
     assert metric.profile_visit_count == 3
     assert candidate.content_format == "1min-\u89c6\u9891"
     assert candidate.review_status == "\u516c\u5f00"
+
+
+@pytest.mark.asyncio
+async def test_upload_reads_only_one_byte_beyond_the_supported_file_limit(
+    session,
+    account_access_setup,
+) -> None:
+    account = account_access_setup["account"]
+    operator = account_access_setup["operator"]
+
+    class OversizedUpload:
+        filename = "oversized.xlsx"
+
+        def __init__(self) -> None:
+            self.requested_size: int | None = None
+
+        async def read(self, size: int | None = None) -> bytes:
+            self.requested_size = size
+            return b"x" * (MAX_FILE_BYTES + 1)
+
+    upload = OversizedUpload()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await upload_import(account.id, operator, session, upload)
+
+    assert exc_info.value.status_code == 422
+    assert upload.requested_size == MAX_FILE_BYTES + 1
+
+
+@pytest.mark.asyncio
+async def test_header_only_preview_cannot_be_committed(
+    client,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "empty.xlsx",
+                workbook_bytes(WORK_LIST_HEADERS, []),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert preview.status_code == 201
+    assert preview.json()["row_count"] == 0
+
+    committed = await client.post(
+        f"/account-data/{account.id}/imports/{preview.json()['id']}/commit",
+        headers=_auth(operator_token),
+    )
+
+    assert committed.status_code == 409
+    assert committed.json()["detail"] == "batch contains no data rows"
+
+
+@pytest.mark.asyncio
+async def test_overlong_source_filename_is_safely_truncated(
+    client,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                f"{'x' * 300}.xlsx",
+                _daily_play_workbook_payload(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert preview.status_code == 201
+    filename = preview.json()["artifacts"][0]["filename"]
+    assert len(filename) == 255
+    assert filename.endswith(".xlsx")
+
+
+@pytest.mark.asyncio
+async def test_reupload_reuses_current_preview_but_rebuilds_outdated_parser_preview(
+    client,
+    session,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    payload = _period_aggregate_workbook_payload()
+    upload = {
+        "file": (
+            "period.xlsx",
+            payload,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    }
+
+    first = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files=upload,
+    )
+    repeated = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files=upload,
+    )
+
+    assert first.status_code == 201
+    assert repeated.status_code == 201
+    assert repeated.json()["id"] == first.json()["id"]
+
+    first_batch = await session.get(DataImportBatch, first.json()["id"])
+    assert first_batch is not None
+    first_batch.parser_version = 1
+    await session.commit()
+
+    rebuilt = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files=upload,
+    )
+
+    assert rebuilt.status_code == 201
+    assert rebuilt.json()["id"] != first.json()["id"]
+    await session.refresh(first_batch)
+    assert first_batch.status is ImportBatchStatus.REVOKED
+    assert first_batch.revoked_at is not None
+    rebuilt_batch = await session.get(DataImportBatch, rebuilt.json()["id"])
+    assert rebuilt_batch is not None
+    assert rebuilt_batch.parser_version == 2
 
 
 @pytest.mark.asyncio

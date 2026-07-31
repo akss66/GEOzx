@@ -8,6 +8,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
+from openpyxl import Workbook
 
 import app.services.data_import.parser as parser_module
 from app.services.data_import.adapters import FileDataSourceAdapter
@@ -146,6 +147,21 @@ def csv_bytes(
     return (b"\xef\xbb\xbf" + data) if bom else data
 
 
+def typed_workbook_bytes(
+    headers: list[str],
+    rows: Iterable[Iterable[object | None]],
+) -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(headers)
+    for row in rows:
+        worksheet.append(list(row))
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
 def _xml_row(index: int, values: list[object | None], formulas: set[tuple[int, int]]) -> str:
     cells: list[str] = []
     for column_index, value in enumerate(values, start=1):
@@ -216,6 +232,20 @@ def test_daily_play_template_detects_in_excel_and_csv(filename: str, payload):
     assert parsed.rows[0].normalized["stat_date"] == date(2026, 7, 18)
     assert parsed.rows[0].normalized["play"] == 81
     assert parsed.rows[0].errors == []
+
+
+def test_daily_play_accepts_typed_excel_dates_and_grouped_counts():
+    typed = parse_source_file(
+        "daily.xlsx",
+        typed_workbook_bytes(DAILY_HEADERS, [[date(2026, 7, 18), 1234]]),
+    )
+    grouped = parse_source_file(
+        "daily.csv",
+        csv_bytes(DAILY_HEADERS, [["2026-07-18", "1,234"]]),
+    )
+
+    assert typed.rows[0].normalized == {"stat_date": date(2026, 7, 18), "play": 1234}
+    assert grouped.rows[0].normalized["play"] == 1234
 
 
 @pytest.mark.parametrize(
@@ -342,6 +372,32 @@ def test_period_aggregate_accepts_fractional_median_and_average_counts():
     assert row.normalized["avg_share_count"] == 0.5
 
 
+def test_period_aggregate_rejects_reversed_date_ranges():
+    parsed = parse_source_file(
+        "aggregate.xlsx",
+        workbook_bytes(
+            PERIOD_AGGREGATE_HEADERS,
+            [[
+                "2026-07-31 ~ 2026-05-02",
+                "1min-视频",
+                "科技",
+                "2",
+                "0.1354",
+                "0.1630",
+                "0.6135",
+                "3.2148",
+                "398.5000",
+                "8.0000",
+                "1.5000",
+                "0.5000",
+            ]],
+        ),
+    )
+
+    assert parsed.preview.invalid_rows == 1
+    assert {issue.code for issue in parsed.rows[0].errors} == {"reversed_date_range"}
+
+
 @pytest.mark.parametrize(
     ("filename", "payload"),
     [
@@ -447,6 +503,59 @@ def test_invalid_dates_and_percentages_are_reported_in_preview():
     assert parsed.rows[0].normalized["published_at"] is None
 
 
+def test_required_identity_and_metric_fields_cannot_be_blank():
+    daily = parse_source_file(
+        "daily.csv",
+        csv_bytes(DAILY_HEADERS, [["", "81"]]),
+    )
+    single = parse_source_file(
+        "single.csv",
+        csv_bytes(
+            SINGLE_CONTENT_HEADERS,
+            [["", "2026-07-07 13:36", "444", "0.1471", "0.6353", "2.8314"]],
+        ),
+    )
+
+    assert {issue.code for issue in daily.rows[0].errors} == {"required_value_missing"}
+    assert daily.rows[0].errors[0].field == "stat_date"
+    assert {issue.code for issue in single.rows[0].errors} == {"required_value_missing"}
+    assert single.rows[0].errors[0].field == "title"
+
+
+def test_negative_counts_and_non_finite_numbers_are_invalid():
+    daily = parse_source_file(
+        "daily.csv",
+        csv_bytes(DAILY_HEADERS, [["2026-07-18", "-1"]]),
+    )
+    single = parse_source_file(
+        "single.csv",
+        csv_bytes(
+            SINGLE_CONTENT_HEADERS,
+            [["作品 A", "2026-07-07 13:36", "444", "0.1471", "0.6353", "NaN"]],
+        ),
+    )
+
+    assert {issue.code for issue in daily.rows[0].errors} == {"below_minimum"}
+    assert {issue.code for issue in single.rows[0].errors} == {"invalid_number"}
+
+
+def test_integer_overflow_and_oversized_titles_are_invalid():
+    daily = parse_source_file(
+        "daily.csv",
+        csv_bytes(DAILY_HEADERS, [["2026-07-18", str(2**31)]]),
+    )
+    single = parse_source_file(
+        "single.csv",
+        csv_bytes(
+            SINGLE_CONTENT_HEADERS,
+            [["作" * 231, "2026-07-07 13:36", "444", "0.1471", "0.6353", "2.8314"]],
+        ),
+    )
+
+    assert {issue.code for issue in daily.rows[0].errors} == {"integer_out_of_range"}
+    assert {issue.code for issue in single.rows[0].errors} == {"value_too_long"}
+
+
 def test_unknown_template_fails_clearly():
     with pytest.raises(ParseFailure, match="Unknown or unsupported template"):
         parse_source_file("unknown.csv", csv_bytes(["抖音号", "抖音名称"], [["a", "b"]]))
@@ -471,6 +580,32 @@ def test_csv_long_row_is_rejected():
         parse_source_file("daily.csv", payload)
 
 
+def test_xlsx_rows_with_unexpected_extra_cells_are_rejected():
+    payload = workbook_bytes(
+        DAILY_HEADERS,
+        [["2026-07-18", "81", "unexpected"]],
+    )
+
+    with pytest.raises(ParseFailure, match="row 2 has 3 fields; expected at most 2"):
+        parse_source_file("daily.xlsx", payload)
+
+
+def test_workbooks_with_multiple_worksheets_are_rejected():
+    workbook = Workbook()
+    first = workbook.active
+    first.append(DAILY_HEADERS)
+    first.append(["2026-07-18", 81])
+    second = workbook.create_sheet("Another export")
+    second.append(DAILY_HEADERS)
+    second.append(["2026-07-19", 82])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+
+    with pytest.raises(ParseFailure, match="exactly one worksheet"):
+        parse_source_file("multiple.xlsx", buffer.getvalue())
+
+
 def test_header_only_file_preserves_template_code_in_preview():
     parsed = parse_source_file("works.csv", csv_bytes(WORK_LIST_HEADERS, []))
 
@@ -491,6 +626,19 @@ def test_formula_cells_are_rejected_before_openpyxl_load(monkeypatch: pytest.Mon
 
     with pytest.raises(ParseFailure, match="Formula cells are not supported"):
         parse_source_file("daily.xlsx", payload)
+
+
+def test_formula_scanner_does_not_treat_filter_tags_as_formulas():
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            b"<worksheet><filterColumn/><filters/></worksheet>",
+        )
+
+    with ZipFile(io.BytesIO(buffer.getvalue())) as archive:
+        info = archive.getinfo("xl/worksheets/sheet1.xml")
+        assert parser_module._entry_contains_formula(archive, info) is False
 
 
 def test_external_links_are_rejected_before_openpyxl_load(monkeypatch: pytest.MonkeyPatch):

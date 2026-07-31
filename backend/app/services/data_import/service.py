@@ -31,6 +31,7 @@ from app.models import (
     PlatformContentRecord,
     User,
 )
+from app.models.account_data import CURRENT_IMPORT_PARSER_VERSION
 from app.models.enums import (
     ConflictStatus,
     ContentIdentityConfidence,
@@ -609,6 +610,8 @@ async def commit_batch(
             account_id=account_id,
             batch_id=batch_id,
         )
+    if not batch.rows:
+        raise DataImportCommitConflictError("batch contains no data rows")
 
     blocking_rows = [
         row.row_number
@@ -750,6 +753,7 @@ async def _insert_preview_graph(
             status=ImportBatchStatus.PREVIEW_READY,
             template_code=parsed_template_code,
             content_sha256=content_sha256,
+            parser_version=CURRENT_IMPORT_PARSER_VERSION,
             row_count=preview_row_count,
             period_start=_derive_period_boundary(rows, field_name="period_start", reducer=min),
             period_end=_derive_period_boundary(rows, field_name="period_end", reducer=max),
@@ -905,6 +909,7 @@ async def _find_existing_preview(
             DataImportBatch.source_kind == source_kind,
             DataImportBatch.template_code == template_code,
             DataImportBatch.content_sha256 == content_sha256,
+            DataImportBatch.parser_version == CURRENT_IMPORT_PARSER_VERSION,
             DataImportBatch.committed_at.is_(None),
             DataImportBatch.revoked_at.is_(None),
         )
@@ -938,6 +943,12 @@ async def _recover_stale_preview(
     )
     if existing is None:
         return PreviewRecoveryResult()
+
+    if existing.parser_version != CURRENT_IMPORT_PARSER_VERSION:
+        existing.status = ImportBatchStatus.REVOKED
+        existing.revoked_at = datetime.now(UTC)
+        await session.flush()
+        return PreviewRecoveryResult(retired_stale_batch=True)
 
     artifact = existing.artifacts[0] if existing.artifacts else None
     if artifact is None:
@@ -1901,7 +1912,8 @@ def _validated_screenshot(filename: str, content: bytes) -> tuple[str, str]:
 def _sanitize_filename(filename: str, *, extension: str) -> str:
     candidate = PurePath(filename).name or f"upload{extension}"
     stem = Path(candidate).stem or "upload"
-    return f"{stem}{extension}"
+    max_stem_length = 255 - len(extension)
+    return f"{stem[:max_stem_length]}{extension}"
 
 
 def _content_type_for_extension(extension: str) -> str:

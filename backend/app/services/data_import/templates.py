@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+MAX_IMPORT_TITLE_CHARS = 230  # Leaves room for the timestamp in the 255-char weak key.
+
 
 def normalize_header_value(value: object | None) -> str:
     if value is None:
@@ -16,6 +18,9 @@ class ColumnDefinition:
     field_name: str
     value_type: str
     aliases: tuple[str, ...] = ()
+    required: bool = False
+    minimum: float | None = None
+    max_length: int | None = None
 
     @property
     def accepted_headers(self) -> tuple[str, ...]:
@@ -53,8 +58,8 @@ DAILY_PLAY_TEMPLATE = TemplateDefinition(
     display_name="抖音每日播放量趋势",
     data_domain="account_metrics",
     columns=(
-        ColumnDefinition("日期", "stat_date", "date"),
-        ColumnDefinition("播放量", "play", "int"),
+        ColumnDefinition("日期", "stat_date", "date", required=True),
+        ColumnDefinition("播放量", "play", "int", required=True, minimum=0),
     ),
 )
 
@@ -63,12 +68,19 @@ SINGLE_CONTENT_TEMPLATE = TemplateDefinition(
     display_name="抖音单条作品表现",
     data_domain="content_metrics",
     columns=(
-        ColumnDefinition("视频名称", "title", "string", aliases=("作品名称",)),
-        ColumnDefinition("发布时间", "published_at", "datetime"),
-        ColumnDefinition("播放量", "play", "int"),
+        ColumnDefinition(
+            "视频名称",
+            "title",
+            "string",
+            aliases=("作品名称",),
+            required=True,
+            max_length=MAX_IMPORT_TITLE_CHARS,
+        ),
+        ColumnDefinition("发布时间", "published_at", "datetime", required=True),
+        ColumnDefinition("播放量", "play", "int", required=True, minimum=0),
         ColumnDefinition("5s完播率", "completion_rate_5s", "ratio"),
         ColumnDefinition("2s跳出率", "bounce_rate_2s", "ratio"),
-        ColumnDefinition("平均播放时长", "avg_watch_time_seconds", "float"),
+        ColumnDefinition("平均播放时长", "avg_watch_time_seconds", "float", minimum=0),
     ),
 )
 
@@ -77,18 +89,18 @@ PERIOD_AGGREGATE_TEMPLATE = TemplateDefinition(
     display_name="抖音周期聚合表现",
     data_domain="benchmarks",
     columns=(
-        ColumnDefinition("发布时间", "period", "date_range"),
+        ColumnDefinition("发布时间", "period", "date_range", required=True),
         ColumnDefinition("体裁", "content_format", "string"),
         ColumnDefinition("垂类", "vertical", "string"),
-        ColumnDefinition("周期内投稿量", "publish_count", "int"),
+        ColumnDefinition("周期内投稿量", "publish_count", "int", required=True, minimum=0),
         ColumnDefinition("条均点击率", "click_rate", "ratio"),
         ColumnDefinition("条均5s完播率", "completion_rate_5s", "ratio"),
         ColumnDefinition("条均2s跳出率", "bounce_rate_2s", "ratio"),
-        ColumnDefinition("条均播放时长", "avg_watch_time_seconds", "float"),
-        ColumnDefinition("播放量中位数", "median_play", "float"),
-        ColumnDefinition("条均点赞数", "avg_like_count", "float"),
-        ColumnDefinition("条均评论量", "avg_comment_count", "float"),
-        ColumnDefinition("条均分享量", "avg_share_count", "float"),
+        ColumnDefinition("条均播放时长", "avg_watch_time_seconds", "float", minimum=0),
+        ColumnDefinition("播放量中位数", "median_play", "float", minimum=0),
+        ColumnDefinition("条均点赞数", "avg_like_count", "float", minimum=0),
+        ColumnDefinition("条均评论量", "avg_comment_count", "float", minimum=0),
+        ColumnDefinition("条均分享量", "avg_share_count", "float", minimum=0),
     ),
 )
 
@@ -97,21 +109,34 @@ WORK_LIST_TEMPLATE = TemplateDefinition(
     display_name="抖音作品列表",
     data_domain="content_metrics",
     columns=(
-        ColumnDefinition("作品名称", "title", "string", aliases=("视频名称",)),
-        ColumnDefinition("发布时间", "published_at", "datetime"),
-        ColumnDefinition("体裁", "content_format", "string"),
-        ColumnDefinition("审核状态", "review_status", "string"),
-        ColumnDefinition("播放量", "play", "int"),
+        ColumnDefinition(
+            "作品名称",
+            "title",
+            "string",
+            aliases=("视频名称",),
+            required=True,
+            max_length=MAX_IMPORT_TITLE_CHARS,
+        ),
+        ColumnDefinition("发布时间", "published_at", "datetime", required=True),
+        ColumnDefinition("体裁", "content_format", "string", max_length=120),
+        ColumnDefinition("审核状态", "review_status", "string", max_length=80),
+        ColumnDefinition("播放量", "play", "int", required=True, minimum=0),
         ColumnDefinition("完播率", "completion_rate", "ratio"),
         ColumnDefinition("5s完播率", "completion_rate_5s", "ratio"),
         ColumnDefinition("封面点击率", "cover_click_rate", "ratio"),
         ColumnDefinition("2s跳出率", "bounce_rate_2s", "ratio"),
-        ColumnDefinition("平均播放时长", "avg_watch_time_seconds", "float"),
-        ColumnDefinition("点赞量", "like_count", "int", aliases=("点赞",)),
-        ColumnDefinition("分享量", "share_count", "int", aliases=("分享",)),
-        ColumnDefinition("评论量", "comment_count", "int", aliases=("评论",)),
-        ColumnDefinition("收藏量", "favorite_count", "int", aliases=("收藏",)),
-        ColumnDefinition("主页访问量", "profile_visit_count", "int", aliases=("主页访问",)),
+        ColumnDefinition("平均播放时长", "avg_watch_time_seconds", "float", minimum=0),
+        ColumnDefinition("点赞量", "like_count", "int", aliases=("点赞",), minimum=0),
+        ColumnDefinition("分享量", "share_count", "int", aliases=("分享",), minimum=0),
+        ColumnDefinition("评论量", "comment_count", "int", aliases=("评论",), minimum=0),
+        ColumnDefinition("收藏量", "favorite_count", "int", aliases=("收藏",), minimum=0),
+        ColumnDefinition(
+            "主页访问量",
+            "profile_visit_count",
+            "int",
+            aliases=("主页访问",),
+            minimum=0,
+        ),
         ColumnDefinition("粉丝增量", "follower_delta", "int"),
     ),
 )

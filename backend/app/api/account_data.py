@@ -24,7 +24,7 @@ from app.schemas.account_data import (
     ManualPreviewRequest,
     ResolveImportRowRequest,
 )
-from app.services.data_import.parser import ParseFailure
+from app.services.data_import.parser import MAX_FILE_BYTES, ParseFailure
 from app.services.data_import.service import (
     DataImportBatchNotFoundError,
     DataImportCommitConflictError,
@@ -112,7 +112,7 @@ async def upload_import(
 ) -> ImportBatchOut:
     account = await require_account_access(session, user, account_id, roles=OPERATE_ROLES)
     try:
-        content = await file.read()
+        content = await file.read(MAX_FILE_BYTES + 1)
         batch = await create_preview(
             session,
             user=user,
