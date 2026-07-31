@@ -1,5 +1,5 @@
 import { WarningOutlined } from "@ant-design/icons";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Skeleton } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -187,28 +187,10 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     queryFn: () => listAccountDataImports(routeAccountId),
   });
 
-  const detailQueries = useQueries({
-    queries: (historyQuery.data?.items ?? []).map((item) => ({
-      queryKey: ["account-data-import", routeAccountId, item.id],
-      queryFn: () => getAccountDataImportBatch(routeAccountId, item.id),
-      enabled: Boolean(account),
-      retry: false,
-    })),
-  });
-
-  const detailsById = useMemo(() => {
-    const map = new Map<number, AccountDataImportBatch>();
-    detailQueries.forEach((query) => {
-      if (query.data) map.set(query.data.id, query.data);
-    });
-    if (draftBatch) map.set(draftBatch.id, draftBatch);
-    return map;
-  }, [detailQueries, draftBatch]);
-
   useEffect(() => {
     if (activeBatchId != null || !historyQuery.data?.items.length) return;
-    const next = historyQuery.data.items.find((item) => item.status === "preview_ready")
-      ?? historyQuery.data.items[0];
+    const next = historyQuery.data.items.find((item) => item.status === "preview_ready");
+    if (!next) return;
     setActiveBatchId(next.id);
     setEntryMode(
       next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified"
@@ -230,13 +212,28 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     }
   }, [historyQuery.isSuccess, pendingBatch]);
 
+  const activeBatchQuery = useQuery({
+    enabled: activeBatchId != null,
+    queryKey: ["account-data-import", routeAccountId, activeBatchId],
+    queryFn: () => getAccountDataImportBatch(routeAccountId, activeBatchId!),
+    retry: false,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
   const activeBatch = useMemo(() => {
     if (draftBatch && (activeBatchId == null || draftBatch.id === activeBatchId)) {
       return draftBatch;
     }
     if (activeBatchId == null) return draftBatch;
-    return detailsById.get(activeBatchId) ?? draftBatch;
-  }, [activeBatchId, detailsById, draftBatch]);
+    if (activeBatchQuery.data?.id === activeBatchId) return activeBatchQuery.data;
+    return null;
+  }, [activeBatchId, activeBatchQuery.data, draftBatch]);
+
+  const activeDetailsById = useMemo(() => {
+    const map = new Map<number, AccountDataImportBatch>();
+    if (activeBatch) map.set(activeBatch.id, activeBatch);
+    return map;
+  }, [activeBatch]);
 
   const blockingRowCount = countBlockingRows(activeBatch);
   const canCommit = Boolean(
@@ -668,15 +665,14 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           ) : null}
           <ImportBatchHistory
             items={historyQuery.data?.items ?? []}
-            detailsById={detailsById}
+            detailsById={activeDetailsById}
             activeBatchId={activeBatchId}
             revokingBatchId={revokeMutation.isPending ? revokeMutation.variables ?? null : null}
             deletingBatchId={deleteMutation.isPending ? deleteMutation.variables ?? null : null}
             revokeError={historyError}
             onOpenBatch={(batchId) => {
-              const opened = detailsById.get(batchId);
               setActiveBatchId(batchId);
-              setDraftBatch(opened ?? null);
+              setDraftBatch(null);
             }}
             onDownloadArtifact={(artifact: AccountDataImportArtifact) => {
               setHistoryError(null);

@@ -1002,6 +1002,7 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
+    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
     fireEvent.click(await screen.findByRole("button", { name: "下载原文件 works.xlsx" }));
 
     await waitFor(() =>
@@ -1060,7 +1061,32 @@ describe("AccountDataCenter", () => {
     expect(await screen.findByText("只有负责人可以撤销已确认批次。")).toBeInTheDocument();
   });
 
-  it("does not render or mutate a stale batch after same-mounted route navigation", async () => {
+  it("lazy loads only the history batch an operator explicitly opens", async () => {
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [
+        buildBatchSummary({ id: 81, status: "committed" }),
+        buildBatchSummary({ id: 82, status: "committed" }),
+        buildBatchSummary({ id: 83, status: "committed" }),
+      ],
+    });
+    vi.mocked(getAccountDataImportBatch).mockImplementation(async (_accountId, batchId) =>
+      buildPreviewBatch({ id: batchId, status: "committed" }),
+    );
+
+    renderPage();
+
+    await waitFor(() => expect(listAccountDataImports).toHaveBeenCalledWith(42));
+    expect(getAccountDataImportBatch).not.toHaveBeenCalled();
+
+    await openAccountDataView("导入记录");
+    fireEvent.click((await screen.findAllByRole("button", { name: "查看详情" }))[0]);
+
+    await waitFor(() => expect(getAccountDataImportBatch).toHaveBeenCalledTimes(1));
+    expect(getAccountDataImportBatch).toHaveBeenCalledWith(42, 81);
+  });
+
+  it("isolates active batch state after same-mounted account switch", async () => {
     const account2Batch = buildPreviewBatch({
       id: 201,
       artifacts: [
@@ -1140,6 +1166,8 @@ describe("AccountDataCenter", () => {
       expect(screen.getByText("account-99.xlsx")).toBeInTheDocument(),
     );
     expect(screen.queryByText("account-2.xlsx")).not.toBeInTheDocument();
+    expect(getAccountDataImportBatch).toHaveBeenCalledWith(2, 201);
+    expect(getAccountDataImportBatch).toHaveBeenCalledWith(99, 990);
 
     fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
 
