@@ -327,6 +327,13 @@ async function openAccountDataView(name: "数据概览" | "导入与补录" | "�
   fireEvent.click(await screen.findByRole("tab", { name }));
 }
 
+async function openBatchMoreMenu(batchId: number) {
+  const trigger = await screen.findByRole("button", {
+    name: `更多操作 批次 ${batchId}`,
+  });
+  fireEvent.click(trigger);
+}
+
 describe("AccountDataCenter", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -859,6 +866,45 @@ describe("AccountDataCenter", () => {
     expect(await screen.findByText("导入失败")).toBeInTheDocument();
   });
 
+  it("renders a dense import history table with business labels", async () => {
+    vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
+      clients: [],
+      selected_client: null,
+      projects: [],
+      selected_project: null,
+      accounts: [buildAccount()],
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [
+        buildBatchSummary({
+          created_by_id: 7,
+          created_by_name: "张运营",
+        }),
+      ],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(
+      buildPreviewBatch({
+        created_by_id: 7,
+        created_by_name: "张运营",
+      }),
+    );
+
+    renderPage();
+
+    await openAccountDataView("导入记录");
+
+    const table = await screen.findByRole("table", { name: "导入记录" });
+    expect(table).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "数据类型" })).toBeInTheDocument();
+    expect(screen.getByText("抖音作品列表")).toBeInTheDocument();
+    expect(screen.getByText("张运营")).toBeInTheDocument();
+    expect(screen.queryByText("douyin_work_list_v1")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看批次 81" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "更多操作 批次 81" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "永久删除批次 81" })).not.toBeInTheDocument();
+  });
+
   it("commits successfully and refreshes status plus history", async () => {
     const preview = buildPreviewBatch();
     const committed: AccountDataImportBatch = {
@@ -1013,7 +1059,8 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "撤销批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /撤销写入/ }));
     expect(screen.getByText("确认撤销这次写入？")).toBeInTheDocument();
     expect(revokeAccountDataImportBatch).not.toHaveBeenCalled();
 
@@ -1061,7 +1108,8 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /永久删除/ }));
     expect(
       screen.getByText("将先撤销该批次产生的数据，再永久删除原文件和历史记录。"),
     ).toBeInTheDocument();
@@ -1111,15 +1159,16 @@ describe("AccountDataCenter", () => {
     const { container } = renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /永久删除/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
 
     expect(await screen.findByText("批次 82")).toBeInTheDocument();
     await waitFor(() =>
-      expect(container.querySelector(".account-data-history-item.is-active"))
+      expect(container.querySelector(".account-data-history-row.is-active"))
         .toHaveTextContent("批次 82"),
     );
-    expect(screen.getByRole("button", { name: "查看预览" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看批次 82" })).toBeEnabled();
   });
 
   it("keeps a batch visible when permanent deletion has a later-data conflict", async () => {
@@ -1153,7 +1202,8 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /永久删除/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
 
     expect(
@@ -1191,7 +1241,8 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /永久删除/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
 
     expect(await screen.findByText("导入批次已永久删除")).toBeInTheDocument();
@@ -1229,8 +1280,9 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
-    fireEvent.click(await screen.findByRole("button", { name: "下载原文件 works.xlsx" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /下载原文件/ }));
 
     await waitFor(() =>
       expect(downloadAccountDataArtifact).toHaveBeenCalledWith(
@@ -1279,7 +1331,8 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入记录");
-    fireEvent.click(await screen.findByRole("button", { name: "撤销批次 81" }));
+    await openBatchMoreMenu(81);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /撤销写入/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认撤销批次 81" }));
 
     await waitFor(() =>
@@ -1307,7 +1360,7 @@ describe("AccountDataCenter", () => {
     expect(getAccountDataImportBatch).not.toHaveBeenCalled();
 
     await openAccountDataView("导入记录");
-    fireEvent.click((await screen.findAllByRole("button", { name: "查看详情" }))[0]);
+    fireEvent.click((await screen.findAllByRole("button", { name: /查看批次/ }))[0]);
 
     await waitFor(() => expect(getAccountDataImportBatch).toHaveBeenCalledTimes(1));
     expect(getAccountDataImportBatch).toHaveBeenCalledWith(42, 81);

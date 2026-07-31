@@ -985,7 +985,7 @@ git commit -m "feat: add full-width account import review"
 - Produces:
   - `<ImportBatchHistory ... />` as the `导入记录` tab panel.
 
-- [ ] **Step 1: Write failing history-table tests**
+- [x] **Step 1: Write failing history-table tests**
 
 Assert:
 
@@ -998,7 +998,7 @@ expect(screen.queryByText("douyin_work_list_v1")).not.toBeInTheDocument();
 
 Assert a row has one explicit `查看` action and one `更多` menu trigger, while destructive actions are not visible until `更多` opens.
 
-- [ ] **Step 2: Write failing revoke/delete flow tests**
+- [x] **Step 2: Write failing revoke/delete flow tests**
 
 Cover:
 
@@ -1007,7 +1007,7 @@ Cover:
 - Second confirmation is still required.
 - Successful deletion refreshes history and status and removes the row.
 
-- [ ] **Step 3: Run tests and confirm failure**
+- [x] **Step 3: Run tests and confirm failure**
 
 Run:
 
@@ -1018,7 +1018,7 @@ pnpm test -- src/pages/AccountDataCenter.test.tsx -t "history table|permanent de
 
 Expected: FAIL because history is still rendered as cards.
 
-- [ ] **Step 4: Implement the table**
+- [x] **Step 4: Implement the table**
 
 Use an accessible table with these columns:
 
@@ -1030,7 +1030,7 @@ Use `getTemplateLabel`, `getSourceKindLabel`, and `getBatchStatusLabel`. Show `�
 Render `created_by_name ?? "已删除成员"` in the creator column; never display a
 raw user ID as the primary operator label.
 
-- [ ] **Step 5: Implement the row action menu**
+- [x] **Step 5: Implement the row action menu**
 
 Use Ant Design `Dropdown` or the project’s existing menu primitive. Menu items:
 
@@ -1040,7 +1040,7 @@ Use Ant Design `Dropdown` or the project’s existing menu primitive. Menu items
 
 Loading the artifact list is allowed only after the user opens or selects that batch. Do not restore eager detail queries for every row.
 
-- [ ] **Step 6: Preserve inline confirmations**
+- [x] **Step 6: Preserve inline confirmations**
 
 Do not introduce a modal as the first interaction. Expand a confirmation row beneath the selected batch, with:
 
@@ -1050,14 +1050,14 @@ Do not introduce a modal as the first interaction. Expand a confirmation row ben
 
 Only one confirmation can be open at once.
 
-- [ ] **Step 7: Style density and responsiveness**
+- [x] **Step 7: Style density and responsiveness**
 
 - Stable compact row height.
 - Quiet table header.
 - No card border around every batch.
 - On mobile, each row becomes a labeled batch summary with the same action menu.
 
-- [ ] **Step 8: Run tests and build**
+- [x] **Step 8: Run tests and build**
 
 Run:
 
