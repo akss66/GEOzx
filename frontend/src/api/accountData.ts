@@ -19,6 +19,7 @@ export type AccountDataImportRowStatus =
   | "needs_resolution"
   | "committed"
   | "revoked";
+export type AccountDataImportRowView = "all" | "ready" | "needs_work";
 
 export interface AccountDataImportArtifact {
   id: number;
@@ -72,6 +73,8 @@ export interface AccountDataImportBatchSummary {
   period_end: string | null;
   committed_at: string | null;
   revoked_at: string | null;
+  created_by_id: number | null;
+  created_by_name: string | null;
   created_at: string;
 }
 
@@ -83,6 +86,23 @@ export interface AccountDataImportBatch extends AccountDataImportBatchSummary {
 
 export interface AccountDataImportBatchList {
   items: AccountDataImportBatchSummary[];
+}
+
+export interface AccountDataImportRowPage {
+  items: AccountDataImportRow[];
+  page: number;
+  page_size: number;
+  total_count: number;
+  filtered_count: number;
+  ready_count: number;
+  blocking_count: number;
+  total_pages: number;
+}
+
+export interface AccountDataImportRowQuery {
+  page?: number;
+  pageSize?: number;
+  view?: AccountDataImportRowView;
 }
 
 export interface AccountDataStatusSource {
@@ -155,6 +175,24 @@ export async function getAccountDataImportBatch(
 ): Promise<AccountDataImportBatch> {
   const { data } = await api.get<AccountDataImportBatch>(
     `/account-data/${accountId}/imports/${batchId}`,
+  );
+  return data;
+}
+
+export async function getAccountDataImportRows(
+  accountId: number,
+  batchId: number,
+  query: AccountDataImportRowQuery = {},
+): Promise<AccountDataImportRowPage> {
+  const { data } = await api.get<AccountDataImportRowPage>(
+    `/account-data/${accountId}/imports/${batchId}/rows`,
+    {
+      params: {
+        page: query.page ?? 1,
+        page_size: query.pageSize ?? 50,
+        view: query.view ?? "all",
+      },
+    },
   );
   return data;
 }

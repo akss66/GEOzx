@@ -7,6 +7,7 @@ import {
   commitAccountDataImportBatch,
   deleteAccountDataImportBatch,
   downloadAccountDataArtifact,
+  getAccountDataImportRows,
   getAccountDataStatus,
   listAccountDataImports,
   resolveAccountDataImportRow,
@@ -82,6 +83,49 @@ describe("account data api", () => {
     await listAccountDataImports(9);
 
     expect(apiGet).toHaveBeenCalledWith("/account-data/9/imports");
+  });
+
+  it("loads paginated import rows with an explicit review filter", async () => {
+    apiGet.mockResolvedValueOnce({
+      data: {
+        items: [],
+        page: 2,
+        page_size: 50,
+        total_count: 61,
+        filtered_count: 2,
+        ready_count: 59,
+        blocking_count: 2,
+        total_pages: 1,
+      },
+    });
+
+    await getAccountDataImportRows(9, 12, {
+      page: 2,
+      pageSize: 50,
+      view: "needs_work",
+    });
+
+    expect(apiGet).toHaveBeenCalledWith("/account-data/9/imports/12/rows", {
+      params: {
+        page: 2,
+        page_size: 50,
+        view: "needs_work",
+      },
+    });
+  });
+
+  it("uses stable defaults when loading import rows", async () => {
+    apiGet.mockResolvedValueOnce({ data: { items: [] } });
+
+    await getAccountDataImportRows(9, 12);
+
+    expect(apiGet).toHaveBeenCalledWith("/account-data/9/imports/12/rows", {
+      params: {
+        page: 1,
+        page_size: 50,
+        view: "all",
+      },
+    });
   });
 
   it("resolves one ambiguous row against an existing content record", async () => {

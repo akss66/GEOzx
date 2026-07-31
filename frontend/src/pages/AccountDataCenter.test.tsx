@@ -154,6 +154,8 @@ function buildBatchSummary(
     revoked_at: null,
     created_at: "2026-07-22T08:00:00Z",
     ...overrides,
+    created_by_id: overrides.created_by_id ?? 1,
+    created_by_name: overrides.created_by_name ?? "Operator",
   };
 }
 
@@ -168,6 +170,8 @@ function buildPreviewBatch(overrides: Partial<AccountDataImportBatch> = {}): Acc
     period_end: "2026-07-22",
     committed_at: null,
     revoked_at: null,
+    created_by_id: 1,
+    created_by_name: "Operator",
     created_at: "2026-07-22T08:00:00Z",
     artifacts: [buildArtifact()],
     conflicts: [
@@ -630,6 +634,8 @@ describe("AccountDataCenter", () => {
             period_end: "2026-07-22",
             committed_at: null,
             revoked_at: null,
+            created_by_id: 1,
+            created_by_name: "Operator",
             created_at: "2026-07-22T08:00:00Z",
           },
         ],
@@ -646,6 +652,8 @@ describe("AccountDataCenter", () => {
             period_end: "2026-07-22",
             committed_at: "2026-07-22T08:25:00Z",
             revoked_at: null,
+            created_by_id: 1,
+            created_by_name: "Operator",
             created_at: "2026-07-22T08:00:00Z",
           },
         ],

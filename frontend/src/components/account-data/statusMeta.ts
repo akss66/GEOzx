@@ -1,4 +1,32 @@
-import type { AccountDataImportBatchStatus } from "../../api/accountData";
+import type {
+  AccountDataCoverage,
+  AccountDataImportBatchStatus,
+  AccountDataSourceKind,
+} from "../../api/accountData";
+
+const templateLabels: Record<string, string> = {
+  douyin_daily_play_v1: "抖音日播放数据",
+  douyin_single_content_v1: "抖音单作品分析",
+  douyin_period_aggregate_v1: "抖音阶段汇总",
+  douyin_work_list_v1: "抖音作品列表",
+};
+
+export function getTemplateLabel(templateCode: string) {
+  return templateLabels[templateCode] ?? "其他账号数据";
+}
+
+export function getSourceKindLabel(sourceKind: AccountDataSourceKind) {
+  if (sourceKind === "official_api") return "平台接口";
+  if (sourceKind === "platform_export") return "平台导出";
+  if (sourceKind === "screenshot_verified") return "截图佐证";
+  return "人工录入";
+}
+
+export function getCoverageLabel(coverage: AccountDataCoverage) {
+  if (coverage === "available") return "数据完整";
+  if (coverage === "partial") return "部分数据";
+  return "待补齐";
+}
 
 export function getBatchStatusLabel(status: AccountDataImportBatchStatus) {
   if (status === "uploaded") return "已上传";

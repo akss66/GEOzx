@@ -21,6 +21,8 @@ function buildSummary(
     period_end: "2026-07-22",
     committed_at: status === "committed" ? "2026-07-22T08:25:00Z" : null,
     revoked_at: status === "revoked" ? "2026-07-22T08:45:00Z" : null,
+    created_by_id: 1,
+    created_by_name: "Operator",
     created_at: "2026-07-22T08:00:00Z",
   };
 }

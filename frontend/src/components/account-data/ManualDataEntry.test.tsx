@@ -19,6 +19,8 @@ function buildScreenshotBatch(): AccountDataImportBatch {
     period_end: "2026-07-21",
     committed_at: null,
     revoked_at: null,
+    created_by_id: 1,
+    created_by_name: "Operator",
     created_at: "2026-07-22T08:00:00Z",
     artifacts: [
       {
