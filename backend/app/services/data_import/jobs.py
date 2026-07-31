@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from app.services.data_import.service import (
 
 MAX_IMPORT_JOB_FILES = 20
 MAX_IMPORT_JOB_BYTES = 50 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class DataImportJobNotFoundError(LookupError):
@@ -435,14 +437,25 @@ async def _process_import_file(
                     "message": str(exc),
                 }
             )
-        except Exception as exc:  # noqa: BLE001 - isolate one dataset/file
+        except Exception:  # noqa: BLE001 - isolate one dataset/file
             await session.rollback()
+            logger.exception(
+                "Account data import dataset failed",
+                extra={
+                    "job_id": job.id,
+                    "job_file_id": job_file.id,
+                    "dataset_ordinal": dataset.dataset_ordinal,
+                },
+            )
             failures.append(
                 {
                     "dataset_ordinal": dataset.dataset_ordinal,
                     "sheet_name": dataset.sheet_name,
-                    "code": getattr(exc, "code", "dataset_processing_failed"),
-                    "message": str(exc),
+                    "code": "dataset_processing_failed",
+                    "message": (
+                        "The dataset could not be processed. "
+                        "Retry it or upload a corrected file."
+                    ),
                 }
             )
 

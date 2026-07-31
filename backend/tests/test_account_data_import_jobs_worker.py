@@ -12,8 +12,14 @@ from app.models import (
     DataFieldObservation,
     DataImportFile,
     DataImportJob,
+    PlatformContentRecord,
 )
-from app.models.enums import ImportFileStatus, ImportJobStatus, Platform
+from app.models.enums import (
+    ContentIdentityConfidence,
+    ImportFileStatus,
+    ImportJobStatus,
+    Platform,
+)
 from app.services.data_import.jobs import (
     JobUpload,
     create_import_job,
@@ -22,7 +28,11 @@ from app.services.data_import.jobs import (
     retry_import_file,
 )
 from app.worker import recover_account_data_import_jobs
-from tests.test_data_import_templates import DAILY_HEADERS, workbook_bytes
+from tests.test_data_import_templates import (
+    DAILY_HEADERS,
+    SINGLE_CONTENT_HEADERS,
+    workbook_bytes,
+)
 
 
 @pytest.fixture
@@ -235,6 +245,77 @@ async def test_retry_processes_only_failed_file_and_does_not_duplicate_observati
     )
     assert original_valid is not None
     assert len(original_valid.datasets) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_unresolved_preview_without_leaking_unique_constraint(
+    session,
+    admin,
+    account,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    content = workbook_bytes(
+        SINGLE_CONTENT_HEADERS[:3],
+        [
+            ["作品 A", "2026-07-30 12:00:00", 100],
+            ["作品 B", "2026-07-30 13:00:00", 200],
+        ],
+    )
+    session.add_all(
+        [
+            PlatformContentRecord(
+                org_id=account.org_id,
+                account_id=account.id,
+                platform=Platform.DOUYIN,
+                external_content_id=f"ambiguous-{index}",
+                title="作品 A",
+                published_at=datetime(2026, 7, 30, 12, 0),
+                identity_confidence=ContentIdentityConfidence.CONFIRMED,
+            )
+            for index in range(2)
+        ]
+    )
+    await session.commit()
+    job, _ = await create_import_job(
+        session,
+        user=admin,
+        account=account,
+        client_request_id="worker-unresolved-retry",
+        uploads=[
+            JobUpload(
+                filename="single-content.xlsx",
+                content_type=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                content=content,
+            )
+        ],
+    )
+    job = await process_import_job(session, job_id=job.id)
+    original = job.files[0]
+    assert original.status is ImportFileStatus.FAILED
+    assert original.error_payload["failures"][0]["code"] == (
+        "manual_resolution_required"
+    )
+
+    retried = await retry_import_file(
+        session,
+        org_id=account.org_id,
+        account_id=account.id,
+        job_id=job.id,
+        file_id=original.id,
+    )
+    job = await process_import_job(session, job_id=job.id)
+    await session.refresh(retried)
+
+    assert retried.status is ImportFileStatus.FAILED
+    failure = retried.error_payload["failures"][0]
+    assert failure["code"] == "manual_resolution_required"
+    assert "IntegrityError" not in failure["message"]
+    assert "uq_data_import_batches_active_preview_identity" not in failure["message"]
 
 
 @pytest.mark.asyncio

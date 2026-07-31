@@ -312,6 +312,23 @@ async def create_job_dataset_preview(
     if existing is not None:
         return existing
 
+    existing = await session.scalar(
+        select(DataImportBatch)
+        .where(
+            DataImportBatch.org_id == account.org_id,
+            DataImportBatch.account_id == account.id,
+            DataImportBatch.source_kind == DataSourceKind.PLATFORM_EXPORT,
+            DataImportBatch.template_code == dataset.template_code,
+            DataImportBatch.content_sha256 == job_file.sha256,
+            DataImportBatch.parser_version == CURRENT_IMPORT_PARSER_VERSION,
+            DataImportBatch.committed_at.is_(None),
+            DataImportBatch.revoked_at.is_(None),
+        )
+        .order_by(DataImportBatch.id.desc())
+    )
+    if existing is not None:
+        return existing
+
     batch = DataImportBatch(
         org_id=account.org_id,
         account_id=account.id,
