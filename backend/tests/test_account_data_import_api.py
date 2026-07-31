@@ -289,6 +289,8 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
     )
     assert history.status_code == 200
     assert [row["id"] for row in history.json()["items"]] == [batch_id]
+    assert history.json()["items"][0]["created_by_id"] == account_access_setup["operator"].id
+    assert history.json()["items"][0]["created_by_name"] == "Operator"
 
     coverage = await client.get(
         f"/account-data/{account.id}/status",
@@ -326,6 +328,96 @@ async def test_operator_can_preview_resolve_commit_download_and_list_imports(
     assert metric.profile_visit_count == 3
     assert candidate.content_format == "1min-\u89c6\u9891"
     assert candidate.review_status == "\u516c\u5f00"
+
+
+@pytest.mark.asyncio
+async def test_paginated_import_rows_report_counts_filter_and_scope(
+    client,
+    session,
+    admin,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+    other_account = account_access_setup["other_account"]
+    payload = workbook_bytes(
+        DAILY_HEADERS,
+        [["2026-07-18", str(index + 1)] for index in range(61)],
+    )
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "daily.xlsx",
+                payload,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    batch_id = preview.json()["id"]
+
+    rows = list(
+        await session.scalars(
+            select(DataImportRow)
+            .where(DataImportRow.batch_id == batch_id)
+            .order_by(DataImportRow.row_number.asc())
+        )
+    )
+    rows[0].status = ImportRowStatus.INVALID
+    rows[1].status = ImportRowStatus.NEEDS_RESOLUTION
+    await session.commit()
+
+    page_two = await client.get(
+        f"/account-data/{account.id}/imports/{batch_id}/rows",
+        headers=_auth(operator_token),
+        params={"page": 2, "page_size": 50, "view": "all"},
+    )
+    assert page_two.status_code == 200
+    assert page_two.json()["page"] == 2
+    assert page_two.json()["page_size"] == 50
+    assert page_two.json()["total_count"] == 61
+    assert page_two.json()["filtered_count"] == 61
+    assert page_two.json()["ready_count"] == 59
+    assert page_two.json()["blocking_count"] == 2
+    assert page_two.json()["total_pages"] == 2
+    assert len(page_two.json()["items"]) == 11
+
+    blocked = await client.get(
+        f"/account-data/{account.id}/imports/{batch_id}/rows",
+        headers=_auth(operator_token),
+        params={"page": 1, "page_size": 50, "view": "needs_work"},
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["filtered_count"] == 2
+    assert {item["status"] for item in blocked.json()["items"]} == {
+        "invalid",
+        "needs_resolution",
+    }
+
+    invalid_page_size = await client.get(
+        f"/account-data/{account.id}/imports/{batch_id}/rows",
+        headers=_auth(operator_token),
+        params={"page_size": 201},
+    )
+    assert invalid_page_size.status_code == 422
+
+    outside_membership = await client.get(
+        f"/account-data/{other_account.id}/imports/{batch_id}/rows",
+        headers=_auth(operator_token),
+    )
+    assert outside_membership.status_code == 404
+
+    admin_token = await _login(client, admin.email, "admin-pw-123")
+    outside_batch_scope = await client.get(
+        f"/account-data/{other_account.id}/imports/{batch_id}/rows",
+        headers=_auth(admin_token),
+    )
+    assert outside_batch_scope.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -105,6 +105,8 @@ class ImportBatchSummaryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    created_by_id: int | None = None
+    created_by_name: str | None = None
     status: ImportBatchStatus
     source_kind: DataSourceKind
     template_code: str
@@ -124,6 +126,20 @@ class ImportBatchOut(ImportBatchSummaryOut):
 
 class ImportBatchListOut(BaseModel):
     items: list[ImportBatchSummaryOut] = Field(default_factory=list)
+
+
+ImportRowView = Literal["all", "ready", "needs_work"]
+
+
+class ImportRowPageOut(BaseModel):
+    items: list[ImportRowOut] = Field(default_factory=list)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=200)
+    total_count: int = Field(ge=0)
+    filtered_count: int = Field(ge=0)
+    ready_count: int = Field(ge=0)
+    blocking_count: int = Field(ge=0)
+    total_pages: int = Field(ge=0)
 
 
 class AccountDataStatusSourceOut(BaseModel):

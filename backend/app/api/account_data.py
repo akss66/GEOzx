@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import math
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +32,8 @@ from app.schemas.account_data import (
     ImportBatchSummaryOut,
     ImportConflictOut,
     ImportRowOut,
+    ImportRowPageOut,
+    ImportRowView,
     ManualPreviewRequest,
     ResolveImportRowRequest,
 )
@@ -40,6 +53,7 @@ from app.services.data_import.service import (
     list_scoped_batches,
     load_scoped_artifact,
     load_scoped_batch,
+    load_scoped_import_rows,
     resolve_row_match,
     revoke_batch,
 )
@@ -82,8 +96,14 @@ def _conflict_out(conflict) -> ImportConflictOut:
     )
 
 
-def _batch_summary_out(batch: DataImportBatch) -> ImportBatchSummaryOut:
-    return ImportBatchSummaryOut.model_validate(batch)
+def _batch_summary_out(
+    batch: DataImportBatch,
+    *,
+    created_by_name: str | None = None,
+) -> ImportBatchSummaryOut:
+    return ImportBatchSummaryOut.model_validate(batch).model_copy(
+        update={"created_by_name": created_by_name}
+    )
 
 
 def _batch_out(batch: DataImportBatch) -> ImportBatchOut:
@@ -175,7 +195,12 @@ async def list_imports(
 ) -> ImportBatchListOut:
     account = await require_account_access(session, user, account_id)
     rows = await list_scoped_batches(session, org_id=user.org_id, account_id=account.id)
-    return ImportBatchListOut(items=[_batch_summary_out(item) for item in rows])
+    return ImportBatchListOut(
+        items=[
+            _batch_summary_out(item.batch, created_by_name=item.created_by_name)
+            for item in rows
+        ]
+    )
 
 
 @router.get("/{account_id}/imports/{batch_id}", response_model=ImportBatchOut)
@@ -199,6 +224,49 @@ async def get_import_batch(
             detail="import batch does not exist",
         ) from exc
     return _batch_out(batch)
+
+
+@router.get(
+    "/{account_id}/imports/{batch_id}/rows",
+    response_model=ImportRowPageOut,
+)
+async def list_import_rows(
+    account_id: int,
+    batch_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 50,
+    view: ImportRowView = "all",
+) -> ImportRowPageOut:
+    account = await require_account_access(session, user, account_id)
+    try:
+        result = await load_scoped_import_rows(
+            session,
+            org_id=user.org_id,
+            account_id=account.id,
+            batch_id=batch_id,
+            page=page,
+            page_size=page_size,
+            view=view,
+        )
+    except DataImportBatchNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="import batch does not exist",
+        ) from exc
+    return ImportRowPageOut(
+        items=[_row_out(item) for item in result.items],
+        page=page,
+        page_size=page_size,
+        total_count=result.total_count,
+        filtered_count=result.filtered_count,
+        ready_count=result.ready_count,
+        blocking_count=result.blocking_count,
+        total_pages=math.ceil(result.filtered_count / page_size)
+        if result.filtered_count
+        else 0,
+    )
 
 
 @router.patch("/{account_id}/imports/{batch_id}/rows/{row_number}", response_model=ImportRowOut)

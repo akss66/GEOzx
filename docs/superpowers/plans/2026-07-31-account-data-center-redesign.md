@@ -158,7 +158,7 @@ assert (
 ).status_code == 404
 ```
 
-Also assert an outsider without account access receives `403`.
+Also assert an outsider without account access receives the existing concealment response `404`.
 
 - [ ] **Step 3: Write a failing history-creator projection test**
 

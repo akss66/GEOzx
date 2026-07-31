@@ -10,7 +10,7 @@ from pathlib import Path, PurePath
 from typing import TypedDict
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -74,6 +74,21 @@ class RowMatchResolution:
     selected_content_id: int | None
     resolved_by: User
     confirmed: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImportRowPage:
+    items: list[DataImportRow]
+    total_count: int
+    filtered_count: int
+    ready_count: int
+    blocking_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ImportBatchListItem:
+    batch: DataImportBatch
+    created_by_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,17 +531,96 @@ async def list_scoped_batches(
     *,
     org_id: int,
     account_id: int,
-) -> list[DataImportBatch]:
-    rows = await session.scalars(
-        select(DataImportBatch)
-        .options(selectinload(DataImportBatch.artifacts))
+) -> list[ImportBatchListItem]:
+    rows = await session.execute(
+        select(DataImportBatch, User.display_name)
+        .outerjoin(User, DataImportBatch.created_by_id == User.id)
         .where(
             DataImportBatch.org_id == org_id,
             DataImportBatch.account_id == account_id,
         )
         .order_by(DataImportBatch.id.desc())
     )
-    return list(rows)
+    return [
+        ImportBatchListItem(batch=batch, created_by_name=created_by_name)
+        for batch, created_by_name in rows.all()
+    ]
+
+
+async def load_scoped_import_rows(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+    page: int,
+    page_size: int,
+    view: str,
+) -> ImportRowPage:
+    scoped_batch_id = await session.scalar(
+        select(DataImportBatch.id).where(
+            DataImportBatch.org_id == org_id,
+            DataImportBatch.account_id == account_id,
+            DataImportBatch.id == batch_id,
+        )
+    )
+    if scoped_batch_id is None:
+        raise DataImportBatchNotFoundError("import batch does not exist")
+
+    scope = (
+        DataImportRow.org_id == org_id,
+        DataImportRow.account_id == account_id,
+        DataImportRow.batch_id == batch_id,
+    )
+    ready_statuses = (ImportRowStatus.READY, ImportRowStatus.COMMITTED)
+    blocking_statuses = (ImportRowStatus.INVALID, ImportRowStatus.NEEDS_RESOLUTION)
+
+    total_count = int(
+        await session.scalar(select(func.count()).select_from(DataImportRow).where(*scope)) or 0
+    )
+    ready_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(DataImportRow)
+            .where(*scope, DataImportRow.status.in_(ready_statuses))
+        )
+        or 0
+    )
+    blocking_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(DataImportRow)
+            .where(*scope, DataImportRow.status.in_(blocking_statuses))
+        )
+        or 0
+    )
+
+    filtered_scope = list(scope)
+    if view == "ready":
+        filtered_scope.append(DataImportRow.status.in_(ready_statuses))
+    elif view == "needs_work":
+        filtered_scope.append(DataImportRow.status.in_(blocking_statuses))
+
+    filtered_count = int(
+        await session.scalar(
+            select(func.count()).select_from(DataImportRow).where(*filtered_scope)
+        )
+        or 0
+    )
+    rows = await session.scalars(
+        select(DataImportRow)
+        .where(*filtered_scope)
+        .order_by(DataImportRow.row_number.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return ImportRowPage(
+        items=list(rows),
+        total_count=total_count,
+        filtered_count=filtered_count,
+        ready_count=ready_count,
+        blocking_count=blocking_count,
+    )
 
 
 async def account_status_summary(
