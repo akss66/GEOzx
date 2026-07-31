@@ -270,6 +270,10 @@ function renderMountedRouteSwitcher(
   );
 }
 
+async function openAccountDataView(name: "数据概览" | "导入与补录" | "导入记录") {
+  fireEvent.click(await screen.findByRole("tab", { name }));
+}
+
 describe("AccountDataCenter", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -332,6 +336,52 @@ describe("AccountDataCenter", () => {
     expect(await screen.findByText("账号数据中心")).toBeInTheDocument();
   });
 
+  it("separates overview, import, and history into three primary views", async () => {
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [] });
+
+    renderPage();
+
+    expect(await screen.findByRole("tab", { name: "数据概览" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "导入与补录" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "导入记录" })).toBeInTheDocument();
+    expect(await screen.findByText("当前账号已有部分可用数据")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "导入与补录" }));
+
+    expect(screen.queryByText("当前账号已有部分可用数据")).not.toBeInTheDocument();
+    expect(await screen.findByLabelText("选择导入文件")).toBeInTheDocument();
+  });
+
+  it("does not present pending preview data as confirmed account data", async () => {
+    const pending = buildPreviewBatch();
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(
+      buildStatus({
+        latest_confirmed_at: null,
+        coverage: {
+          account_metrics: "missing",
+          content_metrics: "missing",
+          audience_profiles: "missing",
+          benchmarks: "missing",
+        },
+        sources: [],
+      }),
+    );
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [buildBatchSummary()],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(pending);
+
+    renderPage();
+
+    expect(await screen.findByText("暂无已确认数据")).toBeInTheDocument();
+    expect(await screen.findByText("有 1 个批次等待确认")).toBeInTheDocument();
+    expect(screen.queryByText("已有可用数据")).not.toBeInTheDocument();
+  });
+
   it("shows a recoverable unknown-template error inline", async () => {
     vi.mocked(getWorkspaceContext).mockResolvedValueOnce({
       clients: [],
@@ -351,6 +401,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入与补录");
     const fileInput = await screen.findByLabelText("选择导入文件");
     fireEvent.change(fileInput, {
       target: {
@@ -397,6 +448,7 @@ describe("AccountDataCenter", () => {
       </StrictMode>,
     );
 
+    await openAccountDataView("导入与补录");
     const fileInput = await screen.findByLabelText("选择导入文件");
     fireEvent.change(fileInput, {
       target: {
@@ -443,6 +495,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入与补录");
     fireEvent.click(await screen.findByRole("tab", { name: "人工录入" }));
     fireEvent.change(screen.getByLabelText("统计日期"), { target: { value: "2026-07-22" } });
     fireEvent.change(screen.getByLabelText("粉丝总数"), { target: { value: "1200" } });
@@ -585,6 +638,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     expect((await screen.findAllByText("已上传")).length).toBeGreaterThan(0);
     expect(await screen.findByText("导入失败")).toBeInTheDocument();
   });
@@ -670,8 +724,7 @@ describe("AccountDataCenter", () => {
     );
     await waitFor(() => expect(listAccountDataImports).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(getAccountDataStatus).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("最近确认时间")).toBeInTheDocument();
-    expect((await screen.findAllByText("已确认")).length).toBeGreaterThan(0);
+    expect(await screen.findByLabelText("数据确认状态")).toHaveTextContent("最近确认");
   });
 
   it("requires an explicit revoke confirmation before revoking one batch", async () => {
@@ -732,6 +785,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "撤销批次 81" }));
     expect(screen.getByText("确认撤销这次写入？")).toBeInTheDocument();
     expect(revokeAccountDataImportBatch).not.toHaveBeenCalled();
@@ -779,6 +833,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
     expect(
       screen.getByText("将先撤销该批次产生的数据，再永久删除原文件和历史记录。"),
@@ -828,6 +883,7 @@ describe("AccountDataCenter", () => {
 
     const { container } = renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
 
@@ -869,6 +925,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
 
@@ -906,6 +963,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "永久删除批次 81" }));
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除批次 81" }));
 
@@ -943,6 +1001,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "下载原文件 works.xlsx" }));
 
     await waitFor(() =>
@@ -991,6 +1050,7 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
+    await openAccountDataView("导入记录");
     fireEvent.click(await screen.findByRole("button", { name: "撤销批次 81" }));
     fireEvent.click(screen.getByRole("button", { name: "确认撤销批次 81" }));
 
