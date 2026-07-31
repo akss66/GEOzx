@@ -198,6 +198,56 @@ async def test_get_import_job_is_account_scoped(
 
 
 @pytest.mark.asyncio
+async def test_list_import_jobs_restores_recent_account_scoped_queue(
+    client,
+    account,
+    monkeypatch,
+    tmp_path,
+):
+    token = await _token(client)
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+
+    async def fake_enqueue(job_id: int, *, dispatch_revision: int) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.api.account_data.enqueue_account_data_import_job",
+        fake_enqueue,
+    )
+    for index in range(2):
+        created = await client.post(
+            f"/account-data/{account.id}/import-jobs",
+            headers=_auth(token),
+            data={"client_request_id": f"bulk-list-{index}"},
+            files=[
+                (
+                    "files",
+                    (
+                        f"daily-{index}.xlsx",
+                        workbook_bytes(
+                            DAILY_HEADERS,
+                            [[f"2026-07-{30 + index}", 10 + index]],
+                        ),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                )
+            ],
+        )
+        assert created.status_code == 202
+
+    response = await client.get(
+        f"/account-data/{account.id}/import-jobs",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    assert [item["client_request_id"] for item in response.json()] == [
+        "bulk-list-1",
+        "bulk-list-0",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_retry_endpoint_reuploads_only_a_failed_file(
     client,
     session,

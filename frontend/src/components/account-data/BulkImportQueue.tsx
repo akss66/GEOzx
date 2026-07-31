@@ -11,6 +11,7 @@ import {
 import {
   createAccountDataImportJob,
   getAccountDataImportJob,
+  listAccountDataImportJobs,
   retryAccountDataImportFile,
   type AccountDataImportFileStatus,
   type AccountDataImportJob,
@@ -72,6 +73,34 @@ export function BulkImportQueue({
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const notifiedRef = useRef(new Set<number>());
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    void listAccountDataImportJobs(accountId)
+      .then((recentJobs) => {
+        if (cancelled) return;
+        recentJobs.forEach((job) => {
+          if (!ACTIVE_STATUSES.has(job.status)) {
+            notifiedRef.current.add(job.id);
+          }
+        });
+        setJobs(recentJobs);
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setError(
+            presentApiError(
+              loadError,
+              "最近的导入任务暂时无法读取。",
+            ).message,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId]);
 
   useEffect(() => {
     const activeJobs = jobs.filter((job) => ACTIVE_STATUSES.has(job.status));

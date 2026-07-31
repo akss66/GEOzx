@@ -319,6 +319,15 @@ export async function getAccountDataImportJob(
   return data;
 }
 
+export async function listAccountDataImportJobs(
+  accountId: number,
+): Promise<AccountDataImportJob[]> {
+  const { data } = await api.get<AccountDataImportJob[]>(
+    `/account-data/${accountId}/import-jobs`,
+  );
+  return data;
+}
+
 export async function retryAccountDataImportFile(
   accountId: number,
   jobId: number,

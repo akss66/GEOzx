@@ -45,6 +45,7 @@ from app.services.data_import.jobs import (
     JobUpload,
     create_import_job,
     enqueue_account_data_import_job,
+    list_import_jobs,
     load_import_job,
     retry_import_file,
 )
@@ -169,6 +170,24 @@ async def create_bulk_import_job(
             dispatch_revision=job.file_count,
         )
     return ImportJobOut.model_validate(job)
+
+
+@router.get(
+    "/{account_id}/import-jobs",
+    response_model=list[ImportJobOut],
+)
+async def get_recent_bulk_import_jobs(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> list[ImportJobOut]:
+    account = await require_account_access(session, user, account_id)
+    jobs = await list_import_jobs(
+        session,
+        org_id=user.org_id,
+        account_id=account.id,
+    )
+    return [ImportJobOut.model_validate(job) for job in jobs]
 
 
 @router.get(

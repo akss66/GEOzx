@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createAccountDataImportJob,
   getAccountDataImportJob,
+  listAccountDataImportJobs,
   retryAccountDataImportFile,
 } from "../../api/accountData";
 import { BulkImportQueue } from "./BulkImportQueue";
@@ -18,12 +19,14 @@ vi.mock("../../api/accountData", async () => {
     ...actual,
     createAccountDataImportJob: vi.fn(),
     getAccountDataImportJob: vi.fn(),
+    listAccountDataImportJobs: vi.fn(),
     retryAccountDataImportFile: vi.fn(),
   };
 });
 
 const createJob = vi.mocked(createAccountDataImportJob);
 const getJob = vi.mocked(getAccountDataImportJob);
+const listJobs = vi.mocked(listAccountDataImportJobs);
 const retryFile = vi.mocked(retryAccountDataImportFile);
 
 function jobFixture() {
@@ -84,6 +87,17 @@ describe("BulkImportQueue", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    listJobs.mockResolvedValue([]);
+  });
+
+  it("restores recent import jobs after the page is reopened", async () => {
+    listJobs.mockResolvedValue([jobFixture()]);
+
+    render(<BulkImportQueue accountId={7} onTerminal={vi.fn()} />);
+
+    expect(await screen.findByText("损坏数据.xlsx")).toBeInTheDocument();
+    expect(listJobs).toHaveBeenCalledWith(7);
+    expect(screen.getByLabelText("重新上传 损坏数据.xlsx")).toBeInTheDocument();
   });
 
   it("submits every selected file in one request", async () => {

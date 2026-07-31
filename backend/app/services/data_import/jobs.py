@@ -172,6 +172,32 @@ async def load_import_job(
     return job
 
 
+async def list_import_jobs(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    limit: int = 20,
+) -> list[DataImportJob]:
+    bounded_limit = min(max(limit, 1), 50)
+    return list(
+        await session.scalars(
+            select(DataImportJob)
+            .options(
+                selectinload(DataImportJob.files).selectinload(
+                    DataImportFile.datasets
+                )
+            )
+            .where(
+                DataImportJob.org_id == org_id,
+                DataImportJob.account_id == account_id,
+            )
+            .order_by(DataImportJob.created_at.desc(), DataImportJob.id.desc())
+            .limit(bounded_limit)
+        )
+    )
+
+
 async def enqueue_account_data_import_job(
     job_id: int,
     *,
