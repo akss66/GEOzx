@@ -8,7 +8,7 @@ from app.services.data_import.parser import (
     ParsedDataset,
     ValidatedRow,
     build_preview,
-    parse_source_file,
+    parse_single_source_file,
 )
 
 
@@ -58,7 +58,7 @@ class FileDataSourceAdapter:
         )
 
     def parse(self, source: SourceInput) -> ParsedDataset:
-        return parse_source_file(source["filename"], source["data"])
+        return parse_single_source_file(source["filename"], source["data"])
 
     def normalize(self, parsed: ParsedDataset) -> list[ValidatedRow]:
         return parsed.rows

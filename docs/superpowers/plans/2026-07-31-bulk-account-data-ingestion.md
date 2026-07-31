@@ -136,13 +136,13 @@ class TemplateMatch:
 - Create: `backend/tests/test_data_import_multi_sheet.py`
 - Modify: `backend/tests/test_data_import_preview.py`
 
-- [ ] Add failing tests for:
+- [x] Add failing tests for:
   - one workbook containing two supported worksheets;
   - a blank worksheet plus a supported worksheet;
   - one supported and one unknown worksheet;
   - duplicate worksheet names normalized safely;
   - aggregate row and byte limits across worksheets.
-- [ ] Introduce:
+- [x] Introduce:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -152,14 +152,14 @@ class ParsedSourceFile:
     warnings: list[RowIssue]
 ```
 
-- [ ] Change `parse_source_file(filename, data)` to return `ParsedSourceFile` after iterating every worksheet and collecting its supported dataset or isolated warning.
-- [ ] Add `sheet_name` and `dataset_ordinal` to `ParsedDataset`.
-- [ ] Treat blank worksheets as skipped warnings.
-- [ ] Return unknown worksheets as isolated dataset failures to the bulk orchestrator instead of failing recognized siblings.
-- [ ] Keep archive, formula, external-link, macro, row, column, and decompression-bomb protections.
-- [ ] Provide a compatibility helper used by the legacy single-file endpoint when exactly one supported dataset is present.
-- [ ] Run `cd backend; python -m pytest tests/test_data_import_preview.py tests/test_data_import_multi_sheet.py -q`.
-- [ ] Commit: `feat(account-data): parse supported datasets from every worksheet`.
+- [x] Change `parse_source_file(filename, data)` to return `ParsedSourceFile` after iterating every worksheet and collecting its supported dataset or isolated warning.
+- [x] Add `sheet_name` and `dataset_ordinal` to `ParsedDataset`.
+- [x] Treat blank worksheets as skipped warnings.
+- [x] Return unknown worksheets as isolated dataset failures to the bulk orchestrator instead of failing recognized siblings.
+- [x] Keep archive, formula, external-link, macro, row, column, and decompression-bomb protections.
+- [x] Provide a compatibility helper used by the legacy single-file endpoint when exactly one supported dataset is present.
+- [x] Run `cd backend; python -m pytest tests/test_data_import_preview.py tests/test_data_import_multi_sheet.py -q`.
+- [x] Commit: `feat(account-data): parse supported datasets from every worksheet`.
 
 ## Task 5: Persist Observations and Canonical Projections
 

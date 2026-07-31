@@ -590,7 +590,7 @@ def test_xlsx_rows_with_unexpected_extra_cells_are_rejected():
         parse_source_file("daily.xlsx", payload)
 
 
-def test_workbooks_with_multiple_worksheets_are_rejected():
+def test_workbooks_with_multiple_supported_worksheets_return_multiple_datasets():
     workbook = Workbook()
     first = workbook.active
     first.append(DAILY_HEADERS)
@@ -602,8 +602,13 @@ def test_workbooks_with_multiple_worksheets_are_rejected():
     workbook.save(buffer)
     workbook.close()
 
-    with pytest.raises(ParseFailure, match="exactly one worksheet"):
-        parse_source_file("multiple.xlsx", buffer.getvalue())
+    parsed = parse_source_file("multiple.xlsx", buffer.getvalue())
+
+    assert [dataset.template_code for dataset in parsed.datasets] == [
+        "douyin_daily_play_v1",
+        "douyin_daily_play_v1",
+    ]
+    assert [dataset.rows[0].normalized["play"] for dataset in parsed.datasets] == [81, 82]
 
 
 def test_header_only_file_preserves_template_code_in_preview():

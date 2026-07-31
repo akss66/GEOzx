@@ -78,32 +78,138 @@ class ParsedDataset:
     headers: list[str]
     rows: list[ValidatedRow]
     preview: ImportPreview
+    sheet_name: str | None = None
+    dataset_ordinal: int = 1
     warnings: list[RowIssue] = field(default_factory=list)
 
 
-def parse_source_file(filename: str, data: bytes) -> ParsedDataset:
+@dataclass(frozen=True, slots=True)
+class ParsedDatasetFailure:
+    sheet_name: str | None
+    dataset_ordinal: int
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSourceFile:
+    filename: str
+    datasets: list[ParsedDataset]
+    warnings: list[RowIssue] = field(default_factory=list)
+    failures: list[ParsedDatasetFailure] = field(default_factory=list)
+
+    def require_single_dataset(self) -> ParsedDataset:
+        if self.failures:
+            raise ParseFailure(
+                "partial_workbook_requires_bulk_import",
+                "A workbook with failed worksheets must use the bulk import flow",
+            )
+        if len(self.datasets) != 1:
+            raise ParseFailure(
+                "multiple_datasets_require_bulk_import",
+                "Files containing multiple datasets must use the bulk import flow",
+            )
+        return self.datasets[0]
+
+    @property
+    def template_code(self) -> str:
+        return self.require_single_dataset().template_code
+
+    @property
+    def template_name(self) -> str:
+        return self.require_single_dataset().template_name
+
+    @property
+    def headers(self) -> list[str]:
+        return self.require_single_dataset().headers
+
+    @property
+    def rows(self) -> list[ValidatedRow]:
+        return self.require_single_dataset().rows
+
+    @property
+    def preview(self) -> ImportPreview:
+        return self.require_single_dataset().preview
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceTable:
+    sheet_name: str | None
+    dataset_ordinal: int
+    headers: list[str]
+    raw_rows: list[dict[str, Any]]
+
+
+def parse_source_file(filename: str, data: bytes) -> ParsedSourceFile:
     extension = _validate_source(filename, data)
-    headers, raw_rows = _parse_xlsx(data) if extension == ".xlsx" else _parse_csv(data)
-    match = _detect_template_or_fail(headers)
-    template = match.template
-    rows = _normalize_rows(match, headers, raw_rows)
-    preview = build_preview(rows, template_code=template.code)
-    warnings = [
-        RowIssue(
-            code="ignored_column",
-            message=f"Unrecognized column was preserved for audit: {header}",
-            field=header,
+    source_warnings: list[RowIssue] = []
+    failures: list[ParsedDatasetFailure] = []
+    if extension == ".xlsx":
+        tables, source_warnings, failures = _parse_xlsx(data)
+    else:
+        headers, raw_rows = _parse_csv(data)
+        tables = [
+            _SourceTable(
+                sheet_name=None,
+                dataset_ordinal=1,
+                headers=headers,
+                raw_rows=raw_rows,
+            )
+        ]
+
+    datasets: list[ParsedDataset] = []
+    for table in tables:
+        try:
+            match = _detect_template_or_fail(table.headers)
+        except ParseFailure as exc:
+            failures.append(
+                ParsedDatasetFailure(
+                    sheet_name=table.sheet_name,
+                    dataset_ordinal=table.dataset_ordinal,
+                    code=exc.code,
+                    message=str(exc),
+                )
+            )
+            continue
+        template = match.template
+        rows = _normalize_rows(match, table.headers, table.raw_rows)
+        preview = build_preview(rows, template_code=template.code)
+        warnings = [
+            RowIssue(
+                code="ignored_column",
+                message=f"Unrecognized column was preserved for audit: {header}",
+                field=header,
+            )
+            for header in match.ignored_headers
+        ]
+        datasets.append(
+            ParsedDataset(
+                template_code=template.code,
+                template_name=template.display_name,
+                headers=table.headers,
+                rows=rows,
+                preview=preview,
+                sheet_name=table.sheet_name,
+                dataset_ordinal=table.dataset_ordinal,
+                warnings=warnings,
+            )
         )
-        for header in match.ignored_headers
-    ]
-    return ParsedDataset(
-        template_code=template.code,
-        template_name=template.display_name,
-        headers=headers,
-        rows=rows,
-        preview=preview,
-        warnings=warnings,
+
+    if not datasets:
+        if failures:
+            first = failures[0]
+            raise ParseFailure(first.code, first.message)
+        raise ParseFailure("empty_file", "The file does not contain any rows")
+    return ParsedSourceFile(
+        filename=filename,
+        datasets=datasets,
+        warnings=source_warnings,
+        failures=failures,
     )
+
+
+def parse_single_source_file(filename: str, data: bytes) -> ParsedDataset:
+    return parse_source_file(filename, data).require_single_dataset()
 
 
 def build_preview(
@@ -161,7 +267,9 @@ def _decode_csv(data: bytes) -> str:
     return text
 
 
-def _parse_xlsx(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
+def _parse_xlsx(
+    data: bytes,
+) -> tuple[list[_SourceTable], list[RowIssue], list[ParsedDatasetFailure]]:
     _scan_xlsx_archive(data)
     try:
         workbook = load_workbook(
@@ -178,35 +286,92 @@ def _parse_xlsx(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
     try:
         if not workbook.worksheets:
             raise ParseFailure("empty_workbook", "The workbook does not contain any worksheets")
-        if len(workbook.worksheets) != 1:
-            raise ParseFailure(
-                "multiple_worksheets_unsupported",
-                "Workbooks must contain exactly one worksheet",
-            )
-        worksheet = workbook.worksheets[0]
-        rows: list[list[Any]] = []
-        for row in worksheet.iter_rows(values_only=True):
-            values = list(row)
-            last_index = max(
-                (
-                    index
-                    for index, value in enumerate(values)
-                    if value is not None and str(value).strip() != ""
-                ),
-                default=-1,
-            )
-            if last_index < 0:
+        tables: list[_SourceTable] = []
+        warnings: list[RowIssue] = []
+        failures: list[ParsedDatasetFailure] = []
+        used_sheet_names: set[str] = set()
+        total_data_rows = 0
+        for dataset_ordinal, worksheet in enumerate(workbook.worksheets, start=1):
+            sheet_name = _stable_sheet_name(worksheet.title, used_sheet_names)
+            rows: list[list[Any]] = []
+            for row in worksheet.iter_rows(values_only=True):
+                values = list(row)
+                last_index = max(
+                    (
+                        index
+                        for index, value in enumerate(values)
+                        if value is not None and str(value).strip() != ""
+                    ),
+                    default=-1,
+                )
+                if last_index < 0:
+                    continue
+                trimmed = values[: last_index + 1]
+                if len(trimmed) > MAX_COLUMNS:
+                    failures.append(
+                        ParsedDatasetFailure(
+                            sheet_name=sheet_name,
+                            dataset_ordinal=dataset_ordinal,
+                            code="too_many_columns",
+                            message=TOO_MANY_COLUMNS_MESSAGE,
+                        )
+                    )
+                    rows = []
+                    break
+                rows.append(trimmed)
+                if len(rows) - 1 > MAX_DATA_ROWS:
+                    raise ParseFailure("too_many_rows", TOO_MANY_ROWS_MESSAGE)
+            if not rows:
+                if any(
+                    failure.dataset_ordinal == dataset_ordinal
+                    for failure in failures
+                ):
+                    continue
+                warnings.append(
+                    RowIssue(
+                        code="blank_worksheet_skipped",
+                        message=f"Blank worksheet was skipped: {sheet_name}",
+                        field=sheet_name,
+                    )
+                )
                 continue
-            trimmed = values[: last_index + 1]
-            if len(trimmed) > MAX_COLUMNS:
-                raise ParseFailure("too_many_columns", TOO_MANY_COLUMNS_MESSAGE)
-            rows.append(trimmed)
-            if len(rows) - 1 > MAX_DATA_ROWS:
+            try:
+                headers, raw_rows = _rows_to_table(rows, reject_extra_cells=True)
+            except ParseFailure as exc:
+                failures.append(
+                    ParsedDatasetFailure(
+                        sheet_name=sheet_name,
+                        dataset_ordinal=dataset_ordinal,
+                        code=exc.code,
+                        message=str(exc),
+                    )
+                )
+                continue
+            total_data_rows += len(raw_rows)
+            if total_data_rows > MAX_DATA_ROWS:
                 raise ParseFailure("too_many_rows", TOO_MANY_ROWS_MESSAGE)
-
-        return _rows_to_table(rows, reject_extra_cells=True)
+            tables.append(
+                _SourceTable(
+                    sheet_name=sheet_name,
+                    dataset_ordinal=dataset_ordinal,
+                    headers=headers,
+                    raw_rows=raw_rows,
+                )
+            )
+        return tables, warnings, failures
     finally:
         workbook.close()
+
+
+def _stable_sheet_name(raw_name: str, used_names: set[str]) -> str:
+    base_name = raw_name.strip() or "Sheet"
+    candidate = base_name
+    suffix = 2
+    while candidate.casefold() in used_names:
+        candidate = f"{base_name} ({suffix})"
+        suffix += 1
+    used_names.add(candidate.casefold())
+    return candidate
 
 
 def _scan_xlsx_archive(data: bytes) -> None:
