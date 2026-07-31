@@ -172,12 +172,16 @@ async def load_import_job(
     return job
 
 
-async def enqueue_account_data_import_job(job_id: int) -> None:
+async def enqueue_account_data_import_job(
+    job_id: int,
+    *,
+    dispatch_revision: int,
+) -> None:
     pool = await get_arq_pool()
     await pool.enqueue_job(
         "execute_account_data_import_job",
         job_id,
-        _job_id=f"account-data-import-job:{job_id}",
+        _job_id=f"account-data-import-job:{job_id}:{dispatch_revision}",
     )
 
 

@@ -47,10 +47,11 @@ async def test_create_import_job_accepts_repeated_files_and_persists_before_enqu
     monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
     enqueued: list[int] = []
 
-    async def fake_enqueue(job_id: int) -> None:
+    async def fake_enqueue(job_id: int, *, dispatch_revision: int) -> None:
         persisted = await session.get(DataImportJob, job_id)
         assert persisted is not None
         assert len(persisted.files) == 2
+        assert dispatch_revision == 2
         enqueued.append(job_id)
 
     monkeypatch.setattr(
@@ -106,7 +107,8 @@ async def test_same_client_request_returns_original_job_without_duplicate_files(
     monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
     enqueued: list[int] = []
 
-    async def fake_enqueue(job_id: int) -> None:
+    async def fake_enqueue(job_id: int, *, dispatch_revision: int) -> None:
+        assert dispatch_revision == 1
         enqueued.append(job_id)
 
     monkeypatch.setattr(
@@ -157,7 +159,7 @@ async def test_get_import_job_is_account_scoped(
     token = await _token(client)
     monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
 
-    async def fake_enqueue(job_id: int) -> None:
+    async def fake_enqueue(job_id: int, *, dispatch_revision: int) -> None:
         return None
 
     monkeypatch.setattr(
@@ -208,7 +210,7 @@ async def test_retry_endpoint_reuploads_only_a_failed_file(
     monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
     enqueued: list[int] = []
 
-    async def fake_enqueue(job_id: int) -> None:
+    async def fake_enqueue(job_id: int, *, dispatch_revision: int) -> None:
         enqueued.append(job_id)
 
     monkeypatch.setattr(

@@ -164,7 +164,10 @@ async def create_bulk_import_job(
     except ValueError as exc:
         raise _bad_request(str(exc), status_code=status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
     if created or job.status.value == "queued":
-        await enqueue_account_data_import_job(job.id)
+        await enqueue_account_data_import_job(
+            job.id,
+            dispatch_revision=job.file_count,
+        )
     return ImportJobOut.model_validate(job)
 
 
@@ -239,7 +242,10 @@ async def retry_bulk_import_file(
         ) from exc
     except ValueError as exc:
         raise _bad_request(str(exc), status_code=status.HTTP_409_CONFLICT) from exc
-    await enqueue_account_data_import_job(job.id)
+    await enqueue_account_data_import_job(
+        job.id,
+        dispatch_revision=job.file_count,
+    )
     return ImportJobOut.model_validate(job)
 
 

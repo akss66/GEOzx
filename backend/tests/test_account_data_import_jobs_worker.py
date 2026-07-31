@@ -14,6 +14,7 @@ from app.models.enums import ImportFileStatus, ImportJobStatus, Platform
 from app.services.data_import.jobs import (
     JobUpload,
     create_import_job,
+    enqueue_account_data_import_job,
     process_import_job,
     retry_import_file,
 )
@@ -31,6 +32,28 @@ async def account(session, admin) -> Account:
     await session.commit()
     await session.refresh(item)
     return item
+
+
+@pytest.mark.asyncio
+async def test_enqueue_uses_file_count_as_dispatch_revision(monkeypatch):
+    enqueued: list[tuple[int, str]] = []
+
+    class FakePool:
+        async def enqueue_job(self, _name, job_id, *, _job_id):
+            enqueued.append((job_id, _job_id))
+
+    async def fake_pool():
+        return FakePool()
+
+    monkeypatch.setattr("app.services.data_import.jobs.get_arq_pool", fake_pool)
+
+    await enqueue_account_data_import_job(41, dispatch_revision=2)
+    await enqueue_account_data_import_job(41, dispatch_revision=3)
+
+    assert enqueued == [
+        (41, "account-data-import-job:41:2"),
+        (41, "account-data-import-job:41:3"),
+    ]
 
 
 @pytest.mark.asyncio
