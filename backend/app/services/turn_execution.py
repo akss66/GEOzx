@@ -1258,6 +1258,8 @@ def _format_account_data_summary(data: dict[str, Any]) -> str:
         "comments": "评论数",
         "share_count": "分享数",
         "shares": "分享数",
+        "profile_visit_count": "主页访问",
+        "unfollow_count": "取关粉丝",
         "engagement_rate": "互动率",
         "cover_click_rate": "封面点击率",
     }

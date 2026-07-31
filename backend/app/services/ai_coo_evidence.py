@@ -19,6 +19,12 @@ ACCOUNT_METRICS = (
     "total_play",
     "total_exposure",
     "engagement_rate",
+    "profile_visit_count",
+    "unfollow_count",
+    "like_count",
+    "comment_count",
+    "share_count",
+    "cover_click_rate",
 )
 
 

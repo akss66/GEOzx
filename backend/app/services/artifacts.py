@@ -532,7 +532,20 @@ def _validate_revision_payload(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="成果内容不符合当前类型要求",
         )
-    business_payload = {key: payload[key] for key in schema.model_fields if key in payload}
+    normalized_payload = dict(payload)
+    if (
+        deliverable_type == DeliverableType.REVIEW_REPORT
+        and "optimization_suggestions" not in normalized_payload
+        and "recommendations" in normalized_payload
+    ):
+        normalized_payload["optimization_suggestions"] = normalized_payload[
+            "recommendations"
+        ]
+    business_payload = {
+        key: normalized_payload[key]
+        for key in schema.model_fields
+        if key in normalized_payload
+    }
     try:
         return validate_payload(deliverable_type, business_payload).model_dump(mode="json")
     except (KeyError, ValidationError) as exc:
@@ -705,10 +718,19 @@ def _artifact_sections(
 ) -> list[ArtifactSection]:
     schema = get_schema(deliverable_type)
     allowed_fields = set(schema.model_fields) if schema is not None else set()
+    section_payload = payload
     if business_artifact_type == _ACCOUNT_INSPECTION_ARTIFACT_TYPE:
         allowed_fields.update(_ACCOUNT_INSPECTION_FIELDS)
+        section_payload = dict(payload)
+        if not section_payload.get("recommendations") and section_payload.get(
+            "optimization_suggestions"
+        ):
+            section_payload["recommendations"] = section_payload[
+                "optimization_suggestions"
+            ]
+        section_payload.pop("optimization_suggestions", None)
     sections: list[ArtifactSection] = []
-    for key, value in payload.items():
+    for key, value in section_payload.items():
         if key not in allowed_fields or key in _NON_SECTION_KEYS or value is None:
             continue
         sections.append(

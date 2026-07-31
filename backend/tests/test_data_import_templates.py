@@ -56,6 +56,17 @@ WORK_LIST_HEADERS = [
     "粉丝增量",
 ]
 
+DOUYIN_DAILY_ACCOUNT_EXPORT_CASES = [
+    ("主页访问", "profile_visit_count", 12, 12),
+    ("总粉丝量", "follower_count", 7994, 7994),
+    ("取关粉丝", "unfollow_count", 3, 3),
+    ("净增粉丝", "follower_delta", -11, -11),
+    ("封面点击率", "cover_click_rate", "83.33%", pytest.approx(0.8333)),
+    ("作品评论", "comment_count", -2, -2),
+    ("作品分享", "share_count", 5, 5),
+    ("作品点赞", "like_count", -21, -21),
+]
+
 CONTENT_TYPES_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels"
@@ -130,6 +141,24 @@ def workbook_bytes(
                 archive.writestr(filename, content)
 
     return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("metric_header", "field_name", "raw_value", "expected"),
+    DOUYIN_DAILY_ACCOUNT_EXPORT_CASES,
+)
+def test_real_douyin_daily_account_metric_exports_are_recognized(
+    metric_header, field_name, raw_value, expected
+):
+    parsed = parse_source_file(
+        f"数据表现_{metric_header}数据.xlsx",
+        workbook_bytes(["日期", metric_header], [["2026-07-30", raw_value]]),
+    ).require_single_dataset()
+
+    assert parsed.template_code.startswith("douyin_daily_")
+    assert parsed.preview.valid_rows == 1
+    assert parsed.rows[0].normalized["stat_date"] == date(2026, 7, 30)
+    assert parsed.rows[0].normalized[field_name] == expected
 
 
 def csv_bytes(

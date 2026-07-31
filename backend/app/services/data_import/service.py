@@ -60,7 +60,10 @@ from app.services.data_import.projection import (
     rebuild_projection,
     record_and_resolve_fields,
 )
-from app.services.data_import.templates import KNOWN_TEMPLATES
+from app.services.data_import.templates import (
+    DAILY_ACCOUNT_METRIC_TEMPLATE_CODES,
+    KNOWN_TEMPLATES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1434,7 +1437,7 @@ async def _project_row_targets(
         return await _project_work_list_row(session=session, batch=batch, row=row)
     if batch.template_code == "douyin_single_content_v1":
         return await _project_single_content_row(session=session, batch=batch, row=row)
-    if batch.template_code == "douyin_daily_play_v1":
+    if batch.template_code in DAILY_ACCOUNT_METRIC_TEMPLATE_CODES:
         return await _project_daily_play_row(session=session, batch=batch, row=row)
     if batch.template_code == "douyin_period_aggregate_v1":
         return await _project_period_aggregate_row(session=session, batch=batch, row=row)
@@ -1922,6 +1925,12 @@ async def _rebuild_account_metric_projection(
         "total_play",
         "total_exposure",
         "engagement_rate",
+        "profile_visit_count",
+        "unfollow_count",
+        "like_count",
+        "comment_count",
+        "share_count",
+        "cover_click_rate",
     ):
         setattr(snapshot, field_name, None)
     for field_name, winner in winners.items():
@@ -2349,7 +2358,17 @@ async def _upsert_account_metric_snapshot(
         merge_values["total_exposure"] = row.normalized_values.get("total_exposure")
     elif "exposure" in row.normalized_values:
         merge_values["total_exposure"] = row.normalized_values.get("exposure")
-    for field_name in ("follower_count", "follower_delta", "engagement_rate"):
+    for field_name in (
+        "follower_count",
+        "follower_delta",
+        "engagement_rate",
+        "profile_visit_count",
+        "unfollow_count",
+        "like_count",
+        "comment_count",
+        "share_count",
+        "cover_click_rate",
+    ):
         if field_name in row.normalized_values:
             merge_values[field_name] = row.normalized_values.get(field_name)
     winners = await record_and_resolve_fields(

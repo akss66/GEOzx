@@ -251,26 +251,33 @@ _SUM_METRICS = {
     "play",
     "exposure",
     "follower_delta",
+    "unfollow_count",
     "like_count",
     "comment_count",
     "share_count",
     "favorite_count",
     "profile_visit_count",
 }
+_LATEST_METRICS = {"follower_count"}
 
 
 def _aggregate_data_metrics(content_snapshots, account_snapshots) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for metric_name in dict.fromkeys((*CONTENT_METRICS, *ACCOUNT_METRICS)):
+        primary_snapshots, fallback_snapshots = (
+            (account_snapshots, content_snapshots)
+            if metric_name in ACCOUNT_METRICS
+            else (content_snapshots, account_snapshots)
+        )
         metrics = [
             item.metrics[metric_name]
-            for item in content_snapshots
+            for item in primary_snapshots
             if metric_name in item.metrics and item.metrics[metric_name].value is not None
         ]
         if not metrics:
             metrics = [
                 item.metrics[metric_name]
-                for item in account_snapshots
+                for item in fallback_snapshots
                 if metric_name in item.metrics and item.metrics[metric_name].value is not None
             ]
         result[metric_name] = _metric_context(metric_name, metrics)
@@ -282,6 +289,15 @@ def _metric_context(metric_name: str, metrics: list[AccountDataMetric]) -> dict[
     value: int | float | None
     if not values:
         value = None
+    elif metric_name in _LATEST_METRICS:
+        latest_metric = max(
+            metrics,
+            key=lambda item: max(
+                (observation.observed_at for observation in item.observations),
+                default=date.min,
+            ),
+        )
+        value = latest_metric.value
     elif metric_name in _SUM_METRICS:
         total = float(sum(values))
         value = int(total) if total.is_integer() else total

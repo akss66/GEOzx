@@ -186,6 +186,7 @@ async def test_account_inspection_uses_verified_business_artifact_type(
         "missing_data": ["缺少转化数据"],
         "findings": ["已有内容播放证据"],
         "recommendations": ["补齐转化数据"],
+        "optimization_suggestions": ["补齐转化数据"],
         "next_action": "导入最近30天转化数据",
         "participating_experts": [
             "06-operator",
@@ -237,6 +238,11 @@ async def test_account_inspection_uses_verified_business_artifact_type(
         "participating_experts",
         "critic",
     }
+    assert [
+        section["title"]
+        for section in projected["sections"]
+        if section["title"] == "优化建议"
+    ] == ["优化建议"]
     assert "raw_tool_log" not in str(projected)
     assert legacy_filter.status_code == 200
     assert legacy_filter.json()["pagination"]["total"] == 0
@@ -458,6 +464,45 @@ async def test_artifact_revision_increments_version_and_rejects_stale_source(
         )
     )
     assert [row.version for row in versions] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_revision_accepts_business_recommendations_alias(
+    client, session, admin
+):
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="inspection-revision",
+        skill_code="account_inspection",
+    )
+    source = seeded[8]
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+    revised_payload = _review_payload(summary="补齐数据后的账号体检")
+    revised_payload["recommendations"] = revised_payload.pop(
+        "optimization_suggestions"
+    )
+
+    response = await client.post(
+        "/artifact-revisions",
+        headers=headers,
+        json={"artifact_id": source.id, "payload": revised_payload},
+    )
+
+    assert response.status_code == 201
+    persisted = await session.scalar(
+        select(Deliverable).where(
+            Deliverable.content_item_id == seeded[2].id,
+            Deliverable.type == DeliverableType.REVIEW_REPORT,
+            Deliverable.version == 2,
+        )
+    )
+    assert persisted is not None
+    assert persisted.payload["optimization_suggestions"] == revised_payload[
+        "recommendations"
+    ]
+    assert "recommendations" not in persisted.payload
 
 
 @pytest.mark.asyncio

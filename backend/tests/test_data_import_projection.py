@@ -163,6 +163,81 @@ async def test_overlapping_daily_imports_update_shared_dates_and_keep_other_date
 
 
 @pytest.mark.asyncio
+async def test_daily_account_export_files_merge_by_date_and_only_replace_present_field(
+    session,
+    admin,
+    account,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    imports = [
+        ("主页访问", 12),
+        ("总粉丝量", 7994),
+        ("取关粉丝", 3),
+        ("净增粉丝", -11),
+        ("封面点击率", "15.61%"),
+        ("作品评论", -2),
+        ("作品分享", 5),
+        ("作品点赞", -21),
+    ]
+    for metric_header, value in imports:
+        await _preview_and_commit(
+            session,
+            admin,
+            account,
+            f"数据表现_{metric_header}数据.xlsx",
+            workbook_bytes(
+                ["日期", metric_header],
+                [["2026-07-30", value]],
+            ),
+        )
+
+    snapshot = await session.scalar(
+        select(AccountMetricSnapshot).where(
+            AccountMetricSnapshot.account_id == account.id,
+            AccountMetricSnapshot.stat_date == date(2026, 7, 30),
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.profile_visit_count == 12
+    assert snapshot.follower_count == 7994
+    assert snapshot.unfollow_count == 3
+    assert snapshot.follower_delta == -11
+    assert snapshot.cover_click_rate == pytest.approx(0.1561)
+    assert snapshot.comment_count == -2
+    assert snapshot.share_count == 5
+    assert snapshot.like_count == -21
+
+    await _preview_and_commit(
+        session,
+        admin,
+        account,
+        "数据表现_作品点赞数据-更新.xlsx",
+        workbook_bytes(
+            ["日期", "作品点赞"],
+            [["2026-07-30", 18]],
+        ),
+    )
+    await session.refresh(snapshot)
+    assert snapshot.like_count == 18
+    assert snapshot.comment_count == -2
+    assert snapshot.follower_count == 7994
+
+    view = await AccountDataViewService(session).load(
+        account,
+        date(2026, 7, 30),
+        date(2026, 7, 30),
+    )
+    metrics = view.account_snapshots[0].metrics
+    assert metrics["profile_visit_count"].value == 12
+    assert metrics["unfollow_count"].value == 3
+    assert metrics["cover_click_rate"].value == pytest.approx(0.1561)
+    assert metrics["like_count"].value == 18
+    assert metrics["comment_count"].value == -2
+
+
+@pytest.mark.asyncio
 async def test_partial_content_reimport_preserves_absent_metrics_and_updates_present_fields(
     session,
     admin,

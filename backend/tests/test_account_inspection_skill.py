@@ -387,6 +387,8 @@ async def test_account_inspection_runs_bounded_graph_and_persists_one_artifact(
     assert persisted.payload["artifact_type"] == "account_inspection_report"
     assert persisted.payload["data_sufficiency"] == "sufficient"
     assert persisted.payload["next_action"]
+    assert "recommendations" not in persisted.payload
+    assert persisted.payload["optimization_suggestions"]
     assert persisted.payload["evidence_refs"] == [{"kind": "data_import_batch", "id": 7}]
     assert (
         await session.scalar(

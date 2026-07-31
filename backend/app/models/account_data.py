@@ -772,6 +772,12 @@ class AccountMetricSnapshot(Base, TimestampMixin):
     total_play: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_exposure: Mapped[int | None] = mapped_column(Integer, nullable=True)
     engagement_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profile_visit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unfollow_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    like_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    share_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cover_click_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class AudienceProfileSnapshot(Base, TimestampMixin):

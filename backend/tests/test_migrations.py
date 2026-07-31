@@ -597,8 +597,28 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_bulk_account_data_ingestion() -> None:
-    assert get_head_revision() == "20260731_0200"
+def test_migration_head_is_douyin_account_metric_exports() -> None:
+    assert get_head_revision() == "20260731_0300"
+
+
+def test_douyin_account_metric_exports_migration_is_linear_and_reversible() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260731_0300_douyin_account_metric_exports"
+    )
+
+    assert migration.down_revision == "20260731_0200"
+    upgrade_source = inspect.getsource(migration.upgrade)
+    downgrade_source = inspect.getsource(migration.downgrade)
+    for column_name in {
+        "profile_visit_count",
+        "unfollow_count",
+        "like_count",
+        "comment_count",
+        "share_count",
+        "cover_click_rate",
+    }:
+        assert column_name in upgrade_source
+        assert column_name in downgrade_source
 
 
 def test_offline_migrations_fail_fast_for_data_dependent_chain() -> None:

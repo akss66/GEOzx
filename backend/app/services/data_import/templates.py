@@ -107,6 +107,116 @@ DAILY_PLAY_TEMPLATE = TemplateDefinition(
     ),
 )
 
+
+def _daily_account_metric_template(
+    *,
+    code: str,
+    display_name: str,
+    header: str,
+    field_name: str,
+    value_type: str = "int",
+    aliases: tuple[str, ...] = (),
+    minimum: float | None = None,
+) -> TemplateDefinition:
+    return TemplateDefinition(
+        code=code,
+        display_name=display_name,
+        data_domain="account_metrics",
+        columns=(
+            ColumnDefinition("日期", "stat_date", "date", required=True),
+            ColumnDefinition(
+                header,
+                field_name,
+                value_type,
+                aliases=aliases,
+                required=True,
+                minimum=minimum,
+            ),
+        ),
+    )
+
+
+DAILY_PROFILE_VISIT_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_profile_visit_v1",
+    display_name="抖音每日主页访问趋势",
+    header="主页访问",
+    aliases=("主页访问量",),
+    field_name="profile_visit_count",
+    minimum=0,
+)
+
+DAILY_FOLLOWER_TOTAL_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_follower_total_v1",
+    display_name="抖音每日总粉丝量趋势",
+    header="总粉丝量",
+    aliases=("粉丝总量",),
+    field_name="follower_count",
+    minimum=0,
+)
+
+DAILY_UNFOLLOW_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_unfollow_v1",
+    display_name="抖音每日取关粉丝趋势",
+    header="取关粉丝",
+    aliases=("取关粉丝量",),
+    field_name="unfollow_count",
+    minimum=0,
+)
+
+DAILY_FOLLOWER_DELTA_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_follower_delta_v1",
+    display_name="抖音每日净增粉丝趋势",
+    header="净增粉丝",
+    aliases=("粉丝净增", "粉丝增量"),
+    field_name="follower_delta",
+)
+
+DAILY_COVER_CLICK_RATE_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_cover_click_rate_v1",
+    display_name="抖音每日封面点击率趋势",
+    header="封面点击率",
+    field_name="cover_click_rate",
+    value_type="ratio",
+)
+
+DAILY_COMMENT_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_comment_v1",
+    display_name="抖音每日作品评论趋势",
+    header="作品评论",
+    aliases=("作品评论数",),
+    field_name="comment_count",
+)
+
+DAILY_SHARE_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_share_v1",
+    display_name="抖音每日作品分享趋势",
+    header="作品分享",
+    aliases=("作品分享数",),
+    field_name="share_count",
+)
+
+DAILY_LIKE_TEMPLATE = _daily_account_metric_template(
+    code="douyin_daily_like_v1",
+    display_name="抖音每日作品点赞趋势",
+    header="作品点赞",
+    aliases=("作品点赞数",),
+    field_name="like_count",
+)
+
+DAILY_ACCOUNT_METRIC_TEMPLATE_CODES = frozenset(
+    {
+        DAILY_PLAY_TEMPLATE.code,
+        DAILY_PROFILE_VISIT_TEMPLATE.code,
+        DAILY_FOLLOWER_TOTAL_TEMPLATE.code,
+        DAILY_UNFOLLOW_TEMPLATE.code,
+        DAILY_FOLLOWER_DELTA_TEMPLATE.code,
+        DAILY_COVER_CLICK_RATE_TEMPLATE.code,
+        DAILY_COMMENT_TEMPLATE.code,
+        DAILY_SHARE_TEMPLATE.code,
+        DAILY_LIKE_TEMPLATE.code,
+    }
+)
+
 SINGLE_CONTENT_TEMPLATE = TemplateDefinition(
     code="douyin_single_content_v1",
     display_name="抖音单条作品表现",
@@ -187,6 +297,14 @@ WORK_LIST_TEMPLATE = TemplateDefinition(
 
 KNOWN_TEMPLATES: tuple[TemplateDefinition, ...] = (
     DAILY_PLAY_TEMPLATE,
+    DAILY_PROFILE_VISIT_TEMPLATE,
+    DAILY_FOLLOWER_TOTAL_TEMPLATE,
+    DAILY_UNFOLLOW_TEMPLATE,
+    DAILY_FOLLOWER_DELTA_TEMPLATE,
+    DAILY_COVER_CLICK_RATE_TEMPLATE,
+    DAILY_COMMENT_TEMPLATE,
+    DAILY_SHARE_TEMPLATE,
+    DAILY_LIKE_TEMPLATE,
     SINGLE_CONTENT_TEMPLATE,
     PERIOD_AGGREGATE_TEMPLATE,
     WORK_LIST_TEMPLATE,

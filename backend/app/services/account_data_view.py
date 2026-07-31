@@ -50,6 +50,12 @@ ACCOUNT_METRICS = (
     "follower_count",
     "follower_delta",
     "engagement_rate",
+    "profile_visit_count",
+    "unfollow_count",
+    "like_count",
+    "comment_count",
+    "share_count",
+    "cover_click_rate",
 )
 CONTENT_DIRECT_FIELDS = {
     "play": "play",
@@ -77,6 +83,12 @@ ACCOUNT_FIELDS = {
     "follower_count": "follower_count",
     "follower_delta": "follower_delta",
     "engagement_rate": "engagement_rate",
+    "profile_visit_count": "profile_visit_count",
+    "unfollow_count": "unfollow_count",
+    "like_count": "like_count",
+    "comment_count": "comment_count",
+    "share_count": "share_count",
+    "cover_click_rate": "cover_click_rate",
 }
 OFFICIAL_SOURCES = {
     MetricSource.DOUYIN,
@@ -896,6 +908,7 @@ def _coerce_metric_value(metric_name: str, value) -> int | float | None:
         "share_count",
         "favorite_count",
         "profile_visit_count",
+        "unfollow_count",
     }:
         return int(value)
     return float(value)

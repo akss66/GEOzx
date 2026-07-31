@@ -1920,6 +1920,7 @@ def _build_report(
 
 def _review_report_payload(report: AccountInspectionReport) -> dict[str, Any]:
     data = report.model_dump(mode="json")
+    data.pop("recommendations", None)
     return {
         **data,
         "period": f"最近{report.period.get('days', 30)}天",

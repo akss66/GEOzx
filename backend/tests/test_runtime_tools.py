@@ -1,9 +1,15 @@
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from app.config import settings
-from app.models import Account, DataImportBatch, MetricSnapshot, PlatformContentRecord
+from app.models import (
+    Account,
+    AccountMetricSnapshot,
+    DataImportBatch,
+    MetricSnapshot,
+    PlatformContentRecord,
+)
 from app.models.enums import (
     AccountStatus,
     ContentIdentityConfidence,
@@ -189,6 +195,78 @@ async def test_account_data_context_exposes_quality_period_and_evidence(session,
     assert result["metrics"]["play"]["source"] == "official_api"
     assert result["metrics"]["play"]["evidence_refs"]
     assert result["metrics"]["play"]["evidence_refs"][0]["kind"] == "metric_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_account_data_context_prefers_account_level_exports_over_content_rollups(
+    session, admin
+) -> None:
+    account = await _account(session, admin, nickname="账号级导出优先")
+    batch = DataImportBatch(
+        org_id=account.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_daily_like_v1",
+        content_sha256="7" * 64,
+        period_start=date.today(),
+        period_end=date.today(),
+        row_count=1,
+        committed_at=datetime.now(UTC),
+    )
+    session.add(batch)
+    await session.flush()
+    session.add_all(
+        [
+            AccountMetricSnapshot(
+                org_id=account.org_id,
+                account_id=account.id,
+                import_batch_id=batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=date.today(),
+                total_play=500,
+                follower_count=7994,
+                like_count=-21,
+                profile_visit_count=12,
+            ),
+            AccountMetricSnapshot(
+                org_id=account.org_id,
+                account_id=account.id,
+                import_batch_id=batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=date.today() - timedelta(days=1),
+                follower_count=7900,
+            ),
+            MetricSnapshot(
+                org_id=admin.org_id,
+                account_id=account.id,
+                source=MetricSource.DOUYIN,
+                stat_date=date.today(),
+                play=320,
+                exposure=900,
+                completion_rate=0.36,
+                like_count=32,
+                like_rate=0.1,
+                comment_rate=0.01,
+                share_rate=0.02,
+                follower_delta=5,
+            ),
+        ]
+    )
+    await session.commit()
+
+    result = await build_runtime_tool_adapter().invoke(
+        "account.data_context",
+        {"days": 30},
+        ToolExecutionContext(session=session, user=admin, account_id=account.id),
+    )
+
+    assert result["metrics"]["play"]["value"] == 500
+    assert result["metrics"]["follower_count"]["value"] == 7994
+    assert result["metrics"]["like_count"]["value"] == -21
+    assert result["metrics"]["profile_visit_count"]["value"] == 12
+    assert result["metrics"]["like_count"]["source"] == "platform_export"
 
 
 @pytest.mark.asyncio
