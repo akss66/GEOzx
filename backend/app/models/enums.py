@@ -164,6 +164,22 @@ class ImportBatchStatus(enum.StrEnum):
     FAILED = "failed"
 
 
+class ImportJobStatus(enum.StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
+    FAILED = "failed"
+
+
+class ImportFileStatus(enum.StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    PARTIALLY_COMPLETED = "partially_completed"
+    FAILED = "failed"
+
+
 class ImportRowStatus(enum.StrEnum):
     READY = "ready"
     INVALID = "invalid"

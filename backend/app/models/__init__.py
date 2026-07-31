@@ -10,7 +10,10 @@ from app.models.account_data import (
     BenchmarkSnapshot,
     DataArtifact,
     DataConflict,
+    DataFieldObservation,
     DataImportBatch,
+    DataImportFile,
+    DataImportJob,
     DataImportRow,
     PlatformContentRecord,
 )
@@ -66,6 +69,9 @@ from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
     "DataImportBatch",
+    "DataImportJob",
+    "DataImportFile",
+    "DataFieldObservation",
     "DataArtifact",
     "DataImportRow",
     "PlatformContentRecord",

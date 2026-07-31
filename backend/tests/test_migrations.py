@@ -523,8 +523,82 @@ def test_data_import_parser_version_migration_is_reversible(monkeypatch) -> None
         }
 
 
-def test_migration_head_is_data_import_parser_version() -> None:
-    assert get_head_revision() == "20260731_0100"
+def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260731_0200_bulk_account_data_ingestion"
+    )
+    assert migration.down_revision == "20260731_0100"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table("orgs", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    sa.Table("users", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    sa.Table("accounts", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    sa.Table(
+        "data_import_batches",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.Column("account_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint(
+            "org_id",
+            "account_id",
+            "id",
+            name="uq_data_import_batches_org_account_id",
+        ),
+    )
+    sa.Table(
+        "data_import_rows",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.Column("account_id", sa.Integer, nullable=False),
+        sa.Column("batch_id", sa.Integer, nullable=False),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        assert {"data_import_jobs", "data_import_files", "data_field_observations"} <= set(
+            inspector.get_table_names()
+        )
+        batch_columns = {
+            column["name"] for column in inspector.get_columns("data_import_batches")
+        }
+        assert {
+            "job_id",
+            "job_file_id",
+            "sheet_name",
+            "dataset_ordinal",
+            "confirmed_sequence",
+        } <= batch_columns
+        observation_uniques = {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("data_field_observations")
+        }
+        assert "uq_data_field_observations_source_field" in observation_uniques
+
+        migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert {
+            "data_import_jobs",
+            "data_import_files",
+            "data_field_observations",
+        }.isdisjoint(inspector.get_table_names())
+        assert "job_id" not in {
+            column["name"] for column in inspector.get_columns("data_import_batches")
+        }
+
+
+def test_migration_head_is_bulk_account_data_ingestion() -> None:
+    assert get_head_revision() == "20260731_0200"
 
 
 def test_offline_migrations_fail_fast_for_data_dependent_chain() -> None:

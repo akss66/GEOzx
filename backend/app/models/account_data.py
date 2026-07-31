@@ -3,6 +3,7 @@
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -26,11 +27,171 @@ from app.models.enums import (
     ContentIdentityConfidence,
     DataSourceKind,
     ImportBatchStatus,
+    ImportFileStatus,
+    ImportJobStatus,
     ImportRowStatus,
     Platform,
 )
 
 CURRENT_IMPORT_PARSER_VERSION = 2
+
+
+class DataImportJob(Base, TimestampMixin):
+    __tablename__ = "data_import_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "id",
+            name="uq_data_import_jobs_org_account_id",
+        ),
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "client_request_id",
+            name="uq_data_import_jobs_client_request",
+        ),
+        CheckConstraint("file_count >= 0", name="ck_data_import_jobs_file_count_nonnegative"),
+        CheckConstraint(
+            "completed_file_count >= 0",
+            name="ck_data_import_jobs_completed_count_nonnegative",
+        ),
+        CheckConstraint(
+            "failed_file_count >= 0",
+            name="ck_data_import_jobs_failed_count_nonnegative",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    client_request_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[ImportJobStatus] = mapped_column(
+        pg_enum(ImportJobStatus, "import_job_status"), index=True, nullable=False
+    )
+    file_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    completed_file_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    failed_file_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    files: Mapped[list["DataImportFile"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="DataImportFile.ordinal",
+        primaryjoin=lambda: and_(
+            DataImportJob.org_id == DataImportFile.org_id,
+            DataImportJob.account_id == DataImportFile.account_id,
+            DataImportJob.id == DataImportFile.job_id,
+        ),
+        foreign_keys=lambda: [
+            DataImportFile.org_id,
+            DataImportFile.account_id,
+            DataImportFile.job_id,
+        ],
+    )
+
+
+class DataImportFile(Base, TimestampMixin):
+    __tablename__ = "data_import_files"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "id",
+            name="uq_data_import_files_org_account_id",
+        ),
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "job_id",
+            "id",
+            name="uq_data_import_files_job_scope_id",
+        ),
+        UniqueConstraint("job_id", "ordinal", name="uq_data_import_files_job_ordinal"),
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "job_id"],
+            ["data_import_jobs.org_id", "data_import_jobs.account_id", "data_import_jobs.id"],
+            name="fk_data_import_files_job_scope",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "retry_of_file_id"],
+            ["data_import_files.org_id", "data_import_files.account_id", "data_import_files.id"],
+            name="fk_data_import_files_retry_scope",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("ordinal >= 1", name="ck_data_import_files_ordinal_positive"),
+        CheckConstraint("byte_size >= 0", name="ck_data_import_files_byte_size_nonnegative"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    job_id: Mapped[int] = mapped_column(BigIntPK, index=True, nullable=False)
+    retry_of_file_id: Mapped[int | None] = mapped_column(BigIntPK, nullable=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[ImportFileStatus] = mapped_column(
+        pg_enum(ImportFileStatus, "import_file_status"), index=True, nullable=False
+    )
+    error_payload: Mapped[dict] = mapped_column(
+        JSONVariant,
+        default=dict,
+        server_default=text("'{}'"),
+        nullable=False,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    job: Mapped[DataImportJob] = relationship(
+        back_populates="files",
+        primaryjoin=lambda: and_(
+            DataImportFile.org_id == DataImportJob.org_id,
+            DataImportFile.account_id == DataImportJob.account_id,
+            DataImportFile.job_id == DataImportJob.id,
+        ),
+        foreign_keys=lambda: [
+            DataImportFile.org_id,
+            DataImportFile.account_id,
+            DataImportFile.job_id,
+        ],
+    )
+    datasets: Mapped[list["DataImportBatch"]] = relationship(
+        back_populates="job_file",
+        order_by="DataImportBatch.dataset_ordinal",
+        primaryjoin=lambda: and_(
+            DataImportFile.org_id == DataImportBatch.org_id,
+            DataImportFile.account_id == DataImportBatch.account_id,
+            DataImportFile.job_id == DataImportBatch.job_id,
+            DataImportFile.id == DataImportBatch.job_file_id,
+        ),
+        foreign_keys=lambda: [
+            DataImportBatch.org_id,
+            DataImportBatch.account_id,
+            DataImportBatch.job_id,
+            DataImportBatch.job_file_id,
+        ],
+    )
 
 
 class DataImportBatch(Base, TimestampMixin):
@@ -57,6 +218,28 @@ class DataImportBatch(Base, TimestampMixin):
             "parser_version >= 1",
             name="ck_data_import_batches_parser_version_positive",
         ),
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "job_id"],
+            ["data_import_jobs.org_id", "data_import_jobs.account_id", "data_import_jobs.id"],
+            name="fk_data_import_batches_job_scope",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "job_id", "job_file_id"],
+            [
+                "data_import_files.org_id",
+                "data_import_files.account_id",
+                "data_import_files.job_id",
+                "data_import_files.id",
+            ],
+            name="fk_data_import_batches_job_file_scope",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "job_file_id",
+            "dataset_ordinal",
+            name="uq_data_import_batches_file_dataset_ordinal",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -69,6 +252,8 @@ class DataImportBatch(Base, TimestampMixin):
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    job_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
+    job_file_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
     source_kind: Mapped[DataSourceKind] = mapped_column(
         pg_enum(DataSourceKind, "data_source_kind"), nullable=False
     )
@@ -83,11 +268,30 @@ class DataImportBatch(Base, TimestampMixin):
         server_default="1",
         nullable=False,
     )
+    sheet_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dataset_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confirmed_sequence: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
     period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    job_file: Mapped[DataImportFile | None] = relationship(
+        back_populates="datasets",
+        primaryjoin=lambda: and_(
+            DataImportBatch.org_id == DataImportFile.org_id,
+            DataImportBatch.account_id == DataImportFile.account_id,
+            DataImportBatch.job_id == DataImportFile.job_id,
+            DataImportBatch.job_file_id == DataImportFile.id,
+        ),
+        foreign_keys=lambda: [
+            DataImportBatch.org_id,
+            DataImportBatch.account_id,
+            DataImportBatch.job_id,
+            DataImportBatch.job_file_id,
+        ],
+    )
 
     artifacts: Mapped[list["DataArtifact"]] = relationship(
         back_populates="batch",
@@ -132,6 +336,21 @@ class DataImportBatch(Base, TimestampMixin):
             DataConflict.org_id,
             DataConflict.account_id,
             DataConflict.batch_id,
+        ],
+    )
+    observations: Mapped[list["DataFieldObservation"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="DataFieldObservation.id",
+        primaryjoin=lambda: and_(
+            DataImportBatch.org_id == DataFieldObservation.org_id,
+            DataImportBatch.account_id == DataFieldObservation.account_id,
+            DataImportBatch.id == DataFieldObservation.import_batch_id,
+        ),
+        foreign_keys=lambda: [
+            DataFieldObservation.org_id,
+            DataFieldObservation.account_id,
+            DataFieldObservation.import_batch_id,
         ],
     )
 
@@ -287,6 +506,13 @@ class DataImportRow(Base, TimestampMixin):
     __tablename__ = "data_import_rows"
     __table_args__ = (
         UniqueConstraint("batch_id", "row_number", name="uq_data_import_rows_batch_row"),
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "batch_id",
+            "id",
+            name="uq_data_import_rows_scope_id",
+        ),
         ForeignKeyConstraint(
             ["org_id", "account_id", "batch_id"],
             [
@@ -370,6 +596,96 @@ class DataImportRow(Base, TimestampMixin):
             DataImportRow.platform_content_record_id,
         ],
         viewonly=True,
+    )
+
+
+class DataFieldObservation(Base, TimestampMixin):
+    __tablename__ = "data_field_observations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "import_batch_id"],
+            [
+                "data_import_batches.org_id",
+                "data_import_batches.account_id",
+                "data_import_batches.id",
+            ],
+            name="fk_data_field_observations_batch_scope",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "account_id", "import_batch_id", "import_row_id"],
+            [
+                "data_import_rows.org_id",
+                "data_import_rows.account_id",
+                "data_import_rows.batch_id",
+                "data_import_rows.id",
+            ],
+            name="fk_data_field_observations_row_scope",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "import_batch_id",
+            "import_row_id",
+            "domain",
+            "entity_key",
+            "stat_date",
+            "field_name",
+            name="uq_data_field_observations_source_field",
+        ),
+        Index(
+            "ix_data_field_observations_active_field",
+            "account_id",
+            "domain",
+            "entity_key",
+            "stat_date",
+            "field_name",
+            "active",
+        ),
+        CheckConstraint(
+            "source_priority >= 0",
+            name="ck_data_field_observations_source_priority_nonnegative",
+        ),
+        CheckConstraint(
+            "confirmed_sequence >= 0",
+            name="ck_data_field_observations_confirmation_nonnegative",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    import_batch_id: Mapped[int] = mapped_column(BigIntPK, index=True, nullable=False)
+    import_row_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
+    domain: Mapped[str] = mapped_column(String(80), nullable=False)
+    entity_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    stat_date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    field_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    value: Mapped[dict] = mapped_column(JSONVariant, nullable=False)
+    source_kind: Mapped[DataSourceKind] = mapped_column(
+        pg_enum(DataSourceKind, "data_source_kind"), nullable=False
+    )
+    source_priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    confirmed_sequence: Mapped[int] = mapped_column(BigIntPK, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+
+    batch: Mapped[DataImportBatch] = relationship(
+        back_populates="observations",
+        primaryjoin=lambda: and_(
+            DataFieldObservation.org_id == DataImportBatch.org_id,
+            DataFieldObservation.account_id == DataImportBatch.account_id,
+            DataFieldObservation.import_batch_id == DataImportBatch.id,
+        ),
+        foreign_keys=lambda: [
+            DataFieldObservation.org_id,
+            DataFieldObservation.account_id,
+            DataFieldObservation.import_batch_id,
+        ],
     )
 
 
