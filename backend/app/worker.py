@@ -9,6 +9,7 @@ import json
 import logging
 import socket
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -26,10 +27,12 @@ from app.models import (
     BrainTask,
     ConversationThread,
     ConversationTurn,
+    DataImportJob,
     Event,
     SkillRun,
     User,
 )
+from app.models.enums import ImportJobStatus
 from app.orchestrator.brain_runtime import runtime_graph, runtime_status
 from app.orchestrator.checkpointing import open_postgres_checkpointer
 from app.schemas.brain import (
@@ -425,6 +428,41 @@ async def recover_agent_runs(ctx: dict) -> int:
     return enqueued
 
 
+async def recover_account_data_import_jobs(ctx: dict) -> int:
+    """Re-enqueue durable import jobs when their Redis message was lost."""
+
+    now = datetime.now(UTC)
+    stale_processing_before = now - timedelta(minutes=30)
+    async with async_session() as session:
+        rows = (
+            await session.scalars(
+                select(DataImportJob)
+                .where(
+                    (DataImportJob.status == ImportJobStatus.QUEUED)
+                    | (
+                        (DataImportJob.status == ImportJobStatus.PROCESSING)
+                        & (DataImportJob.updated_at <= stale_processing_before)
+                    )
+                )
+                .order_by(DataImportJob.id)
+                .limit(100)
+            )
+        ).all()
+
+    pool = ctx["redis"]
+    bucket = int(now.timestamp() // 30)
+    enqueued = 0
+    for job in rows:
+        recovered = await pool.enqueue_job(
+            "execute_account_data_import_job",
+            job.id,
+            _job_id=f"account-data-import-job:{job.id}:recovery:{bucket}",
+        )
+        if recovered is not None:
+            enqueued += 1
+    return enqueued
+
+
 async def on_startup(ctx: dict) -> None:
     if settings.agent_runtime_async_enabled and not settings.langgraph_checkpoint_enabled:
         raise RuntimeError("Async Agent runtime requires LangGraph PostgreSQL checkpoints")
@@ -462,4 +500,11 @@ class WorkerSettings:
     on_shutdown = on_shutdown
     max_tries = 3
     allow_abort_jobs = True
-    cron_jobs = [cron(recover_agent_runs, second={0, 30}, run_at_startup=True)]
+    cron_jobs = [
+        cron(recover_agent_runs, second={0, 30}, run_at_startup=True),
+        cron(
+            recover_account_data_import_jobs,
+            second={0, 30},
+            run_at_startup=True,
+        ),
+    ]

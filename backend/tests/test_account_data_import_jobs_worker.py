@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import func, select
 
@@ -9,6 +11,7 @@ from app.models import (
     AccountMetricSnapshot,
     DataFieldObservation,
     DataImportFile,
+    DataImportJob,
 )
 from app.models.enums import ImportFileStatus, ImportJobStatus, Platform
 from app.services.data_import.jobs import (
@@ -18,6 +21,7 @@ from app.services.data_import.jobs import (
     process_import_job,
     retry_import_file,
 )
+from app.worker import recover_account_data_import_jobs
 from tests.test_data_import_templates import DAILY_HEADERS, workbook_bytes
 
 
@@ -54,6 +58,65 @@ async def test_enqueue_uses_file_count_as_dispatch_revision(monkeypatch):
         (41, "account-data-import-job:41:2"),
         (41, "account-data-import-job:41:3"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_recovery_reenqueues_lost_and_stale_import_jobs(
+    session,
+    admin,
+    account,
+    monkeypatch,
+):
+    job = DataImportJob(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        client_request_id="lost-queue-message",
+        status=ImportJobStatus.QUEUED,
+        file_count=1,
+    )
+    stale = DataImportJob(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        client_request_id="stale-processing-job",
+        status=ImportJobStatus.PROCESSING,
+        file_count=1,
+        updated_at=datetime.now(UTC) - timedelta(minutes=31),
+    )
+    fresh = DataImportJob(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        client_request_id="fresh-processing-job",
+        status=ImportJobStatus.PROCESSING,
+        file_count=1,
+    )
+    session.add_all([job, stale, fresh])
+    await session.commit()
+    await session.refresh(job)
+    await session.refresh(stale)
+
+    jobs: list[tuple[str, int, str]] = []
+
+    class FakePool:
+        async def enqueue_job(self, name, job_id, *, _job_id):
+            jobs.append((name, job_id, _job_id))
+            return object()
+
+    monkeypatch.setattr("app.worker.async_session", lambda: session)
+
+    recovered = await recover_account_data_import_jobs({"redis": FakePool()})
+
+    assert recovered == 2
+    assert [(item[0], item[1]) for item in jobs] == [
+        ("execute_account_data_import_job", job.id),
+        ("execute_account_data_import_job", stale.id),
+    ]
+    assert jobs[0][2].startswith(f"account-data-import-job:{job.id}:recovery:")
+    assert jobs[1][2].startswith(
+        f"account-data-import-job:{stale.id}:recovery:"
+    )
 
 
 @pytest.mark.asyncio
