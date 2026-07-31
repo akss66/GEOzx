@@ -20,7 +20,7 @@
 
 - 完整测试：`python -m pytest -q`
   - 基线结果：1056 passed
-  - 最终代码结果：见“最终发布验证”
+  - 最终代码结果：1057 passed
 - 导入任务 API 与 Worker：11 passed
 - Worker 丢队列恢复：5 passed
 - Ruff：修改过的 Worker、任务服务、API、模型、解析器、投影和测试文件通过
@@ -41,7 +41,7 @@
 - `data_import_jobs`
 - `data_import_files`
 - `data_field_observations`
-- `data_import_backfill_checkpoints`
+- `account_data_backfill_checkpoints`
 
 服务级冒烟结果：
 
@@ -89,13 +89,25 @@ POSTGRES_SMOKE_OK files=5 completed=4 failed=1 overlap=0 fallback=81
 
 ## 最终发布验证
 
-部署完成后补充：
+- 发布提交：`f2d3ad2`
+- 发布目录：
+  `/home/admin/releases/dyflow-20260731-bulk-data-f2d3ad2`
+- 归档：
+  `dyflow-20260731-bulk-data-f2d3ad2.tar.gz`
+- 归档 SHA-256：
+  `5c127a7165ffa0e851e50aae2e21e6b80b626dc159eab8e3ce33004aefb58d02`
+- Alembic：`20260731_0100 -> 20260731_0200 (head)`
+- 新表：4/4 存在，发布时 `data_import_jobs` 为 0
+- backend、frontend、PostgreSQL、Redis 均为 healthy，worker 正常运行
+- Worker 已注册 `execute_account_data_import_job` 和
+  `recover_account_data_import_jobs`
+- Worker 启动巡检成功，遗留任务数为 0
+- `https://tzxai.top/api/health/ready`：
+  `{"status":"ready","checks":{"db":true,"redis":true}}`
+- 站点根路径：HTTP 200，TLS 校验结果 0
+- 未认证访问新导入任务 API：HTTP 401，证明路由已上线且鉴权生效
+- 回滚目标：
+  `/home/admin/releases/dyflow-20260731-account-data-center-db62896`
 
-- 精确发布目录与 Git 提交
-- 归档 SHA-256
-- Alembic 升级结果
-- 容器健康状态
-- Worker 注册与恢复巡检日志
-- HTTPS 健康检查
-- 生产数据库结构与账号隔离冒烟
-- 回滚目标
+数据库迁移仅增加表、列、索引和约束；旧应用可忽略新增结构。若应用层需要
+回滚，可原子切回上述旧目录并重新启动 Compose。

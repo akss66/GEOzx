@@ -327,6 +327,6 @@ export async function createAccountDataImportJob(
   - revoke and permanent delete fallback.
 - [x] Verify browser behavior at desktop and narrow widths: drag/drop, picker, progress, isolated retry, history, coverage, and account switching.
 - [x] Confirm cross-account isolation by switching accounts while a job runs.
-- [ ] Deploy using the repository's existing release workflow, inspect health and worker logs, and run the same smoke scenario in production.
-- [ ] Record exact commands, release identifier, migration result, and evidence in the verification document.
-- [ ] Commit: `docs(account-data): record bulk ingestion verification`.
+- [x] Deploy using the repository's existing release workflow, inspect health and worker logs, and run the same smoke scenario in production.
+- [x] Record exact commands, release identifier, migration result, and evidence in the verification document.
+- [x] Commit: `docs(account-data): record bulk ingestion verification`.
