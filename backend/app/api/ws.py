@@ -9,6 +9,19 @@ from app.core.events import EVENTS_CHANNEL
 router = APIRouter()
 
 
+def _is_closed_transport_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return (
+        "handler is closed" in message
+        or ("transport" in message and "closed=true" in message)
+        or (
+            "websocket.send" in message
+            and ("websocket.close" in message or "response already completed" in message)
+        )
+        or 'cannot call "send" once a close message has been sent' in message
+    )
+
+
 @router.websocket("/ws/events")
 async def ws_events(ws: WebSocket) -> None:
     await ws.accept()
@@ -18,7 +31,12 @@ async def ws_events(ws: WebSocket) -> None:
     try:
         async for message in pubsub.listen():
             if message["type"] == "message":
-                await ws.send_text(message["data"])
+                try:
+                    await ws.send_text(message["data"])
+                except RuntimeError as exc:
+                    if not _is_closed_transport_error(exc):
+                        raise
+                    break
     except WebSocketDisconnect:
         pass
     finally:
