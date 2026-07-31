@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DataFieldObservation, DataImportBatch, DataImportRow
@@ -23,6 +23,13 @@ from app.services.data_import.merge import (
 class FieldWinner:
     value: Any
     observation: DataFieldObservation
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionKey:
+    domain: str
+    entity_key: str
+    stat_date: date
 
 
 def encode_observation_value(value: Any) -> dict[str, Any]:
@@ -105,14 +112,91 @@ async def record_and_resolve_fields(
         )
     await session.flush()
 
+    return await resolve_projection_winners(
+        session,
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        key=ProjectionKey(
+            domain=domain,
+            entity_key=entity_key,
+            stat_date=stat_date,
+        ),
+    )
+
+
+async def deactivate_batch_observations(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    batch_id: int,
+) -> set[ProjectionKey]:
     observations = list(
         await session.scalars(
             select(DataFieldObservation).where(
-                DataFieldObservation.org_id == batch.org_id,
-                DataFieldObservation.account_id == batch.account_id,
-                DataFieldObservation.domain == domain,
-                DataFieldObservation.entity_key == entity_key,
-                DataFieldObservation.stat_date == stat_date,
+                DataFieldObservation.org_id == org_id,
+                DataFieldObservation.account_id == account_id,
+                DataFieldObservation.import_batch_id == batch_id,
+                DataFieldObservation.active.is_(True),
+            )
+        )
+    )
+    affected = {
+        ProjectionKey(
+            domain=item.domain,
+            entity_key=item.entity_key,
+            stat_date=item.stat_date,
+        )
+        for item in observations
+    }
+    if observations:
+        await session.execute(
+            update(DataFieldObservation)
+            .where(
+                DataFieldObservation.org_id == org_id,
+                DataFieldObservation.account_id == account_id,
+                DataFieldObservation.import_batch_id == batch_id,
+                DataFieldObservation.active.is_(True),
+            )
+            .values(active=False)
+        )
+        await session.flush()
+    return affected
+
+
+async def rebuild_projection(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    affected_keys: set[ProjectionKey],
+) -> dict[ProjectionKey, dict[str, FieldWinner]]:
+    return {
+        key: await resolve_projection_winners(
+            session,
+            org_id=org_id,
+            account_id=account_id,
+            key=key,
+        )
+        for key in affected_keys
+    }
+
+
+async def resolve_projection_winners(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    key: ProjectionKey,
+) -> dict[str, FieldWinner]:
+    observations = list(
+        await session.scalars(
+            select(DataFieldObservation).where(
+                DataFieldObservation.org_id == org_id,
+                DataFieldObservation.account_id == account_id,
+                DataFieldObservation.domain == key.domain,
+                DataFieldObservation.entity_key == key.entity_key,
+                DataFieldObservation.stat_date == key.stat_date,
                 DataFieldObservation.active.is_(True),
             )
         )

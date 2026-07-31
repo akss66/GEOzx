@@ -24,7 +24,6 @@ from app.models import (
     User,
 )
 from app.models.enums import (
-    ConflictStatus,
     ContentIdentityConfidence,
     DataSourceKind,
     ImportBatchStatus,
@@ -1092,7 +1091,7 @@ async def test_lead_can_revoke_committed_batch_and_delete_owned_projections(
 
 
 @pytest.mark.asyncio
-async def test_revoke_creates_conflict_when_projection_was_superseded(
+async def test_revoke_preserves_projection_owned_by_a_later_batch(
     client,
     session,
     account_access_setup,
@@ -1154,8 +1153,8 @@ async def test_revoke_creates_conflict_when_projection_was_superseded(
         headers=_auth(lead_token),
     )
 
-    assert revoked.status_code == 409
-    assert "superseded" in revoked.json()["detail"]
+    assert revoked.status_code == 200
+    assert revoked.json()["status"] == "revoked"
     conflict = await session.scalar(
         select(DataConflict).where(
             DataConflict.batch_id == batch_id,
@@ -1163,13 +1162,12 @@ async def test_revoke_creates_conflict_when_projection_was_superseded(
             DataConflict.conflict_code == "superseded_projection",
         )
     )
-    assert conflict is not None
-    assert conflict.status is ConflictStatus.OPEN
+    assert conflict is None
     replay = await client.post(
         f"/account-data/{account.id}/imports/{batch_id}/revoke",
         headers=_auth(lead_token),
     )
-    assert replay.status_code == 409
+    assert replay.status_code == 200
     conflicts = list(
         await session.scalars(
             select(DataConflict).where(
@@ -1179,7 +1177,7 @@ async def test_revoke_creates_conflict_when_projection_was_superseded(
             )
         )
     )
-    assert len(conflicts) == 1
+    assert len(conflicts) == 0
     content = await session.get(PlatformContentRecord, content_target["id"])
     assert content is not None
     assert content.canonical_import_batch_id == later_batch.id
@@ -1190,7 +1188,6 @@ async def test_revoke_creates_conflict_when_projection_was_superseded(
         headers=_auth(lead_token),
     )
 
-    assert deleted.status_code == 409
-    assert "superseded" in deleted.json()["detail"]
-    assert await session.get(DataImportBatch, batch_id) is not None
-    assert source_file.exists()
+    assert deleted.status_code == 204
+    assert await session.get(DataImportBatch, batch_id) is None
+    assert not source_file.exists()

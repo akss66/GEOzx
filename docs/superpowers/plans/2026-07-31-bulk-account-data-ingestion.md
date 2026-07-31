@@ -175,7 +175,7 @@ class ParsedSourceFile:
 - [x] Add tests for partial content rows where omitted metrics preserve earlier values and zero replaces earlier nonzero values.
 - [x] Add tests covering account, content, audience, and benchmark domains, not only content metrics.
 - [x] Implement observation extraction from committed rows with provenance and a monotonic `confirmed_sequence`.
-- [ ] Implement `rebuild_projection(session, affected_keys)` that:
+- [x] Implement `rebuild_projection(session, affected_keys)` that:
   - loads active observations for each affected field;
   - chooses the deterministic winner;
   - upserts one canonical record per business key;
@@ -184,7 +184,7 @@ class ParsedSourceFile:
 - [x] Update `AccountDataViewService` to read canonical rows once per business key and eliminate duplicate account/audience/benchmark snapshots.
 - [x] Ensure the commit transaction writes observations and canonical projection atomically for one dataset.
 - [x] Run `cd backend; python -m pytest tests/test_data_import_projection.py tests/test_account_data_view.py -q`.
-- [ ] Commit: `feat(account-data): merge overlapping imports into canonical projections`.
+- [x] Commit: `feat(account-data): merge overlapping imports into canonical projections`.
 
 ## Task 6: Make Revoke and Delete Rebuild Canonical Data
 
@@ -194,13 +194,13 @@ class ParsedSourceFile:
 - Modify: `backend/tests/test_account_data_import_api.py`
 - Create: `backend/tests/test_data_import_rebuild.py`
 
-- [ ] Add failing tests where a newer source wins, is revoked, and the older surviving value becomes canonical again.
-- [ ] Add the same test for permanent deletion and for all four data domains.
-- [ ] Add tests proving revoke/delete are account-scoped and cannot affect another account's observations.
-- [ ] Mark observations inactive during revoke, reactivate them only through an explicit supported restore path, and rebuild affected keys in the same transaction.
-- [ ] Permanently delete ledger rows only after collecting affected keys and rebuilding from survivors.
-- [ ] Return actionable conflict responses if committed downstream records prevent deletion.
-- [ ] Run `cd backend; python -m pytest tests/test_data_import_rebuild.py tests/test_account_data_import_api.py -q`.
+- [x] Add failing tests where a newer source wins, is revoked, and the older surviving value becomes canonical again.
+- [x] Add the same test for permanent deletion and for all four data domains.
+- [x] Add tests proving revoke/delete are account-scoped and cannot affect another account's observations.
+- [x] Mark observations inactive during revoke, reactivate them only through an explicit supported restore path, and rebuild affected keys in the same transaction.
+- [x] Permanently delete ledger rows only after collecting affected keys and rebuilding from survivors.
+- [x] Return actionable conflict responses if committed downstream records prevent deletion.
+- [x] Run `cd backend; python -m pytest tests/test_data_import_rebuild.py tests/test_account_data_import_api.py -q`.
 - [ ] Commit: `fix(account-data): rebuild canonical values after source removal`.
 
 ## Task 7: Add the Durable Bulk Job Service and API

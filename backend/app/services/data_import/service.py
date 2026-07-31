@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import TypedDict
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -26,6 +26,7 @@ from app.models import (
     BenchmarkSnapshot,
     DataArtifact,
     DataConflict,
+    DataFieldObservation,
     DataImportBatch,
     DataImportRow,
     MetricSnapshot,
@@ -51,7 +52,13 @@ from app.services.data_import.merge import (
     content_entity_key,
 )
 from app.services.data_import.parser import SUPPORTED_EXTENSIONS, RowIssue
-from app.services.data_import.projection import newest_winner, record_and_resolve_fields
+from app.services.data_import.projection import (
+    ProjectionKey,
+    deactivate_batch_observations,
+    newest_winner,
+    rebuild_projection,
+    record_and_resolve_fields,
+)
 from app.services.data_import.templates import KNOWN_TEMPLATES
 
 logger = logging.getLogger(__name__)
@@ -778,15 +785,23 @@ async def revoke_batch(
     if batch.committed_at is None or batch.status is not ImportBatchStatus.COMMITTED:
         raise DataImportStateError("only committed batches can be revoked")
 
-    conflicts = await _find_revoke_conflicts(session=session, batch=batch)
-    if conflicts:
-        await _record_revoke_conflicts(session=session, batch=batch, conflicts=conflicts)
-        await session.commit()
-        raise DataImportRevokeConflictError("batch contains superseded projections")
-
     try:
+        affected_keys = await deactivate_batch_observations(
+            session,
+            org_id=batch.org_id,
+            account_id=batch.account_id,
+            batch_id=batch.id,
+        )
+        if affected_keys:
+            await _rebuild_canonical_projections(
+                session=session,
+                batch=batch,
+                affected_keys=affected_keys,
+            )
+        else:
+            for row in batch.rows:
+                await _delete_row_targets(session=session, batch=batch, row=row)
         for row in batch.rows:
-            await _delete_row_targets(session=session, batch=batch, row=row)
             row.status = ImportRowStatus.REVOKED
         batch.status = ImportBatchStatus.REVOKED
         batch.revoked_at = datetime.now(UTC)
@@ -819,11 +834,24 @@ async def delete_batch_permanently(
     )
     _assert_batch_scope(batch=batch, user=actor)
     if batch.status is ImportBatchStatus.COMMITTED:
-        conflicts = await _find_revoke_conflicts(session=session, batch=batch)
-        if conflicts:
-            raise DataImportDeleteConflictError("batch contains superseded projections")
-        for row in batch.rows:
-            await _delete_row_targets(session=session, batch=batch, row=row)
+        affected_keys = await deactivate_batch_observations(
+            session,
+            org_id=batch.org_id,
+            account_id=batch.account_id,
+            batch_id=batch.id,
+        )
+        if affected_keys:
+            await _rebuild_canonical_projections(
+                session=session,
+                batch=batch,
+                affected_keys=affected_keys,
+            )
+        else:
+            conflicts = await _find_revoke_conflicts(session=session, batch=batch)
+            if conflicts:
+                raise DataImportDeleteConflictError("batch contains superseded projections")
+            for row in batch.rows:
+                await _delete_row_targets(session=session, batch=batch, row=row)
 
     storage_keys = [artifact.storage_key for artifact in batch.artifacts]
     quarantined = _quarantine_artifacts(storage_keys)
@@ -1658,6 +1686,386 @@ async def _delete_row_targets(
             content = await session.get(PlatformContentRecord, int(target["id"]))
             if content is not None and content.canonical_import_batch_id == batch.id:
                 await session.delete(content)
+
+
+async def _rebuild_canonical_projections(
+    session: AsyncSession,
+    *,
+    batch: DataImportBatch,
+    affected_keys: set[ProjectionKey],
+) -> None:
+    winners_by_key = await rebuild_projection(
+        session,
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        affected_keys=affected_keys,
+    )
+    for key, winners in winners_by_key.items():
+        if key.domain == "account_metrics":
+            await _rebuild_account_metric_projection(
+                session=session,
+                batch=batch,
+                key=key,
+                winners=winners,
+            )
+        elif key.domain == "content_metrics":
+            await _rebuild_content_metric_projection(
+                session=session,
+                batch=batch,
+                key=key,
+                winners=winners,
+            )
+        elif key.domain == "audience_profiles":
+            await _rebuild_audience_projection(
+                session=session,
+                batch=batch,
+                key=key,
+                winners=winners,
+            )
+        elif key.domain == "benchmarks":
+            await _rebuild_benchmark_projection(
+                session=session,
+                batch=batch,
+                key=key,
+                winners=winners,
+            )
+    await session.flush()
+
+
+async def _rebuild_account_metric_projection(
+    *,
+    session: AsyncSession,
+    batch: DataImportBatch,
+    key: ProjectionKey,
+    winners,
+) -> None:
+    snapshots = list(
+        await session.scalars(
+            select(AccountMetricSnapshot)
+            .where(
+                AccountMetricSnapshot.org_id == batch.org_id,
+                AccountMetricSnapshot.account_id == batch.account_id,
+                AccountMetricSnapshot.stat_date == key.stat_date,
+            )
+            .order_by(
+                AccountMetricSnapshot.updated_at.desc(),
+                AccountMetricSnapshot.id.desc(),
+            )
+        )
+    )
+    if not winners:
+        for snapshot in snapshots:
+            await session.delete(snapshot)
+        return
+    snapshot = snapshots[0] if snapshots else AccountMetricSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=newest_winner(winners).observation.import_batch_id,
+        source_kind=newest_winner(winners).observation.source_kind,
+        stat_date=key.stat_date,
+    )
+    if not snapshots:
+        session.add(snapshot)
+    for duplicate in snapshots[1:]:
+        await session.delete(duplicate)
+    for field_name in (
+        "follower_count",
+        "follower_delta",
+        "total_play",
+        "total_exposure",
+        "engagement_rate",
+    ):
+        setattr(snapshot, field_name, None)
+    for field_name, winner in winners.items():
+        if hasattr(snapshot, field_name):
+            setattr(snapshot, field_name, winner.value)
+    provenance = newest_winner(winners)
+    snapshot.import_batch_id = provenance.observation.import_batch_id
+    snapshot.source_kind = provenance.observation.source_kind
+
+
+async def _rebuild_content_metric_projection(
+    *,
+    session: AsyncSession,
+    batch: DataImportBatch,
+    key: ProjectionKey,
+    winners,
+) -> None:
+    content_id = _content_id_from_projection_key(batch.account_id, key.entity_key)
+    snapshots = list(
+        await session.scalars(
+            select(MetricSnapshot)
+            .where(
+                MetricSnapshot.org_id == batch.org_id,
+                MetricSnapshot.account_id == batch.account_id,
+                MetricSnapshot.platform_content_record_id == content_id,
+                MetricSnapshot.stat_date == key.stat_date,
+                MetricSnapshot.import_batch_id.is_not(None),
+            )
+            .order_by(MetricSnapshot.updated_at.desc(), MetricSnapshot.id.desc())
+        )
+    )
+    if not winners:
+        for snapshot in snapshots:
+            await session.delete(snapshot)
+        await _reassign_or_delete_content_record(
+            session=session,
+            batch=batch,
+            content_id=content_id,
+            entity_key=key.entity_key,
+        )
+        return
+    provenance = newest_winner(winners)
+    snapshot = snapshots[0] if snapshots else MetricSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=provenance.observation.import_batch_id,
+        platform_content_record_id=content_id,
+        source=MetricSource(_batch_platform(batch).value),
+        stat_date=key.stat_date,
+        play=0,
+        exposure=0,
+        completion_rate=0.0,
+        like_rate=0.0,
+        comment_rate=0.0,
+        share_rate=0.0,
+        follower_delta=0,
+    )
+    if not snapshots:
+        session.add(snapshot)
+    for duplicate in snapshots[1:]:
+        await session.delete(duplicate)
+    nullable_fields = (
+        "title",
+        "like_count",
+        "comment_count",
+        "share_count",
+        "favorite_count",
+        "cover_click_rate",
+        "avg_watch_time_seconds",
+        "completion_rate_5s",
+        "bounce_rate_2s",
+        "profile_visit_count",
+    )
+    for field_name in nullable_fields:
+        setattr(snapshot, field_name, None)
+    for field_name in (
+        "play",
+        "exposure",
+        "completion_rate",
+        "follower_delta",
+    ):
+        setattr(snapshot, field_name, 0)
+    for field_name, winner in winners.items():
+        if hasattr(snapshot, field_name):
+            setattr(snapshot, field_name, winner.value)
+    snapshot.import_batch_id = provenance.observation.import_batch_id
+    snapshot.like_rate = _derived_rate(
+        numerator=snapshot.like_count,
+        denominator=snapshot.play,
+    )
+    snapshot.comment_rate = _derived_rate(
+        numerator=snapshot.comment_count,
+        denominator=snapshot.play,
+    )
+    snapshot.share_rate = _derived_rate(
+        numerator=snapshot.share_count,
+        denominator=snapshot.play,
+    )
+    await _reassign_or_delete_content_record(
+        session=session,
+        batch=batch,
+        content_id=content_id,
+        entity_key=key.entity_key,
+    )
+
+
+async def _rebuild_audience_projection(
+    *,
+    session: AsyncSession,
+    batch: DataImportBatch,
+    key: ProjectionKey,
+    winners,
+) -> None:
+    dimension = _audience_dimension_from_projection_key(batch.account_id, key.entity_key)
+    snapshots = list(
+        await session.scalars(
+            select(AudienceProfileSnapshot)
+            .options(selectinload(AudienceProfileSnapshot.items))
+            .where(
+                AudienceProfileSnapshot.org_id == batch.org_id,
+                AudienceProfileSnapshot.account_id == batch.account_id,
+                AudienceProfileSnapshot.stat_date == key.stat_date,
+                AudienceProfileSnapshot.dimension == dimension,
+            )
+            .order_by(
+                AudienceProfileSnapshot.updated_at.desc(),
+                AudienceProfileSnapshot.id.desc(),
+            )
+        )
+    )
+    if not winners:
+        for snapshot in snapshots:
+            await session.delete(snapshot)
+        return
+    provenance = newest_winner(winners)
+    snapshot = snapshots[0] if snapshots else AudienceProfileSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=provenance.observation.import_batch_id,
+        source_kind=provenance.observation.source_kind,
+        stat_date=key.stat_date,
+        dimension=dimension,
+        items=[],
+    )
+    if not snapshots:
+        session.add(snapshot)
+        await session.flush()
+    for duplicate in snapshots[1:]:
+        await session.delete(duplicate)
+    snapshot.total_audience = None
+    snapshot.items = []
+    if "total_audience" in winners:
+        snapshot.total_audience = _int_or_none(winners["total_audience"].value)
+    if "items" in winners:
+        snapshot.items = [
+            AudienceProfileItem(
+                org_id=batch.org_id,
+                account_id=batch.account_id,
+                snapshot_id=snapshot.id,
+                label=str(item["label"]),
+                value=str(item["value"]),
+                ratio=_float_or_none(item.get("ratio")),
+                rank=rank,
+                meta={},
+            )
+            for rank, item in enumerate(winners["items"].value, start=1)
+        ]
+    snapshot.import_batch_id = provenance.observation.import_batch_id
+    snapshot.source_kind = provenance.observation.source_kind
+
+
+async def _rebuild_benchmark_projection(
+    *,
+    session: AsyncSession,
+    batch: DataImportBatch,
+    key: ProjectionKey,
+    winners,
+) -> None:
+    benchmark_code, metric_code = _benchmark_parts_from_projection_key(
+        batch.account_id,
+        key.entity_key,
+    )
+    snapshots = list(
+        await session.scalars(
+            select(BenchmarkSnapshot)
+            .where(
+                BenchmarkSnapshot.org_id == batch.org_id,
+                BenchmarkSnapshot.account_id == batch.account_id,
+                BenchmarkSnapshot.stat_date == key.stat_date,
+                BenchmarkSnapshot.benchmark_code == benchmark_code,
+                BenchmarkSnapshot.metric_code == metric_code,
+            )
+            .order_by(BenchmarkSnapshot.updated_at.desc(), BenchmarkSnapshot.id.desc())
+        )
+    )
+    if not winners:
+        for snapshot in snapshots:
+            await session.delete(snapshot)
+        return
+    provenance = newest_winner(winners)
+    snapshot = snapshots[0] if snapshots else BenchmarkSnapshot(
+        org_id=batch.org_id,
+        account_id=batch.account_id,
+        import_batch_id=provenance.observation.import_batch_id,
+        source_kind=provenance.observation.source_kind,
+        stat_date=key.stat_date,
+        benchmark_code=benchmark_code,
+        metric_code=metric_code,
+    )
+    if not snapshots:
+        session.add(snapshot)
+    for duplicate in snapshots[1:]:
+        await session.delete(duplicate)
+    snapshot.metric_value = None
+    snapshot.sample_size = None
+    snapshot.meta = {}
+    if "metric_value" in winners:
+        snapshot.metric_value = _float_or_none(winners["metric_value"].value)
+    if "sample_size" in winners:
+        snapshot.sample_size = _int_or_none(winners["sample_size"].value)
+    if "meta" in winners:
+        snapshot.meta = dict(winners["meta"].value)
+    snapshot.import_batch_id = provenance.observation.import_batch_id
+    snapshot.source_kind = provenance.observation.source_kind
+
+
+def _content_id_from_projection_key(account_id: int, entity_key: str) -> int:
+    prefix = f"account:{account_id}:content:"
+    if not entity_key.startswith(prefix):
+        raise ValueError(f"invalid content projection key: {entity_key}")
+    return int(entity_key.removeprefix(prefix))
+
+
+async def _reassign_or_delete_content_record(
+    *,
+    session: AsyncSession,
+    batch: DataImportBatch,
+    content_id: int,
+    entity_key: str,
+) -> None:
+    content = await session.get(PlatformContentRecord, content_id)
+    if content is None or content.canonical_import_batch_id != batch.id:
+        return
+    surviving = await session.scalar(
+        select(DataFieldObservation)
+        .where(
+            DataFieldObservation.org_id == batch.org_id,
+            DataFieldObservation.account_id == batch.account_id,
+            DataFieldObservation.domain == "content_metrics",
+            DataFieldObservation.entity_key == entity_key,
+            DataFieldObservation.active.is_(True),
+        )
+        .order_by(
+            DataFieldObservation.source_priority.desc(),
+            DataFieldObservation.confirmed_sequence.desc(),
+            DataFieldObservation.id.desc(),
+        )
+    )
+    if surviving is None:
+        await session.delete(content)
+        return
+    source_row = await session.get(DataImportRow, surviving.import_row_id)
+    content.canonical_import_batch_id = surviving.import_batch_id
+    content.canonical_import_row_number = (
+        source_row.row_number if source_row is not None else None
+    )
+    content.source_kind = surviving.source_kind
+    content.source_metadata = {
+        **(content.source_metadata or {}),
+        "import_batch_id": surviving.import_batch_id,
+        "row_number": content.canonical_import_row_number,
+    }
+
+
+def _audience_dimension_from_projection_key(account_id: int, entity_key: str) -> str:
+    prefix = f"account:{account_id}:audience:"
+    suffix = ":__profile__"
+    if not entity_key.startswith(prefix) or not entity_key.endswith(suffix):
+        raise ValueError(f"invalid audience projection key: {entity_key}")
+    return unquote(entity_key.removeprefix(prefix).removesuffix(suffix))
+
+
+def _benchmark_parts_from_projection_key(
+    account_id: int,
+    entity_key: str,
+) -> tuple[str, str]:
+    prefix = f"account:{account_id}:benchmark:"
+    marker = ":metric:"
+    if not entity_key.startswith(prefix) or marker not in entity_key:
+        raise ValueError(f"invalid benchmark projection key: {entity_key}")
+    benchmark_code, metric_code = entity_key.removeprefix(prefix).split(marker, 1)
+    return unquote(benchmark_code), unquote(metric_code)
 
 
 async def _project_content_record(
