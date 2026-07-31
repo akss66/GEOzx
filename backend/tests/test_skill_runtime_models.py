@@ -1,11 +1,19 @@
 from decimal import Decimal
 
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 import app.models as models
 from app.models.enums import AgentCode, AgentInvocationStatus, Platform
+from app.orchestrator.skill_runtime import (
+    SkillRecoveryConflict,
+    resolve_frozen_skill_definition,
+    skill_input_hash,
+)
+from app.orchestrator.skills.registry import SkillRegistry
+from app.schemas.skills import SkillDefinition
 
 
 async def _create_conversation_scope(
@@ -58,6 +66,95 @@ async def _create_conversation_scope(
 
 def test_skill_runtime_model_is_registered() -> None:
     assert hasattr(models, "SkillRun")
+
+
+def test_skill_input_hash_is_stable_and_includes_account_scope() -> None:
+    left = skill_input_hash({"days": 30, "account_id": 7})
+    reordered = skill_input_hash({"account_id": 7, "days": 30})
+    different_account = skill_input_hash({"account_id": 8, "days": 30})
+
+    assert left == reordered
+    assert len(left) == 64
+    assert different_account != left
+
+
+def test_recovery_uses_persisted_version_and_rejects_snapshot_tampering() -> None:
+    class Input(BaseModel):
+        days: int = 30
+
+    class Output(BaseModel):
+        summary: str
+
+    def definition(version: int) -> SkillDefinition:
+        return SkillDefinition(
+            code="inspection",
+            version=version,
+            name="Inspection",
+            description="Inspect",
+            supported_platforms=frozenset({"douyin"}),
+            input_model=Input,
+            output_model=Output,
+            expert_codes=(),
+            tool_codes=(),
+            risk_level="low",
+            approval_policy="none",
+            artifact_type="report",
+        )
+
+    registry = SkillRegistry([definition(1), definition(2)])
+    snapshot = {"account_id": 3, "days": 30}
+    frozen = type(
+        "Frozen",
+        (),
+        {
+            "skill_code": "inspection",
+            "skill_version": 1,
+            "input_snapshot": snapshot,
+            "input_hash": skill_input_hash(snapshot),
+        },
+    )()
+
+    assert resolve_frozen_skill_definition(frozen, registry=registry).version == 1
+    frozen.input_snapshot = {"account_id": 3, "days": 60}
+    with pytest.raises(SkillRecoveryConflict, match="SKILL_INPUT_INTEGRITY_MISMATCH"):
+        resolve_frozen_skill_definition(frozen, registry=registry)
+
+
+def test_recovery_never_falls_back_when_exact_version_is_unavailable() -> None:
+    class Input(BaseModel):
+        days: int = 30
+
+    class Output(BaseModel):
+        summary: str
+
+    definition = SkillDefinition(
+        code="inspection",
+        version=2,
+        name="Inspection",
+        description="Inspect",
+        supported_platforms=frozenset({"douyin"}),
+        input_model=Input,
+        output_model=Output,
+        expert_codes=(),
+        tool_codes=(),
+        risk_level="low",
+        approval_policy="none",
+        artifact_type="report",
+    )
+    snapshot = {"account_id": 3, "days": 30}
+    frozen = type(
+        "Frozen",
+        (),
+        {
+            "skill_code": "inspection",
+            "skill_version": 1,
+            "input_snapshot": snapshot,
+            "input_hash": skill_input_hash(snapshot),
+        },
+    )()
+
+    with pytest.raises(SkillRecoveryConflict, match="SKILL_VERSION_UNAVAILABLE"):
+        resolve_frozen_skill_definition(frozen, registry=SkillRegistry([definition]))
 
 
 @pytest.mark.asyncio

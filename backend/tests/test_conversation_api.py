@@ -2,6 +2,8 @@
 
 import json
 import logging
+from contextlib import asynccontextmanager
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -13,6 +15,7 @@ from app.models import (
     AccountMembership,
     AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     Client,
     ClientMembership,
@@ -21,8 +24,10 @@ from app.models import (
     ConversationTurn,
     Deliverable,
     Event,
+    LLMCall,
     Org,
     SkillRun,
+    ToolExecutionAttempt,
     User,
 )
 from app.models.enums import (
@@ -34,6 +39,21 @@ from app.models.enums import (
     UserRole,
     WorkspaceRole,
 )
+from app.schemas.conversation import CreateConversationTurnRequest
+from app.services.turn_execution import execute_conversation_turn
+from app.worker import recover_agent_runs
+
+
+@pytest.fixture(autouse=True)
+def _stub_agent_runtime_queue(monkeypatch):
+    async def enqueue_agent_runtime(*, run_id: int) -> None:
+        del run_id
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        enqueue_agent_runtime,
+        raising=False,
+    )
 
 
 def _auth(user: User) -> dict[str, str]:
@@ -87,10 +107,39 @@ async def _submit_turn(
     )
 
 
+async def _execute_queued_turn(
+    session,
+    user: User,
+    response,
+    *,
+    message: str,
+    requested_skill_code: str | None = None,
+    execution_preference: str = "AUTO",
+    attachment_ids: list[int] | None = None,
+):
+    payload = response.json()
+    turn = await session.get(ConversationTurn, payload["turn"]["id"])
+    run = await session.get(AgentRun, payload["run"]["id"])
+    assert turn is not None
+    assert run is not None
+    result = await execute_conversation_turn(
+        session,
+        user,
+        turn,
+        run,
+        CreateConversationTurnRequest(
+            client_message_id=run.client_message_id,
+            message=message,
+            requested_skill_code=requested_skill_code,
+            execution_preference=execution_preference,
+            attachment_ids=attachment_ids or [],
+        ),
+    )
+    return result, turn, run
+
+
 @pytest.mark.asyncio
-async def test_every_conversation_route_is_disabled_by_default(
-    client, admin, monkeypatch
-) -> None:
+async def test_every_conversation_route_is_disabled_by_default(client, admin, monkeypatch) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", False)
     headers = _auth(admin)
     requests = [
@@ -109,9 +158,9 @@ async def test_every_conversation_route_is_disabled_by_default(
     ]
 
     assert [response.status_code for response in requests] == [503, 503, 503, 503]
-    assert {
-        response.json()["detail"]["code"] for response in requests
-    } == {"MAIN_AGENT_V2_DISABLED"}
+    assert {response.json()["detail"]["code"] for response in requests} == {
+        "MAIN_AGENT_V2_DISABLED"
+    }
 
 
 @pytest.mark.asyncio
@@ -165,7 +214,13 @@ async def test_create_and_get_thread_with_ordered_turn_history(
         "第一条",
         "第二条",
     ]
+    assert [turn["status"] for turn in history["turns"]] == ["queued", "queued"]
     assert all(turn["projections"] == [] for turn in history["turns"])
+    assert all(turn["model_call_count"] == 0 for turn in history["turns"])
+    assert all(turn["route_ms"] is None for turn in history["turns"])
+    assert all(turn["first_token_ms"] is None for turn in history["turns"])
+    assert all(turn["completion_ms"] is None for turn in history["turns"])
+    assert all(turn["total_ms"] is None for turn in history["turns"])
 
 
 @pytest.mark.asyncio
@@ -230,14 +285,330 @@ async def test_history_lists_only_the_current_users_selected_account_threads(
 
     assert admin_history.status_code == 200
     assert member_history.status_code == 200
-    assert [item["id"] for item in admin_history.json()["data"]] == [
-        admin_thread["id"]
-    ]
-    assert [item["id"] for item in member_history.json()["data"]] == [
-        member_thread["id"]
-    ]
+    assert [item["id"] for item in admin_history.json()["data"]] == [admin_thread["id"]]
+    assert [item["id"] for item in member_history.json()["data"]] == [member_thread["id"]]
     assert member_history.json()["data"][0]["title"] == "运营成员自己的会话"
     assert member_history.json()["data"][0]["turn_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_active_runtime(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Active AgentRun deletion account")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="delete-active-1",
+        message="Do not delete this active run",
+        requested_skill_code="account_inspection",
+    )
+
+    assert submitted.status_code == 202
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_active_skill_run(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Active SkillRun deletion account")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="delete-active-skill-1",
+        message="Run the account inspection",
+        requested_skill_code="account_inspection",
+    )
+    assert submitted.status_code == 202
+    await _execute_queued_turn(
+        session,
+        admin,
+        submitted,
+        message="Run the account inspection",
+        requested_skill_code="account_inspection",
+    )
+    run = await session.get(AgentRun, submitted.json()["run"]["id"])
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
+    assert run is not None
+    assert skill_run is not None
+    run.status = "completed"
+    skill_run.status = "running"
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_status", ["running", "waiting_user"])
+async def test_owner_cannot_delete_conversation_with_non_terminal_turn(
+    client,
+    session,
+    admin,
+    monkeypatch,
+    turn_status,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, f"Delete {turn_status} turn")
+    thread = await _create_thread(client, admin, account)
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=f"delete-{turn_status}",
+        user_input="Keep this turn",
+        status=turn_status,
+    )
+    session.add(turn)
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_unknown_tool_state(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete unknown tool state")
+    thread = await _create_thread(client, admin, account)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Unknown tool state",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        tool_code="unknown.state",
+        tool_name="Unknown state",
+        status="provider_mystery",
+        side_effect_level="read",
+    )
+    session.add(tool_call)
+    await session.flush()
+    tool_call_id = tool_call.id
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(AgentToolCall, tool_call_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_active_invocation(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete active invocation")
+    thread = await _create_thread(client, admin, account)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Active invocation",
+    )
+    session.add(task)
+    await session.flush()
+    invocation = AgentInvocation(
+        task_id=task.id,
+        thread_id=thread["id"],
+        step_key="active-invocation",
+        agent_code=AgentCode.OPERATOR,
+        agent_name="Operator",
+        status=AgentInvocationStatus.RUNNING,
+    )
+    session.add(invocation)
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_delete_conversation_with_dispatched_tool_attempt(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete dispatched attempt")
+    thread = await _create_thread(client, admin, account)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Dispatched attempt",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        tool_code="provider.read",
+        tool_name="Provider read",
+        status="success",
+        side_effect_level="read",
+    )
+    session.add(tool_call)
+    await session.flush()
+    session.add(
+        ToolExecutionAttempt(
+            tool_call_id=tool_call.id,
+            attempt_no=1,
+            status="dispatched",
+        )
+    )
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_owner_can_delete_empty_and_terminal_conversations(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Delete terminal conversations")
+    empty_thread = await _create_thread(client, admin, account)
+    terminal_thread = await _create_thread(client, admin, account)
+    session.add(
+        ConversationTurn(
+            thread_id=terminal_thread["id"],
+            org_id=admin.org_id,
+            created_by_id=admin.id,
+            client_message_id="delete-terminal",
+            user_input="Completed",
+            assistant_response="Done",
+            status="completed",
+        )
+    )
+    await session.commit()
+
+    empty_deleted = await client.delete(
+        f"/brain/conversations/{empty_thread['id']}",
+        headers=_auth(admin),
+    )
+    terminal_deleted = await client.delete(
+        f"/brain/conversations/{terminal_thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert empty_deleted.status_code == terminal_deleted.status_code == 204
+    assert await session.get(ConversationThread, empty_thread["id"]) is None
+    assert await session.get(ConversationThread, terminal_thread["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_cross_user_child_blocks_whole_conversation_delete(
+    client,
+    session,
+    admin,
+    member,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "Cross-user child")
+    thread = await _create_thread(client, admin, account)
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="cross-user-child",
+        user_input="Do not partially delete",
+        assistant_response="Done",
+        status="completed",
+    )
+    session.add(turn)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=member.id,
+        thread_id=thread["id"],
+        turn_id=turn.id,
+        client_message_id=turn.client_message_id,
+        status="completed",
+        phase="completed",
+        request_payload={},
+    )
+    session.add(run)
+    await session.flush()
+    turn_id = turn.id
+    run_id = run.id
+    await session.commit()
+
+    blocked = await client.delete(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(ConversationThread, thread["id"]) is not None
+    assert await session.get(ConversationTurn, turn_id) is not None
+    assert await session.get(AgentRun, run_id) is not None
 
 
 @pytest.mark.asyncio
@@ -264,12 +635,18 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         requested_skill_code="account_inspection",
     )
     assert submitted.status_code == 202
+    await _execute_queued_turn(
+        session,
+        admin,
+        submitted,
+        message="体检这个账号",
+        requested_skill_code="account_inspection",
+    )
     run = await session.get(AgentRun, submitted.json()["run"]["id"])
     assert run is not None
     assert run.task_id is not None
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
-    )
+    task_id = run.task_id
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert skill_run is not None
     content_item = ContentItem(
         account_id=account_id,
@@ -295,8 +672,103 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     )
     session.add(deliverable)
     await session.flush()
+    preserved_event = Event(
+        type="preserved.audit",
+        content_item_id=content_item.id,
+        payload={"kept": True},
+    )
+    formal_event = Event(
+        type="brain.runtime.deliverable_completed",
+        content_item_id=content_item.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+        payload={"deliverable_id": deliverable.id},
+    )
+    technical_event = Event(
+        type="agent.kernel.tool_end",
+        content_item_id=content_item.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+        payload={"tool_code": "account.profile"},
+    )
+    session.add_all([preserved_event, formal_event, technical_event])
+    owned_llm_call = LLMCall(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        task_id=task.id,
+        trace_id=f"conversation-thread-{thread['id']}",
+        provider="test",
+        model="test-model",
+    )
+    shared_llm_call = LLMCall(
+        org_id=admin.org_id,
+        created_by_id=member.id,
+        task_id=task.id,
+        trace_id="shared-task-call",
+        provider="test",
+        model="test-model",
+    )
+    invocation = await session.scalar(
+        select(AgentInvocation).where(AgentInvocation.thread_id == thread["id"])
+    )
+    if invocation is None:
+        invocation = AgentInvocation(
+            task_id=task.id,
+            run_id=run.id,
+            skill_run_id=skill_run.id,
+            thread_id=thread["id"],
+            turn_id=submitted.json()["turn"]["id"],
+            step_key="delete-history:operator",
+            agent_code=AgentCode.OPERATOR,
+            agent_name="Operator",
+            status=AgentInvocationStatus.DONE,
+        )
+        session.add(invocation)
+        await session.flush()
+    write_tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        invocation_id=invocation.id,
+        skill_run_id=skill_run.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        tool_code="provider.publish",
+        tool_name="Provider publish",
+        idempotency_key="delete-write-audit",
+        provider_idempotency_key="provider-delete-write-audit",
+        side_effect_level="non_idempotent_write",
+        status="success",
+    )
+    session.add_all([owned_llm_call, shared_llm_call, write_tool_call])
+    await session.flush()
+    write_attempt = ToolExecutionAttempt(
+        tool_call_id=write_tool_call.id,
+        attempt_no=1,
+        status="success",
+        provider_idempotency_key=write_tool_call.provider_idempotency_key,
+    )
+    session.add(write_attempt)
+    read_tool_ids = set(
+        await session.scalars(
+            select(AgentToolCall.id).where(
+                AgentToolCall.thread_id == thread["id"],
+                AgentToolCall.side_effect_level == "read",
+            )
+        )
+    )
     content_item_id = content_item.id
     deliverable_id = deliverable.id
+    preserved_event_id = preserved_event.id
+    formal_event_id = formal_event.id
+    technical_event_id = technical_event.id
+    owned_llm_call_id = owned_llm_call.id
+    shared_llm_call_id = shared_llm_call.id
+    write_tool_call_id = write_tool_call.id
+    write_attempt_id = write_attempt.id
     await session.commit()
 
     denied = await client.delete(
@@ -310,6 +782,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
 
     assert denied.status_code == 404
     assert deleted.status_code == 204
+    session.expire_all()
     assert await session.get(ConversationThread, thread["id"]) is None
     assert (
         await session.scalar(
@@ -319,7 +792,9 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         )
         == 0
     )
-    assert await session.get(BrainTask, run.task_id) is None
+    preserved_task = await session.get(BrainTask, task_id)
+    assert preserved_task is not None
+    assert preserved_task.content_item_id == content_item_id
     preserved_content = await session.get(ContentItem, content_item_id)
     preserved_deliverable = await session.get(Deliverable, deliverable_id)
     assert preserved_content is not None
@@ -330,26 +805,43 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert preserved_deliverable.skill_run_id is None
     assert (
         await session.scalar(
-            select(func.count(AgentRun.id)).where(
-                AgentRun.thread_id == thread["id"]
-            )
+            select(func.count(AgentRun.id)).where(AgentRun.thread_id == thread["id"])
         )
         == 0
     )
     assert (
         await session.scalar(
-            select(func.count(SkillRun.id)).where(
-                SkillRun.thread_id == thread["id"]
-            )
+            select(func.count(SkillRun.id)).where(SkillRun.thread_id == thread["id"])
         )
         == 0
     )
     assert (
-        await session.scalar(
-            select(func.count(Event.id)).where(Event.thread_id == thread["id"])
-        )
+        await session.scalar(select(func.count(Event.id)).where(Event.thread_id == thread["id"]))
         == 0
     )
+    preserved_event_row = await session.get(Event, preserved_event_id)
+    assert preserved_event_row is not None
+    assert preserved_event_row.type == "preserved.audit"
+    formal_event_row = await session.get(Event, formal_event_id)
+    assert formal_event_row is not None
+    assert formal_event_row.content_item_id == content_item_id
+    assert formal_event_row.thread_id is None
+    assert formal_event_row.turn_id is None
+    assert formal_event_row.run_id is None
+    assert formal_event_row.skill_run_id is None
+    assert formal_event_row.payload == {"deliverable_id": deliverable_id}
+    assert await session.get(Event, technical_event_id) is None
+    assert await session.get(LLMCall, owned_llm_call_id) is None
+    assert await session.get(LLMCall, shared_llm_call_id) is not None
+    for read_tool_id in read_tool_ids:
+        assert await session.get(AgentToolCall, read_tool_id) is None
+    retained_write = await session.get(AgentToolCall, write_tool_call_id)
+    assert retained_write is not None
+    assert retained_write.invocation_id is None
+    assert retained_write.skill_run_id is None
+    assert retained_write.thread_id is None
+    assert retained_write.turn_id is None
+    assert await session.get(ToolExecutionAttempt, write_attempt_id) is not None
 
 
 @pytest.mark.asyncio
@@ -359,6 +851,24 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
     account = await _account(session, admin, "提交账号")
     thread = await _create_thread(client, admin, account)
+    enqueued: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        enqueued.append(run_id)
+
+    async def reject_inline_execution(*_args, **_kwargs):
+        raise AssertionError("conversation runtime must not execute in the HTTP request")
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        capture_enqueue,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.api.conversations.execute_conversation_turn",
+        reject_inline_execution,
+        raising=False,
+    )
 
     response = await _submit_turn(
         client,
@@ -378,12 +888,12 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     assert body["run"]["turn_id"] == body["turn"]["id"]
     assert body["run"]["task_id"] is None
     assert body["task_id"] is None
-    assert body["run"]["status"] == "completed"
-    assert len(body["projections"]) == 1
-    assert body["projections"][0]["type"] == "account_data"
-    assert body["projections"][0]["account_id"] == account.id
-    assert body["projections"][0]["turn_id"] == body["turn"]["id"]
+    assert body["run"]["status"] == "queued"
+    assert body["run"]["phase"] == "queued"
+    assert body["turn"]["assistant_response"] is None
+    assert body["projections"] == []
     assert body["turn"]["projections"] == body["projections"]
+    assert enqueued == [body["run"]["id"]]
 
     run = await session.get(AgentRun, body["run"]["id"])
     assert run is not None
@@ -407,6 +917,99 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     )
     assert turn_response.status_code == 200
     assert turn_response.json() == body["turn"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_turn_submission_does_not_enqueue_the_same_run_twice(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "幂等入队账号")
+    thread = await _create_thread(client, admin, account)
+    enqueued: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        enqueued.append(run_id)
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        capture_enqueue,
+        raising=False,
+    )
+
+    first = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="enqueue-once-1",
+        message="查看最近七天数据",
+    )
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="enqueue-once-1",
+        message="查看最近七天数据",
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["run"]["id"] == first.json()["run"]["id"]
+    assert enqueued == [first.json()["run"]["id"]]
+    assert await session.scalar(select(func.count(ConversationTurn.id))) == 1
+    assert await session.scalar(select(func.count(AgentRun.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_submission_failure_keeps_a_durable_queued_run(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "队列恢复账号")
+    thread = await _create_thread(client, admin, account)
+
+    async def fail_enqueue(*, run_id: int) -> None:
+        raise ConnectionError(f"queue unavailable for run {run_id}")
+
+    monkeypatch.setattr(
+        "app.api.conversations.enqueue_agent_runtime",
+        fail_enqueue,
+        raising=False,
+    )
+
+    with pytest.raises(ConnectionError, match="queue unavailable"):
+        await _submit_turn(
+            client,
+            admin,
+            thread["id"],
+            client_message_id="queue-failure-1",
+            message="查看最近七天数据",
+        )
+
+    run = await session.scalar(
+        select(AgentRun).where(AgentRun.client_message_id == "queue-failure-1")
+    )
+    assert run is not None
+    assert run.status == "queued"
+    assert run.phase == "queued"
+
+    enqueued: list[tuple[tuple, dict]] = []
+
+    class RecoveryPool:
+        async def enqueue_job(self, *args, **kwargs):
+            enqueued.append((args, kwargs))
+            return object()
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    recovered = await recover_agent_runs({"redis": RecoveryPool()})
+
+    assert recovered == 1
+    assert enqueued[0][0] == ("execute_agent_run", run.id)
+    assert enqueued[0][1]["_job_id"].startswith(f"agent-run:{run.id}:recovery:")
 
 
 @pytest.mark.asyncio
@@ -435,12 +1038,18 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     )
 
     assert response.status_code == 202
-    body = response.json()
-    response_text = body["turn"]["assistant_response"]
+    result, _turn, _run = await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="你好",
+    )
+    response_text = result.response
     response_events = [
         (event_type, payload)
         for event_type, payload in realtime_events
-        if event_type in {
+        if event_type
+        in {
             "brain.runtime.message_start",
             "brain.runtime.message_delta",
             "brain.runtime.message_done",
@@ -448,6 +1057,9 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     ]
     assert response_events[0][0] == "brain.runtime.message_start"
     assert response_events[-1][0] == "brain.runtime.message_done"
+    assert [payload["stream_seq"] for _, payload in response_events] == list(
+        range(len(response_events))
+    )
     response_deltas = [
         payload["delta"]
         for event_type, payload in response_events
@@ -455,9 +1067,7 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     ]
     assert response_deltas
     assert all(len(delta) <= 2 for delta in response_deltas)
-    assert "".join(
-        response_deltas
-    ) == response_text
+    assert "".join(response_deltas) == response_text
     assert all(
         payload["client_message_id"] == "task-free-stream-1"
         and payload["thread_id"] == thread["id"]
@@ -487,7 +1097,22 @@ async def test_unknown_explicit_skill_returns_blocked_turn_without_formal_record
     )
 
     assert response.status_code == 202
-    body = response.json()
+    await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="Run a capability that is not in the public catalog",
+        requested_skill_code="not_registered",
+    )
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="unsupported-explicit-skill",
+        message="Run a capability that is not in the public catalog",
+        requested_skill_code="not_registered",
+    )
+    body = replay.json()
     assert body["task_id"] is None
     assert body["run"]["status"] == "blocked"
     assert body["projections"] == [
@@ -517,6 +1142,13 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
     }
 
     first = await _submit_turn(client, admin, thread["id"], **request)
+    await _execute_queued_turn(
+        session,
+        admin,
+        first,
+        message=request["message"],
+        requested_skill_code=request["requested_skill_code"],
+    )
     repeated = await _submit_turn(client, admin, thread["id"], **request)
 
     assert first.status_code == 202
@@ -533,15 +1165,11 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
     )
     assert (
         await session.scalar(
-            select(func.count(AgentRun.id)).where(
-                AgentRun.thread_id == thread["id"]
-            )
+            select(func.count(AgentRun.id)).where(AgentRun.thread_id == thread["id"])
         )
         == 1
     )
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
-    )
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert skill_run is not None
     run = await session.get(AgentRun, skill_run.run_id)
     assert run is not None
@@ -585,6 +1213,8 @@ async def test_true_duplicate_returns_the_same_turn_and_run(
     assert execution["experts"]
     assert all(expert["agent_name"] for expert in execution["experts"])
     assert all("input_summary" not in expert for expert in execution["experts"])
+    assert all("attempt" in expert for expert in execution["experts"])
+    assert all("duration_ms" in expert for expert in execution["experts"])
 
 
 @pytest.mark.asyncio
@@ -603,9 +1233,14 @@ async def test_blocked_turn_still_projects_called_experts(
         requested_skill_code="account_inspection",
     )
     assert submitted.status_code == 202
-    skill_run = await session.scalar(
-        select(SkillRun).where(SkillRun.thread_id == thread["id"])
+    await _execute_queued_turn(
+        session,
+        admin,
+        submitted,
+        message="体检这个账号",
+        requested_skill_code="account_inspection",
     )
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.thread_id == thread["id"]))
     assert skill_run is not None
     run = await session.get(AgentRun, skill_run.run_id)
     assert run is not None
@@ -642,10 +1277,364 @@ async def test_blocked_turn_still_projects_called_experts(
     assert history_response.status_code == 200
     projections = history_response.json()["turns"][0]["projections"]
     assert any(item["type"] == "execution_blocked" for item in projections)
-    execution = next(
-        item for item in projections if item["type"] == "execution_summary"
-    )
+    execution = next(item for item in projections if item["type"] == "execution_summary")
     assert execution["experts"][0]["agent_name"] == "账号定位专家"
+
+
+@pytest.mark.asyncio
+async def test_turn_projects_sanitized_tool_only_execution_summary(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "仅工具日志账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="tool-only-summary",
+        message="读取账号资料",
+    )
+    body = submitted.json()
+    turn = await session.get(ConversationTurn, body["turn"]["id"])
+    assert turn is not None
+    turn.route_ms = 12
+    turn.first_token_ms = 120
+    turn.completion_ms = 420
+    turn.total_ms = 430
+    turn.model_call_count = 2
+    turn.intent = {
+        "mode": "query",
+        "reason": "SECRET_MODEL_REASON",
+        "prompt": "SECRET_PROMPT",
+        "provider_body": {"token": "sk-secret"},
+    }
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="只调用工具",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        turn_id=body["turn"]["id"],
+        tool_code="account.profile",
+        tool_name="账号资料",
+        status="success",
+        side_effect_level="read",
+        input_summary="SECRET_INPUT",
+        output_summary="SECRET_OUTPUT",
+        error="Traceback: SHOULD_NOT_LEAK",
+        provider_idempotency_key="provider-key-MUST_NOT_LEAK",
+        meta={"raw_input": "MUST_NOT_LEAK", "api_key": "sk-secret"},
+        latency_ms=37,
+        requires_human_confirmation=False,
+    )
+    session.add(tool_call)
+    await session.flush()
+    session.add_all(
+        [
+            ToolExecutionAttempt(
+                tool_call_id=tool_call.id,
+                attempt_no=1,
+                status="failed",
+                error="raw provider body MUST_NOT_LEAK",
+            ),
+            ToolExecutionAttempt(
+                tool_call_id=tool_call.id,
+                attempt_no=2,
+                status="success",
+            ),
+        ]
+    )
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    summary = next(
+        projection
+        for projection in history.json()["turns"][0]["projections"]
+        if projection["type"] == "execution_summary"
+    )
+    returned_turn = history.json()["turns"][0]
+    assert returned_turn["route_ms"] == 12
+    assert returned_turn["first_token_ms"] == 120
+    assert returned_turn["completion_ms"] == 420
+    assert returned_turn["total_ms"] == 430
+    assert returned_turn["model_call_count"] == 2
+    assert returned_turn["intent"] == {
+        "mode": "query",
+        "route_source": "model",
+        "skill_code": None,
+    }
+    assert summary["run_id"] == body["run"]["id"]
+    assert summary["mode"] == "query"
+    assert summary["route_source"] == "model"
+    assert summary["experts"] == []
+    assert summary["tools"] == [
+        {
+            "id": summary["tools"][0]["id"],
+            "tool_code": "account.profile",
+            "tool_name": "账号资料",
+            "status": "success",
+            "duration_ms": 37,
+            "retry_count": 1,
+            "requires_confirmation": False,
+            "side_effect_level": "read",
+        }
+    ]
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert "SECRET_INPUT" not in serialized
+    assert "SECRET_OUTPUT" not in serialized
+    assert "Traceback" not in serialized
+    assert "SECRET_MODEL_REASON" not in json.dumps(returned_turn, ensure_ascii=False)
+    assert "SECRET_PROMPT" not in json.dumps(returned_turn, ensure_ascii=False)
+    assert "MUST_NOT_LEAK" not in serialized
+    assert "sk-secret" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_history_fail_closed_sanitizes_every_result_payload_projection_kind(
+    client, session, admin, monkeypatch
+) -> None:
+    """AgentRun payloads are untrusted trace data, never a public API passthrough."""
+
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "projection-security")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="projection-security",
+        message="inspect projection safety",
+    )
+    body = submitted.json()
+    run = await session.get(AgentRun, body["run"]["id"])
+    assert run is not None
+    malicious = {
+        "prompt": "SECRET_PROMPT",
+        "api_key": "sk-secret",
+        "provider_body": {"raw_output": "RAW_TOOL_OUTPUT"},
+    }
+    run.result_payload = {
+        "projections": [
+            {"type": "answer", "message": "SECRET_PROMPT", **malicious},
+            {
+                "type": "progress",
+                "skill_run_id": 101,
+                "stages": [
+                    {
+                        "code": "analysis",
+                        "name": "Data analysis",
+                        "status": "completed",
+                        **malicious,
+                    }
+                ],
+                **malicious,
+            },
+            {
+                "type": "expert",
+                "invocation": {
+                    "id": 201,
+                    "agent_code": "01-positioning",
+                    "agent_name": "Positioning expert",
+                    "status": "done",
+                    "attempt": 0,
+                    **malicious,
+                },
+                **malicious,
+            },
+            {
+                "type": "artifact",
+                "artifact_id": 301,
+                "artifact_type": "account_inspection_report",
+                "skill_run_id": 101,
+                "account_id": account.id,
+                "report": {"raw_output": "RAW_TOOL_OUTPUT", "api_key": "sk-secret"},
+                **malicious,
+            },
+            {
+                "type": "account_data",
+                "account_id": account.id,
+                "skill_code": "account_data_query",
+                "skill_run_id": 102,
+                "data": {"raw_output": "RAW_TOOL_OUTPUT", "api_key": "sk-secret"},
+                **malicious,
+            },
+            {
+                "type": "execution_blocked",
+                "skill_run_id": 103,
+                "skill_code": "account_inspection",
+                "code": "EXECUTION_FAILED",
+                "recovery_action": "Retry the account inspection.",
+                **malicious,
+            },
+            {
+                "type": "approval",
+                "approval": {"id": 401, **malicious},
+                **malicious,
+            },
+            {
+                "type": "execution_summary",
+                "run_id": run.id,
+                "experts": [{"agent_name": "SECRET_PROMPT"}],
+                "tools": [{"output": "RAW_TOOL_OUTPUT"}],
+                **malicious,
+            },
+            {"type": "future_projection", **malicious},
+        ]
+    }
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert history.status_code == 200
+    projections = history.json()["turns"][0]["projections"]
+    assert [item["type"] for item in projections] == [
+        "progress",
+        "expert",
+        "artifact",
+        "account_data",
+        "execution_blocked",
+    ]
+    serialized = json.dumps(projections, ensure_ascii=False)
+    assert "SECRET_PROMPT" not in serialized
+    assert "sk-secret" not in serialized
+    assert "RAW_TOOL_OUTPUT" not in serialized
+    assert "provider_body" not in serialized
+    assert all(item["turn_id"] == body["turn"]["id"] for item in projections)
+    artifact_projection = next(item for item in projections if item["type"] == "artifact")
+    assert "report" not in artifact_projection
+    account_projection = next(item for item in projections if item["type"] == "account_data")
+    assert "data" not in account_projection
+
+
+@pytest.mark.asyncio
+async def test_history_reconstructs_pending_approval_projection(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "审批恢复账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="approval-history",
+        message="准备发布",
+    )
+    body = submitted.json()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="审批恢复",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        turn_id=body["turn"]["id"],
+        tool_code="publish_package_prepare",
+        tool_name="生成发布包并进入人工审批",
+        status="waiting_approval",
+        permission_mode="confirm",
+        requires_human_confirmation=True,
+        side_effect_level="read",
+        input_summary="SAFE_INPUT_SUMMARY",
+        output_summary="SAFE_OUTPUT_SUMMARY",
+        meta={"secret": "MUST_NOT_LEAK"},
+    )
+    session.add(tool_call)
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert history.status_code == 200
+    approval = next(
+        projection
+        for projection in history.json()["turns"][0]["projections"]
+        if projection["type"] == "approval"
+    )
+    assert approval == {
+        "type": "approval",
+        "turn_id": body["turn"]["id"],
+        "approval": {
+            "id": tool_call.id,
+            "task_id": task.id,
+            "tool_code": "publish_package_prepare",
+            "tool_name": "生成发布包并进入人工审批",
+            "status": "waiting_approval",
+            "permission_mode": "confirm",
+            "requires_human_confirmation": True,
+        },
+    }
+    assert "MUST_NOT_LEAK" not in json.dumps(approval, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_turn_projects_critic_only_quality_summary(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "仅质量门日志账号")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="critic-only-summary",
+        message="检查现有成果质量",
+    )
+    body = submitted.json()
+    session.add(
+        SkillRun(
+            org_id=admin.org_id,
+            thread_id=thread["id"],
+            turn_id=body["turn"]["id"],
+            run_id=body["run"]["id"],
+            task_id=None,
+            idempotency_key="critic-only-summary",
+            skill_code="artifact_quality_review",
+            skill_version=1,
+            status="completed",
+            input_snapshot={},
+            output_snapshot={"raw_critic_prompt": "SHOULD_NOT_LEAK"},
+            quality_score=Decimal("0.9300"),
+        )
+    )
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    summary = next(
+        projection
+        for projection in history.json()["turns"][0]["projections"]
+        if projection["type"] == "execution_summary"
+    )
+    assert summary["run_id"] == body["run"]["id"]
+    assert summary["skill_code"] == "artifact_quality_review"
+    assert summary["quality_score"] == 0.93
+    assert summary["experts"] == []
+    assert summary["tools"] == []
+    assert "SHOULD_NOT_LEAK" not in json.dumps(summary, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -792,8 +1781,7 @@ async def test_account_scoped_member_cannot_enumerate_or_append_thread_or_turn(
 
     assert [response.status_code for response in responses] == [404, 404, 404]
     assert all(
-        "MAIN_AGENT_V2_ROLLOUT_RESTRICTED" not in str(response.json())
-        for response in responses
+        "MAIN_AGENT_V2_ROLLOUT_RESTRICTED" not in str(response.json()) for response in responses
     )
     assert (
         await session.scalar(
@@ -920,8 +1908,15 @@ async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
     )
 
     assert response.status_code == 202
+    result, _turn, _run = await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="查看近七天数据",
+        requested_skill_code="account_data_query",
+    )
     body = response.json()
-    skill_run_id = body["projections"][0]["skill_run_id"]
+    skill_run_id = result.projections[0]["skill_run_id"]
     run_event = next(
         event
         for event in (await session.scalars(select(Event).order_by(Event.id))).all()
@@ -943,9 +1938,7 @@ async def test_feature_flag_turn_submission_emits_safe_route_diagnostics(
     assert record.task_id is None
     assert record.artifact_ids == []
     assert record.status == "completed"
-    custom_keys = (
-        set(record.__dict__) - set(logging.makeLogRecord({}).__dict__) - {"message"}
-    )
+    custom_keys = set(record.__dict__) - set(logging.makeLogRecord({}).__dict__) - {"message"}
     assert custom_keys == {
         "artifact_ids",
         "event",
@@ -1044,12 +2037,17 @@ async def test_feature_flag_turn_submission_emits_json_route_diagnostics(
     )
 
     assert response.status_code == 202
+    result, _turn, _run = await _execute_queued_turn(
+        session,
+        admin,
+        response,
+        message="sensitive rollout prompt that must not be logged",
+        requested_skill_code="account_data_query",
+    )
     body = response.json()
-    skill_run_id = body["projections"][0]["skill_run_id"]
+    skill_run_id = result.projections[0]["skill_run_id"]
     record = next(
-        entry
-        for entry in caplog.records
-        if "main_agent_turn_completed" in entry.getMessage()
+        entry for entry in caplog.records if "main_agent_turn_completed" in entry.getMessage()
     )
     payload = json.loads(record.getMessage())
 

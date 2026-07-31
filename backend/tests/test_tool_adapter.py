@@ -54,7 +54,14 @@ async def test_role_must_be_allowed(session, member) -> None:
         return {"echo": params.message}
 
     adapter = ToolAdapter(
-        [ToolSpec(name="diagnostics.echo", handler=handler, params_model=EchoParams)]
+        [
+            ToolSpec(
+                name="diagnostics.echo",
+                handler=handler,
+                params_model=EchoParams,
+                side_effect_level="read",
+            )
+        ]
     )
 
     with pytest.raises(ToolNotAllowedError):
@@ -73,7 +80,14 @@ async def test_role_must_be_allowed(session, member) -> None:
 @pytest.mark.asyncio
 async def test_params_are_validated_before_execution(session, admin) -> None:
     adapter = ToolAdapter(
-        [ToolSpec(name="diagnostics.echo", handler=echo_handler, params_model=EchoParams)]
+        [
+            ToolSpec(
+                name="diagnostics.echo",
+                handler=echo_handler,
+                params_model=EchoParams,
+                side_effect_level="read",
+            )
+        ]
     )
 
     with pytest.raises(ToolValidationError):
@@ -96,6 +110,7 @@ async def test_allowed_tool_executes_and_records_audit(session, admin) -> None:
                 name="diagnostics.echo",
                 handler=echo_handler,
                 params_model=EchoParams,
+                side_effect_level="read",
                 allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
             )
         ]
@@ -122,6 +137,7 @@ async def test_tool_timeout_is_audited(session, admin) -> None:
                 name="diagnostics.slow",
                 handler=slow_handler,
                 params_model=EchoParams,
+                side_effect_level="read",
                 timeout_seconds=0.001,
             )
         ]
@@ -141,7 +157,14 @@ async def test_tool_timeout_is_audited(session, admin) -> None:
 @pytest.mark.asyncio
 async def test_extra_prompt_injected_params_are_rejected(session, admin) -> None:
     adapter = ToolAdapter(
-        [ToolSpec(name="diagnostics.echo", handler=echo_handler, params_model=EchoParams)]
+        [
+            ToolSpec(
+                name="diagnostics.echo",
+                handler=echo_handler,
+                params_model=EchoParams,
+                side_effect_level="read",
+            )
+        ]
     )
 
     with pytest.raises(ToolValidationError):
@@ -167,6 +190,7 @@ async def test_account_scoped_tool_cannot_cross_selected_account(session, admin)
                 name="account.read",
                 handler=handler,
                 params_model=EchoParams,
+                side_effect_level="read",
                 scope="account",
             )
         ]
@@ -190,6 +214,7 @@ async def test_confirm_tool_requires_explicit_approval(session, admin) -> None:
                 name="publish.prepare",
                 handler=echo_handler,
                 params_model=EchoParams,
+                side_effect_level="read",
                 permission_mode="confirm",
             )
         ]
@@ -208,3 +233,75 @@ async def test_confirm_tool_requires_explicit_approval(session, admin) -> None:
         ToolExecutionContext(session=session, user=admin, approved=True),
     )
     assert result == {"echo": "ok"}
+
+
+def test_tool_spec_requires_explicit_side_effect_level() -> None:
+    with pytest.raises(TypeError):
+        ToolSpec(
+            name="diagnostics.undeclared",
+            handler=echo_handler,
+            params_model=EchoParams,
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_tool_requires_server_provider_idempotency_key(
+    session,
+    admin,
+) -> None:
+    adapter = ToolAdapter(
+        [
+            ToolSpec(
+                name="provider.write",
+                handler=echo_handler,
+                params_model=EchoParams,
+                side_effect_level="idempotent_write",
+            )
+        ]
+    )
+
+    with pytest.raises(ToolValidationError, match="provider idempotency key"):
+        await adapter.invoke(
+            "provider.write",
+            {"message": "unsafe"},
+            ToolExecutionContext(session=session, user=admin),
+        )
+
+
+@pytest.mark.asyncio
+async def test_adapter_never_commits_handler_or_audit_work(admin) -> None:
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+            self.commit_count = 0
+
+        def add(self, value: object) -> None:
+            self.added.append(value)
+
+        async def commit(self) -> None:
+            self.commit_count += 1
+
+    recording_session = RecordingSession()
+    adapter = ToolAdapter(
+        [
+            ToolSpec(
+                name="diagnostics.echo",
+                handler=echo_handler,
+                params_model=EchoParams,
+                side_effect_level="read",
+            )
+        ]
+    )
+
+    result = await adapter.invoke(
+        "diagnostics.echo",
+        {"message": "ok"},
+        ToolExecutionContext(
+            session=recording_session,  # type: ignore[arg-type]
+            user=admin,
+        ),
+    )
+
+    assert result == {"echo": "ok"}
+    assert recording_session.commit_count == 0
+    assert len(recording_session.added) == 1

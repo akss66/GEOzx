@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from arq import Retry
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
@@ -20,14 +21,146 @@ from app.models import (
     Event,
     SkillRun,
     TaskBrief,
+    ToolExecutionAttempt,
 )
 from app.models.enums import BrainTaskStatus, BrainTaskType, Platform
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.orchestrator.skills.account_inspection import ACCOUNT_INSPECTION_SKILL
 from app.schemas.brain import IntentDecision
-from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
+from app.schemas.conversation import (
+    CreateConversationTurnRequest,
+    TurnExecutionMode,
+    TurnExecutionResult,
+    TurnRouteDecision,
+)
 from app.services.agent_runs import claim_agent_run, mark_agent_run_queued
-from app.worker import execute_agent_run
+from app.worker import execute_agent_run, recover_agent_runs
+
+
+@pytest.mark.asyncio
+async def test_worker_executes_a_task_free_conversation_before_legacy_task_lookup(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Task-free worker account",
+        platform=Platform.DOUYIN,
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Task-free worker thread",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="task-free-worker-1",
+        user_input="你好",
+    )
+    session.add(turn)
+    await session.commit()
+    await session.refresh(turn)
+    request_payload = {
+        "account_id": account.id,
+        "attachment_ids": [17],
+        "client_message_id": turn.client_message_id,
+        "execution_preference": "AUTO",
+        "message": turn.user_input,
+        "requested_skill_code": None,
+        "thread_id": thread.id,
+        "turn_id": turn.id,
+    }
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id=turn.client_message_id,
+        request_payload=request_payload,
+        thread_id=thread.id,
+        turn_id=turn.id,
+    )
+    await mark_agent_run_queued(
+        session,
+        run.id,
+        task_id=None,
+        request_payload=request_payload,
+    )
+    admin_id = admin.id
+    turn_id = turn.id
+    run_id = run.id
+    client_message_id = turn.client_message_id
+    user_input = turn.user_input
+    captured: list[tuple[int, int, int, CreateConversationTurnRequest, SkillRun | None]] = []
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def capture_conversation(
+        _session,
+        user,
+        loaded_turn,
+        loaded_run,
+        request,
+        *,
+        execution_owner,
+        resume_skill_run=None,
+    ):
+        assert execution_owner == "conversation-worker"
+        captured.append(
+            (
+                user.id,
+                loaded_turn.id,
+                loaded_run.id,
+                request,
+                resume_skill_run,
+            )
+        )
+        loaded_run.status = "completed"
+        loaded_run.phase = "completed"
+        await _session.commit()
+        return TurnExecutionResult(
+            mode=TurnExecutionMode.ANSWER,
+            status="completed",
+            response="你好",
+        )
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.execute_conversation_turn",
+        capture_conversation,
+    )
+
+    result = await execute_agent_run(
+        {"worker_id": "conversation-worker"},
+        run.id,
+    )
+
+    assert result is None
+    assert captured == [
+        (
+            admin_id,
+            turn_id,
+            run_id,
+            CreateConversationTurnRequest(
+                client_message_id=client_message_id,
+                message=user_input,
+                attachment_ids=[17],
+            ),
+            None,
+        )
+    ]
+    await session.refresh(run)
+    assert run.status == "completed"
+    assert run.error_code is None
 
 
 @pytest.mark.parametrize(
@@ -43,8 +176,8 @@ from app.worker import execute_agent_run
             "running",
             True,
             True,
-            "failed",
-            "SKILL_EXECUTION_INTERRUPTED",
+            "stopped",
+            "TOOL_RESULT_AMBIGUOUS",
         ),
         (
             "completed",
@@ -110,9 +243,7 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
         title="Expired Skill worker task",
         type=BrainTaskType.ACCOUNT_DIAGNOSIS,
         status=(
-            BrainTaskStatus.RUNNING
-            if skill_status == "running"
-            else BrainTaskStatus.COMPLETED
+            BrainTaskStatus.RUNNING if skill_status == "running" else BrainTaskStatus.COMPLETED
         ),
         runtime_mode="skill",
     )
@@ -137,7 +268,7 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
             "client_message_id": turn.client_message_id,
             "execution_preference": "FORMAL_TASK",
             "message": turn.user_input,
-            "requested_skill_code": "account_inspection",
+            "requested_skill_code": (None if has_ambiguous_call else "account_inspection"),
             "thread_id": thread.id,
             "turn_id": turn.id,
         },
@@ -150,9 +281,7 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key=(
-            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
-        ),
+        idempotency_key=(f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"),
         skill_code="account_inspection",
         skill_version=ACCOUNT_INSPECTION_SKILL.version,
         status=skill_status,
@@ -184,10 +313,19 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
             tool_code="account.profile",
             tool_name="Account profile",
             idempotency_key=f"{skill_run.id}:account.profile",
+            side_effect_level="non_idempotent_write",
             status="running",
             meta={"arguments": {}},
         )
         session.add(tool_call)
+        await session.flush()
+        session.add(
+            ToolExecutionAttempt(
+                tool_call_id=tool_call.id,
+                attempt_no=1,
+                status="dispatched",
+            )
+        )
     await session.commit()
 
     @asynccontextmanager
@@ -223,13 +361,13 @@ async def test_worker_recovers_expired_v2_skill_without_replaying_side_effects(
     assert run.status == expected_run_status
     assert run.error_code == expected_error
     assert turn.assistant_response
-    if skill_status == "running":
-        assert task.status is BrainTaskStatus.FAILED
-        assert skill_run.status == "failed"
-        assert skill_run.error_code == "SKILL_EXECUTION_INTERRUPTED"
+    if has_ambiguous_call:
+        assert task.status is BrainTaskStatus.PENDING_CONFIRMATION
+        assert skill_run.status == "stopped"
+        assert skill_run.error_code == "TOOL_RESULT_AMBIGUOUS"
         assert tool_call is not None
-        assert tool_call.status == "failed"
-        assert tool_call.error == "SKILL_EXECUTION_INTERRUPTED"
+        assert tool_call.status == "ambiguous"
+        assert tool_call.error == "TOOL_RESULT_AMBIGUOUS"
     else:
         assert task.status is BrainTaskStatus.COMPLETED
         assert skill_run.status == "completed"
@@ -319,6 +457,134 @@ async def test_worker_validates_persisted_route_and_passes_it_to_routed_start(
     assert result == task.id
     assert captured_routes == [TurnRouteDecision.model_validate(route_payload)]
     assert captured_routes[0].mode is TurnExecutionMode.SKILL
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_ambiguous_post_graph_run_paused_and_unrecoverable(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Ambiguous post-graph task",
+        type=BrainTaskType.CONTENT_CREATION,
+        status=BrainTaskStatus.RUNNING,
+        current_focus="执行外部写操作",
+        runtime_mode="langgraph",
+    )
+    session.add(task)
+    await session.commit()
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id="ambiguous-post-graph-worker",
+        request_payload={},
+    )
+    await mark_agent_run_queued(
+        session,
+        run.id,
+        task_id=task.id,
+        request_payload={
+            "operation": "start",
+            "task_id": task.id,
+            "intent": IntentDecision(
+                intent="workflow",
+                confidence=1,
+                reason="execute provider write",
+                suggested_expert_codes=[],
+                requires_account_context=False,
+            ).model_dump(mode="json"),
+        },
+    )
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def finish_graph_with_ambiguous_tool(runtime_session, runtime_task, **_kwargs):
+        runtime_task.status = BrainTaskStatus.PENDING_CONFIRMATION
+        runtime_task.current_focus = "外部操作结果待确认"
+        runtime_session.add_all(
+            [
+                Event(
+                    type="brain.runtime.started",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "client_message_id": run.client_message_id,
+                    },
+                ),
+                Event(
+                    type="brain.runtime.tool_ambiguous",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "tool_call_id": 91,
+                        "error_code": "TOOL_RESULT_AMBIGUOUS",
+                    },
+                ),
+                Event(
+                    type="brain.runtime.decision_requested",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "decision_id": "unsafe-resume",
+                    },
+                ),
+                Event(
+                    type="brain.runtime.clarification_requested",
+                    payload={
+                        "task_id": runtime_task.id,
+                        "missing_field": "unsafe-resume",
+                    },
+                ),
+                AgentToolCall(
+                    org_id=runtime_task.org_id,
+                    task_id=runtime_task.id,
+                    tool_code="provider.confirmed_prepare",
+                    tool_name="Provider Confirmed Prepare",
+                    idempotency_key="worker-pending-before-ambiguous",
+                    side_effect_level="read",
+                    status="waiting_approval",
+                    permission_mode="confirm",
+                    requires_human_confirmation=True,
+                    input_summary="prepare after confirmation",
+                    output_summary="",
+                    meta={},
+                ),
+            ]
+        )
+        await runtime_session.commit()
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.runtime_graph.start_routed",
+        finish_graph_with_ambiguous_tool,
+    )
+
+    result = await execute_agent_run({"worker_id": "ambiguous-worker"}, run.id)
+
+    await session.refresh(run)
+    await session.refresh(task)
+    assert result == task.id
+    assert run.status == "waiting_user"
+    assert run.phase == "waiting_user"
+    assert run.next_retry_at is None
+    assert run.lease_owner is None
+    assert run.leased_until is None
+    assert task.status is BrainTaskStatus.PENDING_CONFIRMATION
+
+    jobs: list[tuple] = []
+
+    class FakePool:
+        async def enqueue_job(self, *args, **kwargs):
+            jobs.append((*args, kwargs["_job_id"]))
+            return object()
+
+    recovered = await recover_agent_runs({"redis": FakePool()})
+
+    assert recovered == 0
+    assert jobs == []
 
 
 @pytest.mark.asyncio
@@ -471,9 +737,7 @@ async def test_worker_409_conflict_finishes_run_and_task_once(session, admin, mo
     await session.refresh(run)
     await session.refresh(task)
     failures = list(
-        await session.scalars(
-            select(Event).where(Event.type == "brain.runtime.failed")
-        )
+        await session.scalars(select(Event).where(Event.type == "brain.runtime.failed"))
     )
     assert result is None
     assert run.attempt == 1
@@ -575,3 +839,21 @@ def test_classify_runtime_failure_treats_business_conflicts_as_terminal() -> Non
     conflict.__context__ = wrapped
 
     assert classify_runtime_failure(wrapped) is FailureDisposition.TERMINAL
+
+
+def test_classify_runtime_failure_keeps_permission_and_input_errors_terminal() -> None:
+    with pytest.raises(ValidationError) as invalid_request:
+        CreateConversationTurnRequest(
+            client_message_id="invalid-request",
+            message="",
+        )
+
+    failures = [
+        HTTPException(status_code=403, detail="forbidden"),
+        PermissionError("scope mismatch"),
+        invalid_request.value,
+    ]
+
+    assert {classify_runtime_failure(failure) for failure in failures} == {
+        FailureDisposition.TERMINAL
+    }

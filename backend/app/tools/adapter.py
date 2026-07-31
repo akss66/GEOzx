@@ -46,6 +46,7 @@ class ToolExecutionContext:
     account_id: int | None = None
     task_id: int | None = None
     invocation_id: int | None = None
+    provider_idempotency_key: str | None = None
     approved: bool = False
 
 
@@ -64,6 +65,11 @@ class ToolSpec:
 
     name: str
     handler: ToolHandler
+    side_effect_level: Literal[
+        "read",
+        "idempotent_write",
+        "non_idempotent_write",
+    ]
     params_model: type[BaseModel] = EmptyParams
     allowed_roles: frozenset[UserRole] = field(default_factory=lambda: frozenset({UserRole.ADMIN}))
     timeout_seconds: float = 5.0
@@ -81,6 +87,14 @@ class ToolSpec:
             }
         )
     )
+
+    def __post_init__(self) -> None:
+        if self.side_effect_level not in {
+            "read",
+            "idempotent_write",
+            "non_idempotent_write",
+        }:
+            raise ValueError("invalid tool side_effect_level")
 
 
 class ToolAdapter:
@@ -148,6 +162,19 @@ class ToolAdapter:
                 error="explicit approval is required",
             )
             raise ToolPermissionRequired(f"explicit approval is required for tool: {name}")
+
+        if tool.side_effect_level != "read" and not context.provider_idempotency_key:
+            await self._audit(
+                context,
+                name,
+                "invalid",
+                params,
+                start,
+                error="server provider idempotency key is required",
+            )
+            raise ToolValidationError(
+                f"server provider idempotency key is required for write tool: {name}"
+            )
 
         declared_fields = set(tool.params_model.model_fields)
         undeclared_fields = set(params) - declared_fields
@@ -239,7 +266,6 @@ class ToolAdapter:
                 },
             )
         )
-        await context.session.commit()
 
 
 def _redact_mapping(

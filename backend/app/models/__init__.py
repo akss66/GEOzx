@@ -30,6 +30,7 @@ from app.models.brain import (
     DeliverableAcceptance,
     OrchestrationPlan,
     TaskBrief,
+    ToolExecutionAttempt,
 )
 from app.models.client import (
     AccountClient,
@@ -105,6 +106,7 @@ __all__ = [
     "OrchestrationPlan",
     "AgentInvocation",
     "AgentToolCall",
+    "ToolExecutionAttempt",
     "DeliverableAcceptance",
     "AutomationPolicy",
     "AgentTask",

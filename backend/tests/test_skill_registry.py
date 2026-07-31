@@ -31,7 +31,12 @@ def _definition(
         input_model=AccountInspectionInput,
         output_model=AccountInspectionReport,
         expert_codes=("01-positioning", "02-content-director", "06-operator"),
+        expert_stages=(
+            ("01-positioning", "02-content-director"),
+            ("06-operator",),
+        ),
         tool_codes=("account.profile", "account.data_context"),
+        critic_policy="required",
         risk_level="low",
         approval_policy="none",
         artifact_type="account_inspection_report",
@@ -111,7 +116,12 @@ def test_catalog_item_projects_stable_business_fields_without_python_model_types
         "description": "诊断当前账号",
         "supported_platforms": ["douyin"],
         "expert_codes": ["01-positioning", "02-content-director", "06-operator"],
+        "expert_stages": [
+            ["01-positioning", "02-content-director"],
+            ["06-operator"],
+        ],
         "tool_codes": ["account.profile", "account.data_context"],
+        "critic_policy": "required",
         "risk_level": "low",
         "approval_policy": "none",
         "artifact_type": "account_inspection_report",
@@ -135,3 +145,23 @@ def test_production_registry_covers_the_first_account_operations_loop() -> None:
         assert definition.version >= 1
         assert definition.expert_codes
         assert definition.artifact_type
+
+
+def test_skill_definition_rejects_expert_stage_drift() -> None:
+    with pytest.raises(ValueError, match="expert_stages"):
+        SkillDefinition(
+            code="account_inspection",
+            version=1,
+            name="Account inspection",
+            description="Inspect",
+            supported_platforms=frozenset({"douyin"}),
+            input_model=AccountInspectionInput,
+            output_model=AccountInspectionReport,
+            expert_codes=("01-positioning", "06-operator"),
+            expert_stages=(("01-positioning",),),
+            tool_codes=(),
+            critic_policy="required",
+            risk_level="low",
+            approval_policy="none",
+            artifact_type="account_inspection_report",
+        )

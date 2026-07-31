@@ -37,7 +37,11 @@ from app.schemas.brain import (
     IntentDecision,
     route_decision_from_legacy_intent,
 )
-from app.schemas.conversation import CreateConversationTurnRequest, TurnRouteDecision
+from app.schemas.conversation import (
+    CreateConversationTurnRequest,
+    TurnExecutionResult,
+    TurnRouteDecision,
+)
 from app.services.agent_runs import (
     acquire_agent_run,
     cancel_agent_run,
@@ -83,9 +87,7 @@ async def generate_video(ctx: dict, deliverable_id: int) -> int | None:
     from app.integrations.video_gen.tasks import generate_video_for_deliverable
 
     async with async_session() as session:
-        asset = await generate_video_for_deliverable(
-            session, deliverable_id, emit=publish_event
-        )
+        asset = await generate_video_for_deliverable(session, deliverable_id, emit=publish_event)
         return asset.id if asset else None
 
 
@@ -96,8 +98,7 @@ async def execute_agent_run(
     """Execute one leased AgentRun and persist retry or terminal state."""
 
     worker_id = str(
-        ctx.get("worker_id")
-        or f"{socket.gethostname()}:{ctx.get('job_id', f'agent-run:{run_id}')}"
+        ctx.get("worker_id") or f"{socket.gethostname()}:{ctx.get('job_id', f'agent-run:{run_id}')}"
     )
     heartbeat_task: asyncio.Task[None] | None = None
     async with async_session() as session:
@@ -111,8 +112,11 @@ async def execute_agent_run(
             return None
         request = dict(run.request_payload or {})
         task_id = int(request.get("task_id") or run.task_id or 0)
-        task = await _load_runtime_task(session, task_id, run.org_id)
-        if task is None:
+        is_conversation_run = run.thread_id is not None and run.turn_id is not None
+        task = (
+            None if is_conversation_run else await _load_runtime_task(session, task_id, run.org_id)
+        )
+        if not is_conversation_run and task is None:
             await release_agent_run_failure(
                 session,
                 run_id,
@@ -126,26 +130,13 @@ async def execute_agent_run(
 
         heartbeat_task = asyncio.create_task(_heartbeat_loop(run_id, worker_id))
         try:
-            recoverable_skill = await session.scalar(
-                select(SkillRun)
-                .where(
-                    SkillRun.run_id == run.id,
-                    SkillRun.org_id == run.org_id,
-                )
-                .order_by(SkillRun.id.desc())
-            )
-            if (
-                recoverable_skill is not None
-                and run.thread_id is not None
-                and run.turn_id is not None
-            ):
-                await _recover_v2_skill_run(
+            if is_conversation_run:
+                result = await _execute_v2_conversation_run(
                     session,
                     run=run,
-                    skill_run=recoverable_skill,
                     worker_id=worker_id,
                 )
-                return task.id
+                return result.task_id
 
             operation = str(request.get("operation") or "start")
             if operation == "start":
@@ -196,13 +187,9 @@ async def execute_agent_run(
                     session,
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,
-                    regeneration_source_event_id=request.get(
-                        "regeneration_source_event_id"
-                    ),
+                    regeneration_source_event_id=request.get("regeneration_source_event_id"),
                     force_inline=True,
-                    user_message_recorded=bool(
-                        request.get("user_message_recorded")
-                    ),
+                    user_message_recorded=bool(request.get("user_message_recorded")),
                 )
             elif operation == "resume_decision":
                 await runtime_graph.resume_after_decision(
@@ -248,7 +235,8 @@ async def execute_agent_run(
             return task.id
         except asyncio.CancelledError:
             await cancel_agent_run(session, run_id)
-            task = await _load_runtime_task(session, task_id, run.org_id)
+            if not is_conversation_run:
+                task = await _load_runtime_task(session, task_id, run.org_id)
             if task is not None:
                 await runtime_graph.record_generation_stopped(
                     session,
@@ -278,13 +266,12 @@ async def execute_agent_run(
                     await heartbeat_task
 
 
-async def _recover_v2_skill_run(
+async def _execute_v2_conversation_run(
     session,
     *,
     run: AgentRun,
-    skill_run: SkillRun,
     worker_id: str,
-) -> None:
+) -> TurnExecutionResult:
     user = await session.scalar(
         select(User).where(
             User.id == run.requested_by_id,
@@ -305,11 +292,32 @@ async def _recover_v2_skill_run(
         )
     )
     if user is None or thread is None or turn is None:
-        raise ValueError("Turn-owned SkillRun recovery scope is unavailable")
-    if (
-        skill_run.thread_id != thread.id
-        or skill_run.turn_id != turn.id
-        or skill_run.org_id != run.org_id
+        raise ValueError("Turn-owned Conversation execution scope is unavailable")
+
+    persisted_skills = list(
+        await session.scalars(
+            select(SkillRun).where(
+                SkillRun.run_id == run.id,
+                SkillRun.org_id == run.org_id,
+            )
+        )
+    )
+    recoverable_skills = [
+        item
+        for item in persisted_skills
+        if item.status in {"running", "retry_wait", "waiting_permission"}
+    ]
+    if len(recoverable_skills) > 1:
+        raise RuntimeError("SKILL_RECOVERY_AMBIGUOUS")
+    recoverable_skill = (
+        recoverable_skills[0]
+        if recoverable_skills
+        else (persisted_skills[0] if len(persisted_skills) == 1 else None)
+    )
+    if recoverable_skill is not None and (
+        recoverable_skill.thread_id != thread.id
+        or recoverable_skill.turn_id != turn.id
+        or recoverable_skill.org_id != run.org_id
     ):
         raise PermissionError("Turn-owned SkillRun recovery scope does not match")
 
@@ -317,20 +325,20 @@ async def _recover_v2_skill_run(
     request = CreateConversationTurnRequest.model_validate(
         {
             "attachment_ids": payload.get("attachment_ids") or [],
-            "client_message_id": run.client_message_id,
+            "client_message_id": payload.get("client_message_id"),
             "execution_preference": payload.get("execution_preference") or "AUTO",
-            "message": turn.user_input,
-            "requested_skill_code": skill_run.skill_code,
+            "message": payload.get("message"),
+            "requested_skill_code": payload.get("requested_skill_code"),
         }
     )
-    await execute_conversation_turn(
+    return await execute_conversation_turn(
         session,
         user,
         turn,
         run,
         request,
         execution_owner=worker_id,
-        resume_skill_run=skill_run,
+        resume_skill_run=recoverable_skill,
     )
 
 

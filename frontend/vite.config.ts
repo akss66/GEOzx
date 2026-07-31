@@ -1,6 +1,7 @@
 /// <reference types="vitest" />
 
-import { defineConfig } from "vite";
+import { realpathSync } from "node:fs";
+import { defineConfig, searchForWorkspaceRoot } from "vite";
 import react from "@vitejs/plugin-react";
 
 // 开发服务器把 /api 与 /ws 代理到后端；容器内由 nginx 承担同样代理。
@@ -23,6 +24,12 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    fs: {
+      allow: [
+        searchForWorkspaceRoot(process.cwd()),
+        realpathSync("node_modules"),
+      ],
+    },
     proxy: {
       "/api": {
         target: "http://localhost:8000",

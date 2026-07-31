@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     Numeric,
     String,
@@ -48,6 +50,7 @@ class BrainTask(Base, TimestampMixin):
     """运营大脑统筹的一次目标任务。"""
 
     __tablename__ = "brain_tasks"
+    __table_args__ = (UniqueConstraint("id", "org_id", name="uq_brain_tasks_id_org"),)
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -89,10 +92,14 @@ class BrainTask(Base, TimestampMixin):
         back_populates="task", cascade="all, delete-orphan", uselist=False
     )
     invocations: Mapped[list["AgentInvocation"]] = relationship(
-        back_populates="task", cascade="all, delete-orphan"
+        back_populates="task",
+        cascade="all, delete-orphan",
+        foreign_keys="AgentInvocation.task_id",
     )
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(
-        back_populates="task", cascade="all, delete-orphan"
+        back_populates="task",
+        cascade="all, delete-orphan",
+        foreign_keys="AgentToolCall.task_id",
     )
     acceptances: Mapped[list["DeliverableAcceptance"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
@@ -109,10 +116,11 @@ class BrainTask(Base, TimestampMixin):
     quality_scores: Mapped[list["AgentQualityScore"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
-    experience_memories: Mapped[list["ExperienceMemory"]] = relationship(
-        back_populates="task"
+    experience_memories: Mapped[list["ExperienceMemory"]] = relationship(back_populates="task")
+    skill_runs: Mapped[list["SkillRun"]] = relationship(
+        back_populates="task",
+        foreign_keys="SkillRun.task_id",
     )
-    skill_runs: Mapped[list["SkillRun"]] = relationship(back_populates="task")
 
 
 class TaskBrief(Base, TimestampMixin):
@@ -160,9 +168,7 @@ class OrchestrationPlan(Base, TimestampMixin):
     steps: Mapped[list[dict]] = mapped_column(JSONVariant, default=list, nullable=False)
     quality_gates: Mapped[list[str]] = mapped_column(JSONVariant, default=list, nullable=False)
     estimated_cost: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=0, nullable=False)
-    requires_human_confirmation: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
-    )
+    requires_human_confirmation: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     task: Mapped[BrainTask] = relationship(back_populates="plan")
 
@@ -177,6 +183,37 @@ class AgentInvocation(Base, TimestampMixin):
             "step_key",
             "attempt",
             name="uq_agent_invocation_run_step",
+        ),
+        UniqueConstraint(
+            "id",
+            "task_id",
+            name="uq_agent_invocations_id_task",
+        ),
+        ForeignKeyConstraint(
+            ["turn_id", "thread_id"],
+            ["conversation_turns.id", "conversation_turns.thread_id"],
+            name="fk_agent_invocations_turn_thread",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "task_id", "thread_id", "turn_id"],
+            [
+                "agent_runs.id",
+                "agent_runs.task_id",
+                "agent_runs.thread_id",
+                "agent_runs.turn_id",
+            ],
+            name="fk_agent_invocations_run_task_thread_turn",
+        ),
+        ForeignKeyConstraint(
+            ["skill_run_id", "task_id", "run_id", "thread_id", "turn_id"],
+            [
+                "skill_runs.id",
+                "skill_runs.task_id",
+                "skill_runs.run_id",
+                "skill_runs.thread_id",
+                "skill_runs.turn_id",
+            ],
+            name="fk_agent_invocations_skill_task_run_thread_turn",
         ),
     )
 
@@ -201,9 +238,7 @@ class AgentInvocation(Base, TimestampMixin):
         nullable=True,
     )
     step_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    attempt: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0", nullable=False
-    )
+    attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     agent_code: Mapped[AgentCode] = mapped_column(
         pg_enum(AgentCode, "agent_code"), index=True, nullable=False
     )
@@ -224,13 +259,18 @@ class AgentInvocation(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    task: Mapped[BrainTask] = relationship(back_populates="invocations")
+    task: Mapped[BrainTask] = relationship(
+        back_populates="invocations",
+        foreign_keys=[task_id],
+    )
     skill_run: Mapped["SkillRun | None"] = relationship(
         back_populates="invocations",
         foreign_keys=[skill_run_id],
     )
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(
-        back_populates="invocation", cascade="all, delete-orphan"
+        back_populates="invocation",
+        cascade="all, delete-orphan",
+        foreign_keys="AgentToolCall.invocation_id",
     )
 
 
@@ -245,6 +285,30 @@ class AgentToolCall(Base, TimestampMixin):
             "tool_code",
             "idempotency_key",
             name="uq_agent_tool_call_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["turn_id", "thread_id"],
+            ["conversation_turns.id", "conversation_turns.thread_id"],
+            name="fk_agent_tool_calls_turn_thread",
+        ),
+        ForeignKeyConstraint(
+            ["skill_run_id", "task_id", "thread_id", "turn_id"],
+            [
+                "skill_runs.id",
+                "skill_runs.task_id",
+                "skill_runs.thread_id",
+                "skill_runs.turn_id",
+            ],
+            name="fk_agent_tool_calls_skill_task_thread_turn",
+        ),
+        ForeignKeyConstraint(
+            ["invocation_id", "task_id"],
+            ["agent_invocations.id", "agent_invocations.task_id"],
+            name="fk_agent_tool_calls_invocation_task",
+        ),
+        CheckConstraint(
+            "side_effect_level IN ('read', 'idempotent_write', 'non_idempotent_write')",
+            name="ck_agent_tool_calls_side_effect_level",
         ),
     )
 
@@ -276,6 +340,10 @@ class AgentToolCall(Base, TimestampMixin):
     tool_code: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     tool_name: Mapped[str] = mapped_column(String(180), nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    provider_idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    side_effect_level: Mapped[str] = mapped_column(
+        String(32), default="read", server_default="read", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(40), default="planned", index=True, nullable=False)
     permission_mode: Mapped[str] = mapped_column(String(40), default="auto", nullable=False)
     requires_human_confirmation: Mapped[bool] = mapped_column(
@@ -290,12 +358,58 @@ class AgentToolCall(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    task: Mapped[BrainTask] = relationship(back_populates="tool_calls")
-    invocation: Mapped[AgentInvocation | None] = relationship(back_populates="tool_calls")
+    task: Mapped[BrainTask] = relationship(
+        back_populates="tool_calls",
+        foreign_keys=[task_id],
+    )
+    invocation: Mapped[AgentInvocation | None] = relationship(
+        back_populates="tool_calls",
+        foreign_keys=[invocation_id],
+    )
     skill_run: Mapped["SkillRun | None"] = relationship(
         back_populates="tool_calls",
         foreign_keys=[skill_run_id],
     )
+    attempts: Mapped[list["ToolExecutionAttempt"]] = relationship(
+        back_populates="tool_call",
+        cascade="all, delete-orphan",
+        order_by="ToolExecutionAttempt.attempt_no",
+    )
+
+
+class ToolExecutionAttempt(Base, TimestampMixin):
+    """One persisted provider dispatch attempt for a durable ToolCall."""
+
+    __tablename__ = "tool_execution_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "tool_call_id",
+            "attempt_no",
+            name="uq_tool_execution_attempt_call_number",
+        ),
+        CheckConstraint(
+            "status IN ('planned', 'dispatched', 'success', 'failed', 'ambiguous')",
+            name="ck_tool_execution_attempts_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    tool_call_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_tool_calls.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default="planned", server_default="planned", nullable=False
+    )
+    provider_idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    tool_call: Mapped[AgentToolCall] = relationship(back_populates="attempts")
 
 
 class DeliverableAcceptance(Base, TimestampMixin):
@@ -353,9 +467,7 @@ class AutomationPolicy(Base, TimestampMixin):
     account_group_id: Mapped[int | None] = mapped_column(
         ForeignKey("account_groups.id", ondelete="CASCADE"), nullable=True
     )
-    platform: Mapped[Platform | None] = mapped_column(
-        pg_enum(Platform, "platform"), nullable=True
-    )
+    platform: Mapped[Platform | None] = mapped_column(pg_enum(Platform, "platform"), nullable=True)
     action_type: Mapped[str] = mapped_column(String(120), nullable=False)
     level: Mapped[AutomationLevel] = mapped_column(
         pg_enum(AutomationLevel, "automation_level"),

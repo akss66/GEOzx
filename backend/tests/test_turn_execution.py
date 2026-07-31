@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
 
 from app.models import (
@@ -28,6 +29,7 @@ from app.schemas.conversation import (
     TurnExecutionMode,
     TurnRouteDecision,
 )
+from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_execution import execute_conversation_turn
 
 
@@ -72,6 +74,388 @@ async def _turn_context(session, admin, *, key: str):
     return account, thread, turn, run
 
 
+async def _four_ledger_context(session, admin, *, key: str):
+    account, thread, turn, run = await _turn_context(session, admin, key=key)
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title=f"task-{key}",
+        status=BrainTaskStatus.RUNNING,
+        progress=17,
+        current_focus="running",
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=f"runtime-state:{key}",
+        skill_code="account_inspection",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(skill_run)
+    await session.commit()
+    return account, thread, turn, run, task, skill_run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "runtime_status",
+        "expected_turn_status",
+        "expected_run_status",
+        "expected_skill_status",
+        "expected_task_status",
+    ),
+    [
+        (
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            BrainTaskStatus.COMPLETED,
+        ),
+        ("failed", "failed", "failed", "failed", BrainTaskStatus.FAILED),
+        (
+            "dead_letter",
+            "dead_letter",
+            "dead_letter",
+            "failed",
+            BrainTaskStatus.FAILED,
+        ),
+        (
+            "cancelled",
+            "cancelled",
+            "cancelled",
+            "cancelled",
+            BrainTaskStatus.FAILED,
+        ),
+        (
+            "waiting_permission",
+            "waiting_permission",
+            "waiting_permission",
+            "waiting_permission",
+            BrainTaskStatus.PENDING_CONFIRMATION,
+        ),
+    ],
+)
+async def test_close_runtime_state_maps_all_four_ledgers_consistently(
+    session,
+    admin,
+    runtime_status,
+    expected_turn_status,
+    expected_run_status,
+    expected_skill_status,
+    expected_task_status,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key=f"state-{runtime_status}",
+    )
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=skill_run.id,
+            task_id=task.id,
+            account_id=account.id,
+            result_payload={"status": runtime_status},
+        ),
+        status=runtime_status,
+        message=f"message-{runtime_status}",
+        error_code="TEST_ERROR" if runtime_status != "completed" else None,
+    )
+
+    await session.refresh(turn)
+    await session.refresh(run)
+    await session.refresh(skill_run)
+    await session.refresh(task)
+    assert turn.status == expected_turn_status
+    assert run.status == expected_run_status
+    assert skill_run.status == expected_skill_status
+    assert task.status == expected_task_status
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_retry_wait_does_not_write_terminal_response(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-retry-wait",
+    )
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=skill_run.id,
+            task_id=task.id,
+            account_id=account.id,
+        ),
+        status="retry_wait",
+        message="本次失败，稍后重试。",
+        error_code="TRANSIENT",
+    )
+
+    await session.refresh(turn)
+    await session.refresh(task)
+    assert turn.status == "retry_wait"
+    assert turn.assistant_response is None
+    assert task.status == BrainTaskStatus.RUNNING
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.run_id == run.id,
+                Event.type == "brain.runtime.message_done",
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_status", ["failed", "cancelled"])
+async def test_close_runtime_state_terminal_message_is_idempotent(
+    session,
+    admin,
+    runtime_status,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key=f"state-idempotent-{runtime_status}",
+    )
+    scope = RuntimeStateScope(
+        run_id=run.id,
+        turn_id=turn.id,
+        skill_run_id=skill_run.id,
+        task_id=task.id,
+        account_id=account.id,
+        result_payload={
+            "status": runtime_status,
+            "projections": [{"type": "execution_blocked", "code": "TEST"}],
+        },
+    )
+
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status=runtime_status,
+        message="只允许写入一次的终态消息。",
+        error_code="TEST_ERROR",
+    )
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status=runtime_status,
+        message="只允许写入一次的终态消息。",
+        error_code="TEST_ERROR",
+    )
+
+    await session.refresh(turn)
+    assert turn.assistant_response == "只允许写入一次的终态消息。"
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.run_id == run.id,
+                Event.type == "brain.runtime.message_done",
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_pause_then_complete_delivers_both_messages_once(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-pause-then-complete",
+    )
+    base_scope = {
+        "run_id": run.id,
+        "turn_id": turn.id,
+        "skill_run_id": skill_run.id,
+        "task_id": task.id,
+        "account_id": account.id,
+    }
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **base_scope,
+            result_payload={"status": "waiting_permission"},
+        ),
+        status="waiting_permission",
+        message="请先确认工具授权。",
+    )
+    completed_scope = RuntimeStateScope(
+        **base_scope,
+        result_payload={"status": "completed"},
+    )
+    await close_runtime_state(
+        session,
+        scope=completed_scope,
+        status="completed",
+        message="授权后任务已完成。",
+    )
+    await close_runtime_state(
+        session,
+        scope=completed_scope,
+        status="completed",
+        message="授权后任务已完成。",
+    )
+
+    await session.refresh(turn)
+    deliveries = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.run_id == run.id,
+                Event.type == "brain.runtime.message_done",
+            )
+            .order_by(Event.id)
+        )
+    )
+    assert [event.payload["content"] for event in deliveries] == [
+        "请先确认工具授权。",
+        "授权后任务已完成。",
+    ]
+    assert turn.status == "completed"
+    assert turn.assistant_response == "授权后任务已完成。"
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_first_terminal_preserves_skill_snapshot_on_replay(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-terminal-snapshot",
+    )
+    scope_values = {
+        "run_id": run.id,
+        "turn_id": turn.id,
+        "skill_run_id": skill_run.id,
+        "task_id": task.id,
+        "account_id": account.id,
+    }
+    formal_snapshot = {
+        "status": "completed",
+        "artifact_id": 701,
+        "response": "正式成果已生成。",
+    }
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "completed"},
+            skill_output_snapshot=formal_snapshot,
+        ),
+        status="completed",
+        message="正式成果已生成。",
+    )
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "failed"},
+            skill_output_snapshot={
+                "status": "failed",
+                "error_code": "LATE_FAILURE",
+            },
+        ),
+        status="failed",
+        message="迟到的失败不得覆盖正式成果。",
+        error_code="LATE_FAILURE",
+    )
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "completed"},
+            skill_output_snapshot={
+                "status": "completed",
+                "artifact_id": 999,
+                "response": "重复重放的不同快照。",
+            },
+        ),
+        status="completed",
+        message="重复重放不得覆盖正式成果。",
+    )
+
+    await session.refresh(skill_run)
+    assert skill_run.status == "completed"
+    assert skill_run.output_snapshot == formal_snapshot
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_rejects_cross_scope_without_partial_commit(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, _skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-scope-owner",
+    )
+    (
+        _other_account,
+        _other_thread,
+        _other_turn,
+        _other_run,
+        _other_task,
+        other_skill_run,
+    ) = await _four_ledger_context(
+        session,
+        admin,
+        key="state-scope-other",
+    )
+
+    with pytest.raises(ValueError, match="ownership"):
+        await close_runtime_state(
+            session,
+            scope=RuntimeStateScope(
+                run_id=run.id,
+                turn_id=turn.id,
+                skill_run_id=other_skill_run.id,
+                task_id=task.id,
+                account_id=account.id,
+            ),
+            status="failed",
+            message="不得部分写入。",
+            error_code="SCOPE_MISMATCH",
+        )
+
+    await session.refresh(turn)
+    await session.refresh(run)
+    await session.refresh(task)
+    assert turn.status == "queued"
+    assert turn.assistant_response is None
+    assert run.status == "claimed"
+    assert task.status == BrainTaskStatus.RUNNING
+
+
 def _request(
     key: str,
     message: str | None = None,
@@ -113,9 +497,7 @@ def _decision(mode: TurnExecutionMode, **updates) -> TurnRouteDecision:
 
 @pytest.mark.asyncio
 async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
-    account, thread, turn, run = await _turn_context(
-        session, admin, key="answer-1"
-    )
+    account, thread, turn, run = await _turn_context(session, admin, key="answer-1")
     turn.user_input = "你能做什么？"
     await session.commit()
     answer_calls: list[dict] = []
@@ -130,12 +512,8 @@ async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
         answer_calls.append(kwargs)
         return "我是运营大脑。你可以问我账号数据、内容策划或运营执行问题。"
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.answer_turn", answer
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.answer_turn", answer)
     result = await execute_conversation_turn(
         session, admin, turn, run, _request("answer-1", "你能做什么？")
     )
@@ -164,12 +542,42 @@ async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_deterministic_answer_skips_model_classification(session, admin, monkeypatch) -> None:
+    """Catches deterministic hits regressing into unnecessary model classification."""
+
+    _account, _thread, turn, run = await _turn_context(session, admin, key="deterministic-greeting")
+    turn.user_input = "你好"
+    await session.commit()
+
+    async def should_not_classify(*_args, **_kwargs):
+        raise AssertionError("deterministic greeting must not classify")
+
+    async def answer(*_args, **_kwargs):
+        return "你好，我是运营大脑。"
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn",
+        should_not_classify,
+    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.answer_turn", answer)
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("deterministic-greeting", "你好"),
+    )
+
+    assert result.mode is TurnExecutionMode.ANSWER
+    assert result.response == "你好，我是运营大脑。"
+
+
+@pytest.mark.asyncio
 async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
     session, admin, monkeypatch
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="answer-live-stream"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="answer-live-stream")
     turn.user_input = "请实时回答"
     await session.commit()
     published: list[tuple[str, dict]] = []
@@ -214,15 +622,9 @@ async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
         if event_type == "brain.runtime.message_delta":
             response_during_delta.append(turn.assistant_response)
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.answer_turn", answer
-    )
-    monkeypatch.setattr(
-        "app.orchestrator.brain_runtime.publish_realtime_event", publish
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.answer_turn", answer)
+    monkeypatch.setattr("app.orchestrator.brain_runtime.publish_realtime_event", publish)
 
     result = await execute_conversation_turn(
         session,
@@ -245,12 +647,8 @@ async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
 
 
 @pytest.mark.asyncio
-async def test_clarify_turn_persists_question_without_task(
-    session, admin, monkeypatch
-) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="clarify-1"
-    )
+async def test_clarify_turn_persists_question_without_task(session, admin, monkeypatch) -> None:
+    _account, _thread, turn, run = await _turn_context(session, admin, key="clarify-1")
 
     async def classify(*_args, **_kwargs):
         return _decision(
@@ -261,12 +659,8 @@ async def test_clarify_turn_persists_question_without_task(
             clarifying_question="你希望查看最近多少天？",
         )
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    result = await execute_conversation_turn(
-        session, admin, turn, run, _request("clarify-1")
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    result = await execute_conversation_turn(session, admin, turn, run, _request("clarify-1"))
 
     assert result.mode is TurnExecutionMode.CLARIFY
     assert result.task_id is None
@@ -279,9 +673,7 @@ async def test_clarify_turn_persists_question_without_task(
 async def test_query_uses_authorized_account_and_records_one_skill_run(
     session, admin, monkeypatch
 ) -> None:
-    account, thread, turn, run = await _turn_context(
-        session, admin, key="query-1"
-    )
+    account, thread, turn, run = await _turn_context(session, admin, key="query-1")
     invocations: list[dict] = []
 
     async def classify(*_args, **_kwargs):
@@ -335,12 +727,8 @@ async def test_query_uses_authorized_account_and_records_one_skill_run(
                 },
             }
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter()
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter())
     result = await execute_conversation_turn(
         session,
         admin,
@@ -386,9 +774,7 @@ async def test_query_uses_authorized_account_and_records_one_skill_run(
 async def test_completed_query_duplicate_does_not_reclassify_or_reinvoke(
     session, admin, monkeypatch
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="query-duplicate"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="query-duplicate")
     calls = 0
     tool_calls = 0
 
@@ -407,12 +793,8 @@ async def test_completed_query_duplicate_does_not_reclassify_or_reinvoke(
             tool_calls += 1
             return {"account_id": context.account_id, "metrics": {}}
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter()
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter())
     request = _request("query-duplicate")
     first = await execute_conversation_turn(session, admin, turn, run, request)
 
@@ -436,9 +818,7 @@ async def test_completed_query_duplicate_does_not_reclassify_or_reinvoke(
 async def test_query_tool_failure_closes_run_and_skill_without_retry_or_leak(
     session, admin, monkeypatch
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="query-failure"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="query-failure")
     tool_calls = 0
 
     async def classify(*_args, **_kwargs):
@@ -454,12 +834,8 @@ async def test_query_tool_failure_closes_run_and_skill_without_retry_or_leak(
             tool_calls += 1
             raise RuntimeError("provider-secret-must-not-leak")
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter()
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter())
     request = _request("query-failure")
     first = await execute_conversation_turn(session, admin, turn, run, request)
     repeated = await execute_conversation_turn(session, admin, turn, run, request)
@@ -479,6 +855,43 @@ async def test_query_tool_failure_closes_run_and_skill_without_retry_or_leak(
     assert tool_calls == 1
     events = list(await session.scalars(select(Event)))
     assert all("provider-secret" not in str(event.payload) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_query_retryable_infrastructure_failure_bubbles_to_the_worker(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(session, admin, key="query-retryable")
+
+    async def classify(*_args, **_kwargs):
+        return _decision(
+            TurnExecutionMode.QUERY,
+            skill_code="account_data_query",
+            requires_operation_task=False,
+        )
+
+    class Adapter:
+        async def invoke(self, *_args, **_kwargs):
+            raise HTTPException(status_code=503, detail="provider-secret")
+
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter())
+
+    with pytest.raises(HTTPException) as caught:
+        await execute_conversation_turn(
+            session,
+            admin,
+            turn,
+            run,
+            _request("query-retryable"),
+        )
+
+    assert caught.value.status_code == 503
+    skill_run = await session.scalar(select(SkillRun))
+    assert skill_run is not None
+    assert skill_run.status == "running"
+    assert turn.assistant_response is None
+    assert run.status == "claimed"
 
 
 @pytest.mark.parametrize("tool_account_id", [None, 999999])
@@ -504,12 +917,8 @@ async def test_query_rejects_missing_or_cross_account_tool_result(
                 "secret_raw_data": "must-not-project",
             }
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter()
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.build_runtime_tool_adapter", lambda: Adapter())
     result = await execute_conversation_turn(
         session,
         admin,
@@ -530,18 +939,14 @@ async def test_query_rejects_missing_or_cross_account_tool_result(
 async def test_intelligence_unavailable_is_structured_blocked_not_answer(
     session, admin, monkeypatch
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="intelligence-down"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="intelligence-down")
 
     async def classify(*_args, **_kwargs):
         from app.orchestrator.brain_intelligence import IntelligenceUnavailable
 
         raise IntelligenceUnavailable("raw-provider-failure")
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
     result = await execute_conversation_turn(
         session,
         admin,
@@ -562,9 +967,7 @@ async def test_intelligence_unavailable_is_structured_blocked_not_answer(
 async def test_unavailable_skill_is_structured_blocked_without_artifact(
     session, admin, monkeypatch
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="skill-blocked"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="skill-blocked")
 
     async def classify(*_args, **_kwargs):
         return _decision(
@@ -572,9 +975,7 @@ async def test_unavailable_skill_is_structured_blocked_without_artifact(
             skill_code="not_implemented_skill",
         )
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
     result = await execute_conversation_turn(
         session,
         admin,
@@ -597,9 +998,7 @@ async def test_unknown_explicit_skill_is_blocked_without_formal_side_effects(
     session,
     admin,
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="explicit-unknown-skill"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="explicit-unknown-skill")
 
     result = await execute_conversation_turn(
         session,
@@ -678,9 +1077,7 @@ async def test_unpublished_explicit_skill_is_blocked_without_skill_run(
     admin,
     monkeypatch,
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="explicit-unpublished"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="explicit-unpublished")
     public_definition = skill_registry.get("account_inspection")
     private_definition = replace(
         public_definition,
@@ -737,12 +1134,8 @@ async def test_discuss_only_prevents_workflow_execution(
         started += 1
         raise AssertionError("DISCUSS_ONLY must not start routed work")
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.runtime_graph.start_routed", should_not_start
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", should_not_start)
     result = await execute_conversation_turn(
         session,
         admin,
@@ -760,12 +1153,8 @@ async def test_discuss_only_prevents_workflow_execution(
 
 
 @pytest.mark.asyncio
-async def test_formal_task_forces_non_clarify_route_into_task(
-    session, admin, monkeypatch
-) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="formal-task"
-    )
+async def test_formal_task_forces_non_clarify_route_into_task(session, admin, monkeypatch) -> None:
+    _account, _thread, turn, run = await _turn_context(session, admin, key="formal-task")
     routed_modes: list[TurnExecutionMode] = []
 
     async def classify(*_args, **_kwargs):
@@ -780,12 +1169,8 @@ async def test_formal_task_forces_non_clarify_route_into_task(
         await _session.commit()
         return task
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.runtime_graph.start_routed", start_routed
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     result = await execute_conversation_turn(
         session,
         admin,
@@ -807,9 +1192,7 @@ async def test_formal_task_forces_non_clarify_route_into_task(
 async def test_strategy_task_creates_exactly_one_task_and_uses_routed_runtime(
     session, admin, monkeypatch, mode
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="task-1"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="task-1")
     started: list[tuple[int, int]] = []
 
     async def classify(*_args, **_kwargs):
@@ -823,12 +1206,8 @@ async def test_strategy_task_creates_exactly_one_task_and_uses_routed_runtime(
         await _session.commit()
         return task
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.runtime_graph.start_routed", start_routed
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     request = _request("task-1")
     first = await execute_conversation_turn(session, admin, turn, run, request)
     repeated = await execute_conversation_turn(session, admin, turn, run, request)
@@ -844,9 +1223,7 @@ async def test_strategy_task_creates_exactly_one_task_and_uses_routed_runtime(
 async def test_operation_start_failure_closes_task_run_and_turn_without_replay(
     session, admin, monkeypatch
 ) -> None:
-    _account, _thread, turn, run = await _turn_context(
-        session, admin, key="task-failure"
-    )
+    _account, _thread, turn, run = await _turn_context(session, admin, key="task-failure")
     starts = 0
 
     async def classify(*_args, **_kwargs):
@@ -857,12 +1234,8 @@ async def test_operation_start_failure_closes_task_run_and_turn_without_replay(
         starts += 1
         raise RuntimeError("runtime-secret")
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.runtime_graph.start_routed", start_routed
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     request = _request("task-failure")
     first = await execute_conversation_turn(session, admin, turn, run, request)
     repeated = await execute_conversation_turn(session, admin, turn, run, request)
@@ -880,6 +1253,40 @@ async def test_operation_start_failure_closes_task_run_and_turn_without_replay(
     assert starts == 1
     events = list(await session.scalars(select(Event)))
     assert all("runtime-secret" not in str(event.payload) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_operation_retryable_infrastructure_failure_bubbles_to_the_worker(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(session, admin, key="task-retryable")
+
+    async def classify(*_args, **_kwargs):
+        return _decision(TurnExecutionMode.TASK)
+
+    async def start_routed(*_args, **_kwargs):
+        raise HTTPException(status_code=503, detail="runtime-provider-secret")
+
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
+
+    with pytest.raises(HTTPException) as caught:
+        await execute_conversation_turn(
+            session,
+            admin,
+            turn,
+            run,
+            _request("task-retryable"),
+        )
+
+    assert caught.value.status_code == 503
+    await session.refresh(run)
+    await session.refresh(turn)
+    task = await session.get(BrainTask, run.task_id)
+    assert task is not None
+    assert task.status == BrainTaskStatus.RUNNING
+    assert run.status == "claimed"
+    assert turn.assistant_response is None
 
 
 @pytest.mark.parametrize(
@@ -916,12 +1323,8 @@ async def test_operation_runtime_state_is_persisted_without_reexecution(
     async def status(*_args, **_kwargs):
         return runtime_state
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.runtime_graph.start_routed", start_routed
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     monkeypatch.setattr("app.services.turn_execution.runtime_status", status)
     request = _request(key)
     first = await execute_conversation_turn(session, admin, turn, run, request)
@@ -944,9 +1347,7 @@ async def test_operation_runtime_state_is_persisted_without_reexecution(
 async def test_task_free_events_have_turn_lineage_and_publish_after_commit(
     session, admin, monkeypatch
 ) -> None:
-    account, thread, turn, run = await _turn_context(
-        session, admin, key="lineage-1"
-    )
+    account, thread, turn, run = await _turn_context(session, admin, key="lineage-1")
     published: list[int] = []
 
     async def classify(*_args, **_kwargs):
@@ -966,24 +1367,14 @@ async def test_task_free_events_have_turn_lineage_and_publish_after_commit(
         assert turn.assistant_response
         published.append(event_id)
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.answer_turn", answer
-    )
-    monkeypatch.setattr(
-        "app.orchestrator.brain_runtime.publish_realtime_event", publish
-    )
-    await execute_conversation_turn(
-        session, admin, turn, run, _request("lineage-1")
-    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.answer_turn", answer)
+    monkeypatch.setattr("app.orchestrator.brain_runtime.publish_realtime_event", publish)
+    await execute_conversation_turn(session, admin, turn, run, _request("lineage-1"))
 
     events = list(
         await session.scalars(
-            select(Event)
-            .where(Event.type.like("brain.runtime.%"))
-            .order_by(Event.id)
+            select(Event).where(Event.type.like("brain.runtime.%")).order_by(Event.id)
         )
     )
     assert set(published) == {event.id for event in events}

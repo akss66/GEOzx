@@ -1,13 +1,16 @@
 import pytest
 from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
 from app.models import (
     Account,
+    AgentInvocation,
     AgentQualityScore,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ContentItem,
     ConversationThread,
@@ -21,7 +24,13 @@ from app.models import (
     StrategyPlan,
     User,
 )
-from app.models.enums import DeliverableStatus, DeliverableType, Platform
+from app.models.enums import (
+    AgentCode,
+    AgentInvocationStatus,
+    DeliverableStatus,
+    DeliverableType,
+    Platform,
+)
 
 
 @pytest.fixture()
@@ -44,6 +53,8 @@ def session() -> Session:
 
 def _source_scope(
     session: Session,
+    *,
+    suffix: str = "default",
 ) -> tuple[
     ConversationThread,
     ConversationTurn,
@@ -52,10 +63,10 @@ def _source_scope(
     BrainTask,
     ContentItem,
 ]:
-    org = Org(name="provenance org")
+    org = Org(name=f"provenance org {suffix}")
     user = User(
         org=org,
-        email="operator@example.com",
+        email=f"operator-{suffix}@example.com",
         hashed_password="not-used",
         display_name="Operator",
     )
@@ -79,7 +90,7 @@ def _source_scope(
         thread_id=thread.id,
         org_id=org.id,
         created_by_id=user.id,
-        client_message_id="turn-provenance-1",
+        client_message_id=f"turn-provenance-{suffix}",
         user_input="Diagnose this account.",
     )
     task = BrainTask(org_id=org.id, title="Diagnose account")
@@ -96,7 +107,7 @@ def _source_scope(
         task_id=task.id,
         thread_id=thread.id,
         turn_id=turn.id,
-        client_message_id="turn-provenance-1",
+        client_message_id=f"turn-provenance-{suffix}",
     )
     session.add(run)
     session.flush()
@@ -106,7 +117,7 @@ def _source_scope(
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key="diagnosis-v1",
+        idempotency_key=f"diagnosis-{suffix}-v1",
         skill_code="account.diagnosis",
         skill_version=1,
         status="completed",
@@ -307,3 +318,95 @@ def test_deleting_sources_clears_provenance_without_deleting_formal_records(
         record = session.get(model, record_id)
         assert record is not None
         assert record.thread_id is None
+
+
+def test_composite_runtime_foreign_keys_reject_cross_source_rows(
+    session: Session,
+) -> None:
+    source_a = _source_scope(session, suffix="constraint-a")
+    source_b = _source_scope(session, suffix="constraint-b")
+    thread_a, turn_a, run_a, skill_a, task_a, content_a = source_a
+    thread_b, turn_b, run_b, skill_b, task_b, _content_b = source_b
+
+    invalid_rows = [
+        Deliverable(
+            content_item_id=content_a.id,
+            thread_id=thread_a.id,
+            turn_id=turn_b.id,
+            run_id=run_a.id,
+            skill_run_id=skill_a.id,
+            agent_code="positioning",
+            type=DeliverableType.REVIEW_REPORT,
+            version=2,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload={"summary": "cross turn"},
+        ),
+        AgentInvocation(
+            task_id=task_a.id,
+            run_id=run_b.id,
+            skill_run_id=skill_b.id,
+            thread_id=thread_b.id,
+            turn_id=turn_b.id,
+            step_key="cross-run-task",
+            agent_code=AgentCode.POSITIONING,
+            agent_name="Positioning",
+            status=AgentInvocationStatus.RUNNING,
+        ),
+        AgentToolCall(
+            org_id=thread_b.org_id,
+            task_id=task_b.id,
+            invocation_id=None,
+            skill_run_id=skill_a.id,
+            thread_id=thread_a.id,
+            turn_id=turn_a.id,
+            tool_code="account.profile",
+            tool_name="Account profile",
+            idempotency_key="cross-skill-task",
+            status="success",
+        ),
+    ]
+
+    for row in invalid_rows:
+        session.add(row)
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+
+def test_agent_run_task_org_and_skill_run_task_graph_are_constrained(
+    session: Session,
+) -> None:
+    source_a = _source_scope(session, suffix="task-constraint-a")
+    source_b = _source_scope(session, suffix="task-constraint-b")
+    thread_a, turn_a, run_a, _skill_a, _task_a, _content_a = source_a
+    _thread_b, _turn_b, _run_b, _skill_b, task_b, _content_b = source_b
+
+    session.add(
+        AgentRun(
+            org_id=thread_a.org_id,
+            requested_by_id=turn_a.created_by_id,
+            task_id=task_b.id,
+            thread_id=thread_a.id,
+            turn_id=turn_a.id,
+            client_message_id="cross-task-org",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+    session.add(
+        SkillRun(
+            org_id=thread_a.org_id,
+            thread_id=thread_a.id,
+            turn_id=turn_a.id,
+            run_id=run_a.id,
+            task_id=task_b.id,
+            idempotency_key="cross-task-skill",
+            skill_code="account.diagnosis",
+            skill_version=1,
+            status="running",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()

@@ -17,6 +17,325 @@ def get_head_revision() -> str | None:
     return script.get_current_head()
 
 
+def test_tool_side_effect_outbox_migration_is_reversible(monkeypatch) -> None:
+    migration = importlib.import_module("migrations.versions.20260730_0500_tool_side_effect_outbox")
+    assert migration.down_revision == "20260730_0400"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    tool_calls = sa.Table(
+        "agent_tool_calls",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("tool_code", sa.String(120), nullable=False),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            tool_calls.insert(),
+            [{"id": 1, "tool_code": "account.profile"}],
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {column["name"]: column for column in inspector.get_columns("agent_tool_calls")}
+        checks = {
+            constraint["name"] for constraint in inspector.get_check_constraints("agent_tool_calls")
+        }
+        assert columns["side_effect_level"]["nullable"] is False
+        assert connection.execute(
+            sa.text(
+                "SELECT side_effect_level, provider_idempotency_key "
+                "FROM agent_tool_calls WHERE id = 1"
+            )
+        ).one() == ("read", None)
+        assert "ck_agent_tool_calls_side_effect_level" in checks
+        assert inspector.has_table("tool_execution_attempts")
+
+        migration.downgrade()
+
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("tool_execution_attempts") is False
+        assert "side_effect_level" not in {
+            column["name"] for column in inspector.get_columns("agent_tool_calls")
+        }
+        assert "provider_idempotency_key" not in {
+            column["name"] for column in inspector.get_columns("agent_tool_calls")
+        }
+
+
+def test_runtime_state_convergence_migrates_history_before_constraints(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260730_0200_runtime_state_convergence"
+    )
+    assert migration.down_revision == "20260730_0100"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("assistant_response", sa.Text, nullable=True),
+    )
+    runs = sa.Table(
+        "agent_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("turn_id", sa.Integer, nullable=True),
+        sa.Column("status", sa.String(40), nullable=False),
+    )
+    skills = sa.Table(
+        "skill_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(40), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            turns.insert(),
+            [
+                {"id": 1, "assistant_response": "正式成功回复"},
+                {"id": 2, "assistant_response": None},
+                {"id": 3, "assistant_response": None},
+                {"id": 4, "assistant_response": None},
+                {"id": 5, "assistant_response": None},
+            ],
+        )
+        connection.execute(
+            runs.insert(),
+            [
+                {"id": 10, "turn_id": 1, "status": "error"},
+                {"id": 20, "turn_id": 2, "status": "retry_scheduled"},
+                {"id": 30, "turn_id": 3, "status": "error"},
+                {"id": 50, "turn_id": 5, "status": "mystery"},
+            ],
+        )
+        connection.execute(
+            skills.insert(),
+            [
+                {"id": 100, "status": "waiting_approval"},
+                {"id": 101, "status": "dead_letter"},
+                {"id": 102, "status": "mystery"},
+            ],
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        assert connection.execute(
+            sa.text("SELECT id, status FROM conversation_turns ORDER BY id")
+        ).all() == [
+            (1, "completed"),
+            (2, "retry_wait"),
+            (3, "failed"),
+            (4, "queued"),
+            (5, "queued"),
+        ]
+        assert connection.execute(
+            sa.text("SELECT id, status FROM agent_runs ORDER BY id")
+        ).all() == [
+            (10, "failed"),
+            (20, "retry_wait"),
+            (30, "failed"),
+            (50, "failed"),
+        ]
+        assert connection.execute(
+            sa.text("SELECT id, status FROM skill_runs ORDER BY id")
+        ).all() == [
+            (100, "waiting_permission"),
+            (101, "failed"),
+            (102, "failed"),
+        ]
+        inspector = sa.inspect(connection)
+        assert {item["name"] for item in inspector.get_check_constraints("conversation_turns")} >= {
+            "ck_conversation_turns_status"
+        }
+        assert {item["name"] for item in inspector.get_check_constraints("agent_runs")} >= {
+            "ck_agent_runs_status"
+        }
+        assert {item["name"] for item in inspector.get_check_constraints("skill_runs")} >= {
+            "ck_skill_runs_status"
+        }
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE conversation_turns SET status = 'mystery' WHERE id = 4")
+            )
+
+        migration.downgrade()
+        assert "status" not in {
+            column["name"] for column in sa.inspect(connection).get_columns("conversation_turns")
+        }
+
+
+def test_runtime_scope_migration_backfills_only_canonical_sources_and_preflights_conflicts() -> (
+    None
+):
+    migration = importlib.import_module(
+        "migrations.versions.20260730_0300_runtime_scope_constraints"
+    )
+    assert migration.down_revision == "20260730_0200"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    for name, columns in (
+        (
+            "brain_tasks",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("org_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "agent_runs",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("org_id", sa.Integer, nullable=False),
+                sa.Column("task_id", sa.Integer),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+            ),
+        ),
+        (
+            "skill_runs",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("org_id", sa.Integer, nullable=False),
+                sa.Column("task_id", sa.Integer),
+                sa.Column("run_id", sa.Integer, nullable=False),
+                sa.Column("thread_id", sa.Integer, nullable=False),
+                sa.Column("turn_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "agent_invocations",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("task_id", sa.Integer, nullable=False),
+                sa.Column("run_id", sa.Integer),
+                sa.Column("skill_run_id", sa.Integer),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+            ),
+        ),
+        (
+            "agent_tool_calls",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("task_id", sa.Integer, nullable=False),
+                sa.Column("invocation_id", sa.Integer),
+                sa.Column("skill_run_id", sa.Integer),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+            ),
+        ),
+        (
+            "conversation_threads",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("account_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "conversation_turns",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("thread_id", sa.Integer, nullable=False),
+            ),
+        ),
+        (
+            "content_items",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("account_id", sa.Integer),
+            ),
+        ),
+        (
+            "deliverables",
+            (
+                sa.Column("id", sa.Integer, primary_key=True),
+                sa.Column("content_item_id", sa.Integer, nullable=False),
+                sa.Column("thread_id", sa.Integer),
+                sa.Column("turn_id", sa.Integer),
+                sa.Column("run_id", sa.Integer),
+                sa.Column("skill_run_id", sa.Integer),
+            ),
+        ),
+    ):
+        sa.Table(name, metadata, *columns)
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(sa.text("INSERT INTO brain_tasks VALUES (1, 7)"))
+        connection.execute(sa.text("INSERT INTO conversation_threads VALUES (10, 99)"))
+        connection.execute(sa.text("INSERT INTO conversation_turns VALUES (20, 10)"))
+        connection.execute(sa.text("INSERT INTO content_items VALUES (30, 99)"))
+        connection.execute(sa.text("INSERT INTO agent_runs VALUES (40, 7, 1, 10, 20)"))
+        connection.execute(sa.text("INSERT INTO skill_runs VALUES (50, 7, 1, 40, 10, 20)"))
+        connection.execute(
+            sa.text(
+                "INSERT INTO agent_invocations VALUES "
+                "(60, 1, NULL, 50, NULL, NULL), "
+                "(61, 1, NULL, NULL, NULL, NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO agent_tool_calls VALUES "
+                "(70, 1, 60, NULL, NULL, NULL), "
+                "(71, 1, 61, NULL, NULL, NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverables VALUES "
+                "(80, 30, NULL, NULL, NULL, 50), "
+                "(81, 30, NULL, NULL, NULL, NULL)"
+            )
+        )
+
+        migration._preflight(connection)
+        migration._backfill_canonical_sources(connection)
+        migration._preflight(connection)
+        assert connection.execute(
+            sa.text("SELECT run_id, thread_id, turn_id FROM agent_invocations WHERE id = 60")
+        ).one() == (40, 10, 20)
+        assert connection.execute(
+            sa.text("SELECT skill_run_id, thread_id, turn_id FROM agent_tool_calls WHERE id = 70")
+        ).one() == (50, 10, 20)
+        assert connection.execute(
+            sa.text("SELECT run_id, thread_id, turn_id FROM deliverables WHERE id = 80")
+        ).one() == (40, 10, 20)
+        assert connection.execute(
+            sa.text(
+                "SELECT run_id, skill_run_id, thread_id, turn_id "
+                "FROM agent_invocations WHERE id = 61"
+            )
+        ).one() == (None, None, None, None)
+
+        connection.execute(sa.text("UPDATE agent_invocations SET thread_id = 999 WHERE id = 60"))
+        with pytest.raises(RuntimeError, match="invocation_graph"):
+            migration._preflight(connection)
+
+    source = inspect.getsource(migration)
+    assert "brain_tasks.thread_id" not in source
+    assert "account_ids" not in source
+
+
 def test_client_workspace_migration_is_additive() -> None:
     module = importlib.import_module("migrations.versions.20260716_0200_client_workspace_shell")
 
@@ -78,14 +397,82 @@ def test_user_deletion_preview_reservation_migration_is_reversible_and_non_sensi
         assert forbidden not in upgrade_source
 
 
-def test_migration_head_is_turn_provenance() -> None:
-    assert get_head_revision() == "20260728_0300"
+def test_turn_observability_migration_is_additive_nullable_and_reversible(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module("migrations.versions.20260730_0600_turn_observability")
+    assert migration.down_revision == "20260730_0500"
+
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("user_input", sa.Text, nullable=False),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(turns.insert(), [{"id": 1, "user_input": "历史消息"}])
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {column["name"]: column for column in inspector.get_columns("conversation_turns")}
+        metric_names = {
+            "route_ms",
+            "first_token_ms",
+            "completion_ms",
+            "total_ms",
+            "model_call_count",
+        }
+        assert metric_names <= columns.keys()
+        assert all(columns[name]["nullable"] for name in metric_names)
+        assert connection.execute(
+            sa.text(
+                "SELECT route_ms, first_token_ms, completion_ms, total_ms, "
+                "model_call_count FROM conversation_turns WHERE id = 1"
+            )
+        ).one() == (None, None, None, None, None)
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("conversation_turns")
+        }
+        assert {
+            "ck_conversation_turns_route_ms",
+            "ck_conversation_turns_first_token_ms",
+            "ck_conversation_turns_completion_ms",
+            "ck_conversation_turns_total_ms",
+            "ck_conversation_turns_model_call_count",
+        } <= checks
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE conversation_turns SET model_call_count = -1 WHERE id = 1")
+            )
+
+        migration.downgrade()
+        assert metric_names.isdisjoint(
+            {column["name"] for column in sa.inspect(connection).get_columns("conversation_turns")}
+        )
+
+
+def test_migration_head_is_turn_observability() -> None:
+    assert get_head_revision() == "20260730_0600"
+
+
+def test_offline_migrations_fail_fast_for_data_dependent_chain() -> None:
+    source = __import__("pathlib").Path("migrations/env.py").read_text(encoding="utf-8")
+    assert "CommandError" in source
+    assert "offline SQL is unsupported for data-dependent migrations" in source
 
 
 def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260728_0300_turn_provenance"
-    )
+    migration = importlib.import_module("migrations.versions.20260728_0300_turn_provenance")
     assert migration.down_revision == "20260728_0200"
 
     engine = sa.create_engine("sqlite://")
@@ -169,18 +556,12 @@ def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> No
         all_tables = ("deliverables", *ledger_tables, "events")
         for table_name in all_tables:
             inspector = sa.inspect(connection)
-            columns = {
-                column["name"]: column
-                for column in inspector.get_columns(table_name)
-            }
+            columns = {column["name"]: column for column in inspector.get_columns(table_name)}
             assert task7_columns <= columns.keys()
             for column_name in task7_columns:
                 assert columns[column_name]["nullable"] is True
 
-            indexes = {
-                tuple(index["column_names"])
-                for index in inspector.get_indexes(table_name)
-            }
+            indexes = {tuple(index["column_names"]) for index in inspector.get_indexes(table_name)}
             for column_name in task7_columns:
                 assert (column_name,) in indexes
 
@@ -203,8 +584,7 @@ def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> No
         ).scalar_one() == {"legacy": True}
         assert connection.execute(
             sa.text(
-                "SELECT thread_id, turn_id, run_id, skill_run_id "
-                "FROM deliverables WHERE id = 1"
+                "SELECT thread_id, turn_id, run_id, skill_run_id FROM deliverables WHERE id = 1"
             )
         ).one() == (None, None, None, None)
         for table_name in ledger_tables:
@@ -217,34 +597,27 @@ def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> No
 
         migration.downgrade()
         for table_name in ledger_tables:
-            columns = {
-                column["name"]
-                for column in sa.inspect(connection).get_columns(table_name)
-            }
+            columns = {column["name"] for column in sa.inspect(connection).get_columns(table_name)}
             assert "run_id" in columns
             assert {"thread_id", "turn_id", "skill_run_id"}.isdisjoint(columns)
-            assert connection.execute(
-                sa.text(f"SELECT run_id FROM {table_name} WHERE id = 1")
-            ).scalar_one() == 31
+            assert (
+                connection.execute(
+                    sa.text(f"SELECT run_id FROM {table_name} WHERE id = 1")
+                ).scalar_one()
+                == 31
+            )
         for table_name in ("deliverables", "events"):
-            columns = {
-                column["name"]
-                for column in sa.inspect(connection).get_columns(table_name)
-            }
+            columns = {column["name"] for column in sa.inspect(connection).get_columns(table_name)}
             assert task7_columns.isdisjoint(columns)
 
         migration.upgrade()
         for table_name in all_tables:
-            columns = {
-                column["name"]
-                for column in sa.inspect(connection).get_columns(table_name)
-            }
+            columns = {column["name"] for column in sa.inspect(connection).get_columns(table_name)}
             assert task7_columns <= columns
 
         for table_name in all_tables:
             existing_columns = {
-                column["name"]
-                for column in sa.inspect(connection).get_columns(table_name)
+                column["name"] for column in sa.inspect(connection).get_columns(table_name)
             }
             values = {
                 "id": 2,
@@ -267,9 +640,7 @@ def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> No
         connection.execute(skill_runs.delete().where(skill_runs.c.id == 40))
         connection.execute(agent_runs.delete().where(agent_runs.c.id == 30))
         connection.execute(conversation_turns.delete().where(conversation_turns.c.id == 20))
-        connection.execute(
-            conversation_threads.delete().where(conversation_threads.c.id == 10)
-        )
+        connection.execute(conversation_threads.delete().where(conversation_threads.c.id == 10))
         for table_name in all_tables:
             assert connection.execute(
                 sa.text(
@@ -280,9 +651,7 @@ def test_turn_provenance_migration_is_additive_and_reversible(monkeypatch) -> No
 
 
 def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260728_0200_skill_runs"
-    )
+    migration = importlib.import_module("migrations.versions.20260728_0200_skill_runs")
     assert migration.down_revision == "20260728_0175"
 
     engine = sa.create_engine("sqlite://")
@@ -391,10 +760,7 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         migration.upgrade()
         inspector = sa.inspect(connection)
         assert inspector.has_table("skill_runs") is True
-        skill_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("skill_runs")
-        }
+        skill_columns = {column["name"]: column for column in inspector.get_columns("skill_runs")}
         assert {
             "org_id",
             "thread_id",
@@ -444,17 +810,14 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
             ("id", "thread_id", "turn_id", "org_id"),
         )
         skill_checks = {
-            item["name"]: item["sqltext"]
-            for item in inspector.get_check_constraints("skill_runs")
+            item["name"]: item["sqltext"] for item in inspector.get_check_constraints("skill_runs")
         }
         assert "ck_skill_runs_skill_version_positive" in skill_checks
         invocation_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("agent_invocations")
+            column["name"]: column for column in inspector.get_columns("agent_invocations")
         }
         tool_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("agent_tool_calls")
+            column["name"]: column for column in inspector.get_columns("agent_tool_calls")
         }
         for columns in (invocation_columns, tool_columns):
             assert columns["skill_run_id"]["nullable"] is True
@@ -532,34 +895,35 @@ def test_skill_runs_migration_preserves_legacy_runtime_rows(monkeypatch) -> None
         assert inspector.has_table("agent_invocations") is True
         assert inspector.has_table("agent_tool_calls") is True
         assert "uq_agent_runs_id_thread_turn_org" not in {
-            item["name"]
-            for item in inspector.get_unique_constraints("agent_runs")
+            item["name"] for item in inspector.get_unique_constraints("agent_runs")
         }
         assert {"skill_run_id", "thread_id", "turn_id"}.isdisjoint(
-            column["name"]
-            for column in inspector.get_columns("agent_invocations")
+            column["name"] for column in inspector.get_columns("agent_invocations")
         )
         assert {"skill_run_id", "thread_id", "turn_id"}.isdisjoint(
-            column["name"]
-            for column in inspector.get_columns("agent_tool_calls")
+            column["name"] for column in inspector.get_columns("agent_tool_calls")
         )
-        assert connection.execute(
-            sa.text("SELECT status FROM agent_invocations WHERE id = 50")
-        ).scalar_one() == "done"
-        assert connection.execute(
-            sa.text("SELECT status FROM agent_tool_calls WHERE id = 60")
-        ).scalar_one() == "success"
+        assert (
+            connection.execute(
+                sa.text("SELECT status FROM agent_invocations WHERE id = 50")
+            ).scalar_one()
+            == "done"
+        )
+        assert (
+            connection.execute(
+                sa.text("SELECT status FROM agent_tool_calls WHERE id = 60")
+            ).scalar_one()
+            == "success"
+        )
 
         migration.upgrade()
         inspector = sa.inspect(connection)
         assert inspector.has_table("skill_runs") is True
         assert "uq_agent_runs_id_thread_turn_org" in {
-            item["name"]
-            for item in inspector.get_unique_constraints("agent_runs")
+            item["name"] for item in inspector.get_unique_constraints("agent_runs")
         }
         assert "ck_skill_runs_skill_version_positive" in {
-            item["name"]
-            for item in inspector.get_check_constraints("skill_runs")
+            item["name"] for item in inspector.get_check_constraints("skill_runs")
         }
         assert connection.execute(
             sa.text(
@@ -609,12 +973,11 @@ def test_runtime_event_idempotency_migration_is_reversible(monkeypatch) -> None:
                     "VALUES (3, 'brain.runtime.message_done', 'same-runtime-event')"
                 )
             )
-        connection.execute(
-            sa.text("INSERT INTO events (id, type) VALUES (4, 'legacy.event')")
+        connection.execute(sa.text("INSERT INTO events (id, type) VALUES (4, 'legacy.event')"))
+        assert (
+            connection.execute(sa.text("SELECT payload FROM events WHERE id = 1")).scalar_one()
+            is not None
         )
-        assert connection.execute(
-            sa.text("SELECT payload FROM events WHERE id = 1")
-        ).scalar_one() is not None
 
         migration.downgrade()
         assert "idempotency_key" not in {
@@ -629,9 +992,7 @@ def test_runtime_event_idempotency_migration_is_reversible(monkeypatch) -> None:
 def test_account_scoped_content_migration_is_reversible_only_without_unscoped_rows(
     monkeypatch,
 ) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260728_0150_account_scoped_content"
-    )
+    migration = importlib.import_module("migrations.versions.20260728_0150_account_scoped_content")
 
     assert migration.down_revision == "20260728_0100"
 
@@ -664,6 +1025,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
     )
 
     with engine.begin() as connection:
+
         def assert_project_foreign_key_is_preserved() -> None:
             foreign_key = next(
                 item
@@ -688,9 +1050,12 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
                 ],
             )
             connection.execute(projects.delete().where(projects.c.id == project_id))
-            assert connection.execute(
-                sa.select(content_items.c.id).where(content_items.c.id == content_id)
-            ).scalar_one_or_none() is None
+            assert (
+                connection.execute(
+                    sa.select(content_items.c.id).where(content_items.c.id == content_id)
+                ).scalar_one_or_none()
+                is None
+            )
 
         metadata.create_all(connection)
         connection.execute(projects.insert(), [{"id": 1}])
@@ -704,8 +1069,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
 
         migration.upgrade()
         columns = {
-            column["name"]: column
-            for column in sa.inspect(connection).get_columns("content_items")
+            column["name"]: column for column in sa.inspect(connection).get_columns("content_items")
         }
         assert columns["project_id"]["nullable"] is True
         assert_project_foreign_key_is_preserved()
@@ -719,15 +1083,17 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
         )
         with pytest.raises(RuntimeError, match="project_id IS NULL"):
             migration.downgrade()
-        assert connection.execute(
-            sa.text("SELECT count(*) FROM content_items WHERE project_id IS NULL")
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                sa.text("SELECT count(*) FROM content_items WHERE project_id IS NULL")
+            ).scalar_one()
+            == 1
+        )
 
         connection.execute(sa.text("DELETE FROM content_items WHERE id = 2"))
         migration.downgrade()
         columns = {
-            column["name"]: column
-            for column in sa.inspect(connection).get_columns("content_items")
+            column["name"]: column for column in sa.inspect(connection).get_columns("content_items")
         }
         assert columns["project_id"]["nullable"] is False
         assert_project_foreign_key_is_preserved()
@@ -738,8 +1104,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
 
         migration.upgrade()
         columns = {
-            column["name"]: column
-            for column in sa.inspect(connection).get_columns("content_items")
+            column["name"]: column for column in sa.inspect(connection).get_columns("content_items")
         }
         assert columns["project_id"]["nullable"] is True
         assert_project_foreign_key_is_preserved()
@@ -747,9 +1112,7 @@ def test_account_scoped_content_migration_is_reversible_only_without_unscoped_ro
 
 
 def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260728_0100_conversation_foundation"
-    )
+    migration = importlib.import_module("migrations.versions.20260728_0100_conversation_foundation")
     assert migration.down_revision == "20260727_0300"
 
     engine = sa.create_engine("sqlite://")
@@ -833,12 +1196,9 @@ def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) ->
         assert inspector.has_table("conversation_threads") is True
         assert inspector.has_table("conversation_turns") is True
         thread_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("conversation_threads")
+            column["name"]: column for column in inspector.get_columns("conversation_threads")
         }
-        turn_columns = {
-            column["name"] for column in inspector.get_columns("conversation_turns")
-        }
+        turn_columns = {column["name"] for column in inspector.get_columns("conversation_turns")}
         assert thread_columns["account_id"]["nullable"] is False
         assert {"assistant_response", "intent"} <= turn_columns
         turn_uniques = {
@@ -873,9 +1233,7 @@ def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) ->
             "conversation_threads",
             ("id", "org_id"),
         )
-        agent_run_columns = {
-            column["name"] for column in inspector.get_columns("agent_runs")
-        }
+        agent_run_columns = {column["name"] for column in inspector.get_columns("agent_runs")}
         assert {"thread_id", "turn_id"} <= agent_run_columns
         agent_run_foreign_keys = {
             item["name"]: (
@@ -895,14 +1253,12 @@ def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) ->
             "conversation_turns",
             ("id", "thread_id", "org_id"),
         )
-        assert {
-            item["name"] for item in inspector.get_check_constraints("agent_runs")
-        } >= {"ck_agent_runs_turn_requires_thread"}
+        assert {item["name"] for item in inspector.get_check_constraints("agent_runs")} >= {
+            "ck_agent_runs_turn_requires_thread"
+        }
 
         legacy_run = connection.execute(
-            sa.text(
-                "SELECT task_id, thread_id, turn_id FROM agent_runs WHERE id = 30"
-            )
+            sa.text("SELECT task_id, thread_id, turn_id FROM agent_runs WHERE id = 30")
         ).one()
         assert legacy_run == (20, None, None)
 
@@ -942,29 +1298,20 @@ def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) ->
             )
         )
         with pytest.raises(sa.exc.IntegrityError):
-            connection.execute(
-                sa.text("UPDATE agent_runs SET turn_id = 51 WHERE id = 30")
-            )
+            connection.execute(sa.text("UPDATE agent_runs SET turn_id = 51 WHERE id = 30"))
         with pytest.raises(sa.exc.IntegrityError):
             connection.execute(
                 sa.text("UPDATE agent_runs SET org_id = 2, thread_id = 40 WHERE id = 30")
             )
         with pytest.raises(sa.exc.IntegrityError):
             connection.execute(
-                sa.text(
-                    "UPDATE agent_runs SET thread_id = 41, turn_id = 51 WHERE id = 30"
-                )
+                sa.text("UPDATE agent_runs SET thread_id = 41, turn_id = 51 WHERE id = 30")
             )
         connection.execute(
-            sa.text(
-                "UPDATE agent_runs SET thread_id = 40, turn_id = 51 WHERE id = 30"
-            )
+            sa.text("UPDATE agent_runs SET thread_id = 40, turn_id = 51 WHERE id = 30")
         )
         inputs = connection.execute(
-            sa.text(
-                "SELECT user_input FROM conversation_turns "
-                "WHERE thread_id = 40 ORDER BY id"
-            )
+            sa.text("SELECT user_input FROM conversation_turns WHERE thread_id = 40 ORDER BY id")
         ).scalars()
         assert list(inputs) == ["查看最近七天数据", "制定下周内容策略"]
 
@@ -972,14 +1319,13 @@ def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) ->
         inspector = sa.inspect(connection)
         assert inspector.has_table("conversation_threads") is False
         assert inspector.has_table("conversation_turns") is False
-        downgraded_columns = {
-            column["name"] for column in inspector.get_columns("agent_runs")
-        }
+        downgraded_columns = {column["name"] for column in inspector.get_columns("agent_runs")}
         assert "thread_id" not in downgraded_columns
         assert "turn_id" not in downgraded_columns
-        assert connection.execute(
-            sa.text("SELECT task_id FROM agent_runs WHERE id = 30")
-        ).scalar_one() == 20
+        assert (
+            connection.execute(sa.text("SELECT task_id FROM agent_runs WHERE id = 30")).scalar_one()
+            == 20
+        )
 
         migration.upgrade()
         reupgraded_columns = {
@@ -987,17 +1333,13 @@ def test_conversation_foundation_migration_preserves_legacy_runs(monkeypatch) ->
         }
         assert {"thread_id", "turn_id"} <= reupgraded_columns
         reupgraded_run = connection.execute(
-            sa.text(
-                "SELECT task_id, thread_id, turn_id FROM agent_runs WHERE id = 30"
-            )
+            sa.text("SELECT task_id, thread_id, turn_id FROM agent_runs WHERE id = 30")
         ).one()
         assert reupgraded_run == (20, None, None)
 
 
 def test_ai_coo_runtime_migration_is_additive_and_reversible() -> None:
-    module = importlib.import_module(
-        "migrations.versions.20260727_0300_ai_coo_runtime"
-    )
+    module = importlib.import_module("migrations.versions.20260727_0300_ai_coo_runtime")
 
     assert module.down_revision == "20260727_0200"
     upgrade_source = inspect.getsource(module.upgrade)
@@ -1020,9 +1362,7 @@ def test_ai_coo_runtime_migration_is_additive_and_reversible() -> None:
 
 
 def test_platform_publish_jobs_migration_is_additive_and_reversible() -> None:
-    module = importlib.import_module(
-        "migrations.versions.20260727_0100_platform_publish_jobs"
-    )
+    module = importlib.import_module("migrations.versions.20260727_0100_platform_publish_jobs")
 
     assert module.down_revision == "20260723_0200"
     upgrade_source = inspect.getsource(module.upgrade)
@@ -1036,9 +1376,7 @@ def test_platform_publish_jobs_migration_is_additive_and_reversible() -> None:
 
 
 def test_platform_content_source_migration_preserves_import_lineage() -> None:
-    module = importlib.import_module(
-        "migrations.versions.20260727_0200_platform_content_source"
-    )
+    module = importlib.import_module("migrations.versions.20260727_0200_platform_content_source")
 
     assert module.down_revision == "20260727_0100"
     upgrade_source = inspect.getsource(module.upgrade)
@@ -1201,8 +1539,7 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
             column["name"] for column in inspector.get_columns("data_import_rows")
         }
         upgraded_metric_checks = {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("metric_snapshots")
+            constraint["name"] for constraint in inspector.get_check_constraints("metric_snapshots")
         }
         upgraded_batch_indexes = {
             index["name"] for index in inspector.get_indexes("data_import_batches")
@@ -1219,10 +1556,7 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
         assert "resolved_by_id" in upgraded_row_columns
         assert "resolved_at" in upgraded_row_columns
         assert "uq_data_import_batches_active_preview_identity" in upgraded_batch_indexes
-        assert (
-            "uq_platform_content_records_account_canonical_share_url"
-            in upgraded_content_indexes
-        )
+        assert "uq_platform_content_records_account_canonical_share_url" in upgraded_content_indexes
         assert "ck_metric_snapshots_account_required_for_source_links" in upgraded_metric_checks
 
         migration.downgrade()
@@ -1231,16 +1565,14 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
             column["name"] for column in inspector.get_columns("metric_snapshots")
         }
         downgraded_metric_checks = {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("metric_snapshots")
+            constraint["name"] for constraint in inspector.get_check_constraints("metric_snapshots")
         }
         assert inspector.has_table("data_import_batches") is False
         assert inspector.has_table("platform_content_records") is False
         assert "import_batch_id" not in downgraded_metric_columns
         assert "platform_content_record_id" not in downgraded_metric_columns
         assert (
-            "ck_metric_snapshots_account_required_for_source_links"
-            not in downgraded_metric_checks
+            "ck_metric_snapshots_account_required_for_source_links" not in downgraded_metric_checks
         )
 
         migration.upgrade()
@@ -1258,8 +1590,7 @@ def test_account_data_center_migration_smoke_upgrade_downgrade_reupgrade(monkeyp
             column["name"] for column in inspector.get_columns("data_import_rows")
         }
         reupgraded_metric_checks = {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("metric_snapshots")
+            constraint["name"] for constraint in inspector.get_check_constraints("metric_snapshots")
         }
         assert inspector.has_table("data_import_batches") is True
         assert inspector.has_table("platform_content_records") is True

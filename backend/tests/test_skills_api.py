@@ -25,9 +25,7 @@ async def test_skill_catalog_requires_authentication(client):
 
 
 @pytest.mark.asyncio
-async def test_douyin_composer_exposes_only_stable_business_skill_fields(
-    client, admin
-):
+async def test_douyin_composer_exposes_only_stable_business_skill_fields(client, admin):
     token = await _token(client, admin.email, "admin-pw-123")
 
     response = await client.get(
@@ -107,9 +105,7 @@ async def test_catalog_applies_surface_and_platform_compatibility_before_project
 
 
 @pytest.mark.asyncio
-async def test_disabled_skill_uses_generic_public_unavailability_reason(
-    client, admin, monkeypatch
-):
+async def test_disabled_skill_uses_generic_public_unavailability_reason(client, admin, monkeypatch):
     skills_api = import_module("app.api.skills")
     policy = skills_api._PUBLIC_SKILL_POLICIES["account_inspection"]
     monkeypatch.setitem(
@@ -171,6 +167,7 @@ async def test_unpublished_registry_skill_is_not_enumerated(client, admin, monke
         code="internal_shadow_skill",
         name="Private orchestration graph",
         expert_codes=("secret-expert",),
+        expert_stages=(("secret-expert",),),
         tool_codes=("secret.tool",),
     )
     monkeypatch.setattr(

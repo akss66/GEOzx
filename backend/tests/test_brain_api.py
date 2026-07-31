@@ -227,9 +227,7 @@ async def test_sync_runtime_conflict_finalizes_task_with_safe_failure_event(
     )
     task = await session.scalar(select(BrainTask).order_by(BrainTask.id.desc()))
     failures = list(
-        await session.scalars(
-            select(Event).where(Event.type == "brain.runtime.failed")
-        )
+        await session.scalars(select(Event).where(Event.type == "brain.runtime.failed"))
     )
     assert raised.value.status_code == 409
     assert run is not None
@@ -285,9 +283,7 @@ async def test_sync_retryable_runtime_failure_finishes_without_arq_retry(
     )
     task = await session.scalar(select(BrainTask).order_by(BrainTask.id.desc()))
     failures = list(
-        await session.scalars(
-            select(Event).where(Event.type == "brain.runtime.failed")
-        )
+        await session.scalars(select(Event).where(Event.type == "brain.runtime.failed"))
     )
     assert raised.value.status_code == 503
     assert run is not None
@@ -302,9 +298,7 @@ async def test_sync_retryable_runtime_failure_finishes_without_arq_retry(
 
 
 @pytest.mark.asyncio
-async def test_sync_pre_runtime_conflict_closes_the_existing_task(
-    session, admin
-):
+async def test_sync_pre_runtime_conflict_closes_the_existing_task(session, admin):
     """A validation conflict before runtime start also closes the bound task."""
 
     task = BrainTask(
@@ -344,9 +338,7 @@ async def test_sync_pre_runtime_conflict_closes_the_existing_task(
         select(AgentRun).where(AgentRun.client_message_id == "sync-pre-runtime-conflict")
     )
     failures = list(
-        await session.scalars(
-            select(Event).where(Event.type == "brain.runtime.failed")
-        )
+        await session.scalars(select(Event).where(Event.type == "brain.runtime.failed"))
     )
     assert raised.value.status_code == 409
     assert run is not None
@@ -566,17 +558,11 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
         event for event in task_events if event.type == "brain.runtime.tool_completed"
     ]
     completed_tool_codes = [
-        event.payload["tool_code"]
-        for event in completed_tool_events
-        if event.payload is not None
+        event.payload["tool_code"] for event in completed_tool_events if event.payload is not None
     ]
     persisted_tool_calls = (
-        (
-            await session.scalars(
-                select(AgentToolCall).where(AgentToolCall.task_id == task_id)
-            )
-        ).all()
-    )
+        await session.scalars(select(AgentToolCall).where(AgentToolCall.task_id == task_id))
+    ).all()
     assert len(completed_tool_events) == 2, {
         "task_event_types": [event.type for event in task_events],
         "tool_calls": [
@@ -602,25 +588,20 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
         if event.payload is not None
     } == persisted_tool_call_ids
     assert all(
-        isinstance(event.payload.get("invocation_id"), int)
-        and event.payload["invocation_id"] > 0
+        isinstance(event.payload.get("invocation_id"), int) and event.payload["invocation_id"] > 0
         for event in completed_tool_events
         if event.payload is not None
     )
 
     invocations = (
-        await session.scalars(
-            select(AgentInvocation).where(AgentInvocation.task_id == task_id)
-        )
+        await session.scalars(select(AgentInvocation).where(AgentInvocation.task_id == task_id))
     ).all()
     assert len(invocations) == 1
     assert [invocation.agent_code for invocation in invocations] == ["01-positioning"]
     assert invocations[0].status == AgentInvocationStatus.DONE
     assert await session.scalar(select(func.count()).select_from(StrategyPlan)) == 0
     run = await session.scalar(
-        select(AgentRun).where(
-            AgentRun.client_message_id == "positioning-diagnosis-no-strategy"
-        )
+        select(AgentRun).where(AgentRun.client_message_id == "positioning-diagnosis-no-strategy")
     )
     assert run is not None
     assert run.task_id == task_id
@@ -643,14 +624,11 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
         event
         for event in task_events
         if event.type == "brain.runtime.message_done"
-        and (event.payload or {}).get("semantic_key")
-        == "00-decision:main-agent.acknowledgement"
+        and (event.payload or {}).get("semantic_key") == "00-decision:main-agent.acknowledgement"
     ]
     assert len(ack_events) == 1
     specialist_completed = [
-        event
-        for event in task_events
-        if event.type == "brain.runtime.subagent_completed"
+        event for event in task_events if event.type == "brain.runtime.subagent_completed"
     ]
     assert len(specialist_completed) == 1
     assert specialist_completed[0].payload is not None
@@ -668,8 +646,7 @@ async def test_brain_message_account_positioning_diagnosis_bypasses_strategy(
     ]
     assert lifecycle_events
     assert all(
-        isinstance(event.payload.get("invocation_id"), int)
-        and event.payload["invocation_id"] > 0
+        isinstance(event.payload.get("invocation_id"), int) and event.payload["invocation_id"] > 0
         for event in lifecycle_events
     )
 
@@ -735,29 +712,20 @@ async def test_legacy_analysis_with_positioning_hint_uses_diagnostic_route(
     assert response.status_code == 201, response.text
     runtime = response.json()
     assert runtime["strategy"] is None
-    assert not any(
-        event["type"] == "brain.runtime.next_step" for event in runtime["timeline"]
-    )
+    assert not any(event["type"] == "brain.runtime.next_step" for event in runtime["timeline"])
     invocations = (
         await session.scalars(
-            select(AgentInvocation).where(
-                AgentInvocation.task_id == runtime["task"]["id"]
-            )
+            select(AgentInvocation).where(AgentInvocation.task_id == runtime["task"]["id"])
         )
     ).all()
     assert [invocation.agent_code for invocation in invocations] == ["01-positioning"]
     assert await session.scalar(select(func.count()).select_from(StrategyPlan)) == 0
     run = await session.scalar(
-        select(AgentRun).where(
-            AgentRun.client_message_id == "legacy-positioning-diagnosis"
-        )
+        select(AgentRun).where(AgentRun.client_message_id == "legacy-positioning-diagnosis")
     )
     assert run is not None
     assert run.request_payload["route_decision"]["mode"] == "skill"
-    assert (
-        run.request_payload["route_decision"]["skill_code"]
-        == "account_positioning_diagnosis"
-    )
+    assert run.request_payload["route_decision"]["skill_code"] == "account_positioning_diagnosis"
     assert decide_next_calls == 0
 
 
@@ -834,11 +802,14 @@ async def test_brain_clarification_is_delivered_as_realtime_deltas(
         if payload.get("message_id") == "clarification-stream-1:00-decision:1"
     ]
     assert message_events[0][0] == "brain.runtime.message_start"
-    assert "".join(
-        payload["delta"]
-        for event_type, payload in message_events
-        if event_type == "brain.runtime.message_delta"
-    ) == question
+    assert (
+        "".join(
+            payload["delta"]
+            for event_type, payload in message_events
+            if event_type == "brain.runtime.message_delta"
+        )
+        == question
+    )
     assert message_events[-1][0] == "brain.runtime.message_done"
 
 
@@ -891,9 +862,7 @@ async def test_brain_message_enqueues_runtime_when_async_execution_is_enabled(
     assert response.status_code == 201
     runtime = response.json()
     assert runtime["status"] == "running"
-    assert not any(
-        event["type"] == "brain.runtime.message_done" for event in runtime["timeline"]
-    )
+    assert not any(event["type"] == "brain.runtime.message_done" for event in runtime["timeline"])
     assert len(enqueued) == 1
     run = await session.scalar(
         select(AgentRun).where(AgentRun.client_message_id == "queued-turn-1")
@@ -941,9 +910,7 @@ async def test_async_followup_waits_without_mutating_the_active_turn(
     await session.refresh(task, attribute_names=["brief"])
     assert task.brief.goal == "你好"
     run = await session.scalar(
-        select(AgentRun).where(
-            AgentRun.client_message_id == "serialized-turn-2"
-        )
+        select(AgentRun).where(AgentRun.client_message_id == "serialized-turn-2")
     )
     assert run is not None
     assert run.status == "waiting_predecessor"
@@ -1263,22 +1230,15 @@ async def test_brain_conversation_keeps_operations_identity_and_account_context(
     runtime = response.json()
     assert runtime["invocations"] == []
     direct_answer = next(
-        event
-        for event in runtime["timeline"]
-        if event["type"] == "brain.runtime.message_done"
+        event for event in runtime["timeline"] if event["type"] == "brain.runtime.message_done"
     )
     assert direct_answer["payload"]["content"] == "我是你的新媒体运营主 Agent。"
-    assert (
-        direct_answer["payload"]["semantic_key"]
-        == "00-decision:main-agent.conversation"
-    )
+    assert direct_answer["payload"]["semantic_key"] == "00-decision:main-agent.conversation"
     assert "只有对应专家实际完成分析后" not in direct_answer["payload"]["content"]
 
 
 @pytest.mark.asyncio
-async def test_brain_message_replans_after_each_expert_result(
-    client, session, admin, monkeypatch
-):
+async def test_brain_message_replans_after_each_expert_result(client, session, admin, monkeypatch):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     project_id, account_id = await _project_bound_authorized_douyin_account(
@@ -1387,17 +1347,13 @@ async def test_brain_message_replans_after_each_expert_result(
     assert len(observed_rounds) == 3
     assert observed_rounds[0] == []
     assert any(
-        observation.get("agent_code") == "01-positioning"
-        for observation in observed_rounds[1]
+        observation.get("agent_code") == "01-positioning" for observation in observed_rounds[1]
     )
-    assert {
-        observation.get("agent_code") for observation in observed_rounds[2]
-    } >= {"01-positioning", "02-content-director"}
-    assert {
-        item["code"]
-        for item in available_catalogs[0]
-        if item["kind"] == "expert"
-    } == {
+    assert {observation.get("agent_code") for observation in observed_rounds[2]} >= {
+        "01-positioning",
+        "02-content-director",
+    }
+    assert {item["code"] for item in available_catalogs[0] if item["kind"] == "expert"} == {
         "01-positioning",
         "02-content-director",
         "03-art-director",
@@ -1406,11 +1362,7 @@ async def test_brain_message_replans_after_each_expert_result(
         "06-operator",
         "07-advertiser",
     }
-    assert {
-        item["code"]
-        for item in available_catalogs[0]
-        if item["kind"] == "tool"
-    } == {
+    assert {item["code"] for item in available_catalogs[0] if item["kind"] == "tool"} == {
         "account.data_context",
         "account.metrics_summary",
         "account.profile",
@@ -1486,9 +1438,7 @@ async def test_brain_runtime_executes_scoped_tool_and_observes_result(
     assert runtime["tool_calls"][0]["tool_code"] == "account.profile"
     assert runtime["tool_calls"][0]["status"] == "success"
     completed = next(
-        event
-        for event in runtime["timeline"]
-        if event["type"] == "brain.runtime.tool_completed"
+        event for event in runtime["timeline"] if event["type"] == "brain.runtime.tool_completed"
     )
     assert completed["payload"]["tool_code"] == "account.profile"
     assert completed["payload"]["result"]["account_id"] == account_id
@@ -1695,10 +1645,7 @@ async def test_brain_runtime_recovers_invalid_controller_decision_with_dynamic_p
         and event["payload"]["expert_codes"] == ["01-positioning"]
         for event in runtime["timeline"]
     )
-    assert not any(
-        event["type"] == "brain.runtime.message_error"
-        for event in runtime["timeline"]
-    )
+    assert not any(event["type"] == "brain.runtime.message_error" for event in runtime["timeline"])
 
 
 @pytest.mark.asyncio
@@ -1818,14 +1765,10 @@ async def test_brain_runtime_never_completes_an_unrecoverable_controller_error(
     runtime = response.json()
     assert runtime["status"] == "failed"
     assert any(
-        event["type"] == "brain.runtime.message_error"
-        and event["payload"]["retryable"] is True
+        event["type"] == "brain.runtime.message_error" and event["payload"]["retryable"] is True
         for event in runtime["timeline"]
     )
-    assert not any(
-        event["type"] == "brain.runtime.completed"
-        for event in runtime["timeline"]
-    )
+    assert not any(event["type"] == "brain.runtime.completed" for event in runtime["timeline"])
 
 
 @pytest.mark.asyncio
@@ -1867,8 +1810,7 @@ async def test_brain_runtime_ask_user_reports_waiting_user(client, admin, monkey
     runtime = response.json()
     assert runtime["status"] == "waiting_user"
     assert any(
-        event["type"] == "brain.runtime.clarification_requested"
-        for event in runtime["timeline"]
+        event["type"] == "brain.runtime.clarification_requested" for event in runtime["timeline"]
     )
 
 
@@ -2589,6 +2531,7 @@ async def test_smart_runtime_resumes_from_permission_with_decision_in_parent_con
                     name="publish.prepare",
                     handler=controlled_publish_tool,
                     params_model=EmptyParams,
+                    side_effect_level="read",
                     allowed_roles=frozenset({UserRole.ADMIN}),
                     permission_mode="confirm",
                     scope="account",

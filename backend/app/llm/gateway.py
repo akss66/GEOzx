@@ -9,11 +9,19 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.request_context import get_acting_user_id
+from app.core.runtime_failures import (
+    ProviderRuntimeFailure,
+    exception_chain,
+    http_status_code,
+)
 from app.llm.adapters import CompletionResult
 from app.llm.adapters.deepseek import DeepSeekAdapter
+from app.llm.adapters.deterministic_test import DeterministicTestAdapter
 from app.llm.adapters.litellm import LiteLLMAdapter
 from app.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from app.llm.cost import compute_cost
@@ -25,6 +33,10 @@ from app.services.model_infrastructure import (
     provider_runtime_for_target,
     redact_error,
     resolve_route_targets,
+)
+from app.services.turn_observability import (
+    increment_model_call_count,
+    record_first_user_token,
 )
 
 StreamObserver = Callable[[dict[str, Any]], Awaitable[None]]
@@ -116,6 +128,12 @@ class LLMGateway:
         org_id: int | None,
         target: ModelTarget,
     ) -> _GatewayAdapter:
+        if (
+            not self._custom_adapters
+            and settings.environment == "test"
+            and settings.llm_deterministic_test_provider_enabled
+        ):
+            return DeterministicTestAdapter()
         if target.provider_id is not None:
             runtime = await provider_runtime_for_target(
                 session,
@@ -205,12 +223,10 @@ class LLMGateway:
                 last_exc = (
                     exc
                     if isinstance(exc, ModelRouteConfigurationError)
-                    else RuntimeError(safe_error)
+                    else _provider_runtime_failure(exc, safe_error=safe_error)
                 )
 
-        raise LLMError(
-            f"all candidate models failed: {[item.model for item in candidates]}"
-        ) from last_exc
+        raise LLMError("all candidate models failed") from last_exc
 
     async def chat_stream(
         self,
@@ -238,6 +254,11 @@ class LLMGateway:
                 )
                 async for chunk in adapter.stream(target.model, messages, options):
                     chunks.append(chunk)
+                    await record_first_user_token(
+                        session,
+                        agent_code=agent_code,
+                        delta=chunk,
+                    )
                     await observer(
                         {
                             "phase": "delta",
@@ -301,12 +322,10 @@ class LLMGateway:
                 last_exc = (
                     exc
                     if isinstance(exc, ModelRouteConfigurationError)
-                    else RuntimeError(safe_error)
+                    else _provider_runtime_failure(exc, safe_error=safe_error)
                 )
 
-        raise LLMError(
-            f"all candidate models failed: {[item.model for item in candidates]}"
-        ) from last_exc
+        raise LLMError("all candidate models failed") from last_exc
 
     async def _record(
         self,
@@ -348,6 +367,7 @@ class LLMGateway:
                 error=error,
             )
         )
+        await increment_model_call_count(session)
         await session.commit()
 
 
@@ -356,6 +376,13 @@ def _effective_options(options: dict[str, Any]) -> dict[str, Any]:
     call_context = _call_context.get()
     if call_context is not None and call_context.response_format is not None:
         effective["response_format"] = dict(call_context.response_format)
+    if (
+        call_context is not None
+        and call_context.prompt_id
+        and settings.environment == "test"
+        and settings.llm_deterministic_test_provider_enabled
+    ):
+        effective["_deterministic_prompt_id"] = call_context.prompt_id
     return effective
 
 
@@ -367,6 +394,33 @@ def _rough_token_count(text: str) -> int:
 
 def _safe_error(exc: Exception) -> str:
     return redact_error(str(exc)) or "model provider request failed"
+
+
+def _provider_runtime_failure(
+    exc: Exception,
+    *,
+    safe_error: str,
+) -> ProviderRuntimeFailure:
+    chain = exception_chain(exc)
+    status_code = next(
+        (code for item in chain if (code := http_status_code(item)) is not None),
+        None,
+    )
+    if status_code is not None:
+        failure_kind = "http"
+    elif any(isinstance(item, (TimeoutError, httpx.TimeoutException)) for item in chain):
+        failure_kind = "timeout"
+    elif any(isinstance(item, (ConnectionError, httpx.NetworkError)) for item in chain):
+        failure_kind = "connection"
+    else:
+        failure_kind = "unknown"
+    return ProviderRuntimeFailure(
+        status_code=status_code,
+        failure_kind=failure_kind,
+        safe_message=(
+            safe_error if "[REDACTED]" in safe_error else "model provider request failed"
+        ),
+    )
 
 
 gateway = LLMGateway()

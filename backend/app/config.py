@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     llm_default_model: str = "deepseek-chat"
+    llm_deterministic_test_provider_enabled: bool = False
 
     # —— 视频生成 ——
     # 火山引擎方舟 Ark（豆包视频模型；账号实际可用 Seedance 1.0-pro；M1 E7 接入）

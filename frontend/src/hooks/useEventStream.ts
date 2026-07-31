@@ -21,6 +21,13 @@ interface EventStreamOptions {
 const RECONNECT_DELAYS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const MAX_SEEN_DURABLE_EVENTS = 2_000;
 
+function isDurableTransportEvent(type: string) {
+  return ![
+    "brain.runtime.message_start",
+    "brain.runtime.message_delta",
+  ].includes(type);
+}
+
 /** Subscribe to the proxied event stream and recover durable state after reconnecting. */
 export function useEventStream(
   onEvent?: (event: DyEvent) => void,
@@ -73,7 +80,11 @@ export function useEventStream(
       nextSocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as DyEvent;
-          if (typeof data.id === "number" && Number.isFinite(data.id)) {
+          if (
+            isDurableTransportEvent(data.type)
+            && typeof data.id === "number"
+            && Number.isFinite(data.id)
+          ) {
             const seen = seenDurableEventsRef.current;
             if (seen.ids.has(data.id)) return;
             seen.ids.add(data.id);

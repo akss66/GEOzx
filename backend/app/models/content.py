@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -67,6 +74,26 @@ class Deliverable(Base, TimestampMixin):
     __tablename__ = "deliverables"
     __table_args__ = (
         UniqueConstraint("content_item_id", "type", "version", name="uq_deliverable_version"),
+        ForeignKeyConstraint(
+            ["turn_id", "thread_id"],
+            ["conversation_turns.id", "conversation_turns.thread_id"],
+            name="fk_deliverables_turn_thread",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "thread_id", "turn_id"],
+            ["agent_runs.id", "agent_runs.thread_id", "agent_runs.turn_id"],
+            name="fk_deliverables_run_thread_turn",
+        ),
+        ForeignKeyConstraint(
+            ["skill_run_id", "run_id", "thread_id", "turn_id"],
+            [
+                "skill_runs.id",
+                "skill_runs.run_id",
+                "skill_runs.thread_id",
+                "skill_runs.turn_id",
+            ],
+            name="fk_deliverables_skill_run_thread_turn",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)

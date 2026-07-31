@@ -17,6 +17,8 @@ from app.core.credential_crypto import CredentialEncryptionError, decrypt_provid
 from app.models import Event, IntegrationConfig, LLMCall, ModelConfig, ModelProvider
 from app.models.enums import AgentCode
 
+ROUTER_AGENT_CODE = "00-router"
+
 AGENT_NAMES: dict[str, str] = {
     AgentCode.DECISION.value: "运营大脑",
     AgentCode.POSITIONING.value: "账号定位专家",
@@ -202,9 +204,7 @@ async def provider_runtime_for_target(
     model: str,
 ) -> dict[str, str | None]:
     if org_id is None:
-        raise ModelRouteConfigurationError(
-            "model provider routes require an organization"
-        )
+        raise ModelRouteConfigurationError("model provider routes require an organization")
     provider = await session.scalar(
         select(ModelProvider).where(
             ModelProvider.org_id == org_id,
@@ -212,17 +212,11 @@ async def provider_runtime_for_target(
         )
     )
     if provider is None:
-        raise ModelRouteConfigurationError(
-            "model provider is not available for this organization"
-        )
+        raise ModelRouteConfigurationError("model provider is not available for this organization")
     if not provider.enabled:
-        raise ModelRouteConfigurationError(
-            f"model provider {provider.code} is disabled"
-        )
+        raise ModelRouteConfigurationError(f"model provider {provider.code} is disabled")
     if provider.verification_status != "verified":
-        raise ModelRouteConfigurationError(
-            f"model provider {provider.code} is not verified"
-        )
+        raise ModelRouteConfigurationError(f"model provider {provider.code} is not verified")
     models = list(provider.models or [])
     if model not in models:
         raise ModelRouteConfigurationError(
@@ -254,6 +248,17 @@ async def resolve_route_targets(
             ModelConfig.agent_code == agent_code,
         )
     )
+    if agent_code == ROUTER_AGENT_CODE:
+        decision_cfg = await session.scalar(
+            select(ModelConfig).where(
+                ModelConfig.org_id == org_id,
+                ModelConfig.agent_code == AgentCode.DECISION.value,
+            )
+        )
+        if cfg is None:
+            cfg = decision_cfg
+        elif decision_cfg is not None:
+            return await _resolve_router_route_targets(session, org_id, cfg, decision_cfg)
     if cfg is None:
         return _legacy_target(settings.llm_default_model), None, dict(ROUTING_DEFAULTS)
     params = dict(cfg.params or {})
@@ -272,6 +277,30 @@ async def resolve_route_targets(
         org_id=org_id,
         provider_id=cfg.fallback_provider_id,
         model=cfg.fallback_model,
+    )
+    return primary, fallback, options
+
+
+async def _resolve_router_route_targets(
+    session: AsyncSession,
+    org_id: int,
+    router_cfg: ModelConfig,
+    decision_cfg: ModelConfig,
+) -> tuple[ModelTarget, ModelTarget | None, dict[str, Any]]:
+    decision_routing = dict((decision_cfg.params or {}).get("routing_config") or {})
+    router_routing = dict((router_cfg.params or {}).get("routing_config") or {})
+    options = {**ROUTING_DEFAULTS, **decision_routing, **router_routing}
+    primary = await _candidate_target(
+        session,
+        org_id=org_id,
+        provider_id=router_cfg.primary_provider_id or decision_cfg.primary_provider_id,
+        model=router_cfg.primary_model,
+    )
+    fallback = await _optional_candidate_target(
+        session,
+        org_id=org_id,
+        provider_id=router_cfg.fallback_provider_id or decision_cfg.fallback_provider_id,
+        model=router_cfg.fallback_model or decision_cfg.fallback_model,
     )
     return primary, fallback, options
 
@@ -512,12 +541,14 @@ async def infrastructure_overview(session: AsyncSession, org_id: int) -> dict[st
     routes = await route_rows(session, org_id)
     since = datetime.now(UTC) - timedelta(hours=24)
     calls_24h = await session.scalar(
-        select(func.count()).select_from(LLMCall).where(
-            LLMCall.org_id == org_id, LLMCall.created_at >= since
-        )
+        select(func.count())
+        .select_from(LLMCall)
+        .where(LLMCall.org_id == org_id, LLMCall.created_at >= since)
     )
     failures_24h = await session.scalar(
-        select(func.count()).select_from(LLMCall).where(
+        select(func.count())
+        .select_from(LLMCall)
+        .where(
             LLMCall.org_id == org_id,
             LLMCall.created_at >= since,
             LLMCall.status == "error",
@@ -559,9 +590,7 @@ async def recent_calls(
     conditions = [LLMCall.org_id == org_id]
     if call_status:
         conditions.append(LLMCall.status == call_status)
-    total = await session.scalar(
-        select(func.count()).select_from(LLMCall).where(*conditions)
-    )
+    total = await session.scalar(select(func.count()).select_from(LLMCall).where(*conditions))
     rows = (
         await session.scalars(
             select(LLMCall)

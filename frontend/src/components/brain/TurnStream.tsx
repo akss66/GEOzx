@@ -1,8 +1,17 @@
-import type { Artifact, ConversationThread, ConversationTurn, TurnProjection } from "../../types";
+import type {
+  Artifact,
+  ConversationApproval,
+  ConversationThread,
+  ConversationTurn,
+  TurnProjection,
+} from "../../types";
 import { Button, Input, Tag, Typography } from "antd";
-import type { AgentToolCall } from "../../types";
 import { AgentAvatar } from "../agents/AgentAvatar";
 import type { ArtifactAction } from "./ArtifactCard";
+import {
+  isActiveConversationTurnStatus,
+  turnReactKey,
+} from "./conversationTurnProjection";
 import { TurnArtifact } from "./TurnArtifact";
 
 export function TurnStream({
@@ -21,7 +30,7 @@ export function TurnStream({
   approvingToolCallId?: number | null;
   approvalComment?: string;
   onApprovalCommentChange?: (value: string) => void;
-  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId?: number | null;
   artifactRefreshKey?: number;
@@ -32,7 +41,11 @@ export function TurnStream({
     <div className="tz-turn-stream" aria-label="Conversation turns">
       {thread.turns.map((turn) => (
         <TurnArticle
-          key={turn.id}
+          key={turnReactKey({
+            threadId: thread.id,
+            turnId: turn.id,
+            clientMessageId: turn.client_message_id ?? `turn-${turn.id ?? "pending"}`,
+          })}
           turn={turn}
           threadId={thread.id}
           threadAccountId={thread.account_id}
@@ -71,23 +84,32 @@ function TurnArticle({
   approvingToolCallId: number | null;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
-  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
   revisionArtifacts: Record<number, Artifact[]>;
   sourceArtifactOverrides: Record<number, Artifact>;
 }) {
-  const projections = turn.projections.filter((projection) => belongsToTurn(projection, turn.id));
+  const persistedTurnId = turn.id;
+  const projections = persistedTurnId == null
+    ? []
+    : turn.projections.filter((projection) => belongsToTurn(projection, persistedTurnId));
   const unknownProjection = projections.some((projection) => !isKnownProjection(projection));
   const executionBlocked = projections.some((projection) => projection.type === "execution_blocked");
+  const clientIdentity = turn.client_message_id ?? `turn-${turn.id ?? "pending"}`;
 
   return (
     <article
       className="tz-conversation-turn"
-      data-testid={`conversation-turn-${turn.id}`}
-      data-turn-id={turn.id}
-      data-turn-key={`turn-${turn.id}`}
+      data-testid={`conversation-turn-${turn.id ?? clientIdentity}`}
+      data-turn-id={turn.id ?? undefined}
+      data-turn-key={turnReactKey({
+        threadId,
+        turnId: turn.id,
+        clientMessageId: clientIdentity,
+      })}
+      data-turn-status={turn.status}
     >
       <section
         className="dy-chat-message dy-chat-message-user tz-conversation-turn__user"
@@ -99,29 +121,36 @@ function TurnArticle({
           </Typography.Paragraph>
         </div>
       </section>
-      {turn.assistant_response ? (
-        <section
-          className="dy-chat-message dy-chat-message-agent tz-conversation-turn__assistant"
-          aria-label="Assistant response"
-        >
-          <AgentAvatar code="00-decision" className="dy-chat-avatar" />
-          <div className="dy-chat-bubble">
-            <div className="dy-chat-title-line">
-              <span>运营大脑</span>
-              <Tag style={{ marginInlineEnd: 0 }}>{executionBlocked ? "需处理" : "完成"}</Tag>
-            </div>
+      <section
+        className="dy-chat-message dy-chat-message-agent tz-conversation-turn__assistant"
+        aria-label="Assistant response"
+        aria-busy={isActiveConversationTurnStatus(turn.status)}
+      >
+        <AgentAvatar code="00-decision" className="dy-chat-avatar" />
+        <div className="dy-chat-bubble">
+          <div className="dy-chat-title-line">
+            <span>运营大脑</span>
+            <Tag style={{ marginInlineEnd: 0 }}>
+              {executionBlocked ? "需处理" : turnStatusCopy(turn.status)}
+            </Tag>
+          </div>
+          {turn.assistant_response ? (
             <Typography.Paragraph style={{ color: "inherit", margin: 0, whiteSpace: "pre-wrap" }}>
               {turn.assistant_response}
             </Typography.Paragraph>
-          </div>
-        </section>
-      ) : null}
+          ) : (
+            <Typography.Text type="secondary">
+              {isActiveConversationTurnStatus(turn.status) ? "正在处理…" : "暂无回复"}
+            </Typography.Text>
+          )}
+        </div>
+      </section>
       <div className="tz-conversation-turn__projections">
         {projections.filter(isKnownProjection).map((projection) => (
           <Projection
-            key={projectionKey(projection, turn.id)}
+            key={projectionKey(projection, persistedTurnId!)}
             projection={projection}
-            turnId={turn.id}
+            turnId={persistedTurnId!}
             threadId={threadId}
             threadAccountId={threadAccountId}
             approving={approvingToolCallId === approvalId(projection)}
@@ -135,7 +164,9 @@ function TurnArticle({
             sourceArtifactOverrides={sourceArtifactOverrides}
           />
         ))}
-        {unknownProjection ? <UnknownProjection turnId={turn.id} /> : null}
+        {unknownProjection && persistedTurnId != null
+          ? <UnknownProjection turnId={persistedTurnId} />
+          : null}
       </div>
       <TurnTechnicalDetails turn={turn} />
     </article>
@@ -145,7 +176,6 @@ function TurnArticle({
 function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
   const { intent } = turn;
   const route = readableIntent(intent, "mode");
-  const status = readableIntent(intent, "status");
   const execution = turn.projections.find(
     (projection) => projection.type === "execution_summary",
   );
@@ -153,13 +183,26 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
   return (
     <details className="tz-conversation-turn__technical">
       <summary>技术日志</summary>
-      <div>消息编号：{turn.id}</div>
+      {turn.id != null ? <div>消息编号：{turn.id}</div> : null}
       {route ? <div>路由：{route}</div> : null}
-      {status ? <div>状态：{status}</div> : null}
+      {turn.intent?.route_source ? <div>路由来源：{turn.intent.route_source}</div> : null}
+      <div>状态：{turn.status}</div>
+      {turn.route_ms != null ? <div>路由耗时：{turn.route_ms} ms</div> : null}
+      {turn.first_token_ms != null ? <div>首字延迟：{turn.first_token_ms} ms</div> : null}
+      {turn.completion_ms != null ? <div>完成耗时：{turn.completion_ms} ms</div> : null}
+      {turn.total_ms != null ? <div>总耗时：{turn.total_ms} ms</div> : null}
+      {turn.model_call_count != null ? <div>模型调用：{turn.model_call_count} 次</div> : null}
       {execution?.type === "execution_summary" ? (
         <>
+          {execution.run_id ? <div>Agent Run：{execution.run_id}</div> : null}
           {execution.skill_code ? <div>Skill：{execution.skill_code}</div> : null}
+          {execution.skill_version != null ? (
+            <div>Skill 版本：v{execution.skill_version}</div>
+          ) : null}
           {execution.skill_run_id ? <div>Skill Run：{execution.skill_run_id}</div> : null}
+          {execution.quality_score != null ? (
+            <div>质量门：{Math.round(execution.quality_score * 100)} 分</div>
+          ) : null}
           {execution.experts.map((expert) => (
             <div key={expert.id}>
               Expert #{expert.id} · {expert.agent_code} · {expert.status}
@@ -168,12 +211,27 @@ function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {
           {execution.tools.map((tool) => (
             <div key={tool.id}>
               Tool #{tool.id} · {tool.tool_code} · {tool.status}
+              {tool.retry_count != null ? ` · 重试 ${tool.retry_count} 次` : ""}
             </div>
           ))}
+          {execution.error_code ? <div>错误代码：{execution.error_code}</div> : null}
+          {execution.recovery_action ? <div>恢复建议：{execution.recovery_action}</div> : null}
         </>
       ) : null}
     </details>
   );
+}
+
+function turnStatusCopy(status: string) {
+  if (["claimed", "waiting_predecessor", "queued"].includes(status)) return "等待中";
+  if (["running", "retry_wait"].includes(status)) return "执行中";
+  if (["completed"].includes(status)) return "完成";
+  if (["blocked", "waiting_permission", "waiting_decision", "waiting_user"].includes(status)) {
+    return "需处理";
+  }
+  if (["failed", "dead_letter"].includes(status)) return "执行失败";
+  if (["cancelled", "stopped"].includes(status)) return "已停止";
+  return "状态更新";
 }
 
 function Projection({
@@ -198,7 +256,7 @@ function Projection({
   approving: boolean;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
-  onApprove?: (approval: AgentToolCall, approved: boolean, comment?: string) => void;
+  onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
   artifactRefreshKey: number;
@@ -234,12 +292,21 @@ function Projection({
     case "execution_summary":
       return (
         <section {...shared} aria-label="Execution summary">
-          <strong>调用专家</strong>
-          <div>
-            {projection.experts.length > 0
-              ? projection.experts.map((expert) => expert.agent_name).join("、")
-              : "本次未调用专家"}
-          </div>
+          {projection.experts.length > 0 ? (
+            <>
+              <strong>调用专家</strong>
+              <div>{projection.experts.map((expert) => expert.agent_name).join("、")}</div>
+            </>
+          ) : projection.tools.length > 0 ? (
+            <>
+              <strong>调用工具</strong>
+              <div>{projection.tools.map((tool) => tool.tool_name).join("、")}</div>
+            </>
+          ) : projection.quality_score != null ? (
+            <strong>质量审核</strong>
+          ) : (
+            <strong>执行记录</strong>
+          )}
           {projection.quality_score != null ? (
             <div>质量评分：{Math.round(projection.quality_score * 100)} 分</div>
           ) : null}
@@ -365,7 +432,7 @@ function projectionKey(projection: TurnProjection, turnId: number) {
   }
 }
 
-function readableIntent(intent: Record<string, unknown> | null, key: string) {
+function readableIntent(intent: ConversationTurn["intent"], key: "mode") {
   const value = intent?.[key];
   return typeof value === "string" && value.length <= 80 ? value : null;
 }

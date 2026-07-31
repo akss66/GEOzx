@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -113,16 +114,12 @@ class _FakeTools:
                 "data_sync_status": "ready",
             }
 
-        async def data_context(
-            _params: _DaysParams, context: ToolExecutionContext
-        ) -> dict:
+        async def data_context(_params: _DaysParams, context: ToolExecutionContext) -> dict:
             calls.append("account.data_context")
             return {
                 "account_id": context.account_id,
                 "period": {"days": 30, "start": "2026-06-29", "end": "2026-07-28"},
-                "coverage": {
-                    "content_metrics": "available" if sufficient_flag else "missing"
-                },
+                "coverage": {"content_metrics": "available" if sufficient_flag else "missing"},
                 "metrics": (
                     {
                         "play": {
@@ -142,9 +139,7 @@ class _FakeTools:
                     else {}
                 ),
                 "sources": (
-                    [{"batch_id": 7, "source_kind": "platform_export"}]
-                    if sufficient_flag
-                    else []
+                    [{"batch_id": 7, "source_kind": "platform_export"}] if sufficient_flag else []
                 ),
                 "content_snapshot_count": 3 if sufficient_flag else 0,
                 "account_snapshot_count": 1 if sufficient_flag else 0,
@@ -157,12 +152,14 @@ class _FakeTools:
                         name="account.profile",
                         handler=profile,
                         params_model=_EmptyParams,
+                        side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
                     ),
                     ToolSpec(
                         name="account.data_context",
                         handler=data_context,
                         params_model=_DaysParams,
+                        side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
                     ),
                 ]
@@ -180,12 +177,13 @@ class _FakeHarness:
     async def execute(self, *args, **kwargs):
         self.calls.append(kwargs["code"])
         session = args[0]
+        scope = kwargs["scope"]
         invocation = AgentInvocation(
             task_id=kwargs["task"].id,
-            run_id=kwargs["run_id"],
-            skill_run_id=kwargs["skill_run_id"],
-            thread_id=kwargs["thread_id"],
-            turn_id=kwargs["turn_id"],
+            run_id=scope.run_id,
+            skill_run_id=scope.skill_run_id,
+            thread_id=scope.thread_id,
+            turn_id=scope.turn_id,
             step_key=kwargs["step_key"],
             attempt=kwargs["attempt"],
             agent_code=kwargs["code"],
@@ -273,9 +271,7 @@ async def test_account_inspection_reports_missing_data_without_fabricated_metric
     session,
     admin,
 ) -> None:
-    account, thread, turn, run = await _conversation_scope(
-        session, admin, key="inspection-missing"
-    )
+    account, thread, turn, run = await _conversation_scope(session, admin, key="inspection-missing")
     runtime = SkillRuntime(
         tool_executor=_FakeTools(sufficient=False),
         harness=_FakeHarness(),
@@ -299,6 +295,45 @@ async def test_account_inspection_reports_missing_data_without_fabricated_metric
     assert "无法" in report.summary
     assert all("output" not in finding for finding in report.findings)
     assert report.account_id == account.id
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_retryable_infrastructure_failure_bubbles_to_worker(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-retryable"
+    )
+
+    class RetryableTools:
+        async def execute(self, **_kwargs):
+            raise HTTPException(status_code=503, detail="provider-secret")
+
+    runtime = SkillRuntime(
+        tool_executor=RetryableTools(),
+        harness=_FakeHarness(),
+        critic=_PassingCritic(),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await runtime.execute(
+            session,
+            user=admin,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="account_inspection",
+            days=30,
+        )
+
+    assert caught.value.status_code == 503
+    skill_run = await session.scalar(select(SkillRun))
+    task = await session.scalar(select(BrainTask))
+    assert skill_run is not None
+    assert task is not None
+    assert skill_run.status == "running"
+    assert task.status == BrainTaskStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -352,9 +387,7 @@ async def test_account_inspection_runs_bounded_graph_and_persists_one_artifact(
     assert persisted.payload["artifact_type"] == "account_inspection_report"
     assert persisted.payload["data_sufficiency"] == "sufficient"
     assert persisted.payload["next_action"]
-    assert persisted.payload["evidence_refs"] == [
-        {"kind": "data_import_batch", "id": 7}
-    ]
+    assert persisted.payload["evidence_refs"] == [{"kind": "data_import_batch", "id": 7}]
     assert (
         await session.scalar(
             select(func.count(AgentQualityScore.id)).where(
@@ -527,18 +560,19 @@ async def test_account_inspection_concurrent_creator_reuses_unique_winner(
     harness = _FakeHarness()
     critic = _PassingCritic()
     runtime = SkillRuntime(tool_executor=tools, harness=harness, critic=critic)
+    original_flush = session.flush
     original_commit = session.commit
     injected = False
     account_id = thread.account_id
 
-    async def commit_with_concurrent_winner():
+    async def flush_with_concurrent_winner(*args, **kwargs):
         nonlocal injected
         pending = next(
             (item for item in session.new if isinstance(item, SkillRun)),
             None,
         )
         if pending is None or injected:
-            return await original_commit()
+            return await original_flush(*args, **kwargs)
         injected = True
         values = {
             "org_id": pending.org_id,
@@ -569,7 +603,7 @@ async def test_account_inspection_concurrent_creator_reuses_unique_winner(
         await original_commit()
         raise IntegrityError("INSERT skill_runs", {}, RuntimeError("unique"))
 
-    monkeypatch.setattr(session, "commit", commit_with_concurrent_winner)
+    monkeypatch.setattr(session, "flush", flush_with_concurrent_winner)
     result = await runtime.execute(
         session,
         user=admin,
@@ -628,9 +662,7 @@ async def test_account_inspection_active_owner_reuses_running_winner_without_ree
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key=(
-            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
-        ),
+        idempotency_key=(f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"),
         skill_code="account_inspection",
         skill_version=ACCOUNT_INSPECTION_SKILL.version,
         status="running",
@@ -746,9 +778,7 @@ async def test_account_inspection_crash_replay_closes_stale_running_side_effects
         turn_id=turn.id,
         run_id=run.id,
         task_id=task.id,
-        idempotency_key=(
-            f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"
-        ),
+        idempotency_key=(f"skill:account_inspection:v{ACCOUNT_INSPECTION_SKILL.version}"),
         skill_code="account_inspection",
         skill_version=ACCOUNT_INSPECTION_SKILL.version,
         status="running",
@@ -931,12 +961,8 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
             requires_operation_task=True,
         )
 
-    monkeypatch.setattr(
-        "app.services.turn_execution.skill_runtime.execute", fake_execute
-    )
-    monkeypatch.setattr(
-        "app.services.turn_execution.brain_intelligence.classify_turn", classify
-    )
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime.execute", fake_execute)
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
     explicit = await execute_conversation_turn(
         session,
         admin,

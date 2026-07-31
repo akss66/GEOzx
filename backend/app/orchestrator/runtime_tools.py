@@ -13,6 +13,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.config import settings
 from app.core.workspace_access import require_account_access
 from app.models import User
 from app.models.enums import UserRole
@@ -35,6 +36,23 @@ class AccountMetricsParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     days: int = Field(default=30, ge=1, le=90)
+
+
+class DeterministicConfirmActionParams(BaseModel):
+    """Empty payload for the CI-only approval boundary tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+async def _deterministic_confirm_action(
+    _params: DeterministicConfirmActionParams,
+    context: ToolExecutionContext,
+) -> dict[str, Any]:
+    return {
+        "approved": context.approved,
+        "account_id": context.account_id,
+        "status": "test_action_completed",
+    }
 
 
 async def _account_profile(
@@ -203,9 +221,7 @@ def _metric_context(metric_name: str, metrics: list[AccountDataMetric]) -> dict[
     return {
         "value": value,
         "source": (
-            source_values[0]
-            if len(source_values) == 1
-            else ("mixed" if source_values else None)
+            source_values[0] if len(source_values) == 1 else ("mixed" if source_values else None)
         ),
         "sources": source_values,
         "observed_at": _iso(latest_observed_at),
@@ -256,6 +272,7 @@ _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.profile",
         handler=_tool_handler(AccountProfileParams, _account_profile),
+        side_effect_level="read",
         params_model=AccountProfileParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
@@ -263,6 +280,7 @@ _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.data_context",
         handler=_tool_handler(AccountMetricsParams, _account_data_context),
+        side_effect_level="read",
         params_model=AccountMetricsParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
@@ -270,6 +288,7 @@ _RUNTIME_TOOL_SPECS = (
     ToolSpec(
         name="account.metrics_summary",
         handler=_tool_handler(AccountMetricsParams, _account_metrics_summary),
+        side_effect_level="read",
         params_model=AccountMetricsParams,
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
@@ -277,13 +296,33 @@ _RUNTIME_TOOL_SPECS = (
 )
 
 
+def _runtime_tool_specs() -> tuple[ToolSpec, ...]:
+    if not (settings.environment == "test" and settings.llm_deterministic_test_provider_enabled):
+        return _RUNTIME_TOOL_SPECS
+    return (
+        *_RUNTIME_TOOL_SPECS,
+        ToolSpec(
+            name="test.confirm_action",
+            handler=_tool_handler(
+                DeterministicConfirmActionParams,
+                _deterministic_confirm_action,
+            ),
+            side_effect_level="idempotent_write",
+            params_model=DeterministicConfirmActionParams,
+            allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+            permission_mode="confirm",
+            scope="account",
+        ),
+    )
+
+
 def build_runtime_tool_adapter() -> ToolAdapter:
-    return ToolAdapter(list(_RUNTIME_TOOL_SPECS))
+    return ToolAdapter(list(_runtime_tool_specs()))
 
 
 def runtime_tool_capabilities(user: User) -> list[dict[str, Any]]:
     capabilities: list[dict[str, Any]] = []
-    for spec in _RUNTIME_TOOL_SPECS:
+    for spec in _runtime_tool_specs():
         if user.role not in spec.allowed_roles or spec.permission_mode == "disabled":
             continue
         capabilities.append(
@@ -301,6 +340,8 @@ def runtime_tool_capabilities(user: User) -> list[dict[str, Any]]:
 
 
 def _tool_description(code: str) -> str:
+    if code == "test.confirm_action":
+        return "CI-only controlled action used to verify approval persistence."
     return {
         "account.profile": "读取当前已选账号的公开概况和接入状态",
         "account.data_context": "读取当前账号统一数据视图、指标证据、覆盖度、时效与冲突",

@@ -48,6 +48,7 @@ from app.models import (
     DeliverableAcceptance,
     Event,
     ReflectionRecord,
+    SkillRun,
     StrategyPlan,
     TaskBrief,
     User,
@@ -74,8 +75,9 @@ from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_i
 from app.orchestrator.capability_registry import runtime_capabilities
 from app.orchestrator.main_kernel import MainKernelActionExecutor, MainKernelRoute
 from app.orchestrator.runtime_budget import RuntimeBudgetGuard, RuntimeBudgetLimits
+from app.orchestrator.runtime_scope import RuntimeScope, RuntimeScopeConflict
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
-from app.orchestrator.tool_executor import DurableToolExecutor
+from app.orchestrator.tool_executor import DurableToolExecutor, ToolExecutionOutcome
 from app.prompts import prompt_registry
 from app.schemas.brain import (
     DecisionRequest,
@@ -88,6 +90,11 @@ from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.ai_coo_evidence import build_account_situation
 from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.runtime_memory import runtime_memory_service
+from app.services.runtime_state import (
+    RuntimeEventSpec,
+    RuntimeStateScope,
+    close_runtime_state,
+)
 
 
 class BrainRuntimeState(TypedDict, total=False):
@@ -153,8 +160,7 @@ _BOUNDED_WORKFLOW_ACKNOWLEDGEMENT = (
     "只有对应专家实际完成分析后，才会向你交付正式结论。"
 )
 _SPECIALIST_RESULT_BLOCKED_MESSAGE = (
-    "本轮未获得已完成的专家分析，因此不能生成正式诊断结论。"
-    "请检查账号授权和专家执行状态后重试。"
+    "本轮未获得已完成的专家分析，因此不能生成正式诊断结论。请检查账号授权和专家执行状态后重试。"
 )
 
 
@@ -296,11 +302,7 @@ class BrainRuntimeGraph:
 
         if run.task_id is not None:
             raise ValueError("task-free Turn delivery cannot own a BrainTask")
-        if (
-            run.turn_id != turn.id
-            or run.thread_id != turn.thread_id
-            or run.org_id != turn.org_id
-        ):
+        if run.turn_id != turn.id or run.thread_id != turn.thread_id or run.org_id != turn.org_id:
             raise ValueError("AgentRun and ConversationTurn ownership do not match")
         client_message_id = str(run.client_message_id or "")
         if not client_message_id:
@@ -620,7 +622,11 @@ class BrainRuntimeGraph:
                 "finish": "smart_summarize",
             },
         )
-        smart_graph.add_edge("execute_tools", "collect_permissions")
+        smart_graph.add_conditional_edges(
+            "execute_tools",
+            self._route_after_tool_execution,
+            {"waiting": END, "continue": "collect_permissions"},
+        )
         smart_graph.add_conditional_edges(
             "decision_gate",
             self._route_after_decision_gate,
@@ -682,7 +688,11 @@ class BrainRuntimeGraph:
                 "finish": "smart_summarize",
             },
         )
-        smart_resume_graph.add_edge("execute_tools", "smart_permission_gate")
+        smart_resume_graph.add_conditional_edges(
+            "execute_tools",
+            self._route_after_tool_execution,
+            {"waiting": END, "continue": "smart_permission_gate"},
+        )
         smart_resume_graph.add_conditional_edges(
             "decision_gate",
             self._route_after_decision_gate,
@@ -880,9 +890,7 @@ class BrainRuntimeGraph:
                 "round_index": 1,
                 "required_expert_codes": expert_codes,
                 "selected_experts": (
-                    expert_codes
-                    if route_decision.mode is TurnExecutionMode.SKILL
-                    else []
+                    expert_codes if route_decision.mode is TurnExecutionMode.SKILL else []
                 ),
                 "selected_tool_calls": [],
                 "observations": [],
@@ -1053,7 +1061,7 @@ class BrainRuntimeGraph:
                             "kind": "permission",
                             "tool_call_id": tool_call.id,
                             "approved": approved,
-                        }
+                        },
                     ),
                     config=self.graph_config(task.thread_id),
                 )
@@ -1221,7 +1229,7 @@ class BrainRuntimeGraph:
                             "decision_id": decision_id,
                             "choice_id": choice_id,
                             "choice_title": choice_title,
-                        }
+                        },
                     ),
                     config=self.graph_config(thread_id),
                 )
@@ -1383,9 +1391,7 @@ class BrainRuntimeGraph:
             existing_invocation_ids = set(
                 (
                     await session.scalars(
-                        select(AgentInvocation.id).where(
-                            AgentInvocation.task_id == task.id
-                        )
+                        select(AgentInvocation.id).where(AgentInvocation.task_id == task.id)
                     )
                 ).all()
             )
@@ -1466,11 +1472,7 @@ class BrainRuntimeGraph:
                     .order_by(AgentInvocation.id)
                 )
             ).all()
-            current = [
-                row
-                for row in rows
-                if row.id in current_invocation_ids
-            ]
+            current = [row for row in rows if row.id in current_invocation_ids]
             observations = list(state.get("observations", []))
             for invocation in current:
                 code = _agent_code_value(invocation.agent_code)
@@ -1514,11 +1516,7 @@ class BrainRuntimeGraph:
                     Deliverable,
                     int(output["deliverable_id"]),
                 )
-                if (
-                    invocation is None
-                    or invocation.task_id != task.id
-                    or deliverable is None
-                ):
+                if invocation is None or invocation.task_id != task.id or deliverable is None:
                     failed.append(
                         {
                             **output,
@@ -1584,10 +1582,7 @@ class BrainRuntimeGraph:
                     task,
                     "brain.runtime.critic_scored",
                     {
-                        "message": (
-                            f"{invocation.agent_name}质量评分 "
-                            f"{recorded.score.score} 分。"
-                        ),
+                        "message": (f"{invocation.agent_name}质量评分 {recorded.score.score} 分。"),
                         "invocation_id": invocation.id,
                         "deliverable_id": deliverable.id,
                         "quality_score_id": recorded.score.id,
@@ -1621,8 +1616,7 @@ class BrainRuntimeGraph:
                 }
 
             requires_human = any(
-                item["disposition"] == CriticDisposition.HUMAN.value
-                for item in failed
+                item["disposition"] == CriticDisposition.HUMAN.value for item in failed
             )
             if not requires_human and iteration < 2:
                 for item in failed:
@@ -1702,6 +1696,13 @@ class BrainRuntimeGraph:
             project_id = task.brief.project_id if task.brief else None
             executor = DurableToolExecutor(build_runtime_tool_adapter())
             observations = list(state.get("observations", []))
+            scope = await _main_tool_runtime_scope(
+                session,
+                task=task,
+                user=user,
+                account_id=account_id,
+                agent_run_id=state.get("agent_run_id"),
+            )
 
             for payload in state.get("selected_tool_calls", [])[:5]:
                 request = RuntimeToolCall.model_validate(payload)
@@ -1721,9 +1722,21 @@ class BrainRuntimeGraph:
                     request=request,
                     project_id=project_id,
                     account_id=account_id,
+                    scope=scope,
                 )
                 if outcome.status == "waiting_approval":
                     continue
+                if outcome.status == "ambiguous":
+                    return await self._converge_ambiguous_tool_result(
+                        session=session,
+                        state=state,
+                        task=task,
+                        request=request,
+                        outcome=outcome,
+                        account_id=account_id,
+                        project_id=project_id,
+                        observations=observations,
+                    )
                 observation = {
                     "kind": "tool_result",
                     "tool_call_id": outcome.tool_call.id,
@@ -1744,6 +1757,137 @@ class BrainRuntimeGraph:
         return {
             **state,
             "status": "tools_executed",
+            "selected_tool_calls": [],
+            "observations": observations,
+        }
+
+    async def _converge_ambiguous_tool_result(
+        self,
+        *,
+        session: AsyncSession,
+        state: BrainRuntimeState,
+        task: BrainTask,
+        request: RuntimeToolCall,
+        outcome: ToolExecutionOutcome,
+        account_id: int | None,
+        project_id: int | None,
+        observations: list[dict[str, Any]],
+    ) -> BrainRuntimeState:
+        """Pause an uncertain external write without replaying or claiming success."""
+
+        tool_call = outcome.tool_call
+        if tool_call.task_id != task.id:
+            raise ValueError("ambiguous ToolCall does not belong to the active BrainTask")
+
+        error_code = "TOOL_RESULT_AMBIGUOUS"
+        message = (
+            "外部操作的最终结果暂时无法确认。为避免重复执行，系统已停止自动重试；"
+            "请先核对平台实际状态，再决定下一步。"
+        )
+        run_id = int(state.get("agent_run_id") or 0)
+        run: AgentRun | None = None
+        if run_id:
+            run = await session.scalar(
+                select(AgentRun)
+                .where(AgentRun.id == run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                run is None
+                or run.task_id != task.id
+                or run.org_id != task.org_id
+                or (tool_call.thread_id is not None and tool_call.thread_id != run.thread_id)
+                or (tool_call.turn_id is not None and tool_call.turn_id != run.turn_id)
+            ):
+                raise ValueError("ambiguous ToolCall AgentRun provenance does not match")
+        skill_run_id = int(tool_call.skill_run_id or 0)
+        skill_run: SkillRun | None = None
+        if skill_run_id:
+            if run is None:
+                raise ValueError("ambiguous SkillRun requires an active AgentRun")
+            skill_run = await session.scalar(
+                select(SkillRun)
+                .where(SkillRun.id == skill_run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                skill_run is None
+                or skill_run.task_id != task.id
+                or skill_run.run_id != run.id
+                or skill_run.thread_id != tool_call.thread_id
+                or skill_run.turn_id != tool_call.turn_id
+                or skill_run.org_id != task.org_id
+            ):
+                raise ValueError("ambiguous ToolCall SkillRun provenance does not match")
+            skill_run.status = "stopped"
+            skill_run.error_code = error_code
+            skill_run.output_snapshot = {
+                **dict(skill_run.output_snapshot or {}),
+                "status": "ambiguous",
+                "tool_call_id": tool_call.id,
+                "tool_code": request.tool_code,
+                "error_code": error_code,
+            }
+
+        ambiguous_payload = {
+            "message": message,
+            "status": "ambiguous",
+            "error_code": error_code,
+            "tool_call_id": tool_call.id,
+            "tool_code": request.tool_code,
+            **({"skill_run_id": skill_run.id} if skill_run is not None else {}),
+        }
+        if run_id:
+            closure = await close_runtime_state(
+                session,
+                scope=RuntimeStateScope(
+                    run_id=run_id,
+                    turn_id=run.turn_id,
+                    task_id=task.id,
+                    account_id=account_id,
+                    project_id=project_id,
+                    content_item_id=task.content_item_id,
+                    result_payload={
+                        **ambiguous_payload,
+                        "runtime_status": "waiting_user",
+                    },
+                    error_detail=message,
+                    extra_events=(
+                        RuntimeEventSpec(
+                            event_type="brain.runtime.tool_ambiguous",
+                            semantic_key=f"tool-ambiguous:{tool_call.id}",
+                            payload=ambiguous_payload,
+                        ),
+                    ),
+                ),
+                status="waiting_user",
+                message=message,
+                error_code=error_code,
+            )
+            if closure.turn is None:
+                await self._record_event(
+                    session,
+                    task,
+                    "brain.runtime.tool_ambiguous",
+                    ambiguous_payload,
+                )
+        else:
+            task.status = BrainTaskStatus.PENDING_CONFIRMATION
+            task.current_focus = message[:500]
+            await self._record_event(
+                session,
+                task,
+                "brain.runtime.tool_ambiguous",
+                ambiguous_payload,
+            )
+
+        return {
+            **state,
+            "status": "waiting_user",
+            "kernel_route": MainKernelRoute.WAITING.value,
+            "termination_reason": "tool_result_ambiguous",
             "selected_tool_calls": [],
             "observations": observations,
         }
@@ -1859,18 +2003,14 @@ class BrainRuntimeGraph:
                 user = await session.get(User, task.created_by_id)
                 if user is None or user.org_id != task.org_id:
                     raise PermissionError("brain task creator is unavailable")
-                outcome = await DurableToolExecutor(
-                    build_runtime_tool_adapter()
-                ).execute(
+                outcome = await DurableToolExecutor(build_runtime_tool_adapter()).execute(
                     task=task,
                     user=user,
                     request=RuntimeToolCall(
                         tool_code="account.data_context",
                         arguments={"days": 30},
                         purpose="Load the selected account data card.",
-                        idempotency_key=(
-                            f"query-data-card:{state.get('agent_run_id') or task.id}"
-                        ),
+                        idempotency_key=(f"query-data-card:{state.get('agent_run_id') or task.id}"),
                     ),
                     project_id=task.brief.project_id if task.brief else None,
                     account_id=int(account_id),
@@ -1885,9 +2025,7 @@ class BrainRuntimeGraph:
                 task,
                 str(card),
                 model="tool:account.data_context",
-                client_message_id=(
-                    runtime_identity[3] if runtime_identity is not None else None
-                ),
+                client_message_id=(runtime_identity[3] if runtime_identity is not None else None),
             )
             await self._record_event(
                 session,
@@ -1941,9 +2079,7 @@ class BrainRuntimeGraph:
                     account_id=account_id,
                 )
                 situation_summary = situation.model_dump(mode="json")
-                evidence_refs = [
-                    item.model_dump(mode="json") for item in situation.evidence_refs
-                ]
+                evidence_refs = [item.model_dump(mode="json") for item in situation.evidence_refs]
             task.current_focus = "运营大脑正在核对真实数据与运营态势"
             await self._record_event(
                 session,
@@ -2023,9 +2159,7 @@ class BrainRuntimeGraph:
                 task,
                 "brain.runtime.task_planned",
                 {
-                    "message": (
-                        "运营大脑已完成按需任务拆解，接下来只调用必要专家。"
-                    ),
+                    "message": ("运营大脑已完成按需任务拆解，接下来只调用必要专家。"),
                     "steps": task_plan,
                 },
             )
@@ -2062,13 +2196,9 @@ class BrainRuntimeGraph:
                 raise PermissionError("brain task creator is unavailable")
             capabilities = await runtime_capabilities(session, user)
             required_expert_codes = _required_expert_codes(state, task)
-            successful_expert_codes = _successful_expert_codes(
-                state.get("observations", [])
-            )
+            successful_expert_codes = _successful_expert_codes(state.get("observations", []))
             available_expert_codes = {
-                str(item["code"])
-                for item in capabilities
-                if item.get("kind") == "expert"
+                str(item["code"]) for item in capabilities if item.get("kind") == "expert"
             }
             try:
                 step = await brain_intelligence.decide_next(
@@ -2083,22 +2213,18 @@ class BrainRuntimeGraph:
                 pending_expert_codes = [
                     code
                     for code in required_expert_codes
-                    if code in available_expert_codes
-                    and code not in successful_expert_codes
+                    if code in available_expert_codes and code not in successful_expert_codes
                 ][:3]
                 if pending_expert_codes:
                     step = RuntimeNextStep(
                         action="dispatch_experts",
-                        expert_codes=[
-                            AgentCode(code) for code in pending_expert_codes
-                        ],
+                        expert_codes=[AgentCode(code) for code in pending_expert_codes],
                         rationale=(
                             "本轮结构化控制决策未通过校验，"
                             "按运营大脑已经生成的动态任务计划继续执行必要专家步骤。"
                         ),
                         handoff_message=(
-                            "我按刚刚制定的计划继续推进，"
-                            "先把这一步交给对应专家处理。"
+                            "我按刚刚制定的计划继续推进，先把这一步交给对应专家处理。"
                         ),
                         purpose="恢复动态计划中的必要专家步骤",
                         evidence_refs=["dynamic-plan-recovery"],
@@ -2108,10 +2234,7 @@ class BrainRuntimeGraph:
                         task,
                         "brain.runtime.decision_recovered",
                         {
-                            "message": (
-                                "结构化决策已安全恢复，"
-                                "继续执行动态计划中的必要专家步骤。"
-                            ),
+                            "message": ("结构化决策已安全恢复，继续执行动态计划中的必要专家步骤。"),
                             "reason": str(exc),
                             "expert_codes": pending_expert_codes,
                         },
@@ -2144,24 +2267,18 @@ class BrainRuntimeGraph:
                 and not successful_expert_codes.intersection(required_expert_codes)
             ):
                 pending_expert_codes = [
-                    code
-                    for code in required_expert_codes
-                    if code in available_expert_codes
+                    code for code in required_expert_codes if code in available_expert_codes
                 ][:3]
                 if pending_expert_codes:
                     step = step.model_copy(
                         update={
                             "action": "dispatch_experts",
-                            "expert_codes": [
-                                AgentCode(code) for code in pending_expert_codes
-                            ],
+                            "expert_codes": [AgentCode(code) for code in pending_expert_codes],
                             "rationale": (
-                                "专业任务必须先取得对应专家的有效结论，"
-                                "运营大脑才能汇总或结束本轮。"
+                                "专业任务必须先取得对应专家的有效结论，运营大脑才能汇总或结束本轮。"
                             ),
                             "handoff_message": (
-                                "我先把这项专业任务交给对应专家处理，"
-                                "完成后再为你汇总结论。"
+                                "我先把这项专业任务交给对应专家处理，完成后再为你汇总结论。"
                             ),
                             "purpose": step.purpose or step.rationale,
                             "evidence_refs": list(step.evidence_refs) or ["intent-routing"],
@@ -2204,14 +2321,10 @@ class BrainRuntimeGraph:
 
             if step.action == "dispatch_experts":
                 allowed_codes = {
-                    str(item["code"])
-                    for item in capabilities
-                    if item.get("kind") == "expert"
+                    str(item["code"]) for item in capabilities if item.get("kind") == "expert"
                 }
                 requested = [
-                    code.value
-                    for code in step.expert_codes
-                    if code.value in allowed_codes
+                    code.value for code in step.expert_codes if code.value in allowed_codes
                 ]
                 requested_codes: list[str] = [str(code) for code in requested]
                 expert_authorization = budget_guard.authorize_experts(
@@ -2446,9 +2559,7 @@ class BrainRuntimeGraph:
                 task=task,
             )
             candidate_ids = [
-                str(item.get("key"))
-                for item in reflection.experience_candidates
-                if item.get("key")
+                str(item.get("key")) for item in reflection.experience_candidates if item.get("key")
             ]
             event_type = (
                 "brain.runtime.performance_observed"
@@ -2541,6 +2652,10 @@ class BrainRuntimeGraph:
     @staticmethod
     def _route_after_smart_permission(state: BrainRuntimeState) -> str:
         return "waiting" if state.get("pending_permissions") else "continue"
+
+    @staticmethod
+    def _route_after_tool_execution(state: BrainRuntimeState) -> str:
+        return "waiting" if state.get("status") == "waiting_user" else "continue"
 
     @staticmethod
     def _route_after_critic(state: BrainRuntimeState) -> str:
@@ -2668,9 +2783,7 @@ class BrainRuntimeGraph:
     def _route_after_permission_gate(self, state: BrainRuntimeState) -> str:
         return "waiting" if state.get("pending_permissions") else "continue"
 
-    def _subagent_lifecycle_event_type(
-        self, invocation: AgentInvocation
-    ) -> str | None:
+    def _subagent_lifecycle_event_type(self, invocation: AgentInvocation) -> str | None:
         if invocation.status == AgentInvocationStatus.DONE:
             return "brain.runtime.subagent_completed"
         if invocation.status in {
@@ -2714,9 +2827,7 @@ class BrainRuntimeGraph:
                 else str(invocation.agent_code)
             )
             action = (
-                "已完成本轮处理"
-                if event_type == "brain.runtime.subagent_completed"
-                else "处理失败"
+                "已完成本轮处理" if event_type == "brain.runtime.subagent_completed" else "处理失败"
             )
             await self._record_event(
                 session,
@@ -2740,9 +2851,7 @@ class BrainRuntimeGraph:
             _BOUNDED_WORKFLOW_ACKNOWLEDGEMENT,
             model="system",
             client_message_id=identity[3] if identity is not None else None,
-            semantic_key=_main_agent_message_semantic(
-                "main-agent.acknowledgement"
-            ),
+            semantic_key=_main_agent_message_semantic("main-agent.acknowledgement"),
         )
 
     async def _stream_summary_turn(
@@ -2797,15 +2906,9 @@ class BrainRuntimeGraph:
         if latest_invocation_run_id is None:
             invocation_filters.append(AgentInvocation.run_id.is_(None))
         else:
-            invocation_filters.append(
-                AgentInvocation.run_id == latest_invocation_run_id
-            )
+            invocation_filters.append(AgentInvocation.run_id == latest_invocation_run_id)
         completed_invocations = (
-            (
-                await session.scalars(
-                    select(AgentInvocation).where(*invocation_filters)
-                )
-            ).all()
+            (await session.scalars(select(AgentInvocation).where(*invocation_filters))).all()
             if invocation_ids
             else []
         )
@@ -2825,25 +2928,18 @@ class BrainRuntimeGraph:
                 "summary": row.output_summary,
             }
             for item in observations
-            if (row := completed_by_id.get(int(item.get("invocation_id") or 0)))
-            is not None
+            if (row := completed_by_id.get(int(item.get("invocation_id") or 0))) is not None
         ]
-        completed_codes = {
-            _agent_code_value(row.agent_code) for row in completed_invocations
-        }
+        completed_codes = {_agent_code_value(row.agent_code) for row in completed_invocations}
         missing_required_codes = required_codes - completed_codes
-        if missing_required_codes or (
-            expert_observations_present and not completed_observations
-        ):
+        if missing_required_codes or (expert_observations_present and not completed_observations):
             await self._stream_runtime_message(
                 session,
                 task,
                 _SPECIALIST_RESULT_BLOCKED_MESSAGE,
                 model="system",
                 client_message_id=identity[3] if identity is not None else None,
-                semantic_key=_main_agent_message_semantic(
-                    "main-agent.summary-blocked"
-                ),
+                semantic_key=_main_agent_message_semantic("main-agent.summary-blocked"),
             )
             await self._record_event(
                 session,
@@ -2868,10 +2964,7 @@ class BrainRuntimeGraph:
                 *history,
                 {
                     "role": "user",
-                    "content": (
-                        f"原目标：{task.brief.goal}\n"
-                        f"本轮可信成果：{summary_observations}"
-                    ),
+                    "content": (f"原目标：{task.brief.goal}\n本轮可信成果：{summary_observations}"),
                 },
             ],
         )
@@ -2932,9 +3025,7 @@ class BrainRuntimeGraph:
                     "message": result.content,
                     "content": result.content,
                     "client_message_id": client_message_id,
-                    "semantic_key": _main_agent_message_semantic(
-                        "main-agent.conversation"
-                    ),
+                    "semantic_key": _main_agent_message_semantic("main-agent.conversation"),
                 },
             )
 
@@ -3113,8 +3204,7 @@ class BrainRuntimeGraph:
             run_id=run_id,
             client_message_id=client_message_id,
             event_type="brain.runtime.message_done",
-            semantic_key=semantic_key
-            or _runtime_message_id(client_message_id, agent_code),
+            semantic_key=semantic_key or _runtime_message_id(client_message_id, agent_code),
         )
         return (
             await session.scalar(select(Event.id).where(Event.idempotency_key == key))
@@ -3226,31 +3316,25 @@ async def runtime_status(session: AsyncSession, task: BrainTask) -> str:
     )
     if latest_stopped_id > latest_started_id:
         return "stopped"
+    latest_ambiguous_id = max(
+        (event.id for event in events if event.type == "brain.runtime.tool_ambiguous"),
+        default=0,
+    )
     latest_waiting_user_id = max(
-        (
-            event.id
-            for event in events
-            if event.type == "brain.runtime.clarification_requested"
-        ),
+        (event.id for event in events if event.type == "brain.runtime.clarification_requested"),
         default=0,
     )
     latest_waiting_decision_id = max(
-        (
-            event.id
-            for event in events
-            if event.type == "brain.runtime.decision_requested"
-        ),
+        (event.id for event in events if event.type == "brain.runtime.decision_requested"),
         default=0,
     )
     latest_decision_selected_id = max(
-        (
-            event.id
-            for event in events
-            if event.type == "brain.runtime.decision_selected"
-        ),
+        (event.id for event in events if event.type == "brain.runtime.decision_selected"),
         default=0,
     )
     pending = await _pending_permissions(session, task.id, task.org_id)
+    if latest_ambiguous_id > latest_started_id:
+        return "waiting_user"
     if pending:
         return "waiting_permission"
     if latest_waiting_decision_id > max(latest_started_id, latest_decision_selected_id):
@@ -3281,15 +3365,15 @@ async def _pending_permissions(
     return list(
         (
             await session.scalars(
-            select(AgentToolCall)
-            .where(
-                AgentToolCall.task_id == task_id,
-                AgentToolCall.org_id == org_id,
-                AgentToolCall.requires_human_confirmation.is_(True),
-                AgentToolCall.status == "waiting_approval",
+                select(AgentToolCall)
+                .where(
+                    AgentToolCall.task_id == task_id,
+                    AgentToolCall.org_id == org_id,
+                    AgentToolCall.requires_human_confirmation.is_(True),
+                    AgentToolCall.status == "waiting_approval",
+                )
+                .order_by(AgentToolCall.id)
             )
-            .order_by(AgentToolCall.id)
-        )
         ).all()
     )
 
@@ -3482,6 +3566,40 @@ def _compact_context_text(value: str, limit: int = 1200) -> str:
     return text if len(text) <= limit else f"{text[:limit]}..."
 
 
+async def _main_tool_runtime_scope(
+    session: AsyncSession,
+    *,
+    task: BrainTask,
+    user: User,
+    account_id: int | None,
+    agent_run_id: int | None,
+) -> RuntimeScope | None:
+    """Bind V3 conversation tools to their immutable run provenance."""
+
+    if agent_run_id is None:
+        return None
+    if account_id is None:
+        raise RuntimeScopeConflict("main tool runtime has no selected account")
+    run = await session.get(AgentRun, agent_run_id)
+    if run is None or run.task_id != task.id:
+        raise RuntimeScopeConflict("main tool runtime has incomplete provenance")
+    if run.thread_id is None and run.turn_id is None:
+        return None
+    if run.thread_id is None or run.turn_id is None:
+        raise RuntimeScopeConflict("main tool runtime has partial conversation provenance")
+    scope = RuntimeScope(
+        org_id=task.org_id,
+        user_id=user.id,
+        account_id=account_id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        run_id=run.id,
+        task_id=task.id,
+    )
+    await scope.validate(session)
+    return scope
+
+
 async def _load_task(session: AsyncSession, task_id: int) -> BrainTask:
     task = await session.scalar(
         select(BrainTask)
@@ -3502,9 +3620,7 @@ def _required_expert_codes(
     task: BrainTask,
 ) -> list[str]:
     required = [
-        code
-        for code in state.get("required_expert_codes", [])
-        if code != AgentCode.DECISION.value
+        code for code in state.get("required_expert_codes", []) if code != AgentCode.DECISION.value
     ]
     if required or task.plan is None:
         return list(dict.fromkeys(required))
@@ -3512,8 +3628,7 @@ def _required_expert_codes(
         dict.fromkeys(
             str(step.get("agent_code"))
             for step in task.plan.steps
-            if step.get("agent_code")
-            and str(step.get("agent_code")) != AgentCode.DECISION.value
+            if step.get("agent_code") and str(step.get("agent_code")) != AgentCode.DECISION.value
         )
     )
 
@@ -3545,12 +3660,16 @@ def _expert_codes_for_route(
 ) -> list[str]:
     if route.mode is TurnExecutionMode.SKILL:
         normalized = (route.skill_code or "").strip().lower().replace("-", "_")
-        if normalized in {
-            "account_positioning",
-            "account_positioning_diagnosis",
-            "positioning",
-            "positioning_diagnosis",
-        } or "positioning" in normalized:
+        if (
+            normalized
+            in {
+                "account_positioning",
+                "account_positioning_diagnosis",
+                "positioning",
+                "positioning_diagnosis",
+            }
+            or "positioning" in normalized
+        ):
             return [AgentCode.POSITIONING.value]
     if intent is None:
         return []

@@ -128,4 +128,44 @@ describe("useEventStream", () => {
 
     expect(onEvent).toHaveBeenCalledTimes(2);
   });
+
+  it("does not drop start and delta frames when they reuse one durable event id", () => {
+    const onEvent = vi.fn();
+    renderHook(() => useEventStream(onEvent));
+    act(() => FakeWebSocket.instances[0].open());
+    act(() =>
+      FakeWebSocket.instances[0].emit({
+        id: 71,
+        type: "brain.runtime.message_start",
+        payload: { message_id: "m-1", stream_seq: 0 },
+      }),
+    );
+    act(() =>
+      FakeWebSocket.instances[0].emit({
+        id: 71,
+        type: "brain.runtime.message_delta",
+        payload: { message_id: "m-1", delta: "a", stream_seq: 1 },
+      }),
+    );
+    act(() =>
+      FakeWebSocket.instances[0].emit({
+        id: 71,
+        type: "brain.runtime.message_done",
+        payload: { message_id: "m-1", content: "ab", stream_seq: 2 },
+      }),
+    );
+
+    expect(onEvent).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ id: 71, type: "brain.runtime.message_start" }),
+    );
+    expect(onEvent).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ id: 71, type: "brain.runtime.message_delta" }),
+    );
+    expect(onEvent).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ id: 71, type: "brain.runtime.message_done" }),
+    );
+  });
 });

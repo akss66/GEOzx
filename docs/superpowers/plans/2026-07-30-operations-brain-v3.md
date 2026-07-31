@@ -1,0 +1,315 @@
+# 运营大脑 V3 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 将运营大脑升级为快速、可审计、账号隔离的混合式 Manager–Worker 运行架构。
+
+**Architecture:** ConversationTurn 是唯一用户消息入口。确定性路由优先处理明确请求，轻量模型仅处理歧义；主 Agent 保持对话控制，Skill Runtime 编排专家与 Tool，Runtime 统一状态、审批、幂等、重试和审计。
+
+**Tech Stack:** FastAPI、SQLAlchemy 2、Pydantic v2、React、TypeScript、TanStack Query、SSE、Pytest、Vitest、Playwright、PostgreSQL。
+
+## Global Constraints
+
+- 不删除或破坏 V2 的历史 Conversation、Turn、SkillRun、Artifact 和审计数据。
+- 不执行真实外部发布。
+- 每个增量必须先有失败测试，再写最小实现。
+- 新能力默认关闭或保持兼容，直到该增量的自动化测试和构建通过。
+- 用户界面只展示业务语言；模型、Schema、Tool 原始 JSON 默认折叠。
+
+---
+
+### Task 1: 确定性快速路由
+
+**Files:**
+- Modify: `backend/app/orchestrator/capability_router.py`
+- Modify: `backend/app/services/turn_execution.py`
+- Test: `backend/tests/test_capability_router.py`
+- Test: `backend/tests/test_turn_execution.py`
+
+**Interfaces:**
+- Produces: `route_deterministic_request(message, *, platform, registry, has_account) -> TurnRouteDecision | None`
+- Consumes: `SkillRegistry` 与已发布 Skill code。
+
+- [x] 写测试：问候、身份和能力询问返回 ANSWER；明确数据查询返回 QUERY；自然语言体检返回 SKILL；复杂歧义请求返回 `None`。
+- [x] 运行 `cd backend && uv run pytest tests/test_capability_router.py tests/test_turn_execution.py -q`，确认新增测试先失败。
+- [x] 实现高置信度、否定词安全的确定性路由，并在 `_route_turn` 调用模型前使用。
+- [x] 断言确定性命中时 `BrainIntelligence.classify_turn` 未被调用。
+- [x] 再次运行定向测试并提交 `feat: add deterministic main-agent routing`。
+
+### Task 2: 路由与回答模型分层
+
+**Files:**
+- Modify: `backend/app/models/enums.py`
+- Modify: `backend/app/orchestrator/brain_intelligence.py`
+- Modify: `backend/app/seed.py`
+- Create: `backend/migrations/versions/20260730_0100_main_agent_router_profile.py`
+- Test: `backend/tests/test_turn_intelligence.py`
+- Test: `backend/tests/test_model_infrastructure.py`
+
+**Interfaces:**
+- Produces: 独立路由 workload code `00-router`。
+- 保留: `00-decision` 作为主 Agent 回答和综合模型。
+
+- [x] 写测试：歧义分类调用 `00-router`，回答调用 `00-decision`。
+- [x] 写迁移测试：每个组织获得 Flash 路由配置，供应商/兜底来源与主 Agent 配置兼容。
+- [x] 运行定向测试确认失败。
+- [x] 增加路由 workload、种子和迁移；配置不存在时安全回退到 `00-decision`，不能使生产请求不可用。
+- [x] 运行定向测试并提交 `feat: separate router and answer model profiles`。
+
+### Task 3: Conversation Worker 化与可分类故障
+
+**Files:**
+- Modify: `backend/app/api/conversations.py`
+- Modify: `backend/app/worker.py`
+- Modify: `backend/app/llm/gateway.py`
+- Modify: `backend/app/core/runtime_failures.py`
+- Modify: `backend/app/services/agent_runs.py`
+- Modify: `backend/app/services/turn_execution.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_llm_gateway.py`
+- Test: `backend/tests/test_worker.py`
+- Test: `backend/tests/test_turn_execution.py`
+- Test: `backend/tests/test_account_inspection_skill.py`
+
+**Interfaces:**
+- Conversation API 只负责持久化 Turn/Run 并入队，Worker 负责正式执行。
+- `classify_runtime_failure(exc) -> FailureDisposition` 必须保留供应商 HTTP 状态和超时原因。
+
+- [x] 写测试：提交 Turn 返回已入队 Run，不能在 HTTP 请求线程内执行完整 Runtime。
+- [x] 写测试：409、权限和校验错误不重试；429、5xx、连接和响应超时有界重试。
+- [x] 写测试：LLM Gateway 包装异常后仍可识别原始状态码与 cause。
+- [x] 写测试：Query、Skill 和 operation 不吞掉可重试基础设施故障。
+- [x] 运行定向测试确认失败。
+- [x] 将 Conversation 初次执行接入现有 durable Worker；保留 SSE 通过 Run/Turn 关联推送。
+- [x] 调整 Gateway 安全异常包装，在不暴露供应商正文的同时保留类型化故障元数据。
+- [x] 业务错误继续生成可操作终态；可重试技术错误向 Worker 冒泡。
+- [x] 运行定向测试并提交 `feat: execute conversation turns through durable workers`。
+
+### Task 4: 统一 Turn/Run/SkillRun/Task 状态机
+
+**Files:**
+- Modify: `backend/app/models/conversation.py`
+- Modify: `backend/app/models/agent_runtime.py`
+- Modify: `backend/app/models/skill_runtime.py`
+- Modify: `backend/app/services/agent_runs.py`
+- Modify: `backend/app/services/turn_execution.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
+- Create: `backend/app/services/runtime_state.py`
+- Create: `backend/migrations/versions/20260730_0200_runtime_state_convergence.py`
+- Test: `backend/tests/test_agent_runs.py`
+- Test: `backend/tests/test_turn_execution.py`
+- Test: `backend/tests/test_account_inspection_skill.py`
+
+**Interfaces:**
+- Produces: `close_runtime_state(session, *, scope, status, message, error_code=None)`。
+- 状态族固定为 active、paused、terminal；等待审批属于 paused，不得继续显示 running。
+- ConversationTurn 允许状态：`queued`、`running`、`retry_wait`、`waiting_permission`、`waiting_decision`、`waiting_user`、`completed`、`blocked`、`failed`、`dead_letter`、`cancelled`、`stopped`。
+- AgentRun 保留 `claimed`、`waiting_predecessor` 以及上述状态；SkillRun 允许 `running`、`retry_wait`、`waiting_permission`、`completed`、`blocked`、`failed`、`cancelled`、`stopped`。
+- BrainTask 映射：active/retry 为 `RUNNING`；waiting/stopped 为 `PENDING_CONFIRMATION`；completed 为 `COMPLETED`；blocked/failed/dead_letter/cancelled 为 `FAILED`。
+
+- [x] 写参数化测试：completed、failed、dead_letter、cancelled、waiting_permission 在四类账本中的映射一致。
+- [x] 写测试：失败/取消只产生一条终态用户消息，重放不会重复写。
+- [x] 运行测试确认失败。
+- [x] 增加 Turn 状态和数据库约束，集中收口服务在一个事务中更新所有账本。
+- [x] 将 Worker、Skill 和 operation 的分散状态写入替换为集中收口调用。
+- [x] 运行迁移与定向测试并提交 `fix: converge runtime state across turn ledgers`。
+
+### Task 5: 账号、会话、轮次和成果来源约束
+
+**Files:**
+- Modify: `backend/app/models/conversation.py`
+- Modify: `backend/app/models/agent_runtime.py`
+- Modify: `backend/app/models/skill_runtime.py`
+- Modify: `backend/app/models/content.py`
+- Modify: `backend/app/models/brain.py`
+- Modify: `backend/app/services/conversations.py`
+- Modify: `backend/app/services/artifacts.py`
+- Modify: `backend/app/orchestrator/agent_harness.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
+- Modify: `backend/app/orchestrator/tool_executor.py`
+- Create: `backend/app/orchestrator/runtime_scope.py`
+- Create: `backend/app/services/runtime_deliverables.py`
+- Create: `backend/migrations/versions/20260730_0300_runtime_scope_constraints.py`
+- Test: `backend/tests/test_artifacts_api.py`
+- Test: `backend/tests/test_agent_harness.py`
+- Test: `backend/tests/test_runtime_tool_executor.py`
+- Test: `backend/tests/test_skill_runtime_models.py`
+- Test: `backend/tests/test_turn_provenance.py`
+- Test: `backend/tests/test_migrations.py`
+
+**Interfaces:**
+- Produces: `RuntimeScope(org_id, user_id, account_id, thread_id, turn_id, run_id, task_id, skill_run_id=None)`。
+- Produces: `RuntimeScope.from_conversation(...)`、`bind_task(...)`、`bind_skill(...)`；V3 写路径不得继续散传裸来源 ID。
+- Produces: `write_runtime_deliverable(session, *, scope, content, ...)`，由 Harness 与 Skill Runtime 共用。
+- 数据库仅强制“非空复合来源必须一致”；nullable legacy provenance 继续兼容，V3 的完整性由 `RuntimeScope` 在 flush 前拒绝。
+- `BrainTask.thread_id` 是图运行字符串，不是 ConversationThread 外键；不得据此推断会话。
+
+- [x] 写跨用户、跨组织、跨账号、跨 Thread、跨 Turn、跨 Task、跨 Run 和跨 SkillRun 挂载测试，全部必须在写入前拒绝。
+- [x] 写数据库约束测试：Run↔Task/org、SkillRun↔Run/Task/Turn、Invocation↔Run/SkillRun、ToolCall↔Invocation/SkillRun、Deliverable↔Turn/Run/SkillRun 的完整复合来源不一致时必须失败。
+- [x] 写 legacy 回归：来源全空仍可写；半 scope 在 V3 路径拒绝；不得按标题、时间、JSON account_ids 或图 thread_id 猜测回填。
+- [x] 写迁移 preflight：只允许从唯一 canonical SkillRun/Invocation 确定性补齐；任何冲突必须报告并使迁移事务回滚。
+- [x] 运行测试确认失败。
+- [x] 在 Harness、ToolExecutor、Skill Runtime 和 Artifact writer 边界应用完整 scope 校验；幂等 ToolCall 必须比较 invocation_id 与完整 scope。
+- [x] 增加可行的组合来源约束并保持现有删除顺序：正式成果保留，删除会话后 provenance 置空。
+- [x] 人工 Artifact revision 复制 provenance 前先验证历史来源自洽；坏 lineage 返回 409，不能继续复制。
+- [x] 运行迁移与定向测试并提交 `fix: enforce runtime scope and lineage constraints`。
+
+### Task 6: Skill 恢复、专家编排与按需质量门
+
+**Files:**
+- Modify: `backend/app/worker.py`
+- Modify: `backend/app/models/skill_runtime.py`
+- Modify: `backend/app/schemas/skills.py`
+- Modify: `backend/app/services/turn_execution.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
+- Modify: `backend/app/orchestrator/skills/registry.py`
+- Modify: `backend/app/orchestrator/skills/account_inspection.py`
+- Modify: `backend/app/orchestrator/skills/operating_tasks.py`
+- Modify: `backend/app/orchestrator/agent_harness.py`
+- Create: `backend/migrations/versions/20260730_0400_skill_recovery_freeze.py`
+- Test: `backend/tests/test_skill_runtime_models.py`
+- Test: `backend/tests/test_skill_registry.py`
+- Test: `backend/tests/test_account_inspection_skill.py`
+- Test: `backend/tests/test_operating_skills.py`
+- Test: `backend/tests/test_agent_harness.py`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_migrations.py`
+
+**Interfaces:**
+- 恢复使用持久化 `skill_code + skill_version + input_hash`，不得自动升级 Registry 版本。
+- 逻辑幂等键不含版本；恢复优先使用显式 SkillRun，多个非终态候选必须冲突，不能选择“最新一条”。
+- SkillDefinition 明确 `expert_stages`、`tool_codes`、`critic_policy`、`artifact_type`。
+- 同一专家 stage 使用独立 AsyncSession 有界并行；Invocation 自身保存 trace 输出，父会话只按定义顺序汇总 DTO。
+- 正式成果必须引用已完成的专家 Invocation，producer 不得为 `00-decision`。
+- 普通 ANSWER/QUERY 不进入 Critic。
+
+- [x] 写测试：v1 运行中部署 v2 后仍恢复 v1 和原始输入；精确版本缺失时阻塞，不回退最新版本。
+- [x] 写测试：持久化快照 hash 被篡改、相同幂等键不同输入、并发 winner 的 version/hash/scope 不同必须冲突。
+- [x] 写测试：旧 versioned 幂等键可恢复；多个非终态 legacy SkillRun 必须返回恢复歧义。
+- [x] 写测试：同 stage 专家用独立 session 真实并行，结果按定义顺序汇总；下一 stage 只读取已完成的前序输出。
+- [x] 写测试：Invocation 独立保存 trace 输出且可恢复；任一专家失败时正式 Deliverable 数量为 0。
+- [x] 写测试：正式成果 producer 来自专家 Invocation，不是 `00-decision`；required policy 调 Critic，none/ANSWER/QUERY 零 Critic。
+- [x] 运行测试确认失败。
+- [x] 迁移 canonical backfill `input_hash`，遇到重复活跃 SkillRun 或坏快照时整体回滚。
+- [x] 冻结 Skill 恢复参数；实现独立会话有界并行、Invocation trace 权威存储和按需质量门。
+- [x] Registry 保留所有仍可能恢复的版本；旧 AgentRun trace 只作为兼容读取 fallback。
+- [x] 运行定向测试并提交 `feat: freeze skill recovery and bound expert quality gates`。
+
+### Task 7: 对话删除生命周期和外部副作用幂等
+
+**Files:**
+- Modify: `backend/app/services/conversations.py`
+- Modify: `backend/app/services/runtime_state.py`
+- Modify: `backend/app/models/brain.py`
+- Modify: `backend/app/models/__init__.py`
+- Modify: `backend/app/orchestrator/tool_executor.py`
+- Modify: `backend/app/orchestrator/runtime_tools.py`
+- Modify: `backend/app/orchestrator/skill_runtime.py`
+- Modify: `backend/app/tools/adapter.py`
+- Modify: `backend/app/tools/__init__.py`
+- Create: `backend/migrations/versions/20260730_0500_tool_side_effect_outbox.py`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_tool_adapter.py`
+- Test: `backend/tests/test_runtime_tool_executor.py`
+- Test: `backend/tests/test_worker.py`
+- Test: `backend/tests/test_migrations.py`
+
+**Interfaces:**
+- active/paused/未知状态会话删除返回稳定 409；仅完整 terminal 或空会话可永久删除。
+- 删除前锁定 Thread/Turn/Run/SkillRun/Invocation/ToolCall；仅所有者可删，管理员也不能越权。
+- `ToolSpec.side_effect_level` 必填：`read`、`idempotent_write`、`non_idempotent_write`。
+- 写 Tool 必须使用服务端 provider idempotency key 与持久化 Attempt；非幂等写 dispatch 后结果不确定时进入 `ambiguous`，不得自动重放。
+
+- [x] 写参数化测试：active/paused/未知 Turn、Run、SkillRun、Invocation、ToolCall 拒绝删除；terminal/空会话可删；删除与 Worker acquire 竞态安全。
+- [x] 写测试：非所有者（含管理员）404；跨用户子记录使事务整体冲突；Task/Content/Deliverable/formal Event 保留并解除来源。
+- [x] 写测试：消息、技术 Event、read ToolCall/Attempt、owned LLMCall 删除；写 ToolCall/Attempt 保留并解除来源；shared Task 的其他用户数据不被删。
+- [x] 写测试：ToolSpec 必须声明副作用；非幂等写不能 auto；provider key 服务端生成且跨重试稳定。
+- [x] 写测试：success replay 零 provider 调用；幂等写 timeout 使用同 key 重试；非幂等写 timeout/成功后本地提交失败进入 ambiguous 且不二次调用。
+- [x] 写测试：相同逻辑键并发只创建一个 ToolCall、最多一个非幂等 dispatch；ambiguous 映射 waiting_user/stopped 而非 Worker 自动重试。
+- [x] 运行测试确认失败。
+- [x] 实现锁定式安全删除，复用统一状态族并 fail closed；修正 LLMCall 过宽删除和 write Tool 审计保留。
+- [x] 实现 ToolCall 业务 outbox、ToolExecutionAttempt 状态机和 provider key；Adapter 不得在 handler 内部 commit。
+- [x] 当前生产 Runtime Tool 明确标记为 read；不得在本 Task 接真实发布。
+- [x] 运行定向测试并提交 `fix: protect active conversations and side effects`。
+
+### Task 8: 前端单一 Turn 投影和专业技术日志
+
+**Files:**
+- Modify: `backend/app/schemas/conversation.py`
+- Modify: `backend/app/api/conversations.py`
+- Modify: `backend/app/services/runtime_state.py`
+- Modify: `frontend/src/pages/BrainHome.tsx`
+- Modify: `frontend/src/components/brain/TurnStream.tsx`
+- Modify: `frontend/src/hooks/useEventStream.ts`
+- Modify: `frontend/src/types.ts`
+- Modify: `frontend/src/styles/brain-v2.css`
+- Create: `frontend/src/components/brain/conversationProjection.ts`
+- Test: `frontend/src/components/brain/conversationProjection.test.ts`
+- Test: `frontend/src/pages/BrainHome.test.tsx`
+- Test: `frontend/src/components/brain/TurnStream.test.tsx`
+- Test: `frontend/src/hooks/useEventStream.test.tsx`
+- Test: `backend/tests/test_conversation_api.py`
+- Test: `backend/tests/test_turn_execution.py`
+
+**Interfaces:**
+- ConversationTurn 是聊天区唯一渲染源。
+- `ConversationTurn.status` 由后端 schema 暴露，前端不得从 intent 猜运行状态。
+- optimistic、HTTP durable、SSE live 以 `thread_id + turn_id? + client_message_id` 合并；绑定服务器 turn_id 前后 React key 稳定。
+- 持久 Event ID 仅用于 transport checkpoint；流式 frame 以 sequence/领域键归并，不能因 start/delta/done 复用 ID 而丢帧。
+- 实时状态作为当前 Turn 的临时投影，不再作为独立聊天消息列表。
+- 现有来源 Turn 与成果中心继续引用同一 Artifact id。
+
+- [x] 写测试：HTTP submission 已写入缓存时同一 client id 只渲染一个用户 Turn；新 Thread pending 使用同一 TurnArticle，绑定服务器 ID 后不跳位。
+- [x] 写测试：start/delta/done 即使复用 transport ID 也不丢帧；delta→late start 不清空；done without start 可完成；done 后 late delta 忽略。
+- [x] 写测试：durable done 重连去重；跨 Thread/Turn/client 事件忽略；重连后的 durable GET 覆盖 live 临时投影。
+- [x] 写测试：默认仅显示参与专家摘要；展开显示权威 Turn 状态、route/skill/tool/critic/审计 ID；tool-only/critic-only 也有 execution summary。
+- [x] 写测试：Turn 内成果与成果中心使用同一 Artifact ID；旧 active task localStorage 不再激活 legacy UI。
+- [x] 运行前端定向测试确认失败。
+- [x] 新 Thread 创建后立即写 Conversation query cache；移除独立 PendingConversation，将 pending/running/done 全部投影为同一个 TurnArticle。
+- [x] 移除聊天页 legacy BrainTask/ConversationStream、active task localStorage 与重复运行态渲染回退。
+- [x] durable ID 仅去重 durable event；start/delta 为 ephemeral，领域层以 Turn 组合键和 sequence 归并；不得按 delta 文本去重。
+- [x] 扩展脱敏 execution summary，使 tool-only/critic-only 可见；不暴露 Prompt、原始 Tool 输入输出、堆栈或密钥。
+- [x] 运行定向测试、TypeScript 和构建并提交 `fix: unify v3 turn streaming and technical details`。
+
+### Task 9: 性能预算、可观测性与端到端能力矩阵
+
+**Files:**
+- Modify: `backend/app/models/conversation.py`
+- Modify: `backend/app/models/brain.py`
+- Modify: `backend/app/llm/gateway.py`
+- Modify: `backend/app/orchestrator/brain_runtime.py`
+- Modify: `backend/app/services/turn_execution.py`
+- Create: `backend/app/services/turn_observability.py`
+- Modify: `backend/app/schemas/conversation.py`
+- Modify: `backend/app/api/conversations.py`
+- Modify: `backend/migrations/env.py`
+- Create: `backend/migrations/versions/20260730_0600_turn_observability.py`
+- Modify: `frontend/src/types.ts`
+- Modify: `frontend/src/components/brain/TurnStream.tsx`
+- Modify: `frontend/src/components/brain/TurnStream.test.tsx`
+- Modify: `frontend/e2e/main-agent-v2.spec.ts`
+- Modify: `.github/workflows/ci.yml`
+- Create: `backend/tests/test_main_agent_v3_performance.py`
+- Modify: `backend/tests/test_llm_gateway.py`
+- Modify: `backend/tests/test_conversation_api.py`
+- Modify: `backend/tests/test_migrations.py`
+- Create: `docs/runbooks/main-agent-v3-rollout.md`
+
+**Interfaces:**
+- ConversationTurn 持久化 nullable/nonnegative `route_ms`、`first_token_ms`、`completion_ms`、`total_ms`、`model_call_count`，历史行不得伪造回填。
+- 模型调用次数从 LLMGateway 每个真实 provider attempt 原子累计；重试计数、resume 不清零，终态 replay 不新增。
+- 明确问候/能力：router 0、answer 1；显式 QUERY/SKILL：router 0；模糊请求：router 1。
+- 技术日志使用强类型 allowlist 摘要，不透传 Prompt、原始工具输入输出、provider body、异常堆栈、密钥或 idempotency key。
+
+- [x] 写模型/迁移 RED：5 个指标可空且非负；LLMCall 审计原子累计 model_call_count；并行专家不丢计数。
+- [x] 写 fake-clock RED：route、用户首 token、completion、terminal/paused total 的时间语义；retry/resume 保留首次指标并更新总耗时。
+- [x] 写预算测试：问候/能力 router0 answer1；显式 query/skill router0；模糊请求 router1；终态 replay零新增调用。
+- [x] 写恶意 payload 测试：技术摘要严格 allowlist，敏感字段不可见。
+- [x] 增加 10 类用户提示词后端能力矩阵和 Playwright UI 合同；异步 Worker 使用有界状态轮询，不使用 sleep/waitForTimeout。
+- [x] 实现 ConversationTurn 指标、ContextVar Turn telemetry、Gateway 原子计数、脱敏投影和前端条件展示。
+- [x] 迁移门禁使用临时 PostgreSQL online upgrade；offline 数据迁移链明确 fail-fast，不能用 AttributeError 或伪造 SQL 通过。
+- [x] CI 增加 V3 定向、migration、后端全量有界 job、前端 test/type/build 与 Playwright；输出慢测试。
+- [x] 编写灰度/回滚/指标/告警 runbook。
+- [x] 运行后端定向与全量门禁、前端全量、类型检查、Lint、构建、Playwright和迁移 smoke。
+- [x] 进行代码审查并提交 `test: enforce main-agent v3 capability and latency budgets`。

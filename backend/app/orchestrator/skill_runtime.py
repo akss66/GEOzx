@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -9,11 +12,12 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.models import (
     AgentInvocation,
     AgentQualityScore,
@@ -23,9 +27,9 @@ from app.models import (
     ContentItem,
     ConversationThread,
     ConversationTurn,
-    Deliverable,
     SkillRun,
     TaskBrief,
+    ToolExecutionAttempt,
     User,
 )
 from app.models.enums import (
@@ -44,6 +48,7 @@ from app.orchestrator.ai_coo_critic import (
     ai_coo_critic_service,
 )
 from app.orchestrator.brain_intelligence import brain_intelligence
+from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skills.account_inspection import (
     AccountInspectionCriticOutcome,
@@ -61,11 +66,48 @@ from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
+from app.services.runtime_deliverables import write_runtime_deliverable
+from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 _ACCOUNT_INSPECTION = "account_inspection"
 _MAX_CRITIC_IMPROVEMENTS = 2
 DataSufficiency = Literal["insufficient", "partial", "sufficient"]
 log = logging.getLogger("dyflow.skill_runtime")
+
+
+async def run_bounded_stage(
+    operations: list[Any],
+    *,
+    limit: int = 3,
+) -> list[Any]:
+    """Run one expert stage concurrently without sharing execution state."""
+
+    semaphore = asyncio.Semaphore(max(1, min(3, limit)))
+
+    async def run(operation: Any) -> Any:
+        async with semaphore:
+            return await operation()
+
+    results = await asyncio.gather(
+        *(run(operation) for operation in operations),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return results
+
+
+def skill_input_hash(snapshot: dict[str, Any]) -> str:
+    """Return the stable SHA-256 identity of one fully frozen Skill input."""
+
+    normalized = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -88,12 +130,35 @@ class _CriticResult:
     suggestions: list[str]
 
 
+@dataclass(frozen=True)
+class _ExpertResult:
+    invocation: AgentInvocation
+    output: dict[str, Any]
+
+
 class _ToolScopeMismatch(PermissionError):
     pass
 
 
 class _SkillLeaseLost(RuntimeError):
     pass
+
+
+class SkillRecoveryConflict(RuntimeError):
+    """A persisted Skill execution cannot be safely resumed."""
+
+
+def resolve_frozen_skill_definition(
+    skill_run: SkillRun,
+    *,
+    registry: Any = skill_registry,
+) -> SkillDefinition:
+    if skill_input_hash(dict(skill_run.input_snapshot or {})) != skill_run.input_hash:
+        raise SkillRecoveryConflict("SKILL_INPUT_INTEGRITY_MISMATCH")
+    try:
+        return registry.get(skill_run.skill_code, version=skill_run.skill_version)
+    except KeyError as exc:
+        raise SkillRecoveryConflict("SKILL_VERSION_UNAVAILABLE") from exc
 
 
 class SkillRuntime:
@@ -121,22 +186,72 @@ class SkillRuntime:
         skill_code: str,
         days: int = 30,
         lease_owner: str | None = None,
+        resume_skill_run: SkillRun | None = None,
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
         run_id = run.id
-        definition = skill_registry.get(skill_code)
-        input_payload = (
-            {"days": days} if "days" in definition.input_model.model_fields else {}
-        )
-        frozen_input = definition.input_model.model_validate(input_payload)
-        idempotency_key = f"skill:{definition.code}:v{definition.version}"
-        lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
-        existing = await session.scalar(
-            select(SkillRun).where(
-                SkillRun.run_id == run_id,
-                SkillRun.idempotency_key == idempotency_key,
+        persisted_candidates = (
+            []
+            if resume_skill_run is not None
+            else list(
+                await session.scalars(
+                    select(SkillRun).where(
+                        SkillRun.run_id == run_id,
+                        SkillRun.skill_code == skill_code,
+                    )
+                )
             )
         )
+        if len(persisted_candidates) > 1:
+            raise SkillRecoveryConflict("SKILL_RECOVERY_AMBIGUOUS")
+        recovery_candidate = resume_skill_run or (
+            persisted_candidates[0] if persisted_candidates else None
+        )
+        definition = (
+            resolve_frozen_skill_definition(recovery_candidate)
+            if recovery_candidate is not None
+            else skill_registry.get(skill_code)
+        )
+        if recovery_candidate is not None:
+            frozen_snapshot = dict(recovery_candidate.input_snapshot or {})
+            model_input = {
+                key: value
+                for key, value in frozen_snapshot.items()
+                if key in definition.input_model.model_fields
+            }
+            frozen_input = definition.input_model.model_validate(model_input)
+        else:
+            input_payload = {"days": days} if "days" in definition.input_model.model_fields else {}
+            frozen_input = definition.input_model.model_validate(input_payload)
+            frozen_snapshot = {
+                "account_id": thread.account_id,
+                **frozen_input.model_dump(mode="json"),
+            }
+        idempotency_key = f"skill:{definition.code}"
+        lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
+        existing = recovery_candidate
+        if existing is None:
+            existing = await session.scalar(
+                select(SkillRun).where(
+                    SkillRun.run_id == run_id,
+                    SkillRun.idempotency_key == idempotency_key,
+                )
+            )
+        else:
+            if (
+                existing.org_id != user.org_id
+                or existing.run_id != run_id
+                or existing.thread_id != thread.id
+                or existing.turn_id != turn.id
+                or existing.skill_code != definition.code
+            ):
+                raise SkillRecoveryConflict("SKILL_RECOVERY_SCOPE_CONFLICT")
+            if (
+                existing.skill_version != definition.version
+                or existing.input_hash != skill_input_hash(frozen_snapshot)
+                or dict(existing.input_snapshot or {}) != frozen_snapshot
+            ):
+                raise SkillRecoveryConflict("SKILL_RECOVERY_WINNER_CONFLICT")
         if existing is not None and existing.status in {
             "blocked",
             "completed",
@@ -186,25 +301,36 @@ class SkillRuntime:
                 skill_version=definition.version,
                 status="running",
                 input_snapshot={
-                    "account_id": thread.account_id,
-                    **frozen_input.model_dump(mode="json"),
+                    **frozen_snapshot,
                 },
+                input_hash=skill_input_hash(frozen_snapshot),
                 output_snapshot={},
             )
             session.add(skill_run)
             now = utc_now()
-            run.status = "running"
-            run.phase = "skill_runtime"
             run.attempt += 1
             run.lease_owner = lease_owner
-            run.leased_until = now + timedelta(
-                seconds=max(1, settings.agent_run_lease_seconds)
-            )
+            run.leased_until = now + timedelta(seconds=max(1, settings.agent_run_lease_seconds))
             run.heartbeat_at = now
             run.started_at = run.started_at or now
             run.next_retry_at = None
             try:
-                await session.commit()
+                await session.flush()
+                await close_runtime_state(
+                    session,
+                    scope=RuntimeStateScope(
+                        run_id=run.id,
+                        turn_id=turn.id,
+                        skill_run_id=skill_run.id,
+                        task_id=task.id,
+                        account_id=thread.account_id,
+                        project_id=thread.project_id,
+                        content_item_id=task.content_item_id,
+                        skill_output_snapshot={},
+                    ),
+                    status="running",
+                    message=f"{definition.name}正在执行。",
+                )
                 await session.refresh(skill_run)
             except IntegrityError as exc:
                 await session.rollback()
@@ -219,16 +345,27 @@ class SkillRuntime:
                 if (
                     skill_run.skill_code != definition.code
                     or skill_run.skill_version != definition.version
+                    or skill_run.input_hash != skill_input_hash(frozen_snapshot)
+                    or dict(skill_run.input_snapshot or {}) != frozen_snapshot
                 ):
-                    raise PermissionError(
-                        "concurrent SkillRun winner changed the frozen definition"
-                    ) from exc
+                    raise SkillRecoveryConflict("SKILL_RECOVERY_WINNER_CONFLICT") from exc
                 return self._existing_result(skill_run)
         elif skill_run.task_id != task.id:
             raise PermissionError("SkillRun task ownership does not match")
 
+        runtime_scope = await RuntimeScope.from_conversation(
+            session,
+            user=user,
+            thread=thread,
+            turn=turn,
+            run=run,
+        )
+        runtime_scope = await runtime_scope.bind_task(session, task)
+        runtime_scope = await runtime_scope.bind_skill(session, skill_run)
         skill_run_id = skill_run.id
         task_id = task.id
+        thread_id = thread.id
+        turn_id = turn.id
         if recovering and await self._interrupt_ambiguous_side_effects(
             session,
             run=run,
@@ -248,6 +385,8 @@ class SkillRuntime:
                     task=task,
                     content=content,
                     skill_run=skill_run,
+                    scope=runtime_scope,
+                    definition=definition,
                     days=frozen_input.days,
                     lease_owner=lease_owner,
                 )
@@ -260,6 +399,7 @@ class SkillRuntime:
                 task=task,
                 content=content,
                 skill_run=skill_run,
+                scope=runtime_scope,
                 definition=definition,
                 frozen_input=frozen_input.model_dump(mode="json"),
                 lease_owner=lease_owner,
@@ -271,6 +411,10 @@ class SkillRuntime:
                 raise
             return self._existing_result(persisted)
         except Exception as exc:
+            retryable = classify_runtime_failure(exc) is FailureDisposition.RETRYABLE
+            await session.rollback()
+            if retryable:
+                raise
             log.exception(
                 "Skill execution failed",
                 extra={
@@ -280,32 +424,48 @@ class SkillRuntime:
                     "run_id": run_id,
                 },
             )
-            await session.rollback()
             persisted = await session.get(SkillRun, skill_run_id)
             persisted_task = await session.get(BrainTask, task_id)
+            persisted_run = await session.get(AgentRun, run_id)
+            persisted_turn = await session.get(ConversationTurn, turn_id)
+            persisted_thread = await session.get(ConversationThread, thread_id)
             scope_mismatch = isinstance(exc, _ToolScopeMismatch)
             terminal_status = "blocked" if scope_mismatch else "failed"
-            error_code = (
-                "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(exc).__name__
-            )
+            error_code = "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(exc).__name__
             response = (
                 "工具返回的数据不属于当前账号，账号体检已停止。"
                 if scope_mismatch
                 else "账号体检执行失败，请稍后重试。"
             )
             if persisted is not None:
-                persisted.status = terminal_status
-                persisted.error_code = error_code
-                persisted.output_snapshot = {
+                output_snapshot = {
                     "status": terminal_status,
+                    "task_id": task_id,
+                    "artifact_id": None,
+                    "artifact_type": definition.artifact_type or "account_inspection_report",
+                    "report": {},
                     "error_code": error_code,
                     "response": response,
-                    "artifact_type": definition.artifact_type,
                 }
-            if persisted_task is not None:
-                persisted_task.status = BrainTaskStatus.FAILED
-                persisted_task.progress = 0
-            await session.commit()
+                if (
+                    persisted_task is None
+                    or persisted_run is None
+                    or persisted_turn is None
+                    or persisted_thread is None
+                ):
+                    raise RuntimeError("Skill execution scope disappeared") from exc
+                await self._close_skill_state(
+                    session,
+                    thread=persisted_thread,
+                    turn=persisted_turn,
+                    run=persisted_run,
+                    task=persisted_task,
+                    skill_run=persisted,
+                    status=terminal_status,
+                    response=response,
+                    output_snapshot=output_snapshot,
+                    error_code=error_code,
+                )
             return SkillExecutionResult(
                 status=terminal_status,
                 skill_run_id=skill_run_id,
@@ -328,12 +488,12 @@ class SkillRuntime:
         task: BrainTask,
         content: ContentItem,
         skill_run: SkillRun,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
         days: int,
         lease_owner: str,
     ) -> SkillExecutionResult:
-        tool_executor = self._tool_executor or DurableToolExecutor(
-            build_runtime_tool_adapter()
-        )
+        tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
         for tool_code, arguments in (
             ("account.profile", {}),
@@ -350,16 +510,16 @@ class SkillRuntime:
                     idempotency_key=f"{skill_run.id}:{tool_code}",
                 ),
                 project_id=thread.project_id,
-                account_id=thread.account_id,
                 agent_code=AgentCode.DECISION.value,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             if outcome.status != "success" or outcome.result is None:
                 return await self._pause_for_tool(
                     session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
                     skill_run=skill_run,
                     task=task,
                     status=outcome.status,
@@ -376,55 +536,37 @@ class SkillRuntime:
         evidence_refs = _evidence_refs(data_context)
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
-        tool_packet = [
-            {"tool_code": code, "result": value} for code, value in tool_results.items()
-        ]
-        for index, code in enumerate(
-            (
-                AgentCode.POSITIONING,
-                AgentCode.CONTENT_DIRECTOR,
-                AgentCode.OPERATOR,
-            )
-        ):
+        tool_packet = [{"tool_code": code, "result": value} for code, value in tool_results.items()]
+        definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
+        for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            result = await self._harness.execute(
+            stage_results = await self._execute_expert_stage(
                 session,
                 user=user,
                 task=task,
-                code=code,
+                scope=scope,
+                codes=tuple(AgentCode(code) for code in stage),
                 purpose="基于所选账号证据完成一键账号体检，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
-                step_key=f"account-inspection:{index}:{code.value}",
-                attempt=0,
+                step_keys={
+                    AgentCode(code): (f"account-inspection:{definition_index[code]}:{code}")
+                    for code in stage
+                },
                 upstream={
                     "tool_results": {"items": tool_packet},
-                    "expert_outputs": upstream_outputs,
+                    "expert_outputs": list(upstream_outputs),
                 },
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
-                trace_only=True,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            await self._attach_expert_provenance(
-                session,
-                result=result,
-                thread=thread,
-                turn=turn,
-                run=run,
-                skill_run=skill_run,
-            )
-            expert_results.append(result)
-            upstream_outputs.append(
-                {
-                    "agent_code": code.value,
-                    "summary": result.invocation.output_summary
-                    if hasattr(result.invocation, "output_summary")
-                    else "",
-                    "payload": dict(result.output or {}),
-                }
-            )
+            for result in stage_results:
+                expert_results.append(result)
+                upstream_outputs.append(
+                    {
+                        "agent_code": result.invocation.agent_code.value,
+                        "summary": result.invocation.output_summary,
+                        "payload": dict(result.output),
+                    }
+                )
 
         latest_result = expert_results[-1]
         critic_history: list[_CriticResult] = []
@@ -474,6 +616,8 @@ class SkillRuntime:
                     turn=turn,
                     run=run,
                     report=report,
+                    scope=scope,
+                    producer=latest_result.invocation,
                 )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             latest_result = await self._harness.execute(
@@ -484,9 +628,10 @@ class SkillRuntime:
                 purpose="按质量审核意见修订账号体检建议，不得编造数据。",
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
                 run_id=run.id,
-                step_key=(
-                    f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"
-                ),
+                skill_run_id=skill_run.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                step_key=(f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"),
                 attempt=iteration + 1,
                 upstream={
                     "tool_results": {"items": tool_packet},
@@ -495,9 +640,7 @@ class SkillRuntime:
                         "suggestions": review.suggestions,
                     },
                 },
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
                 trace_only=True,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -521,24 +664,27 @@ class SkillRuntime:
             )
 
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
-        final_deliverable = Deliverable(
-            content_item_id=content.id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            skill_run_id=skill_run.id,
-            agent_code=AgentCode.DECISION.value,
-            type=DeliverableType.REVIEW_REPORT,
+        self._require_formal_producer(
+            latest_result.invocation,
+            scope=scope,
+            definition=definition,
+        )
+        definition.output_model.model_validate(report.model_dump(mode="json"))
+        final_deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
+            agent_code=latest_result.invocation.agent_code.value,
+            deliverable_type=DeliverableType.REVIEW_REPORT,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
             note=(
                 "business_artifact_type=account_inspection_report; "
+                f"producer_invocation_id={latest_result.invocation.id}; "
                 "generated by account_inspection Skill"
             ),
         )
-        session.add(final_deliverable)
-        await session.flush()
         quality = await session.scalar(
             select(AgentQualityScore)
             .where(
@@ -550,11 +696,6 @@ class SkillRuntime:
         if quality is not None:
             quality.deliverable_id = final_deliverable.id
 
-        task.status = BrainTaskStatus.COMPLETED
-        task.progress = 100
-        task.current_focus = "一键账号体检已完成。"
-        skill_run.status = "completed"
-        skill_run.error_code = None
         skill_run.quality_score = Decimal(str(report.critic.score / 100))
         output = {
             "status": "completed",
@@ -564,8 +705,17 @@ class SkillRuntime:
             "report": report.model_dump(mode="json"),
             "response": "账号体检已完成，正式体检报告已生成。",
         }
-        skill_run.output_snapshot = output
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output["response"],
+            output_snapshot=output,
+        )
         return self._existing_result(skill_run)
 
     async def _execute_operating_skill(
@@ -579,15 +729,14 @@ class SkillRuntime:
         task: BrainTask,
         content: ContentItem,
         skill_run: SkillRun,
+        scope: RuntimeScope,
         definition: SkillDefinition,
         frozen_input: dict[str, Any],
         lease_owner: str,
     ) -> SkillExecutionResult:
         """Run one bounded specialist graph and persist its business artifact."""
 
-        tool_executor = self._tool_executor or DurableToolExecutor(
-            build_runtime_tool_adapter()
-        )
+        tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
         for tool_code in definition.tool_codes:
             if tool_code not in {"account.profile", "account.data_context"}:
@@ -608,15 +757,15 @@ class SkillRuntime:
                     idempotency_key=f"{skill_run.id}:{tool_code}",
                 ),
                 project_id=thread.project_id,
-                account_id=thread.account_id,
                 agent_code=AgentCode.DECISION.value,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
+                scope=scope,
             )
             if outcome.status != "success" or outcome.result is None:
                 return await self._pause_for_tool(
                     session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
                     skill_run=skill_run,
                     task=task,
                     status=outcome.status,
@@ -634,22 +783,24 @@ class SkillRuntime:
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
         evidence_refs = _evidence_refs(tool_results.get("account.data_context", {}))
-        for index, raw_code in enumerate(definition.expert_codes):
-            code = AgentCode(raw_code)
+        definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
+        for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            result = await self._harness.execute(
+            stage_results = await self._execute_expert_stage(
                 session,
                 user=user,
                 task=task,
-                code=code,
+                scope=scope,
+                codes=tuple(AgentCode(code) for code in stage),
                 purpose=(
                     f"完成“{definition.name}”：{turn.user_input}。"
                     "必须遵守当前账号范围，不得编造数据或声称已经发布。"
                 ),
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
-                step_key=f"{definition.code}:{index}:{code.value}",
-                attempt=0,
+                step_keys={
+                    AgentCode(code): f"{definition.code}:{definition_index[code]}:{code}"
+                    for code in stage
+                },
                 upstream={
                     "tool_results": {
                         "items": [
@@ -657,75 +808,240 @@ class SkillRuntime:
                             for key, value in tool_results.items()
                         ]
                     },
-                    "expert_outputs": upstream_outputs,
+                    "expert_outputs": list(upstream_outputs),
                 },
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
-                trace_only=True,
             )
-            await self._attach_expert_provenance(
-                session,
-                result=result,
-                thread=thread,
-                turn=turn,
-                run=run,
-                skill_run=skill_run,
-            )
-            expert_results.append(result)
-            upstream_outputs.append(
-                {
-                    "agent_code": code.value,
-                    "summary": result.invocation.output_summary,
-                    "payload": dict(result.output or {}),
-                }
-            )
+            await self._heartbeat(session, run=run, lease_owner=lease_owner)
+            for result in stage_results:
+                expert_results.append(result)
+                upstream_outputs.append(
+                    {
+                        "agent_code": result.invocation.agent_code.value,
+                        "summary": result.invocation.output_summary,
+                        "payload": dict(result.output),
+                    }
+                )
 
         report, deliverable_type, deliverable_payload = _build_operating_report(
             definition=definition,
             account_id=thread.account_id,
-            platform=str(
-                tool_results.get("account.profile", {}).get("platform") or "douyin"
-            ),
+            platform=str(tool_results.get("account.profile", {}).get("platform") or "douyin"),
             user_input=turn.user_input,
             frozen_input=frozen_input,
             tool_results=tool_results,
             expert_results=expert_results,
             evidence_refs=evidence_refs,
         )
-        deliverable = Deliverable(
-            content_item_id=content.id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            skill_run_id=skill_run.id,
-            agent_code=AgentCode.DECISION.value,
-            type=deliverable_type,
+        definition.output_model.model_validate(report)
+        self._require_formal_producer(
+            expert_results[-1].invocation,
+            scope=scope,
+            definition=definition,
+        )
+        if definition.critic_policy == "required":
+            if self._critic is None:
+                return await self._complete_operating_skill_for_human_review(
+                    session,
+                    content=content,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=scope,
+                    definition=definition,
+                    report=report,
+                    deliverable_type=deliverable_type,
+                    deliverable_payload=deliverable_payload,
+                    producer=expert_results[-1].invocation,
+                    review_reason="No safe Critic adapter is configured.",
+                )
+            review = await self._critic.review(
+                session=session,
+                task=task,
+                invocation=expert_results[-1].invocation,
+                report=report,
+                evidence_refs=evidence_refs,
+                iteration=0,
+            )
+            if not bool(review.passed):
+                return await self._complete_operating_skill_for_human_review(
+                    session,
+                    content=content,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=scope,
+                    definition=definition,
+                    report=report,
+                    deliverable_type=deliverable_type,
+                    deliverable_payload=deliverable_payload,
+                    producer=expert_results[-1].invocation,
+                    review_reason="Critic review requires human confirmation.",
+                    quality_score=int(review.score),
+                )
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
+            agent_code=expert_results[-1].invocation.agent_code.value,
+            deliverable_type=deliverable_type,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=deliverable_payload,
-            note=f"generated by {definition.code} Skill",
+            note=(
+                f"producer_invocation_id={expert_results[-1].invocation.id}; "
+                f"generated by {definition.code} Skill"
+            ),
         )
-        session.add(deliverable)
-        await session.flush()
-
-        task.status = BrainTaskStatus.COMPLETED
-        task.progress = 100
-        task.current_focus = f"{definition.name}已完成。"
         content.status = ContentStatus.DRAFT
-        skill_run.status = "completed"
-        skill_run.error_code = None
         output = {
             "status": "completed",
             "task_id": task.id,
             "artifact_id": deliverable.id,
             "artifact_type": definition.artifact_type or definition.code,
             "report": report,
-            "response": f"{definition.name}已完成，正式成果已生成。",
+            "response": f"{definition.name} completed.",
         }
-        skill_run.output_snapshot = output
-        await session.commit()
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output["response"],
+            output_snapshot=output,
+        )
         return self._existing_result(skill_run)
+
+    async def _complete_operating_skill_for_human_review(
+        self,
+        session: AsyncSession,
+        *,
+        content: ContentItem,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
+        report: dict[str, Any],
+        deliverable_type: DeliverableType,
+        deliverable_payload: dict[str, Any],
+        producer: AgentInvocation,
+        review_reason: str,
+        quality_score: int | None = None,
+    ) -> SkillExecutionResult:
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
+            agent_code=producer.agent_code.value,
+            deliverable_type=deliverable_type,
+            version=1,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=deliverable_payload,
+            note=(
+                f"producer_invocation_id={producer.id}; "
+                f"generated by {definition.code} Skill; "
+                f"quality review pending: {review_reason}"
+            ),
+        )
+        content.status = ContentStatus.DRAFT
+        if quality_score is not None:
+            skill_run.quality_score = Decimal(str(quality_score / 100))
+        await session.flush()
+        output = {
+            "status": "completed",
+            "task_id": task.id,
+            "artifact_id": deliverable.id,
+            "artifact_type": definition.artifact_type or definition.code,
+            "report": report,
+            "response": f"{definition.name} completed and is pending human review.",
+            "review_reason": review_reason,
+        }
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output["response"],
+            output_snapshot=output,
+        )
+        return SkillRuntime._existing_result(skill_run)
+
+    async def _execute_expert_stage(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        task: BrainTask,
+        scope: RuntimeScope,
+        codes: tuple[AgentCode, ...],
+        purpose: str,
+        evidence_refs: list[str],
+        step_keys: dict[AgentCode, str],
+        upstream: dict[str, Any],
+    ) -> list[_ExpertResult]:
+        frozen_upstream = json.loads(json.dumps(upstream))
+        if self._harness is not agent_harness:
+            results: list[_ExpertResult] = []
+            for code in codes:
+                result = await self._harness.execute(
+                    session,
+                    user=user,
+                    task=task,
+                    code=code,
+                    purpose=purpose,
+                    evidence_refs=evidence_refs,
+                    run_id=scope.run_id,
+                    skill_run_id=scope.skill_run_id,
+                    thread_id=scope.thread_id,
+                    turn_id=scope.turn_id,
+                    step_key=step_keys[code],
+                    attempt=0,
+                    upstream=json.loads(json.dumps(frozen_upstream)),
+                    scope=scope,
+                    trace_only=True,
+                )
+                results.append(
+                    _ExpertResult(
+                        invocation=result.invocation,
+                        output=dict(result.output or {}),
+                    )
+                )
+            return results
+
+        operations = [
+            (
+                lambda code=code: self._harness.execute_trace_isolated(
+                    scope=scope,
+                    code=code,
+                    purpose=purpose,
+                    evidence_refs=evidence_refs,
+                    step_key=step_keys[code],
+                    attempt=0,
+                    upstream=json.loads(json.dumps(frozen_upstream)),
+                )
+            )
+            for code in codes
+        ]
+        trace_results = await run_bounded_stage(operations, limit=3)
+        results = []
+        for trace in trace_results:
+            invocation = await session.get(AgentInvocation, trace.invocation_id)
+            if invocation is None:
+                raise SkillRecoveryConflict("SKILL_INVOCATION_TRACE_MISSING")
+            results.append(_ExpertResult(invocation=invocation, output=dict(trace.output)))
+        return results
 
     async def _review(
         self,
@@ -818,6 +1134,79 @@ class SkillRuntime:
         skill_run: SkillRun,
         task: BrainTask,
     ) -> bool:
+        ambiguous_writes = list(
+            await session.scalars(
+                select(AgentToolCall)
+                .outerjoin(
+                    ToolExecutionAttempt,
+                    ToolExecutionAttempt.tool_call_id == AgentToolCall.id,
+                )
+                .where(
+                    AgentToolCall.skill_run_id == skill_run.id,
+                    AgentToolCall.side_effect_level != "read",
+                    or_(
+                        AgentToolCall.status == "ambiguous",
+                        and_(
+                            AgentToolCall.status == "running",
+                            ToolExecutionAttempt.status == "dispatched",
+                        ),
+                    ),
+                )
+                .distinct()
+                .with_for_update(of=AgentToolCall)
+                .execution_options(populate_existing=True)
+            )
+        )
+        if ambiguous_writes:
+            now = datetime.now(UTC)
+            error_code = "TOOL_RESULT_AMBIGUOUS"
+            ambiguous_ids = [tool_call.id for tool_call in ambiguous_writes]
+            for tool_call in ambiguous_writes:
+                tool_call.status = "ambiguous"
+                tool_call.error = error_code
+                tool_call.finished_at = now
+            dispatched_attempts = list(
+                await session.scalars(
+                    select(ToolExecutionAttempt)
+                    .where(
+                        ToolExecutionAttempt.tool_call_id.in_(ambiguous_ids),
+                        ToolExecutionAttempt.status == "dispatched",
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            for attempt in dispatched_attempts:
+                attempt.status = "ambiguous"
+                attempt.error = error_code
+                attempt.finished_at = now
+            response = (
+                "外部写入已经发出，但平台结果暂时无法确认。"
+                "为避免重复操作，本次执行已停止，请人工核对平台状态后再决定下一步。"
+            )
+            output_snapshot = {
+                "status": "stopped",
+                "task_id": task.id,
+                "artifact_id": None,
+                "artifact_type": "account_inspection_report",
+                "report": {},
+                "response": response,
+                "error_code": error_code,
+            }
+            await SkillRuntime._close_skill_state(
+                session,
+                thread=await session.get(ConversationThread, turn.thread_id),
+                turn=turn,
+                run=run,
+                task=task,
+                skill_run=skill_run,
+                status="stopped",
+                response=response,
+                output_snapshot=output_snapshot,
+                error_code=error_code,
+            )
+            return True
+
         tool_calls = list(
             await session.scalars(
                 select(AgentToolCall)
@@ -862,11 +1251,6 @@ class SkillRuntime:
             invocation.status = AgentInvocationStatus.FAILED
             invocation.failure_reason = error_code
             invocation.finished_at = now
-        task.status = BrainTaskStatus.FAILED
-        task.progress = 0
-        task.current_focus = response
-        skill_run.status = "failed"
-        skill_run.error_code = error_code
         output_snapshot = {
             "status": "failed",
             "task_id": task.id,
@@ -876,33 +1260,19 @@ class SkillRuntime:
             "response": response,
             "error_code": error_code,
         }
-        skill_run.output_snapshot = output_snapshot
-        turn.assistant_response = response
-        run.status = "failed"
-        run.phase = "failed"
-        run.finished_at = now
-        run.lease_owner = None
-        run.leased_until = None
-        run.next_retry_at = None
         run.heartbeat_at = now
-        run.error_code = error_code
-        run.error_detail = None
-        run.result_payload = {
-            "mode": "skill",
-            "status": "failed",
-            "response": response,
-            "task_id": task.id,
-            "projections": [
-                {
-                    "type": "execution_blocked",
-                    "artifact_type": "account_inspection_report",
-                    "skill_run_id": skill_run.id,
-                    "code": error_code,
-                }
-            ],
-            "error_code": error_code,
-        }
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=await session.get(ConversationThread, turn.thread_id),
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="failed",
+            response=response,
+            output_snapshot=output_snapshot,
+            error_code=error_code,
+        )
         return True
 
     @staticmethod
@@ -927,6 +1297,29 @@ class SkillRuntime:
         await session.commit()
 
     @staticmethod
+    def _require_formal_producer(
+        invocation: AgentInvocation,
+        *,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
+    ) -> None:
+        agent_code = (
+            invocation.agent_code.value
+            if isinstance(invocation.agent_code, AgentCode)
+            else str(invocation.agent_code)
+        )
+        if (
+            invocation.status is not AgentInvocationStatus.DONE
+            or agent_code == AgentCode.DECISION.value
+            or agent_code not in definition.expert_codes
+            or invocation.run_id != scope.run_id
+            or invocation.skill_run_id != scope.skill_run_id
+            or invocation.thread_id != scope.thread_id
+            or invocation.turn_id != scope.turn_id
+        ):
+            raise SkillRecoveryConflict("SKILL_FORMAL_PRODUCER_INVALID")
+
+    @staticmethod
     async def _complete_for_human_review(
         session: AsyncSession,
         *,
@@ -937,25 +1330,24 @@ class SkillRuntime:
         turn: ConversationTurn,
         run: AgentRun,
         report: AccountInspectionReport,
+        scope: RuntimeScope,
+        producer: AgentInvocation,
     ) -> SkillExecutionResult:
-        deliverable = Deliverable(
-            content_item_id=content.id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            skill_run_id=skill_run.id,
-            agent_code=AgentCode.DECISION.value,
-            type=DeliverableType.REVIEW_REPORT,
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
+            agent_code=producer.agent_code.value,
+            deliverable_type=DeliverableType.REVIEW_REPORT,
             version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
             note=(
                 "business_artifact_type=account_inspection_report; "
+                f"producer_invocation_id={producer.id}; "
                 "critic below auto-pass threshold; requires human review"
             ),
         )
-        session.add(deliverable)
-        await session.flush()
         quality = await session.scalar(
             select(AgentQualityScore)
             .where(AgentQualityScore.skill_run_id == skill_run.id)
@@ -964,13 +1356,8 @@ class SkillRuntime:
         if quality is not None:
             quality.deliverable_id = deliverable.id
 
-        task.status = BrainTaskStatus.COMPLETED
-        task.progress = 100
-        task.current_focus = "体检报告已生成，需人工确认。"
-        skill_run.status = "completed"
-        skill_run.error_code = None
         skill_run.quality_score = Decimal(str(report.critic.score / 100))
-        skill_run.output_snapshot = {
+        output_snapshot = {
             "status": "completed",
             "task_id": task.id,
             "artifact_id": deliverable.id,
@@ -981,47 +1368,143 @@ class SkillRuntime:
                 "未达到自动通过标准，请人工确认后采用。"
             ),
         }
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output_snapshot["response"],
+            output_snapshot=output_snapshot,
+        )
         return SkillRuntime._existing_result(skill_run)
 
     @staticmethod
     async def _pause_for_tool(
         session: AsyncSession,
         *,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
         skill_run: SkillRun,
         task: BrainTask,
         status: str,
         skill_name: str = "账号体检",
         artifact_type: str = "account_inspection_report",
     ) -> SkillExecutionResult:
-        paused_status = (
-            "waiting_permission" if status == "waiting_approval" else "failed"
-        )
+        paused_status = {
+            "waiting_approval": "waiting_permission",
+            "ambiguous": "stopped",
+        }.get(status, "failed")
         error_code = (
             "TOOL_PERMISSION_REQUIRED"
             if paused_status == "waiting_permission"
-            else "TOOL_EXECUTION_FAILED"
+            else (
+                "TOOL_RESULT_AMBIGUOUS" if paused_status == "stopped" else "TOOL_EXECUTION_FAILED"
+            )
         )
-        task.current_focus = (
+        response = (
             f"{skill_name}正在等待工具授权。"
             if paused_status.startswith("waiting")
             else f"{skill_name}工具执行失败。"
         )
-        if paused_status == "failed":
-            task.status = BrainTaskStatus.FAILED
-        skill_run.status = paused_status
-        skill_run.error_code = error_code
-        skill_run.output_snapshot = {
+        if paused_status == "stopped":
+            response = (
+                "外部写入结果暂时无法确认。为避免重复操作，本次执行已停止，"
+                "请人工核对平台状态后再决定下一步。"
+            )
+        output_snapshot = {
             "status": paused_status,
             "task_id": task.id,
             "artifact_id": None,
             "artifact_type": artifact_type,
             "report": {},
-            "response": task.current_focus,
+            "response": response,
             "error_code": error_code,
         }
-        await session.commit()
+        await SkillRuntime._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status=paused_status,
+            response=response,
+            output_snapshot=output_snapshot,
+            error_code=error_code,
+        )
         return SkillRuntime._existing_result(skill_run)
+
+    @staticmethod
+    async def _close_skill_state(
+        session: AsyncSession,
+        *,
+        thread: ConversationThread | None,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        status: str,
+        response: str,
+        output_snapshot: dict[str, Any],
+        error_code: str | None = None,
+    ) -> None:
+        if thread is None:
+            raise RuntimeError("Skill execution ConversationThread disappeared")
+        artifact_id = output_snapshot.get("artifact_id")
+        projections = (
+            [
+                {
+                    "type": "artifact",
+                    "artifact_id": artifact_id,
+                    "artifact_type": output_snapshot.get("artifact_type"),
+                    "skill_run_id": skill_run.id,
+                    "account_id": thread.account_id,
+                    "report": output_snapshot.get("report") or {},
+                }
+            ]
+            if isinstance(artifact_id, int)
+            else (
+                [
+                    {
+                        "type": "execution_blocked",
+                        "artifact_type": output_snapshot.get("artifact_type"),
+                        "skill_run_id": skill_run.id,
+                        "account_id": thread.account_id,
+                        "code": error_code,
+                    }
+                ]
+                if error_code is not None
+                else []
+            )
+        )
+        await close_runtime_state(
+            session,
+            scope=RuntimeStateScope(
+                run_id=run.id,
+                turn_id=turn.id,
+                skill_run_id=skill_run.id,
+                task_id=task.id,
+                account_id=thread.account_id,
+                project_id=thread.project_id,
+                content_item_id=task.content_item_id,
+                result_payload={
+                    "mode": "skill",
+                    "status": status,
+                    "response": response,
+                    "task_id": task.id,
+                    "projections": projections,
+                    "error_code": error_code,
+                },
+                skill_output_snapshot=output_snapshot,
+            ),
+            status=status,
+            message=response,
+            error_code=error_code,
+        )
 
     @staticmethod
     async def _compatibility_task(
@@ -1122,9 +1605,7 @@ class SkillRuntime:
             skill_run_id=skill_run.id,
             task_id=skill_run.task_id,
             artifact_id=output.get("artifact_id"),
-            artifact_type=str(
-                output.get("artifact_type") or "account_inspection_report"
-            ),
+            artifact_type=str(output.get("artifact_type") or "account_inspection_report"),
             report=dict(output.get("report") or {}),
             response=response,
             error_code=output.get("error_code") or skill_run.error_code,
@@ -1145,8 +1626,7 @@ def _build_operating_report(
     outputs = [dict(item.output or {}) for item in expert_results]
     participants = [str(item.invocation.agent_code) for item in expert_results]
     outputs_by_agent = {
-        str(item.invocation.agent_code): dict(item.output or {})
-        for item in expert_results
+        str(item.invocation.agent_code): dict(item.output or {}) for item in expert_results
     }
     preferred_agent = (
         AgentCode.OPERATOR.value
@@ -1156,11 +1636,7 @@ def _build_operating_report(
     latest = outputs_by_agent.get(preferred_agent, outputs[-1] if outputs else {})
 
     if definition.code == "script_generation":
-        scenes = [
-            str(item).strip()
-            for item in latest.get("scenes", [])
-            if str(item).strip()
-        ]
+        scenes = [str(item).strip() for item in latest.get("scenes", []) if str(item).strip()]
         while len(scenes) < 3:
             scenes.append(
                 "主体：用具体案例解释核心观点。"
@@ -1173,9 +1649,7 @@ def _build_operating_report(
             hook=str(latest.get("hook") or "先说结论：这件事最容易踩的坑在这里。"),
             scenes=scenes,
             duration_seconds=int(
-                latest.get("duration_seconds")
-                or frozen_input.get("duration_seconds")
-                or 60
+                latest.get("duration_seconds") or frozen_input.get("duration_seconds") or 60
             ),
             bgm_suggestion=latest.get("bgm_suggestion"),
             participating_experts=participants,
@@ -1227,9 +1701,7 @@ def _build_operating_report(
             theme=str(latest.get("theme") or latest.get("title") or user_input[:80]),
             topics=topics,
             posting_notes=[
-                str(item)
-                for item in latest.get("posting_notes", [])
-                if str(item).strip()
+                str(item) for item in latest.get("posting_notes", []) if str(item).strip()
             ]
             or ["先小批量发布并根据完播、互动和咨询反馈调整后续选题。"],
             evidence_refs=evidence_refs,
@@ -1252,8 +1724,7 @@ def _build_operating_report(
         metrics = dict(metrics) if isinstance(metrics, dict) else {}
         coverage = data_context.get("coverage")
         has_data = bool(metrics) or (
-            isinstance(coverage, dict)
-            and any(value == "available" for value in coverage.values())
+            isinstance(coverage, dict) and any(value == "available" for value in coverage.values())
         )
         highlights = _string_list(latest.get("highlights"))
         issues = _string_list(latest.get("issues"))
@@ -1313,8 +1784,7 @@ def _build_operating_report(
                     ],
                 }
             ],
-            operating_notes=issues
-            or ["本 Skill 只完成发布准备，不会直接向平台发布。"],
+            operating_notes=issues or ["本 Skill 只完成发布准备，不会直接向平台发布。"],
             participating_experts=participants,
         )
         data = report.model_dump(mode="json")
@@ -1384,8 +1854,7 @@ def _build_report(
         else ("partial" if len(metrics) < 3 else "sufficient")
     )
     summaries = [
-        str(getattr(item.invocation, "output_summary", "") or "").strip()
-        for item in expert_results
+        str(getattr(item.invocation, "output_summary", "") or "").strip() for item in expert_results
     ]
     findings = [item for item in summaries if item]
     operator_payload = next(
@@ -1400,9 +1869,7 @@ def _build_report(
     if sufficiency == "insufficient":
         findings = ["当前只能确认数据缺口，尚不能形成账号表现或内容方向结论。"]
     if sufficiency == "insufficient":
-        summary = (
-            "现有数据不足，无法形成可靠的表现结论；本报告先列出缺失数据和补数动作。"
-        )
+        summary = "现有数据不足，无法形成可靠的表现结论；本报告先列出缺失数据和补数动作。"
         recommendations = ["先补齐账号指标和内容表现快照，再进行趋势与内容诊断。"]
         next_action = "补齐并确认最近30天账号及内容数据"
     else:

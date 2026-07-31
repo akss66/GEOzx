@@ -9,12 +9,14 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agents.base import AgentContext
 from app.agents.registry import AGENT_SPECS, AgentSpec, get_agent_spec
 from app.core.approval_audit import add_approval_requested
 from app.core.events import publish_realtime_event, record_runtime_event_once
 from app.core.workspace_access import require_account_access, require_project_access
+from app.db import async_session
 from app.models import (
     Account,
     AgentInvocation,
@@ -41,6 +43,7 @@ from app.models.enums import (
     WorkspaceRole,
 )
 from app.orchestrator.agent_kernel import KernelEventType, expert_kernel_policy
+from app.orchestrator.runtime_scope import RuntimeScope, RuntimeScopeConflict
 from app.orchestrator.runtime_tools import (
     build_runtime_tool_adapter,
     runtime_tool_capabilities,
@@ -57,6 +60,7 @@ from app.services.knowledge_workspace import (
     list_agent_knowledge,
     record_knowledge_citations,
 )
+from app.services.runtime_deliverables import write_runtime_deliverable
 
 
 class AgentHarnessError(RuntimeError):
@@ -75,6 +79,14 @@ class AgentHarnessResult:
     acceptance: DeliverableAcceptance | None
     knowledge_sources: list[KnowledgeEntry]
     output: dict
+
+
+@dataclass(frozen=True)
+class AgentTraceResult:
+    invocation_id: int
+    agent_code: str
+    output_summary: str
+    output: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -97,6 +109,61 @@ _MANAGEMENT_TO_RUNTIME_TOOL = {
 class AgentHarness:
     """Execute a specialist with scope, prompt, trace, and idempotency controls."""
 
+    async def execute_trace_isolated(
+        self,
+        *,
+        scope: RuntimeScope,
+        code: AgentCode,
+        purpose: str,
+        evidence_refs: list[str],
+        step_key: str,
+        attempt: int,
+        upstream: dict,
+        session_factory: Any = async_session,
+    ) -> AgentTraceResult:
+        """Reload the complete scope and execute one trace in its own session."""
+
+        async with session_factory() as session:
+            user = await session.scalar(
+                select(User).where(
+                    User.id == scope.user_id,
+                    User.org_id == scope.org_id,
+                )
+            )
+            task = await session.scalar(
+                select(BrainTask)
+                .options(selectinload(BrainTask.brief))
+                .where(
+                    BrainTask.id == scope.task_id,
+                    BrainTask.org_id == scope.org_id,
+                )
+            )
+            if user is None or task is None:
+                raise RuntimeScopeConflict("isolated expert scope is unavailable")
+            result = await self.execute(
+                session,
+                user=user,
+                task=task,
+                code=code,
+                purpose=purpose,
+                evidence_refs=list(evidence_refs),
+                run_id=scope.run_id,
+                skill_run_id=scope.skill_run_id,
+                thread_id=scope.thread_id,
+                turn_id=scope.turn_id,
+                step_key=step_key,
+                attempt=attempt,
+                upstream=dict(upstream),
+                scope=scope,
+                trace_only=True,
+            )
+            return AgentTraceResult(
+                invocation_id=result.invocation.id,
+                agent_code=code.value,
+                output_summary=result.invocation.output_summary,
+                output=dict(result.output or {}),
+            )
+
     async def execute(
         self,
         session: AsyncSession,
@@ -106,25 +173,46 @@ class AgentHarness:
         code: AgentCode,
         purpose: str,
         evidence_refs: list[str],
-        run_id: int | None,
-        step_key: str | None,
+        run_id: int | None = None,
+        step_key: str | None = None,
         attempt: int = 0,
         upstream: dict | None = None,
         skill_run_id: int | None = None,
         thread_id: int | None = None,
         turn_id: int | None = None,
+        scope: RuntimeScope | None = None,
         trace_only: bool = False,
     ) -> AgentHarnessResult:
         if task.org_id != user.org_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+        if scope is not None:
+            await scope.validate(session)
+            if scope.org_id != task.org_id or scope.user_id != user.id or scope.task_id != task.id:
+                raise RuntimeScopeConflict("Agent Harness scope does not match")
+            if any(
+                explicit is not None and explicit != expected
+                for explicit, expected in (
+                    (run_id, scope.run_id),
+                    (skill_run_id, scope.skill_run_id),
+                    (thread_id, scope.thread_id),
+                    (turn_id, scope.turn_id),
+                )
+            ):
+                raise RuntimeScopeConflict("Agent Harness provenance was overridden")
+            run_id = scope.run_id
+            skill_run_id = scope.skill_run_id
+            thread_id = scope.thread_id
+            turn_id = scope.turn_id
+        elif any(value is not None for value in (skill_run_id, thread_id, turn_id)):
+            raise RuntimeScopeConflict("V3 Agent Harness writes require RuntimeScope")
         # Async ORM relationships must never be loaded by plain attribute access.
         # Skill retries and worker hand-offs can supply a persisted task whose
         # one-to-one Brief relationship is unloaded or expired.
         await session.refresh(task, attribute_names=["brief"])
         spec = get_agent_spec(code)
         project_id, account_id = self._task_scope(task)
+        if scope is not None and account_id != scope.account_id:
+            raise RuntimeScopeConflict("Agent Harness account scope does not match")
         project, account = await self._require_scope(
             session,
             user=user,
@@ -277,9 +365,7 @@ class AgentHarness:
         operating_context["agent_policy"]["kernel"] = kernel_policy.as_context()
         runner = spec.runner()
         runner.code = code.value
-        runtime_capabilities = {
-            str(item["code"]): item for item in runtime_tool_capabilities(user)
-        }
+        runtime_capabilities = {str(item["code"]): item for item in runtime_tool_capabilities(user)}
         available_tools = (
             []
             if trace_only
@@ -300,6 +386,7 @@ class AgentHarness:
                 account_id=account.id,
                 agent_code=code.value,
                 invocation_id=invocation.id,
+                scope=scope,
             )
             if outcome.status != "success" or outcome.result is None:
                 raise SpecialistKernelBlocked(
@@ -344,9 +431,7 @@ class AgentHarness:
                     content_item_id=content_item.id,
                     task_id=task.id,
                     invocation_id=invocation.id,
-                    trace_id=f"agent-run:{run_id}"
-                    if run_id is not None
-                    else task.thread_id,
+                    trace_id=f"agent-run:{run_id}" if run_id is not None else task.thread_id,
                     project_id=project_id,
                     account_id=account.id,
                     request=purpose,
@@ -445,17 +530,17 @@ class AgentHarness:
             )
 
         version = await self._next_version(session, content_item.id, spec)
-        deliverable = Deliverable(
-            content_item_id=content_item.id,
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content_item,
             agent_code=code.value,
-            type=spec.deliverable_type,
+            deliverable_type=spec.deliverable_type,
             version=version,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=payload_dict,
             note="Generated by the audited Agent Harness; awaiting human acceptance.",
         )
-        session.add(deliverable)
-        await session.flush()
         summary = self._payload_summary(payload_dict)
         acceptance = DeliverableAcceptance(
             task_id=task.id,
@@ -680,12 +765,9 @@ class AgentHarness:
         """
         return {
             runtime_code
-            for management_code, permission_mode in management[
-                "tool_permissions"
-            ].items()
+            for management_code, permission_mode in management["tool_permissions"].items()
             if permission_mode == "auto"
-            and (runtime_code := _MANAGEMENT_TO_RUNTIME_TOOL.get(management_code))
-            is not None
+            and (runtime_code := _MANAGEMENT_TO_RUNTIME_TOOL.get(management_code)) is not None
         }
 
     @staticmethod
@@ -706,9 +788,7 @@ class AgentHarness:
         project_id: int | None,
         account_id: int,
     ) -> tuple[Project | None, Account]:
-        account = await require_account_access(
-            session, user, account_id, roles=_OPERATING_ROLES
-        )
+        account = await require_account_access(session, user, account_id, roles=_OPERATING_ROLES)
         if account.status != AccountStatus.ACTIVE:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -722,9 +802,7 @@ class AgentHarness:
         if project_id is None:
             return None, account
 
-        project = await require_project_access(
-            session, user, project_id, roles=_OPERATING_ROLES
-        )
+        project = await require_project_access(session, user, project_id, roles=_OPERATING_ROLES)
         linked_id = await session.scalar(
             select(ProjectAccount.id).where(
                 ProjectAccount.project_id == project.id,
@@ -849,6 +927,16 @@ class AgentHarness:
         task: BrainTask,
         invocation: AgentInvocation,
     ) -> AgentHarnessResult:
+        for item in reversed(invocation.upstream or []):
+            if isinstance(item, dict) and isinstance(item.get("trace_only_output"), dict):
+                return AgentHarnessResult(
+                    task=task,
+                    invocation=invocation,
+                    deliverable=None,
+                    acceptance=None,
+                    knowledge_sources=[],
+                    output=dict(item["trace_only_output"]),
+                )
         if invocation.run_id is not None:
             run = await session.get(AgentRun, invocation.run_id)
             if run is not None:
@@ -865,18 +953,6 @@ class AgentHarness:
                             knowledge_sources=[],
                             output=dict(payload),
                         )
-        for item in reversed(invocation.upstream or []):
-            if isinstance(item, dict) and isinstance(
-                item.get("trace_only_output"), dict
-            ):
-                return AgentHarnessResult(
-                    task=task,
-                    invocation=invocation,
-                    deliverable=None,
-                    acceptance=None,
-                    knowledge_sources=[],
-                    output=dict(item["trace_only_output"]),
-                )
         raise AgentHarnessError("trace-only specialist result is incomplete")
 
     @staticmethod
@@ -887,6 +963,9 @@ class AgentHarness:
         invocation: AgentInvocation,
         payload: dict[str, Any],
     ) -> None:
+        upstream = list(invocation.upstream or [])
+        upstream.append({"trace_only_output": dict(payload)})
+        invocation.upstream = upstream
         if invocation.run_id is None:
             return
         run = await session.get(AgentRun, invocation.run_id)
@@ -904,9 +983,7 @@ class AgentHarness:
         return invocation.step_key or str(invocation.id)
 
     @staticmethod
-    async def _next_version(
-        session: AsyncSession, content_item_id: int, spec: AgentSpec
-    ) -> int:
+    async def _next_version(session: AsyncSession, content_item_id: int, spec: AgentSpec) -> int:
         latest = await session.scalar(
             select(func.max(Deliverable.version)).where(
                 Deliverable.content_item_id == content_item_id,

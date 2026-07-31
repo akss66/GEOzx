@@ -58,7 +58,12 @@ ACCOUNT_INSPECTION_SKILL = SkillDefinition(
     input_model=AccountInspectionInput,
     output_model=AccountInspectionReport,
     expert_codes=("01-positioning", "02-content-director", "06-operator"),
+    expert_stages=(
+        ("01-positioning", "02-content-director"),
+        ("06-operator",),
+    ),
     tool_codes=("account.profile", "account.data_context"),
+    critic_policy="required",
     risk_level="low",
     approval_policy="none",
     artifact_type="account_inspection_report",
