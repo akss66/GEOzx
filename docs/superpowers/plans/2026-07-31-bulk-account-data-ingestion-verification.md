@@ -105,6 +105,8 @@ POSTGRES_SMOKE_OK files=5 completed=4 failed=1 overlap=0 fallback=81
 - `https://tzxai.top/api/health/ready`：
   `{"status":"ready","checks":{"db":true,"redis":true}}`
 - 站点根路径：HTTP 200，TLS 校验结果 0
+- Playwright 实际打开生产站点成功，标题和登录页内容正确，控制台错误 0，
+  失败请求 0
 - 未认证访问新导入任务 API：HTTP 401，证明路由已上线且鉴权生效
 - 回滚目标：
   `/home/admin/releases/dyflow-20260731-account-data-center-db62896`
