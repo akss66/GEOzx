@@ -369,7 +369,7 @@ function Projection({
         />
       );
     case "account_data":
-      return <section {...shared}>已读取当前账号的数据，可继续告诉我想分析的指标。</section>;
+      return <section {...shared}>{accountDataMessage(projection.data?.data_status)}</section>;
     case "execution_blocked":
       return (
         <section {...shared} aria-label="Execution blocked">
@@ -377,6 +377,16 @@ function Projection({
         </section>
       );
   }
+}
+
+function accountDataMessage(status?: "available" | "pending_import" | "empty") {
+  if (status === "pending_import") {
+    return "当前账号暂无已正式写入的数据；存在待确认导入，请先完成正式写入。";
+  }
+  if (status === "empty") {
+    return "当前账号暂无可分析数据，请先同步或导入账号数据。";
+  }
+  return "已读取当前账号的数据，可继续告诉我想分析的指标。";
 }
 
 function approvalId(projection: TurnProjection) {

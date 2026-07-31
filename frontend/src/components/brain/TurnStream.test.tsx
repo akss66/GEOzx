@@ -283,6 +283,43 @@ describe("TurnStream", () => {
     expect(screen.getByText(/Tool #8002/)).toBeVisible();
   });
 
+  it("shows a pending import action instead of claiming account data was read", () => {
+    render(
+      <TurnStream
+        thread={{
+          ...thread,
+          turns: [{
+            ...thread.turns[1],
+            projections: [{
+              type: "account_data",
+              turn_id: 102,
+              account_id: 3,
+              skill_code: "account_data_query",
+              skill_run_id: 4010,
+              data: {
+                data_status: "pending_import",
+                pending_imports: [{
+                  batch_id: 8,
+                  status: "preview_ready",
+                  template_code: "douyin_period_aggregate_v1",
+                  row_count: 1,
+                  period_start: "2026-05-02",
+                  period_end: "2026-07-31",
+                }],
+              },
+            }],
+          }],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText("当前账号暂无已正式写入的数据；存在待确认导入，请先完成正式写入。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("已读取当前账号的数据，可继续告诉我想分析的指标。"))
+      .not.toBeInTheDocument();
+  });
+
   it("shows critic-only quality without inventing an expert", () => {
     render(
       <TurnStream
