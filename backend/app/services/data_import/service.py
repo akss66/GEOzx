@@ -787,18 +787,6 @@ async def account_status_summary(
             source for source in sources if source["data_domain"] == data_domain
         ]
         latest_source = domain_sources[0] if domain_sources else None
-        if latest_source is not None:
-            committed_at = latest_source["committed_at"]
-            inventory_status = (
-                "stale"
-                if (
-                    isinstance(committed_at, datetime)
-                    and committed_at.date() < stale_before.date()
-                )
-                else "available"
-            )
-        else:
-            inventory_status = pending_by_domain.get(data_domain, "not_imported")
         period_starts = [
             source["period_start"]
             for source in domain_sources
@@ -809,12 +797,32 @@ async def account_status_summary(
             for source in domain_sources
             if isinstance(source["period_end"], date)
         ]
+        confirmed_period_end = max(period_ends) if period_ends else None
+        if latest_source is not None:
+            committed_at = latest_source["committed_at"]
+            freshness_date = (
+                confirmed_period_end
+                if confirmed_period_end is not None
+                else committed_at.date()
+                if isinstance(committed_at, datetime)
+                else None
+            )
+            inventory_status = (
+                "stale"
+                if (
+                    freshness_date is not None
+                    and freshness_date < stale_before.date()
+                )
+                else "available"
+            )
+        else:
+            inventory_status = pending_by_domain.get(data_domain, "not_imported")
         dataset_inventory.append(
             {
                 "data_domain": data_domain,
                 "status": inventory_status,
                 "confirmed_period_start": min(period_starts) if period_starts else None,
-                "confirmed_period_end": max(period_ends) if period_ends else None,
+                "confirmed_period_end": confirmed_period_end,
                 "latest_source": latest_source,
             }
         )

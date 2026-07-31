@@ -874,6 +874,48 @@ async def test_commit_projects_daily_play_into_account_metric_snapshots_and_stat
 
 
 @pytest.mark.asyncio
+async def test_dataset_inventory_marks_old_data_period_stale_even_when_just_imported(
+    client,
+    account_access_setup,
+    operator_token,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr("app.config.settings.storage_local_dir", str(tmp_path))
+    account = account_access_setup["account"]
+
+    preview = await client.post(
+        f"/account-data/{account.id}/imports",
+        headers=_auth(operator_token),
+        files={
+            "file": (
+                "old-daily.xlsx",
+                _daily_play_workbook_payload(stat_date="2000-01-01"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 201
+    committed = await client.post(
+        f"/account-data/{account.id}/imports/{preview.json()['id']}/commit",
+        headers=_auth(operator_token),
+    )
+    assert committed.status_code == 200
+
+    coverage = await client.get(
+        f"/account-data/{account.id}/status",
+        headers=_auth(operator_token),
+    )
+    assert coverage.status_code == 200
+    inventory = {
+        item["data_domain"]: item
+        for item in coverage.json()["dataset_inventory"]
+    }
+    assert inventory["account_metrics"]["confirmed_period_end"] == "2000-01-01"
+    assert inventory["account_metrics"]["status"] == "stale"
+
+
+@pytest.mark.asyncio
 async def test_commit_projects_single_content_without_inventing_unmodeled_metrics(
     client,
     session,
