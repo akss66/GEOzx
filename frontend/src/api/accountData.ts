@@ -20,6 +20,18 @@ export type AccountDataImportRowStatus =
   | "committed"
   | "revoked";
 export type AccountDataImportRowView = "all" | "ready" | "needs_work";
+export type AccountDataImportJobStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "completed_with_errors"
+  | "failed";
+export type AccountDataImportFileStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "partially_completed"
+  | "failed";
 
 export interface AccountDataImportArtifact {
   id: number;
@@ -103,6 +115,43 @@ export interface AccountDataImportRowQuery {
   page?: number;
   pageSize?: number;
   view?: AccountDataImportRowView;
+}
+
+export interface AccountDataImportJobDataset {
+  id: number;
+  template_code: string;
+  sheet_name: string | null;
+  dataset_ordinal: number | null;
+  status: AccountDataImportBatchStatus;
+  row_count: number;
+}
+
+export interface AccountDataImportJobFile {
+  id: number;
+  retry_of_file_id: number | null;
+  ordinal: number;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  sha256: string;
+  status: AccountDataImportFileStatus;
+  error_payload: Record<string, unknown>;
+  started_at: string | null;
+  completed_at: string | null;
+  datasets: AccountDataImportJobDataset[];
+}
+
+export interface AccountDataImportJob {
+  id: number;
+  account_id: number;
+  client_request_id: string;
+  status: AccountDataImportJobStatus;
+  file_count: number;
+  completed_file_count: number;
+  failed_file_count: number;
+  started_at: string | null;
+  completed_at: string | null;
+  files: AccountDataImportJobFile[];
 }
 
 export interface AccountDataStatusSource {
@@ -225,6 +274,43 @@ export async function uploadAccountDataImport(
     {
       headers: { "Content-Type": "multipart/form-data" },
     },
+  );
+  return data;
+}
+
+export async function createAccountDataImportJob(
+  accountId: number,
+  files: File[],
+  clientRequestId: string,
+): Promise<AccountDataImportJob> {
+  const formData = new FormData();
+  formData.append("client_request_id", clientRequestId);
+  files.forEach((file) => formData.append("files", file));
+  const { data } = await api.post<AccountDataImportJob>(
+    `/account-data/${accountId}/import-jobs`,
+    formData,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return data;
+}
+
+export async function getAccountDataImportJob(
+  accountId: number,
+  jobId: number,
+): Promise<AccountDataImportJob> {
+  const { data } = await api.get<AccountDataImportJob>(
+    `/account-data/${accountId}/import-jobs/${jobId}`,
+  );
+  return data;
+}
+
+export async function retryAccountDataImportFile(
+  accountId: number,
+  jobId: number,
+  fileId: number,
+): Promise<AccountDataImportJob> {
+  const { data } = await api.post<AccountDataImportJob>(
+    `/account-data/${accountId}/import-jobs/${jobId}/files/${fileId}/retry`,
   );
   return data;
 }

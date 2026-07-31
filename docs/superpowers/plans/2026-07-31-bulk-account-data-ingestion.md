@@ -247,9 +247,9 @@ POST   /account-data/{account_id}/import-jobs/{job_id}/files/{file_id}/retry
 - Modify: `frontend/src/pages/AccountDataCenter.test.tsx`
 - Modify: `frontend/src/styles/account-data-center.css`
 
-- [ ] Add failing component tests proving drag/drop and file-picker both submit multiple files in one request.
-- [ ] Add failing tests for mixed terminal states: four successful files remain successful while one failed file exposes `重试此文件`.
-- [ ] Add typed job/file/dataset DTOs and:
+- [x] Add failing component tests proving drag/drop and file-picker both submit multiple files in one request.
+- [x] Add failing tests for mixed terminal states: four successful files remain successful while one failed file exposes `重试此文件`.
+- [x] Add typed job/file/dataset DTOs and:
 
 ```ts
 export async function createAccountDataImportJob(
@@ -259,12 +259,12 @@ export async function createAccountDataImportJob(
 ): Promise<AccountDataImportJob>
 ```
 
-- [ ] Change the input to `multiple`, accept `.xlsx,.csv`, and label the primary action `继续添加数据文件`.
-- [ ] Render one queue row per file with detected datasets, worksheet names, progress, warnings, failure reason, and isolated retry.
-- [ ] Poll the job endpoint while any file is queued or processing, then invalidate status/history queries once terminal.
-- [ ] Keep manual entry under `其他录入方式`; do not replace the active multi-file queue when additional files are selected.
-- [ ] Preserve keyboard access, visible focus, and screen-reader status announcements.
-- [ ] Run `cd frontend; npm test -- --run src/components/account-data/BulkImportQueue.test.tsx src/pages/AccountDataCenter.test.tsx`.
+- [x] Change the input to `multiple`, accept `.xlsx,.csv`, and label the primary action `继续添加数据文件`.
+- [x] Render one queue row per file with detected datasets, worksheet names, progress, warnings, failure reason, and isolated retry.
+- [x] Poll the job endpoint while any file is queued or processing, then invalidate status/history queries once terminal.
+- [x] Keep manual entry under `其他录入方式`; do not replace the active multi-file queue when additional files are selected.
+- [x] Preserve keyboard access, visible focus, and screen-reader status announcements.
+- [x] Run `cd frontend; npm test -- --run src/components/account-data/BulkImportQueue.test.tsx src/components/account-data/ManualDataEntry.test.tsx src/components/account-data/ImportBatchHistory.test.tsx`, then `npm run lint` and `npm run build`.
 - [ ] Commit: `feat(account-data): add multi-file import queue`.
 
 ## Task 9: Correct Coverage Semantics and Operator Copy

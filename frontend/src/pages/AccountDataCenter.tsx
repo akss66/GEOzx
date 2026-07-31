@@ -13,9 +13,7 @@ import {
   getAccountDataImportBatch,
   getAccountDataStatus,
   listAccountDataImports,
-  resolveAccountDataImportRow,
   revokeAccountDataImportBatch,
-  uploadAccountDataImport,
   type AccountDataImportArtifact,
   type AccountDataImportBatch,
   type AccountDataImportRow,
@@ -29,9 +27,9 @@ import {
   type AccountDataView,
 } from "../components/account-data/AccountDataTabs";
 import { DataCoverageOverview } from "../components/account-data/DataCoverageOverview";
+import { BulkImportQueue } from "../components/account-data/BulkImportQueue";
 import { OperationalState } from "../components/ui";
 import { ImportBatchHistory } from "../components/account-data/ImportBatchHistory";
-import { ImportWorkspace } from "../components/account-data/ImportWorkspace";
 import { ManualDataEntry } from "../components/account-data/ManualDataEntry";
 import { getTemplateLabel } from "../components/account-data/statusMeta";
 import {
@@ -260,29 +258,6 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
     return batch;
   }
 
-  const uploadMutation = useMutation({
-    mutationFn: (file: File) => uploadAccountDataImport(routeAccountId, file),
-    onSuccess: (batch) => {
-      if (!isMountedRef.current) return;
-      setFlowFeedback({
-        tone: "success",
-        title: "导入预览已生成",
-        description: "请先核对行级数据，确认无误后再正式写入当前账号。",
-      });
-      setHistoryError(null);
-      setEntryMode("file");
-      setActiveView("import");
-      setActiveBatchId(batch.id);
-      setDraftBatch(batch);
-      queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
-      void historyQuery.refetch();
-    },
-    onError: (error) => {
-      if (!isMountedRef.current) return;
-      setFlowFeedback(presentImportError(error));
-    },
-  });
-
   const manualPreviewMutation = useMutation({
     mutationFn: ({ payload, screenshot }: { payload: ManualPreviewPayload; screenshot: File | null }) =>
       createManualAccountDataPreview(routeAccountId, payload, screenshot),
@@ -301,43 +276,6 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
       setDraftBatch(batch);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
       void historyQuery.refetch();
-    },
-    onError: (error) => {
-      if (!isMountedRef.current) return;
-      setFlowFeedback(presentImportError(error));
-    },
-  });
-
-  const resolveMutation = useMutation({
-    mutationFn: ({
-      batchId,
-      rowNumber,
-      selectedContentId,
-    }: {
-      batchId: number;
-      rowNumber: number;
-      selectedContentId: number;
-    }) =>
-      resolveAccountDataImportRow(
-        routeAccountId,
-        batchId,
-        rowNumber,
-        selectedContentId,
-      ),
-    onSuccess: async (_row, variables) => {
-      try {
-        await queryClient.invalidateQueries({
-          queryKey: ["account-data-import-rows", routeAccountId, variables.batchId],
-        });
-        const batch = await refreshBatchWorkspace(variables.batchId);
-        if (!isMountedRef.current) return;
-        setHistoryError(null);
-        setActiveBatchId(variables.batchId);
-        setDraftBatch(batch);
-      } catch (error) {
-        if (!isMountedRef.current) return;
-        setFlowFeedback(presentImportError(error));
-      }
     },
     onError: (error) => {
       if (!isMountedRef.current) return;
@@ -627,30 +565,14 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
 
           <div className="account-data-import-workspace">
             {entryMode === "file" ? (
-              <ImportWorkspace
-                key={`${routeAccountId}:${activeBatch?.source_kind === "platform_export" ? activeBatch.id : "empty"}`}
+              <BulkImportQueue
+                key={routeAccountId}
                 accountId={routeAccountId}
-                batch={activeBatch?.source_kind === "platform_export" ? activeBatch : null}
-                feedback={flowFeedback}
-                uploading={uploadMutation.isPending}
-                resolvingRowNumber={resolveMutation.isPending ? resolveMutation.variables?.rowNumber ?? null : null}
-                committing={commitMutation.isPending}
-                onFileSelected={(file) => {
-                  setFlowFeedback(null);
-                  setHistoryError(null);
-                  uploadMutation.mutate(file);
-                }}
-                onResolveRow={(rowNumber, selectedContentId) => {
-                  if (!activeBatch) return;
-                  setFlowFeedback(null);
-                  setHistoryError(null);
-                  resolveMutation.mutate({ batchId: activeBatch.id, rowNumber, selectedContentId });
-                }}
-                onCommit={() => {
-                  if (!activeBatch) return;
-                  setFlowFeedback(null);
-                  setHistoryError(null);
-                  commitMutation.mutate(activeBatch.id);
+                onTerminal={() => {
+                  void Promise.all([
+                    historyQuery.refetch(),
+                    statusQuery.refetch(),
+                  ]);
                 }}
               />
             ) : (
