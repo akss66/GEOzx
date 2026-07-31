@@ -8,7 +8,12 @@ import type {
   ManualBenchmarkMetric,
   ManualPreviewPayload,
 } from "../../api/accountData";
-import { getBatchStatusDescription, getBatchStatusLabel } from "./statusMeta";
+import { ImportCommitBar } from "./ImportCommitBar";
+import {
+  getBatchStatusDescription,
+  getBatchStatusLabel,
+  getTemplateLabel,
+} from "./statusMeta";
 
 type ManualDomain = ManualPreviewPayload["data_domain"];
 
@@ -41,6 +46,7 @@ function inputNumber(form: HTMLFormElement, name: string) {
 }
 
 export function ManualDataEntry({
+  embedded = false,
   batch,
   feedback,
   creating,
@@ -51,6 +57,7 @@ export function ManualDataEntry({
   onConfirmRow,
   onCommit,
 }: {
+  embedded?: boolean;
   batch: AccountDataImportBatch | null;
   feedback: FlowFeedback | null;
   creating: boolean;
@@ -134,16 +141,26 @@ export function ManualDataEntry({
   const pendingConfirmation = visibleBatch?.rows.find(
     (row) => row.status === "needs_resolution",
   );
+  const blockingCount = visibleBatch?.rows.filter(
+    (row) => row.status === "invalid" || row.status === "needs_resolution",
+  ).length ?? 0;
 
   return (
     <section className="account-data-flow account-data-manual" aria-label="人工录入流程">
-      <header className="account-data-section-head">
-        <div>
-          <span>人工数据工作台</span>
-          <h2>人工录入与截图核验</h2>
-          <p>补齐无法导出的账号诊断、粉丝画像和对标数据，所有字段都会保留来源与确认记录。</p>
+      {!embedded ? (
+        <header className="account-data-section-head">
+          <div>
+            <span>人工数据工作台</span>
+            <h2>人工录入与截图核验</h2>
+            <p>补齐无法导出的账号诊断、粉丝画像和对标数据，所有字段都会保留来源与确认记录。</p>
+          </div>
+        </header>
+      ) : (
+        <div className="account-data-embedded-heading">
+          <strong>人工补录</strong>
+          <span>填写平台暂时无法导出的数据，可附截图作为核验依据。</span>
         </div>
-      </header>
+      )}
 
       <div className="account-data-domain-tabs" role="tablist" aria-label="人工数据类型">
         {DOMAIN_OPTIONS.map((option) => (
@@ -161,7 +178,10 @@ export function ManualDataEntry({
       </div>
 
       {visibleFeedback ? (
-        <div className={`account-data-feedback is-${visibleFeedback.tone}`} role="status">
+        <div
+          className={`account-data-feedback is-${visibleFeedback.tone}`}
+          role={visibleFeedback.tone === "error" ? "alert" : "status"}
+        >
           <strong>{visibleFeedback.title}</strong>
           <p>{visibleFeedback.description}</p>
         </div>
@@ -247,16 +267,24 @@ export function ManualDataEntry({
         <div className="account-data-manual-preview">
           <div>
             <span>当前预览</span>
-            <strong>{visibleBatch.template_code}</strong>
+            <strong>{getTemplateLabel(visibleBatch.template_code)}</strong>
             <p>{`${getBatchStatusLabel(visibleBatch.status)}：${getBatchStatusDescription(visibleBatch.status)}`}</p>
           </div>
           <div className="account-data-manual-actions">
             {pendingConfirmation ? (
               <Button loading={confirming} icon={<CheckOutlined />} onClick={() => onConfirmRow(pendingConfirmation.row_number)}>确认截图数据</Button>
             ) : null}
-            <Button type="primary" loading={committing} disabled={!canCommit} onClick={onCommit}>确认写入</Button>
           </div>
         </div>
+      ) : null}
+      {visibleBatch ? (
+        <ImportCommitBar
+          totalCount={visibleBatch.row_count}
+          blockingCount={blockingCount}
+          committing={committing}
+          disabled={!canCommit}
+          onCommit={onCommit}
+        />
       ) : null}
     </section>
   );

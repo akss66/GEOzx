@@ -1,6 +1,6 @@
 import { UploadOutlined } from "@ant-design/icons";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Button, Skeleton } from "antd";
+import { Button } from "antd";
 import { type ChangeEvent, useEffect, useState } from "react";
 
 import {
@@ -42,6 +42,7 @@ export function ImportWorkspace({
 }) {
   const [rowPage, setRowPage] = useState(1);
   const [rowView, setRowView] = useState<AccountDataImportRowView>("all");
+  const [lastSelectedFile, setLastSelectedFile] = useState<File | null>(null);
   const batchId = batch?.id ?? null;
 
   useEffect(() => {
@@ -65,6 +66,7 @@ export function ImportWorkspace({
   function handleChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (file) {
+      setLastSelectedFile(file);
       onFileSelected(file);
       event.target.value = "";
     }
@@ -105,6 +107,19 @@ export function ImportWorkspace({
         >
           <strong>{feedback.title}</strong>
           <p>{feedback.description}</p>
+          {hasUploadError && lastSelectedFile ? (
+            <div className="account-data-upload-recovery">
+              <span>{lastSelectedFile.name}</span>
+              <span>此次上传未写入任何账号数据。</span>
+              <Button
+                size="small"
+                aria-label={`重新上传 ${lastSelectedFile.name}`}
+                onClick={() => onFileSelected(lastSelectedFile)}
+              >
+                重新上传
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -149,7 +164,13 @@ export function ImportWorkspace({
                 {rowsQuery.isFetching ? <span>正在更新…</span> : null}
               </div>
               {rowsQuery.isLoading ? (
-                <Skeleton active paragraph={{ rows: 5 }} />
+                <ImportPreviewTable
+                  loading
+                  templateCode={batch.template_code}
+                  rows={[]}
+                  resolvingRowNumber={resolvingRowNumber}
+                  onResolveRow={onResolveRow}
+                />
               ) : rowsQuery.isError ? (
                 <div className="account-data-empty-inline" role="alert">
                   <strong>行数据加载失败</strong>
@@ -158,6 +179,7 @@ export function ImportWorkspace({
               ) : (
                 <>
                   <ImportPreviewTable
+                    loading={false}
                     templateCode={batch.template_code}
                     rows={rowData?.items ?? []}
                     resolvingRowNumber={resolvingRowNumber}

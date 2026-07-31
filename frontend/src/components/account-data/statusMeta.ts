@@ -9,6 +9,9 @@ const templateLabels: Record<string, string> = {
   douyin_single_content_v1: "抖音单作品分析",
   douyin_period_aggregate_v1: "抖音阶段汇总",
   douyin_work_list_v1: "抖音作品列表",
+  manual_account_period_v1: "人工账号周期数据",
+  manual_audience_dimension_v1: "人工粉丝画像",
+  manual_benchmark_v1: "人工对标基准",
 };
 
 export function getTemplateLabel(templateCode: string) {

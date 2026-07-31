@@ -9,10 +9,22 @@
   gap: 18px;
 }
 
-.account-data-skeleton-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(360px, 0.9fr);
-  gap: 18px;
+.account-data-header--skeleton .ant-skeleton {
+  max-width: 420px;
+}
+
+.account-data-tabs--skeleton span {
+  color: transparent;
+  border-radius: 4px;
+  background: #ece9e4;
+  user-select: none;
+}
+
+.account-data-panel--skeleton {
+  padding: 20px;
+  border: 1px solid var(--tz-line);
+  border-radius: 10px;
+  background: #fff;
 }
 
 .account-data-header {
@@ -248,6 +260,7 @@
 }
 
 .account-data-entry-switch {
+  position: relative;
   margin: 18px 0 12px;
 }
 
@@ -269,6 +282,43 @@
   background: #fff;
   color: var(--dy-text);
   box-shadow: 0 1px 2px rgba(32, 24, 18, 0.08);
+}
+
+.account-data-entry-switch button[aria-expanded="true"] {
+  color: var(--dy-text);
+}
+
+.account-data-embedded-heading {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 2px;
+}
+
+.account-data-embedded-heading strong {
+  font-size: 18px;
+}
+
+.account-data-embedded-heading span {
+  color: var(--dy-muted);
+  font-size: 12px;
+}
+
+.account-data-upload-recovery {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 6px;
+}
+
+.account-data-upload-recovery span {
+  color: var(--dy-muted);
+  font-size: 12px;
+}
+
+.account-data-upload-recovery span:first-child {
+  color: var(--dy-text);
+  font-weight: 600;
 }
 
 .account-data-manual-grid {
@@ -422,6 +472,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.account-data-preview-loading-row td {
+  height: 180px;
+  color: var(--dy-muted);
+  text-align: center;
 }
 
 .account-data-coverage-item {
@@ -1257,6 +1313,10 @@
   .account-data-import-summary > div:nth-child(-n + 2) {
     border-bottom: 1px solid var(--tz-line-subtle);
   }
+
+  .account-data-manual-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1291,6 +1351,22 @@
 
   .account-data-import-progress {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .account-data-entry-switch {
+    display: flex;
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .account-data-entry-switch button {
+    flex: 0 0 auto;
+  }
+
+  .account-data-field-grid,
+  .account-data-field-grid.three,
+  .account-data-repeat-row {
+    grid-template-columns: 1fr;
   }
 
   .account-data-import-summary {

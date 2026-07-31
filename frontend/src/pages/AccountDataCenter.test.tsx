@@ -425,6 +425,50 @@ describe("AccountDataCenter", () => {
     expect(await screen.findByLabelText("选择导入文件")).toBeInTheDocument();
   });
 
+  it("starts with file import and reveals manual entry as a secondary method", async () => {
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({ items: [] });
+
+    renderPage();
+
+    await openAccountDataView("导入与补录");
+    expect(screen.getByRole("button", { name: "文件导入" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByRole("button", { name: "人工补录" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "其他补录方式" }));
+    fireEvent.click(await screen.findByRole("button", { name: "人工补录" }));
+
+    expect(screen.getByRole("button", { name: "人工补录" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(await screen.findByLabelText("统计日期")).toBeInTheDocument();
+  });
+
+  it("keeps an active file preview when temporarily switching to manual entry", async () => {
+    const preview = buildPreviewBatch();
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [buildBatchSummary()],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "确认写入 1 条" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "其他补录方式" }));
+    fireEvent.click(await screen.findByRole("button", { name: "人工补录" }));
+    expect(await screen.findByLabelText("统计日期")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "文件导入" }));
+
+    expect(await screen.findByRole("button", { name: "确认写入 1 条" })).toBeInTheDocument();
+    expect(getAccountDataImportBatch).toHaveBeenCalledTimes(1);
+  });
+
   it("does not present pending preview data as confirmed account data", async () => {
     const pending = buildPreviewBatch();
     vi.mocked(getAccountDataStatus).mockResolvedValueOnce(
@@ -483,7 +527,30 @@ describe("AccountDataCenter", () => {
     });
 
     expect(await screen.findByText("无法识别导入模板")).toBeInTheDocument();
+    expect(screen.getByText("unknown.xlsx")).toBeInTheDocument();
+    expect(screen.getByText("此次上传未写入任何账号数据。")).toBeInTheDocument();
     expect(screen.getByText("请改用已支持的抖音导出模板后重新上传。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新上传 unknown.xlsx" })).toBeEnabled();
+  });
+
+  it("preserves validation table headers while row data is loading", async () => {
+    const preview = buildPreviewBatch();
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [buildBatchSummary()],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
+    vi.mocked(getAccountDataImportRows).mockImplementationOnce(
+      () => new Promise<AccountDataImportRowPage>(() => undefined),
+    );
+
+    renderPage();
+
+    expect(
+      await screen.findByRole("table", { name: "导入数据校验表" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "状态" })).toBeInTheDocument();
+    expect(screen.getByText("正在加载校验数据…")).toBeInTheDocument();
   });
 
   it("keeps the uploaded preview in React StrictMode", async () => {
@@ -565,7 +632,8 @@ describe("AccountDataCenter", () => {
     renderPage();
 
     await openAccountDataView("导入与补录");
-    fireEvent.click(await screen.findByRole("tab", { name: "人工录入" }));
+    fireEvent.click(await screen.findByRole("button", { name: "其他补录方式" }));
+    fireEvent.click(await screen.findByRole("button", { name: "人工补录" }));
     fireEvent.change(screen.getByLabelText("统计日期"), { target: { value: "2026-07-22" } });
     fireEvent.change(screen.getByLabelText("粉丝总数"), { target: { value: "1200" } });
     fireEvent.change(screen.getByLabelText("播放量"), { target: { value: "8900" } });
@@ -585,7 +653,9 @@ describe("AccountDataCenter", () => {
       null,
     ));
     expect(await screen.findByText("人工数据预览已生成")).toBeInTheDocument();
-    expect(screen.getByText("manual_account_period_v1")).toBeInTheDocument();
+    expect(screen.getByText("人工账号周期数据")).toBeInTheDocument();
+    expect(screen.queryByText("manual_account_period_v1")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认写入 1 条" })).toBeEnabled();
     expect(confirmManualAccountDataRow).not.toHaveBeenCalled();
   });
 
@@ -709,8 +779,13 @@ describe("AccountDataCenter", () => {
 
     renderPage();
 
-    const table = await screen.findByRole("table", { name: "导入数据校验表" });
-    expect(table.querySelectorAll("tbody > tr")).toHaveLength(50);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("table", { name: "导入数据校验表" })
+          .querySelectorAll("tbody > tr"),
+      ).toHaveLength(50),
+    );
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() =>
       expect(getAccountDataImportRows).toHaveBeenCalledWith(

@@ -48,11 +48,13 @@ function listMessages(items: Array<Record<string, unknown>>) {
 }
 
 export function ImportPreviewTable({
+  loading = false,
   templateCode,
   rows,
   resolvingRowNumber,
   onResolveRow,
 }: {
+  loading?: boolean;
   templateCode: string;
   rows: AccountDataImportRow[];
   resolvingRowNumber: number | null;
@@ -61,7 +63,11 @@ export function ImportPreviewTable({
   const columns = TEMPLATE_COLUMNS[templateCode] ?? TEMPLATE_COLUMNS.douyin_work_list_v1;
   return (
     <div className="account-data-preview-table-wrap">
-      <table className="account-data-preview-table" aria-label="导入数据校验表">
+      <table
+        className="account-data-preview-table"
+        aria-label="导入数据校验表"
+        aria-busy={loading}
+      >
         <thead>
           <tr>
             <th>状态</th>
@@ -75,6 +81,11 @@ export function ImportPreviewTable({
           </tr>
         </thead>
         <tbody>
+          {loading ? (
+            <tr className="account-data-preview-loading-row">
+              <td colSpan={columns.length + 3}>正在加载校验数据…</td>
+            </tr>
+          ) : null}
           {rows.map((row) => {
             const status = rowStatusMeta(row.status);
             const errors = listMessages(row.field_errors);

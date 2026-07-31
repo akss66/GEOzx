@@ -1092,7 +1092,7 @@ git commit -m "feat: add dense account import history"
 - Consumes: existing manual preview, manual confirmation, and commit mutations.
 - Produces: one import view with `文件导入` as the primary method and `人工补录` as the secondary method.
 
-- [ ] **Step 1: Write failing method-switch tests**
+- [x] **Step 1: Write failing method-switch tests**
 
 Assert:
 
@@ -1101,7 +1101,7 @@ Assert:
 - Switching methods does not lose an existing active file preview without confirmation.
 - A manual preview switches the progress state to review and uses the same commit bar counts.
 
-- [ ] **Step 2: Write failing loading and error tests**
+- [x] **Step 2: Write failing loading and error tests**
 
 Cover:
 
@@ -1111,7 +1111,7 @@ Cover:
 - Empty/header-only files never enable confirm.
 - A detail failure does not blank the data overview.
 
-- [ ] **Step 3: Write failing accessibility tests**
+- [x] **Step 3: Write failing accessibility tests**
 
 Verify:
 
@@ -1122,7 +1122,7 @@ Verify:
 - Confirmation bar is reachable after the table in DOM order.
 - More-menu and confirmation controls have accessible names containing the batch ID.
 
-- [ ] **Step 4: Run tests and confirm failure**
+- [x] **Step 4: Run tests and confirm failure**
 
 Run:
 
@@ -1133,11 +1133,11 @@ pnpm test -- src/pages/AccountDataCenter.test.tsx
 
 Expected: at least the new method, skeleton, and accessibility assertions fail.
 
-- [ ] **Step 5: Integrate manual entry into `ImportWorkspace`**
+- [x] **Step 5: Integrate manual entry into `ImportWorkspace`**
 
 Use a secondary method selector inside the import view. Reuse `ManualDataEntry`; remove its duplicated outer section header and commit action when embedded. It should emit the same active-batch update shape as file upload.
 
-- [ ] **Step 6: Implement state-specific skeletons and errors**
+- [x] **Step 6: Implement state-specific skeletons and errors**
 
 Keep:
 
@@ -1147,7 +1147,7 @@ Keep:
 
 Use `OperationalState` only for account-level blocking errors. Use inline retry feedback for file, rows, and history-detail failures.
 
-- [ ] **Step 7: Finish responsive and reduced-motion rules**
+- [x] **Step 7: Finish responsive and reduced-motion rules**
 
 Test CSS at:
 
@@ -1158,7 +1158,7 @@ Test CSS at:
 
 At 390px, transform history rows into stacked summaries and keep import rows in a contained horizontal table. Do not create a squeezed two-column page.
 
-- [ ] **Step 8: Run the page suite, lint, and build**
+- [x] **Step 8: Run the page suite, lint, and build**
 
 Run:
 

@@ -130,6 +130,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
   const [draftBatch, setDraftBatch] = useState<AccountDataImportBatch | null>(null);
   const [activeView, setActiveView] = useState<AccountDataView>("overview");
   const [entryMode, setEntryMode] = useState<DataEntryMode>("file");
+  const [showSecondaryMethods, setShowSecondaryMethods] = useState(false);
   const [flowFeedback, setFlowFeedback] = useState<FlowFeedback>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
@@ -197,6 +198,9 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
       next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified"
         ? "manual"
         : "file",
+    );
+    setShowSecondaryMethods(
+      next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified",
     );
   }, [activeBatchId, historyQuery.data]);
 
@@ -428,11 +432,10 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
       setActiveBatchId(next?.id ?? null);
       setDraftBatch(null);
       if (next) {
-        setEntryMode(
-          next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified"
-            ? "manual"
-            : "file",
-        );
+        const nextIsManual =
+          next.source_kind === "manual_entry" || next.source_kind === "screenshot_verified";
+        setEntryMode(nextIsManual ? "manual" : "file");
+        setShowSecondaryMethods(nextIsManual);
       }
     }
   }
@@ -460,9 +463,18 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
   if (accountQuery.isLoading) {
     return (
       <div className="account-data-center account-data-center--loading" aria-label="账号数据中心加载中">
-        <Skeleton active paragraph={{ rows: 2 }} />
-        <div className="account-data-skeleton-grid">
-          <Skeleton active paragraph={{ rows: 8 }} />
+        <div className="account-data-header account-data-header--skeleton">
+          <Skeleton active avatar paragraph={{ rows: 1 }} />
+        </div>
+        <div
+          className="account-data-tabs account-data-tabs--skeleton"
+          aria-label="账号数据中心视图加载中"
+        >
+          <span>数据概览</span>
+          <span>导入与补录</span>
+          <span>导入记录</span>
+        </div>
+        <div className="account-data-panel account-data-panel--skeleton">
           <Skeleton active paragraph={{ rows: 8 }} />
         </div>
       </div>
@@ -554,6 +566,15 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
             onAnalyze={() => navigate("/brain")}
           />
         </div>
+      ) : activeView === "overview" && (statusQuery.isLoading || historyQuery.isLoading) ? (
+        <div
+          id="account-data-panel-overview"
+          role="tabpanel"
+          aria-labelledby="account-data-tab-overview"
+          className="account-data-panel account-data-panel--skeleton"
+        >
+          <Skeleton active paragraph={{ rows: 8 }} />
+        </div>
       ) : null}
 
       {activeView === "import" ? (
@@ -570,11 +591,10 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
             </div>
           ) : null}
 
-          <div className="account-data-entry-switch" role="tablist" aria-label="数据补录方式">
+          <div className="account-data-entry-switch" role="group" aria-label="数据补录方式">
             <button
               type="button"
-              role="tab"
-              aria-selected={entryMode === "file"}
+              aria-pressed={entryMode === "file"}
               className={entryMode === "file" ? "is-active" : undefined}
               onClick={() => {
                 setEntryMode("file");
@@ -585,16 +605,24 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
             </button>
             <button
               type="button"
-              role="tab"
-              aria-selected={entryMode === "manual"}
-              className={entryMode === "manual" ? "is-active" : undefined}
-              onClick={() => {
-                setEntryMode("manual");
-                setFlowFeedback(null);
-              }}
+              aria-expanded={showSecondaryMethods}
+              onClick={() => setShowSecondaryMethods((current) => !current)}
             >
-              人工录入
+              其他补录方式
             </button>
+            {showSecondaryMethods ? (
+              <button
+                type="button"
+                aria-pressed={entryMode === "manual"}
+                className={entryMode === "manual" ? "is-active" : undefined}
+                onClick={() => {
+                  setEntryMode("manual");
+                  setFlowFeedback(null);
+                }}
+              >
+                人工补录
+              </button>
+            ) : null}
           </div>
 
           <div className="account-data-import-workspace">
@@ -627,6 +655,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
               />
             ) : (
               <ManualDataEntry
+                embedded
                 batch={activeBatch?.source_kind === "manual_entry" || activeBatch?.source_kind === "screenshot_verified" ? activeBatch : null}
                 feedback={flowFeedback}
                 creating={manualPreviewMutation.isPending}
