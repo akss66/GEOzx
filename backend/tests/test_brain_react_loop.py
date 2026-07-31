@@ -47,6 +47,32 @@ def _state(**overrides):
     return state
 
 
+@pytest.mark.asyncio
+async def test_task_free_model_stream_emits_monotonic_sequence(monkeypatch) -> None:
+    turn = ConversationTurn(id=11, thread_id=22, org_id=33)
+    run = AgentRun(
+        id=44,
+        org_id=33,
+        thread_id=22,
+        turn_id=11,
+        task_id=None,
+        client_message_id="stream-sequence-contract",
+    )
+    published: list[tuple[str, dict]] = []
+
+    async def capture(event_type: str, payload: dict, **_kwargs) -> None:
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(brain_runtime_module, "publish_realtime_event", capture)
+    stream = BrainRuntimeGraph.task_free_realtime_stream(turn=turn, run=run)
+
+    await stream.observe({"phase": "start", "model": "test-model"})
+    await stream.observe({"phase": "delta", "model": "test-model", "delta": "你"})
+    await stream.observe({"phase": "delta", "model": "test-model", "delta": "好"})
+
+    assert [payload["stream_seq"] for _, payload in published] == [0, 1, 2]
+
+
 async def _runtime_retry_fixture(session, admin, *, client_message_id: str):
     account = Account(
         org_id=admin.org_id,

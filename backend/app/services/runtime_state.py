@@ -84,6 +84,7 @@ class RuntimeStateScope:
     intent: dict[str, Any] | None = None
     error_detail: str | None = None
     response_streamed: bool = False
+    stream_seq_start: int = 0
     extra_events: tuple[RuntimeEventSpec, ...] = field(default_factory=tuple)
 
 
@@ -434,7 +435,11 @@ async def _record_delivery_events(
                 # It therefore needs its own monotonically increasing sequence
                 # so the client reducer cannot mistake it for a duplicate of
                 # the final delta.
-                "stream_seq": len(_realtime_text_chunks(message)) + 1,
+                "stream_seq": (
+                    scope.stream_seq_start
+                    if scope.response_streamed
+                    else scope.stream_seq_start + len(_realtime_text_chunks(message)) + 1
+                ),
             },
         ),
         RuntimeEventSpec(
@@ -492,14 +497,17 @@ async def _publish_delivery_events(
             stream_payload = {
                 key: value for key, value in payload.items() if key not in {"content", "message"}
             }
+            chunks = _realtime_text_chunks(message)
+            done_sequence = int(payload["stream_seq"])
+            stream_start_sequence = done_sequence - len(chunks) - 1
             await brain_runtime.publish_realtime_event(
                 "brain.runtime.message_start",
-                {**stream_payload, "stream_seq": 0},
+                {**stream_payload, "stream_seq": stream_start_sequence},
                 content_item_id=event.content_item_id,
                 project_id=event.project_id,
                 event_id=event.id,
             )
-            for index, delta in enumerate(_realtime_text_chunks(message), start=1):
+            for index, delta in enumerate(chunks, start=stream_start_sequence + 1):
                 await brain_runtime.publish_realtime_event(
                     "brain.runtime.message_delta",
                     {**stream_payload, "delta": delta, "stream_seq": index},

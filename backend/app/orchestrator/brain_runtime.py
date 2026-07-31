@@ -219,6 +219,7 @@ class _TaskFreeRealtimeStream:
     turn: ConversationTurn
     run: AgentRun
     has_deltas: bool = False
+    next_sequence: int = 0
 
     async def observe(self, event: dict[str, Any]) -> None:
         phase = str(event.get("phase") or "")
@@ -240,8 +241,9 @@ class _TaskFreeRealtimeStream:
             self.has_deltas = False
             await publish_realtime_event(
                 "brain.runtime.message_start",
-                base_payload,
+                {**base_payload, "stream_seq": self.next_sequence},
             )
+            self.next_sequence += 1
         elif phase == "delta":
             delta = str(event.get("delta") or "")
             if not delta:
@@ -249,8 +251,13 @@ class _TaskFreeRealtimeStream:
             self.has_deltas = True
             await publish_realtime_event(
                 "brain.runtime.message_delta",
-                {**base_payload, "delta": delta},
+                {
+                    **base_payload,
+                    "delta": delta,
+                    "stream_seq": self.next_sequence,
+                },
             )
+            self.next_sequence += 1
 
 
 class BrainRuntimeGraph:

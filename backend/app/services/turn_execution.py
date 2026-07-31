@@ -252,6 +252,7 @@ async def _execute_conversation_turn(
                 response="运营大脑暂时无法生成这条回复，请稍后重试。",
                 status="blocked",
                 error_code="ANSWER_MODEL_UNAVAILABLE",
+                stream_seq_start=realtime_stream.next_sequence,
             )
         return await _deliver_task_free(
             session,
@@ -261,6 +262,7 @@ async def _execute_conversation_turn(
             decision=decision,
             response=answer,
             response_streamed=realtime_stream.has_deltas,
+            stream_seq_start=realtime_stream.next_sequence,
         )
     if decision.mode is TurnExecutionMode.CLARIFY:
         return await _deliver_task_free(
@@ -584,6 +586,7 @@ async def _deliver_task_free(
     status: str = "completed",
     error_code: str | None = None,
     response_streamed: bool = False,
+    stream_seq_start: int = 0,
     extra_events: list[tuple[str, str, dict[str, Any]]] | None = None,
     skill_run_id: int | None = None,
     skill_output_snapshot: dict[str, Any] | None = None,
@@ -630,6 +633,7 @@ async def _deliver_task_free(
             skill_output_snapshot=skill_output_snapshot,
             intent=decision.model_dump(mode="json"),
             response_streamed=response_streamed,
+            stream_seq_start=stream_seq_start,
             extra_events=tuple(runtime_events),
         ),
         status=status,
