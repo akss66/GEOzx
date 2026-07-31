@@ -30,9 +30,10 @@ import {
 } from "../components/account-data/AccountDataTabs";
 import { DataCoverageOverview } from "../components/account-data/DataCoverageOverview";
 import { OperationalState } from "../components/ui";
-import { FileImportFlow } from "../components/account-data/FileImportFlow";
 import { ImportBatchHistory } from "../components/account-data/ImportBatchHistory";
+import { ImportWorkspace } from "../components/account-data/ImportWorkspace";
 import { ManualDataEntry } from "../components/account-data/ManualDataEntry";
+import { getTemplateLabel } from "../components/account-data/statusMeta";
 import {
   resolveAccountWorkspaceSelection,
   useCurrentWorkspace,
@@ -266,6 +267,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
       });
       setHistoryError(null);
       setEntryMode("file");
+      setActiveView("import");
       setActiveBatchId(batch.id);
       setDraftBatch(batch);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
@@ -320,6 +322,9 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
       ),
     onSuccess: async (_row, variables) => {
       try {
+        await queryClient.invalidateQueries({
+          queryKey: ["account-data-import-rows", routeAccountId, variables.batchId],
+        });
         const batch = await refreshBatchWorkspace(variables.batchId);
         if (!isMountedRef.current) return;
         setHistoryError(null);
@@ -375,6 +380,9 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
       });
       setHistoryError(null);
       queryClient.setQueryData(["account-data-import", routeAccountId, batch.id], batch);
+      await queryClient.invalidateQueries({
+        queryKey: ["account-data-import-rows", routeAccountId, batch.id],
+      });
       await Promise.all([historyQuery.refetch(), statusQuery.refetch()]);
     },
     onError: (error) => {
@@ -555,7 +563,7 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           aria-labelledby="account-data-tab-import"
           className="account-data-panel"
         >
-          {blockingRowCount > 0 ? (
+          {entryMode === "manual" && blockingRowCount > 0 ? (
             <div className="account-data-warning" role="status">
               <WarningOutlined />
               <span>{`${blockingRowCount} 行仍需校验或人工确认，正式写入前不会放行。`}</span>
@@ -591,13 +599,14 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
 
           <div className="account-data-import-workspace">
             {entryMode === "file" ? (
-              <FileImportFlow
+              <ImportWorkspace
+                key={`${routeAccountId}:${activeBatch?.source_kind === "platform_export" ? activeBatch.id : "empty"}`}
+                accountId={routeAccountId}
                 batch={activeBatch?.source_kind === "platform_export" ? activeBatch : null}
                 feedback={flowFeedback}
                 uploading={uploadMutation.isPending}
                 resolvingRowNumber={resolveMutation.isPending ? resolveMutation.variables?.rowNumber ?? null : null}
                 committing={commitMutation.isPending}
-                canCommit={canCommit}
                 onFileSelected={(file) => {
                   setFlowFeedback(null);
                   setHistoryError(null);
@@ -690,6 +699,35 @@ function AccountDataCenterWorkspace({ routeAccountId }: { routeAccountId: number
           />
         </div>
       ) : null}
+
+      {flowFeedback?.tone === "success"
+        && activeBatch?.status === "committed"
+        && activeView === "import" ? (
+          <div className="account-data-success-actions" role="status">
+            <div>
+              <strong>{`${activeBatch.row_count} 条数据已写入`}</strong>
+              <span>
+                {activeBatch.period_start && activeBatch.period_end
+                  ? `${activeBatch.period_start} 至 ${activeBatch.period_end}`
+                  : "当前批次已进入账号数据中心"}
+              </span>
+            </div>
+            <button type="button" onClick={() => setActiveView("overview")}>
+              查看数据概览
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate("/", {
+                state: {
+                  agentDraft: `分析账号“${account.nickname}”刚确认写入的${getTemplateLabel(activeBatch.template_code)}，先总结数据变化，再告诉我下一步最值得做什么。`,
+                  agentMode: "discuss",
+                },
+              })}
+            >
+              交给运营大脑分析
+            </button>
+          </div>
+        ) : null}
     </div>
   );
 }

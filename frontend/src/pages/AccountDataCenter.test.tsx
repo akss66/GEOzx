@@ -24,9 +24,12 @@ import {
   type AccountDataImportArtifact,
   type AccountDataImportBatch,
   type AccountDataImportBatchSummary,
+  type AccountDataImportRow,
+  type AccountDataImportRowPage,
   type AccountDataStatus,
   commitAccountDataImportBatch,
   getAccountDataImportBatch,
+  getAccountDataImportRows,
   getAccountDataStatus,
   listAccountDataImports,
   resolveAccountDataImportRow,
@@ -51,6 +54,7 @@ vi.mock("../api/accountData", () => ({
   getAccountDataStatus: vi.fn(),
   listAccountDataImports: vi.fn(),
   getAccountDataImportBatch: vi.fn(),
+  getAccountDataImportRows: vi.fn(),
   uploadAccountDataImport: vi.fn(),
   createManualAccountDataPreview: vi.fn(),
   confirmManualAccountDataRow: vi.fn(),
@@ -214,6 +218,55 @@ function buildPreviewBatch(overrides: Partial<AccountDataImportBatch> = {}): Acc
   };
 }
 
+function buildImportRow(
+  rowNumber: number,
+  overrides: Partial<AccountDataImportRow> = {},
+): AccountDataImportRow {
+  return {
+    id: 600 + rowNumber,
+    row_number: rowNumber,
+    status: "ready",
+    raw_values: {
+      title: `作品 ${rowNumber}`,
+      published_at: "2026-07-18 14:11:20",
+      play: rowNumber * 100,
+    },
+    normalized_values: {
+      title: `作品 ${rowNumber}`,
+      published_at: "2026-07-18T14:11:20",
+      play: rowNumber * 100,
+    },
+    field_errors: [],
+    warnings: [],
+    candidate_content_ids: [],
+    projected_target_ids: [],
+    platform_content_record_id: rowNumber,
+    resolution_outcome: null,
+    resolved_by_id: null,
+    resolved_at: null,
+    ...overrides,
+  };
+}
+
+function buildRowPage(
+  overrides: Partial<AccountDataImportRowPage> = {},
+): AccountDataImportRowPage {
+  const items = overrides.items ?? [buildImportRow(1)];
+  return {
+    items,
+    page: 1,
+    page_size: 50,
+    total_count: items.length,
+    filtered_count: items.length,
+    ready_count: items.filter((row) => row.status === "ready").length,
+    blocking_count: items.filter(
+      (row) => row.status === "invalid" || row.status === "needs_resolution",
+    ).length,
+    total_pages: 1,
+    ...overrides,
+  };
+}
+
 function createTestQueryClient() {
   return new QueryClient({
     defaultOptions: {
@@ -278,6 +331,15 @@ describe("AccountDataCenter", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(getAccount).mockResolvedValue(buildAccount());
+    vi.mocked(getAccountDataImportRows).mockResolvedValue(
+      buildRowPage({
+        items: [buildPreviewBatch().rows[0]],
+        total_count: 1,
+        filtered_count: 1,
+        ready_count: 0,
+        blocking_count: 1,
+      }),
+    );
     Object.defineProperty(window, "matchMedia", {
       writable: true,
       value: vi.fn(() => ({
@@ -544,12 +606,145 @@ describe("AccountDataCenter", () => {
       items: [buildBatchSummary()],
     });
     vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
+    vi.mocked(getAccountDataImportRows).mockResolvedValueOnce(
+      buildRowPage({
+        items: preview.rows,
+        total_count: 1,
+        filtered_count: 1,
+        ready_count: 0,
+        blocking_count: 1,
+      }),
+    );
 
     renderPage();
 
-    expect(await screen.findByRole("button", { name: "确认导入" })).toBeDisabled();
-    expect(screen.getByText("播放量不能为空")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "确认写入 1 条" })).toBeDisabled();
+    expect(await screen.findByText("播放量不能为空")).toBeInTheDocument();
     expect(commitAccountDataImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("shows a four-step import progress and business summary", async () => {
+    const preview = buildPreviewBatch({
+      template_code: "douyin_work_list_v1",
+      row_count: 68,
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [buildBatchSummary({ row_count: 68 })],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
+    vi.mocked(getAccountDataImportRows).mockResolvedValueOnce(
+      buildRowPage({
+        items: Array.from({ length: 50 }, (_, index) => buildImportRow(index + 1)),
+        total_count: 68,
+        filtered_count: 68,
+        ready_count: 67,
+        blocking_count: 1,
+        total_pages: 2,
+      }),
+    );
+
+    renderPage();
+
+    await screen.findByRole("heading", { name: "核对本次导入" });
+    const progress = screen.getByRole("list", { name: "导入进度" });
+    expect(progress.children[0]).toHaveClass("is-complete");
+    expect(progress.children[1]).toHaveClass("is-complete");
+    expect(progress.children[2]).toHaveClass("is-current");
+    expect(progress.children[3]).toHaveClass("is-upcoming");
+    expect(screen.getByText("抖音作品列表")).toBeInTheDocument();
+    expect(screen.getByText("douyin_work_list_v1").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("works.xlsx")).toBeInTheDocument();
+  });
+
+  it("pages import rows and resets to page one when filtering needs-work rows", async () => {
+    const preview = buildPreviewBatch({ row_count: 68 });
+    const pageOne = buildRowPage({
+      items: Array.from({ length: 50 }, (_, index) => buildImportRow(index + 1)),
+      total_count: 68,
+      filtered_count: 68,
+      ready_count: 67,
+      blocking_count: 1,
+      total_pages: 2,
+    });
+    const pageTwo = buildRowPage({
+      items: Array.from({ length: 18 }, (_, index) => buildImportRow(index + 51)),
+      page: 2,
+      total_count: 68,
+      filtered_count: 68,
+      ready_count: 67,
+      blocking_count: 1,
+      total_pages: 2,
+    });
+    const needsWork = buildRowPage({
+      items: [
+        buildImportRow(68, {
+          status: "invalid",
+          field_errors: [{ message: "播放量不能为空" }],
+        }),
+      ],
+      total_count: 68,
+      filtered_count: 1,
+      ready_count: 67,
+      blocking_count: 1,
+    });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [buildBatchSummary({ row_count: 68 })],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
+    vi.mocked(getAccountDataImportRows).mockImplementation(
+      async (_accountId, _batchId, query) => {
+        if (query?.view === "needs_work") return needsWork;
+        return query?.page === 2 ? pageTwo : pageOne;
+      },
+    );
+
+    renderPage();
+
+    const table = await screen.findByRole("table", { name: "导入数据校验表" });
+    expect(table.querySelectorAll("tbody > tr")).toHaveLength(50);
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(getAccountDataImportRows).toHaveBeenCalledWith(
+        42,
+        81,
+        { page: 2, pageSize: 50, view: "all" },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "需处理 1" }));
+    await waitFor(() =>
+      expect(getAccountDataImportRows).toHaveBeenCalledWith(
+        42,
+        81,
+        { page: 1, pageSize: 50, view: "needs_work" },
+      ),
+    );
+    expect(await screen.findByText("播放量不能为空")).toBeInTheDocument();
+  });
+
+  it("uses server row counts to block or allow import confirmation", async () => {
+    const preview = buildPreviewBatch({ row_count: 68 });
+    vi.mocked(getAccountDataStatus).mockResolvedValueOnce(buildStatus());
+    vi.mocked(listAccountDataImports).mockResolvedValueOnce({
+      items: [buildBatchSummary({ row_count: 68 })],
+    });
+    vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(preview);
+    vi.mocked(getAccountDataImportRows).mockResolvedValueOnce(
+      buildRowPage({
+        items: Array.from({ length: 50 }, (_, index) => buildImportRow(index + 1)),
+        total_count: 68,
+        filtered_count: 68,
+        ready_count: 67,
+        blocking_count: 1,
+        total_pages: 2,
+      }),
+    );
+
+    renderPage();
+
+    expect(await screen.findByText("仍有 1 条需要处理")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认写入 68 条" })).toBeDisabled();
   });
 
   it("blocks commit until one ambiguous row is resolved", async () => {
@@ -585,12 +780,31 @@ describe("AccountDataCenter", () => {
     vi.mocked(getAccountDataImportBatch)
       .mockResolvedValueOnce(preview)
       .mockResolvedValueOnce(refreshedBatch);
+    vi.mocked(getAccountDataImportRows)
+      .mockResolvedValueOnce(
+        buildRowPage({
+          items: preview.rows,
+          total_count: 1,
+          filtered_count: 1,
+          ready_count: 0,
+          blocking_count: 1,
+        }),
+      )
+      .mockResolvedValue(
+        buildRowPage({
+          items: refreshedBatch.rows,
+          total_count: 1,
+          filtered_count: 1,
+          ready_count: 1,
+          blocking_count: 0,
+        }),
+      );
     vi.mocked(resolveAccountDataImportRow).mockResolvedValueOnce(resolvedRow);
 
     renderPage();
 
-    expect(await screen.findByRole("button", { name: "确认导入" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "选用候选作品 #91" }));
+    expect(await screen.findByRole("button", { name: "确认写入 1 条" })).toBeDisabled();
+    fireEvent.click(await screen.findByRole("button", { name: "选用候选作品 #91" }));
 
     await waitFor(() =>
       expect(resolveAccountDataImportRow).toHaveBeenCalledWith(42, 81, 2, 91),
@@ -598,7 +812,9 @@ describe("AccountDataCenter", () => {
     await waitFor(() => expect(getAccountDataImportBatch).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(listAccountDataImports).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(getAccountDataStatus).toHaveBeenCalledTimes(2));
-    expect(screen.getByRole("button", { name: "确认导入" })).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认写入 1 条" })).toBeEnabled(),
+    );
   });
 
   it("renders uploaded and failed batch statuses truthfully", async () => {
@@ -713,11 +929,22 @@ describe("AccountDataCenter", () => {
         ],
       });
     vi.mocked(getAccountDataImportBatch).mockResolvedValueOnce(refreshedPreview);
+    vi.mocked(getAccountDataImportRows).mockResolvedValueOnce(
+      buildRowPage({
+        items: refreshedPreview.rows,
+        total_count: 1,
+        filtered_count: 1,
+        ready_count: 1,
+        blocking_count: 0,
+      }),
+    );
     vi.mocked(commitAccountDataImportBatch).mockResolvedValueOnce(committed);
 
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: "确认导入" }));
+    const commitButton = await screen.findByRole("button", { name: "确认写入 1 条" });
+    await waitFor(() => expect(commitButton).toBeEnabled());
+    fireEvent.click(commitButton);
 
     await waitFor(() =>
       expect(commitAccountDataImportBatch).toHaveBeenCalledWith(42, 81),
@@ -1142,6 +1369,15 @@ describe("AccountDataCenter", () => {
     vi.mocked(getAccountDataImportBatch).mockImplementation(async (accountId, batchId) =>
       accountId === 2 && batchId === 201 ? account2Batch : account99Batch,
     );
+    vi.mocked(getAccountDataImportRows).mockImplementation(async (accountId) =>
+      buildRowPage({
+        items: accountId === 2 ? account2Batch.rows : account99Batch.rows,
+        total_count: 1,
+        filtered_count: 1,
+        ready_count: 1,
+        blocking_count: 0,
+      }),
+    );
     vi.mocked(commitAccountDataImportBatch).mockImplementation(async (accountId, batchId) => ({
       ...(accountId === 99 && batchId === 990 ? account99Batch : account2Batch),
       status: "committed",
@@ -1158,7 +1394,9 @@ describe("AccountDataCenter", () => {
     await waitFor(() =>
       expect(screen.getByText("account-2.xlsx")).toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: "确认导入" })).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认写入 1 条" })).toBeEnabled(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "切换到账号 99" }));
 
@@ -1169,7 +1407,9 @@ describe("AccountDataCenter", () => {
     expect(getAccountDataImportBatch).toHaveBeenCalledWith(2, 201);
     expect(getAccountDataImportBatch).toHaveBeenCalledWith(99, 990);
 
-    fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
+    const account99CommitButton = screen.getByRole("button", { name: "确认写入 1 条" });
+    await waitFor(() => expect(account99CommitButton).toBeEnabled());
+    fireEvent.click(account99CommitButton);
 
     await waitFor(() =>
       expect(commitAccountDataImportBatch).toHaveBeenCalledWith(99, 990),

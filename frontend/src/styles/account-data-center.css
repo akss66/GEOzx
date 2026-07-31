@@ -831,6 +831,240 @@
   gap: 8px;
 }
 
+.account-data-import-review {
+  width: 100%;
+  padding-bottom: 96px;
+}
+
+.account-data-import-progress {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.account-data-import-progress li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 9px 12px;
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 9px;
+  background: #f8f6f1;
+  color: var(--dy-muted);
+  font-size: 12px;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.account-data-import-progress li > span {
+  display: grid;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--tz-line);
+  border-radius: 50%;
+  background: #fff;
+  font-size: 11px;
+}
+
+.account-data-import-progress li.is-complete {
+  border-color: color-mix(in srgb, var(--dy-success) 22%, var(--tz-line));
+  color: var(--dy-success);
+}
+
+.account-data-import-progress li.is-current {
+  border-color: color-mix(in srgb, var(--dy-accent) 36%, var(--tz-line));
+  background: color-mix(in srgb, var(--dy-accent) 5%, #fff);
+  color: var(--dy-text);
+}
+
+.account-data-import-progress li.is-error {
+  border-color: color-mix(in srgb, var(--dy-error) 38%, var(--tz-line));
+  background: color-mix(in srgb, var(--dy-error) 5%, #fff);
+  color: var(--dy-error);
+}
+
+.account-data-import-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--tz-line-subtle);
+  border-radius: 10px;
+  background: #faf8f4;
+}
+
+.account-data-import-summary > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-right: 1px solid var(--tz-line-subtle);
+}
+
+.account-data-import-summary > div:nth-child(4) {
+  border-right: 0;
+}
+
+.account-data-import-summary span,
+.account-data-import-summary dt {
+  color: var(--dy-muted);
+  font-size: 11px;
+}
+
+.account-data-import-summary strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-data-technical-details {
+  grid-column: 1 / -1;
+  padding: 10px 16px;
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+.account-data-technical-details summary {
+  color: var(--dy-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.account-data-technical-details dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  margin: 10px 0 0;
+}
+
+.account-data-technical-details dl > div {
+  display: flex;
+  gap: 7px;
+}
+
+.account-data-technical-details dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.account-data-row-toolbar,
+.account-data-pagination,
+.account-data-commit-bar,
+.account-data-success-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.account-data-row-toolbar > div {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 8px;
+  background: #f3f1ec;
+}
+
+.account-data-row-toolbar button,
+.account-data-success-actions button {
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dy-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.account-data-row-toolbar button.is-active {
+  border-color: var(--tz-line-subtle);
+  background: #fff;
+  color: var(--dy-text);
+  box-shadow: 0 1px 2px rgba(32, 24, 18, 0.06);
+}
+
+.account-data-row-toolbar > span,
+.account-data-pagination > span {
+  color: var(--dy-muted);
+  font-size: 12px;
+}
+
+.account-data-pagination > div {
+  display: flex;
+  gap: 8px;
+}
+
+.account-data-preview-table {
+  min-width: 860px;
+}
+
+.account-data-preview-table td.is-numeric,
+.account-data-preview-table th.is-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-data-preview-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.account-data-preview-table .account-data-original-row {
+  margin-top: 8px;
+}
+
+.account-data-commit-bar {
+  position: sticky;
+  z-index: 8;
+  bottom: 12px;
+  padding: 13px 14px;
+  border: 1px solid var(--tz-line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 28px rgba(38, 28, 20, 0.12);
+  backdrop-filter: blur(10px);
+}
+
+.account-data-commit-bar > div,
+.account-data-success-actions > div {
+  display: grid;
+  gap: 3px;
+}
+
+.account-data-commit-bar strong,
+.account-data-success-actions strong {
+  font-size: 13px;
+}
+
+.account-data-commit-bar span,
+.account-data-success-actions span {
+  color: var(--dy-muted);
+  font-size: 12px;
+}
+
+.account-data-success-actions {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--dy-success) 24%, var(--tz-line));
+  border-radius: 10px;
+  background: #fff;
+}
+
+.account-data-success-actions > div {
+  margin-right: auto;
+}
+
+.account-data-success-actions button {
+  border-color: var(--tz-line);
+  background: #fff;
+  color: var(--dy-text);
+}
+
 .account-data-history-list {
   display: grid;
   gap: 12px;
@@ -918,6 +1152,18 @@
   .account-data-domain-grid {
     grid-template-columns: 1fr;
   }
+
+  .account-data-import-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .account-data-import-summary > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .account-data-import-summary > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--tz-line-subtle);
+  }
 }
 
 @media (max-width: 640px) {
@@ -949,10 +1195,39 @@
   .account-data-domain-row > button {
     grid-column: 1;
   }
+
+  .account-data-import-progress {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .account-data-import-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .account-data-import-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--tz-line-subtle);
+  }
+
+  .account-data-row-toolbar,
+  .account-data-commit-bar,
+  .account-data-success-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .account-data-row-toolbar > div {
+    overflow-x: auto;
+  }
+
+  .account-data-commit-bar {
+    bottom: 8px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .account-data-step-strip li,
+  .account-data-import-progress li,
   .account-data-history-item {
     transition: none;
   }
