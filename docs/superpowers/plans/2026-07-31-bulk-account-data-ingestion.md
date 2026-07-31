@@ -171,19 +171,19 @@ class ParsedSourceFile:
 - Modify: `backend/tests/test_account_data_view.py`
 - Create: `backend/tests/test_data_import_projection.py`
 
-- [ ] Add failing integration tests for two overlapping 30-day imports where only shared dates/fields update and non-overlapping dates survive.
-- [ ] Add tests for partial content rows where omitted metrics preserve earlier values and zero replaces earlier nonzero values.
-- [ ] Add tests covering account, content, audience, and benchmark domains, not only content metrics.
-- [ ] Implement observation extraction from committed rows with provenance and a monotonic `confirmed_sequence`.
+- [x] Add failing integration tests for two overlapping 30-day imports where only shared dates/fields update and non-overlapping dates survive.
+- [x] Add tests for partial content rows where omitted metrics preserve earlier values and zero replaces earlier nonzero values.
+- [x] Add tests covering account, content, audience, and benchmark domains, not only content metrics.
+- [x] Implement observation extraction from committed rows with provenance and a monotonic `confirmed_sequence`.
 - [ ] Implement `rebuild_projection(session, affected_keys)` that:
   - loads active observations for each affected field;
   - chooses the deterministic winner;
   - upserts one canonical record per business key;
   - deletes a canonical field/row only when no active observation survives.
-- [ ] Remove batch ID from canonical identity lookups while retaining the winning source batch as provenance.
-- [ ] Update `AccountDataViewService` to read canonical rows once per business key and eliminate duplicate account/audience/benchmark snapshots.
-- [ ] Ensure the commit transaction writes observations and canonical projection atomically for one dataset.
-- [ ] Run `cd backend; python -m pytest tests/test_data_import_projection.py tests/test_account_data_view.py -q`.
+- [x] Remove batch ID from canonical identity lookups while retaining the winning source batch as provenance.
+- [x] Update `AccountDataViewService` to read canonical rows once per business key and eliminate duplicate account/audience/benchmark snapshots.
+- [x] Ensure the commit transaction writes observations and canonical projection atomically for one dataset.
+- [x] Run `cd backend; python -m pytest tests/test_data_import_projection.py tests/test_account_data_view.py -q`.
 - [ ] Commit: `feat(account-data): merge overlapping imports into canonical projections`.
 
 ## Task 6: Make Revoke and Delete Rebuild Canonical Data

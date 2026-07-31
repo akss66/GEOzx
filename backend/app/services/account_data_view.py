@@ -15,11 +15,14 @@ from app.models import (
     AudienceProfileSnapshot,
     BenchmarkSnapshot,
     DataConflict,
+    DataFieldObservation,
     DataImportBatch,
     DataImportRow,
     MetricSnapshot,
 )
 from app.models.enums import ConflictStatus, DataSourceKind, ImportBatchStatus, MetricSource
+from app.services.data_import.merge import account_entity_key, content_entity_key
+from app.services.data_import.projection import decode_observation_value
 
 ObservationSource = DataSourceKind | Literal["legacy_manual", "derived"]
 
@@ -206,6 +209,12 @@ class _ImportProjectionContext:
     row: DataImportRow
 
 
+FieldObservationIndex = dict[
+    tuple[str, str, date, str],
+    list[DataFieldObservation],
+]
+
+
 class AccountDataViewService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -266,12 +275,24 @@ class AccountDataViewService:
                 .order_by(BenchmarkSnapshot.stat_date.desc(), BenchmarkSnapshot.id.desc())
             )
         )
+        field_observations = list(
+            await self.session.scalars(
+                select(DataFieldObservation).where(
+                    DataFieldObservation.org_id == account.org_id,
+                    DataFieldObservation.account_id == account.id,
+                    DataFieldObservation.stat_date.between(period_start, period_end),
+                    DataFieldObservation.active.is_(True),
+                )
+            )
+        )
+        field_observation_index = _build_field_observation_index(field_observations)
         relevant_batch_ids = _collect_relevant_batch_ids(
             content_rows=content_rows,
             account_rows=account_rows,
             audience_rows=audience_rows,
             benchmark_rows=benchmark_rows,
         )
+        relevant_batch_ids.update(item.import_batch_id for item in field_observations)
         batches = await self._load_batches(account, relevant_batch_ids)
         batch_by_id = {item.id: item for item in batches}
         import_rows = _build_import_projection_index(batches)
@@ -282,8 +303,18 @@ class AccountDataViewService:
             period_end,
             batches,
         )
-        content_snapshots = _build_content_snapshots(content_rows, batch_by_id, import_rows)
-        account_snapshots = _build_account_snapshots(account_rows, batch_by_id, import_rows)
+        content_snapshots = _build_content_snapshots(
+            content_rows,
+            batch_by_id,
+            import_rows,
+            field_observation_index,
+        )
+        account_snapshots = _build_account_snapshots(
+            account_rows,
+            batch_by_id,
+            import_rows,
+            field_observation_index,
+        )
         audience = _build_audience_views(audience_rows, batch_by_id)
         benchmarks = _build_benchmark_views(benchmark_rows, batch_by_id)
         coverage = {
@@ -427,10 +458,27 @@ def _build_import_projection_index(
     return index
 
 
+def _build_field_observation_index(
+    observations: list[DataFieldObservation],
+) -> FieldObservationIndex:
+    index: FieldObservationIndex = defaultdict(list)
+    for observation in observations:
+        index[
+            (
+                observation.domain,
+                observation.entity_key,
+                observation.stat_date,
+                observation.field_name,
+            )
+        ].append(observation)
+    return index
+
+
 def _build_content_snapshots(
     rows: list[MetricSnapshot],
     batch_by_id: dict[int, DataImportBatch],
     import_rows: dict[str, dict[int, _ImportProjectionContext]],
+    field_observations: FieldObservationIndex,
 ) -> list[ContentMetricSnapshotView]:
     grouped: dict[tuple[object, date], ContentMetricSnapshotView] = {}
     for row in rows:
@@ -460,14 +508,40 @@ def _build_content_snapshots(
             )
             grouped[snapshot_key] = snapshot
         for metric_name in CONTENT_METRICS:
-            observation = _content_observation(
-                metric_name=metric_name,
-                row=row,
-                batch_by_id=batch_by_id,
-                imported_context=imported_context,
-            )
-            if observation is not None:
-                snapshot.metrics[metric_name].observations.append(observation)
+            persisted_observations: list[DataFieldObservation] = []
+            if row.platform_content_record_id is not None:
+                persisted_observations = field_observations.get(
+                    (
+                        "content_metrics",
+                        content_entity_key(
+                            int(row.account_id),
+                            row.platform_content_record_id,
+                        ),
+                        row.stat_date,
+                        CONTENT_DIRECT_FIELDS.get(metric_name, metric_name),
+                    ),
+                    [],
+                )
+            if persisted_observations and row.import_batch_id is not None:
+                known_ids = {
+                    item.evidence_id
+                    for item in snapshot.metrics[metric_name].observations
+                    if item.evidence_kind == "field_observation"
+                }
+                snapshot.metrics[metric_name].observations.extend(
+                    _field_observation_view(metric_name, item, batch_by_id)
+                    for item in persisted_observations
+                    if item.id not in known_ids
+                )
+            else:
+                observation = _content_observation(
+                    metric_name=metric_name,
+                    row=row,
+                    batch_by_id=batch_by_id,
+                    imported_context=imported_context,
+                )
+                if observation is not None:
+                    snapshot.metrics[metric_name].observations.append(observation)
     results = list(grouped.values())
     for snapshot in results:
         for metric in snapshot.metrics.values():
@@ -510,32 +584,117 @@ def _build_account_snapshots(
     rows: list[AccountMetricSnapshot],
     batch_by_id: dict[int, DataImportBatch],
     import_rows: dict[str, dict[int, _ImportProjectionContext]],
+    field_observations: FieldObservationIndex,
 ) -> list[AccountMetricSnapshotView]:
-    results: list[AccountMetricSnapshotView] = []
+    grouped: dict[date, AccountMetricSnapshotView] = {}
     for row in rows:
         context = import_rows.get("account_metric_snapshot", {}).get(row.id)
-        metrics = {metric: AccountDataMetric(metric=metric) for metric in ACCOUNT_METRICS}
+        snapshot = grouped.setdefault(
+            row.stat_date,
+            AccountMetricSnapshotView(
+                stat_date=row.stat_date,
+                metrics={
+                    metric: AccountDataMetric(metric=metric)
+                    for metric in ACCOUNT_METRICS
+                },
+            ),
+        )
         for metric_name in ACCOUNT_METRICS:
-            observation = _account_observation(
-                metric_name=metric_name,
-                row=row,
-                batch_by_id=batch_by_id,
-                imported_context=context,
+            persisted_observations = field_observations.get(
+                (
+                    "account_metrics",
+                    account_entity_key(row.account_id),
+                    row.stat_date,
+                    ACCOUNT_FIELDS[metric_name],
+                ),
+                [],
             )
-            if observation is not None:
-                metrics[metric_name].observations.append(observation)
-            _finalize_metric(metrics[metric_name])
-        results.append(AccountMetricSnapshotView(stat_date=row.stat_date, metrics=metrics))
+            if persisted_observations:
+                known_ids = {
+                    item.evidence_id
+                    for item in snapshot.metrics[metric_name].observations
+                    if item.evidence_kind == "field_observation"
+                }
+                snapshot.metrics[metric_name].observations.extend(
+                    _field_observation_view(metric_name, item, batch_by_id)
+                    for item in persisted_observations
+                    if item.id not in known_ids
+                )
+            else:
+                observation = _account_observation(
+                    metric_name=metric_name,
+                    row=row,
+                    batch_by_id=batch_by_id,
+                    imported_context=context,
+                )
+                if observation is not None:
+                    snapshot.metrics[metric_name].observations.append(observation)
+    results = list(grouped.values())
+    for snapshot in results:
+        for metric in snapshot.metrics.values():
+            _finalize_metric(metric)
     results.sort(key=lambda item: item.stat_date, reverse=True)
     return results
+
+
+def _field_observation_view(
+    metric_name: str,
+    observation: DataFieldObservation,
+    batch_by_id: dict[int, DataImportBatch],
+) -> AccountDataObservation:
+    batch = batch_by_id.get(observation.import_batch_id)
+    return AccountDataObservation(
+        metric=metric_name,
+        value=_coerce_metric_value(
+            metric_name,
+            decode_observation_value(observation.value),
+        ),
+        source=observation.source_kind,
+        observed_at=observation.stat_date,
+        confirmed_at=(
+            batch.committed_at if batch is not None else observation.updated_at
+        ),
+        evidence_id=observation.id,
+        evidence_kind="field_observation",
+    )
 
 
 def _build_audience_views(
     rows: list[AudienceProfileSnapshot],
     batch_by_id: dict[int, DataImportBatch],
 ) -> list[AudienceProfileSnapshotView]:
-    results: list[AudienceProfileSnapshotView] = []
+    selected: dict[tuple[date, str], AudienceProfileSnapshot] = {}
     for row in rows:
+        key = (row.stat_date, row.dimension)
+        existing = selected.get(key)
+        if existing is None or _projection_row_sort_key(
+            row_source=(
+                batch_by_id[row.import_batch_id].source_kind
+                if row.import_batch_id in batch_by_id
+                else row.source_kind
+            ),
+            confirmed_at=(
+                batch_by_id[row.import_batch_id].committed_at
+                if row.import_batch_id in batch_by_id
+                else row.updated_at
+            ),
+            row_id=row.id,
+        ) < _projection_row_sort_key(
+            row_source=(
+                batch_by_id[existing.import_batch_id].source_kind
+                if existing.import_batch_id in batch_by_id
+                else existing.source_kind
+            ),
+            confirmed_at=(
+                batch_by_id[existing.import_batch_id].committed_at
+                if existing.import_batch_id in batch_by_id
+                else existing.updated_at
+            ),
+            row_id=existing.id,
+        ):
+            selected[key] = row
+    results: list[AudienceProfileSnapshotView] = []
+    for row in selected.values():
         batch = batch_by_id.get(row.import_batch_id)
         results.append(
             AudienceProfileSnapshotView(
@@ -562,8 +721,38 @@ def _build_benchmark_views(
     rows: list[BenchmarkSnapshot],
     batch_by_id: dict[int, DataImportBatch],
 ) -> list[BenchmarkSnapshotView]:
-    results: list[BenchmarkSnapshotView] = []
+    selected: dict[tuple[date, str, str], BenchmarkSnapshot] = {}
     for row in rows:
+        key = (row.stat_date, row.benchmark_code, row.metric_code)
+        existing = selected.get(key)
+        if existing is None or _projection_row_sort_key(
+            row_source=(
+                batch_by_id[row.import_batch_id].source_kind
+                if row.import_batch_id in batch_by_id
+                else row.source_kind
+            ),
+            confirmed_at=(
+                batch_by_id[row.import_batch_id].committed_at
+                if row.import_batch_id in batch_by_id
+                else row.updated_at
+            ),
+            row_id=row.id,
+        ) < _projection_row_sort_key(
+            row_source=(
+                batch_by_id[existing.import_batch_id].source_kind
+                if existing.import_batch_id in batch_by_id
+                else existing.source_kind
+            ),
+            confirmed_at=(
+                batch_by_id[existing.import_batch_id].committed_at
+                if existing.import_batch_id in batch_by_id
+                else existing.updated_at
+            ),
+            row_id=existing.id,
+        ):
+            selected[key] = row
+    results: list[BenchmarkSnapshotView] = []
+    for row in selected.values():
         batch = batch_by_id.get(row.import_batch_id)
         results.append(
             BenchmarkSnapshotView(
@@ -578,6 +767,23 @@ def _build_benchmark_views(
             )
         )
     return results
+
+
+def _projection_row_sort_key(
+    *,
+    row_source: ObservationSource,
+    confirmed_at: datetime | None,
+    row_id: int,
+) -> tuple[int, float, int]:
+    return (
+        _source_priority(row_source),
+        -(
+            confirmed_at.timestamp()
+            if confirmed_at is not None
+            else float("-inf")
+        ),
+        -row_id,
+    )
 
 
 def _content_observation(

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import TypedDict
+from urllib.parse import quote
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -43,7 +44,14 @@ from app.models.enums import (
 )
 from app.services.data_import import REGISTERED_ADAPTERS, DataSourceAdapter, SourceInput
 from app.services.data_import.identity import build_weak_fingerprint, match_content
+from app.services.data_import.merge import (
+    account_entity_key,
+    audience_entity_key,
+    benchmark_entity_key,
+    content_entity_key,
+)
 from app.services.data_import.parser import SUPPORTED_EXTENSIONS, RowIssue
+from app.services.data_import.projection import newest_winner, record_and_resolve_fields
 from app.services.data_import.templates import KNOWN_TEMPLATES
 
 logger = logging.getLogger(__name__)
@@ -718,6 +726,17 @@ async def commit_batch(
         )
 
     try:
+        account_query = select(Account).where(
+            Account.org_id == org_id,
+            Account.id == account_id,
+        )
+        if _dialect_name(session) == "postgresql":
+            account_query = account_query.with_for_update()
+        if await session.scalar(account_query) is None:
+            raise DataImportStateError("account is no longer available")
+        committed_at = datetime.now(UTC)
+        batch.committed_at = committed_at
+        batch.confirmed_sequence = int(committed_at.timestamp() * 1_000_000)
         for row in batch.rows:
             row.projected_target_ids = await _project_row_targets(
                 session=session,
@@ -726,7 +745,6 @@ async def commit_batch(
             )
             row.status = ImportRowStatus.COMMITTED
         batch.status = ImportBatchStatus.COMMITTED
-        batch.committed_at = datetime.now(UTC)
         await session.commit()
     except Exception:
         await session.rollback()
@@ -1373,19 +1391,51 @@ async def _project_audience_dimension_row(
     batch: DataImportBatch,
     row: DataImportRow,
 ) -> list[dict[str, object]]:
-    snapshot = AudienceProfileSnapshot(
-        org_id=batch.org_id,
-        account_id=batch.account_id,
-        import_batch_id=batch.id,
-        source_kind=batch.source_kind,
-        stat_date=_row_stat_date(batch=batch, row=row),
-        dimension=str(row.normalized_values["dimension"]),
-        total_audience=_int_or_none(row.normalized_values.get("total_audience")),
+    stat_date = _row_stat_date(batch=batch, row=row)
+    dimension = str(row.normalized_values["dimension"])
+    winners = await record_and_resolve_fields(
+        session,
+        batch=batch,
+        row=row,
+        domain="audience_profiles",
+        entity_key=audience_entity_key(batch.account_id, dimension, "__profile__"),
+        stat_date=stat_date,
+        values={
+            "total_audience": row.normalized_values.get("total_audience"),
+            "items": row.normalized_values.get("audience_items"),
+        },
     )
-    session.add(snapshot)
-    await session.flush()
-    for rank, item in enumerate(row.normalized_values.get("audience_items") or [], start=1):
-        session.add(
+    snapshot = await session.scalar(
+        select(AudienceProfileSnapshot)
+        .options(selectinload(AudienceProfileSnapshot.items))
+        .where(
+            AudienceProfileSnapshot.org_id == batch.org_id,
+            AudienceProfileSnapshot.account_id == batch.account_id,
+            AudienceProfileSnapshot.stat_date == stat_date,
+            AudienceProfileSnapshot.dimension == dimension,
+        )
+        .order_by(
+            AudienceProfileSnapshot.updated_at.desc(),
+            AudienceProfileSnapshot.id.desc(),
+        )
+    )
+    action = "updated" if snapshot is not None else "created"
+    if snapshot is None:
+        snapshot = AudienceProfileSnapshot(
+            org_id=batch.org_id,
+            account_id=batch.account_id,
+            import_batch_id=batch.id,
+            source_kind=batch.source_kind,
+            stat_date=stat_date,
+            dimension=dimension,
+            items=[],
+        )
+        session.add(snapshot)
+        await session.flush()
+    if "total_audience" in winners:
+        snapshot.total_audience = _int_or_none(winners["total_audience"].value)
+    if "items" in winners:
+        snapshot.items = [
             AudienceProfileItem(
                 org_id=batch.org_id,
                 account_id=batch.account_id,
@@ -1396,9 +1446,20 @@ async def _project_audience_dimension_row(
                 rank=rank,
                 meta={},
             )
-        )
+            for rank, item in enumerate(winners["items"].value, start=1)
+        ]
+    provenance = newest_winner(winners)
+    if provenance is not None:
+        snapshot.import_batch_id = provenance.observation.import_batch_id
+        snapshot.source_kind = provenance.observation.source_kind
     await session.flush()
-    return [{"kind": "audience_profile_snapshot", "id": snapshot.id, "action": "created"}]
+    return [
+        {
+            "kind": "audience_profile_snapshot",
+            "id": snapshot.id,
+            "action": action,
+        }
+    ]
 
 
 async def _project_manual_benchmark_row(
@@ -1610,8 +1671,14 @@ async def _project_content_record(
         batch=batch,
         row=row,
     )
-    content_record.content_format = _string_or_none(row.normalized_values.get("content_format"))
-    content_record.review_status = _string_or_none(row.normalized_values.get("review_status"))
+    if row.normalized_values.get("content_format") is not None:
+        content_record.content_format = _string_or_none(
+            row.normalized_values.get("content_format")
+        )
+    if row.normalized_values.get("review_status") is not None:
+        content_record.review_status = _string_or_none(
+            row.normalized_values.get("review_status")
+        )
     return content_record, [
         {
             "kind": "platform_content_record",
@@ -1629,13 +1696,46 @@ async def _upsert_metric_snapshot(
     content_record: PlatformContentRecord,
 ) -> tuple[MetricSnapshot, str]:
     stat_date = _row_stat_date(batch=batch, row=row)
+    entity_key = content_entity_key(batch.account_id, content_record.id)
+    merge_values = {
+        field_name: row.normalized_values.get(field_name)
+        for field_name in (
+            "title",
+            "play",
+            "exposure",
+            "completion_rate",
+            "follower_delta",
+            "like_count",
+            "comment_count",
+            "share_count",
+            "favorite_count",
+            "cover_click_rate",
+            "avg_watch_time_seconds",
+            "completion_rate_5s",
+            "bounce_rate_2s",
+            "profile_visit_count",
+        )
+        if field_name in row.normalized_values
+    }
+    winners = await record_and_resolve_fields(
+        session,
+        batch=batch,
+        row=row,
+        domain="content_metrics",
+        entity_key=entity_key,
+        stat_date=stat_date,
+        values=merge_values,
+    )
     existing = await session.scalar(
-        select(MetricSnapshot).where(
+        select(MetricSnapshot)
+        .where(
+            MetricSnapshot.org_id == batch.org_id,
             MetricSnapshot.account_id == batch.account_id,
-            MetricSnapshot.import_batch_id == batch.id,
+            MetricSnapshot.import_batch_id.is_not(None),
             MetricSnapshot.platform_content_record_id == content_record.id,
             MetricSnapshot.stat_date == stat_date,
         )
+        .order_by(MetricSnapshot.updated_at.desc(), MetricSnapshot.id.desc())
     )
     action = "updated" if existing is not None else "created"
     metric = existing or MetricSnapshot(
@@ -1645,62 +1745,35 @@ async def _upsert_metric_snapshot(
         platform_content_record_id=content_record.id,
         source=MetricSource(_batch_platform(batch).value),
         stat_date=stat_date,
+        play=0,
+        exposure=0,
+        completion_rate=0.0,
+        like_rate=0.0,
+        comment_rate=0.0,
+        share_rate=0.0,
+        follower_delta=0,
     )
-    metric.title = row.normalized_values.get("title")
-    metric.play = int(row.normalized_values.get("play") or 0)
-    metric.exposure = int(row.normalized_values.get("exposure") or 0)
-    metric.completion_rate = _float_or_zero(row.normalized_values.get("completion_rate"))
+    for field_name, winner in winners.items():
+        if hasattr(metric, field_name):
+            setattr(metric, field_name, winner.value)
+    provenance = newest_winner(winners)
+    if provenance is not None:
+        metric.import_batch_id = provenance.observation.import_batch_id
     metric.like_rate = _derived_rate(
-        numerator=row.normalized_values.get("like_count"),
-        denominator=row.normalized_values.get("play"),
+        numerator=metric.like_count,
+        denominator=metric.play,
     )
     metric.comment_rate = _derived_rate(
-        numerator=row.normalized_values.get("comment_count"),
-        denominator=row.normalized_values.get("play"),
+        numerator=metric.comment_count,
+        denominator=metric.play,
     )
     metric.share_rate = _derived_rate(
-        numerator=row.normalized_values.get("share_count"),
-        denominator=row.normalized_values.get("play"),
-    )
-    metric.follower_delta = int(row.normalized_values.get("follower_delta") or 0)
-    metric.like_count = _int_or_none(row.normalized_values.get("like_count"))
-    metric.comment_count = _int_or_none(row.normalized_values.get("comment_count"))
-    metric.share_count = _int_or_none(row.normalized_values.get("share_count"))
-    metric.favorite_count = _int_or_none(row.normalized_values.get("favorite_count"))
-    metric.cover_click_rate = _float_or_none(row.normalized_values.get("cover_click_rate"))
-    metric.avg_watch_time_seconds = _float_or_none(
-        row.normalized_values.get("avg_watch_time_seconds")
-    )
-    metric.completion_rate_5s = _float_or_none(
-        row.normalized_values.get("completion_rate_5s")
-    )
-    metric.bounce_rate_2s = _float_or_none(row.normalized_values.get("bounce_rate_2s"))
-    metric.profile_visit_count = _int_or_none(
-        row.normalized_values.get("profile_visit_count")
+        numerator=metric.share_count,
+        denominator=metric.play,
     )
     if existing is None:
-        savepoint = await session.begin_nested()
-        try:
-            session.add(metric)
-            await session.flush()
-        except IntegrityError:
-            await savepoint.rollback()
-            recovered_metric = await session.scalar(
-                select(MetricSnapshot).where(
-                    MetricSnapshot.account_id == batch.account_id,
-                    MetricSnapshot.import_batch_id == batch.id,
-                    MetricSnapshot.platform_content_record_id == content_record.id,
-                    MetricSnapshot.stat_date == stat_date,
-                )
-            )
-            if recovered_metric is None:
-                raise
-            metric = recovered_metric
-            action = "updated"
-        else:
-            await savepoint.commit()
-    else:
-        await session.flush()
+        session.add(metric)
+    await session.flush()
     return metric, action
 
 
@@ -1711,11 +1784,37 @@ async def _upsert_account_metric_snapshot(
     row: DataImportRow,
 ) -> tuple[AccountMetricSnapshot, str]:
     stat_date = _row_stat_date(batch=batch, row=row)
+    merge_values: dict[str, object | None] = {}
+    if "total_play" in row.normalized_values:
+        merge_values["total_play"] = row.normalized_values.get("total_play")
+    elif "play" in row.normalized_values:
+        merge_values["total_play"] = row.normalized_values.get("play")
+    if "total_exposure" in row.normalized_values:
+        merge_values["total_exposure"] = row.normalized_values.get("total_exposure")
+    elif "exposure" in row.normalized_values:
+        merge_values["total_exposure"] = row.normalized_values.get("exposure")
+    for field_name in ("follower_count", "follower_delta", "engagement_rate"):
+        if field_name in row.normalized_values:
+            merge_values[field_name] = row.normalized_values.get(field_name)
+    winners = await record_and_resolve_fields(
+        session,
+        batch=batch,
+        row=row,
+        domain="account_metrics",
+        entity_key=account_entity_key(batch.account_id),
+        stat_date=stat_date,
+        values=merge_values,
+    )
     existing = await session.scalar(
-        select(AccountMetricSnapshot).where(
+        select(AccountMetricSnapshot)
+        .where(
+            AccountMetricSnapshot.org_id == batch.org_id,
             AccountMetricSnapshot.account_id == batch.account_id,
-            AccountMetricSnapshot.import_batch_id == batch.id,
             AccountMetricSnapshot.stat_date == stat_date,
+        )
+        .order_by(
+            AccountMetricSnapshot.updated_at.desc(),
+            AccountMetricSnapshot.id.desc(),
         )
     )
     action = "updated" if existing is not None else "created"
@@ -1726,37 +1825,16 @@ async def _upsert_account_metric_snapshot(
         source_kind=batch.source_kind,
         stat_date=stat_date,
     )
-    snapshot.total_play = _int_or_none(
-        row.normalized_values.get("total_play", row.normalized_values.get("play"))
-    )
-    snapshot.follower_count = _int_or_none(row.normalized_values.get("follower_count"))
-    snapshot.follower_delta = _int_or_none(row.normalized_values.get("follower_delta"))
-    snapshot.total_exposure = _int_or_none(
-        row.normalized_values.get("total_exposure", row.normalized_values.get("exposure"))
-    )
-    snapshot.engagement_rate = _float_or_none(row.normalized_values.get("engagement_rate"))
+    for field_name, winner in winners.items():
+        if hasattr(snapshot, field_name):
+            setattr(snapshot, field_name, winner.value)
+    provenance = newest_winner(winners)
+    if provenance is not None:
+        snapshot.import_batch_id = provenance.observation.import_batch_id
+        snapshot.source_kind = provenance.observation.source_kind
     if existing is None:
-        savepoint = await session.begin_nested()
-        try:
-            session.add(snapshot)
-            await session.flush()
-        except IntegrityError:
-            await savepoint.rollback()
-            recovered_snapshot = await session.scalar(
-                select(AccountMetricSnapshot).where(
-                    AccountMetricSnapshot.account_id == batch.account_id,
-                    AccountMetricSnapshot.import_batch_id == batch.id,
-                    AccountMetricSnapshot.stat_date == stat_date,
-                )
-            )
-            if recovered_snapshot is None:
-                raise
-            snapshot = recovered_snapshot
-            action = "updated"
-        else:
-            await savepoint.commit()
-    else:
-        await session.flush()
+        session.add(snapshot)
+    await session.flush()
     return snapshot, action
 
 
@@ -1772,14 +1850,44 @@ async def _upsert_benchmark_snapshot(
 ) -> tuple[BenchmarkSnapshot, str]:
     stat_date = _row_stat_date(batch=batch, row=row)
     benchmark_code = benchmark_code or _benchmark_code(row=row)
+    resolved_sample_size = sample_size
+    if resolved_sample_size is None and "publish_count" in row.normalized_values:
+        resolved_sample_size = _int_or_none(row.normalized_values.get("publish_count"))
+    meta = {
+        "content_format": row.normalized_values.get("content_format"),
+        "vertical": row.normalized_values.get("vertical"),
+        "period_start": _date_or_none(row.normalized_values.get("period_start")),
+        "period_end": _date_or_none(row.normalized_values.get("period_end")),
+    }
+    merge_values: dict[str, object | None] = {
+        "metric_value": metric_value,
+        "sample_size": resolved_sample_size,
+    }
+    if any(value is not None for value in meta.values()):
+        merge_values["meta"] = meta
+    entity_key = (
+        f"{benchmark_entity_key(batch.account_id, benchmark_code)}:"
+        f"metric:{quote(metric_code, safe='')}"
+    )
+    winners = await record_and_resolve_fields(
+        session,
+        batch=batch,
+        row=row,
+        domain="benchmarks",
+        entity_key=entity_key,
+        stat_date=stat_date,
+        values=merge_values,
+    )
     existing = await session.scalar(
-        select(BenchmarkSnapshot).where(
+        select(BenchmarkSnapshot)
+        .where(
+            BenchmarkSnapshot.org_id == batch.org_id,
             BenchmarkSnapshot.account_id == batch.account_id,
-            BenchmarkSnapshot.import_batch_id == batch.id,
             BenchmarkSnapshot.stat_date == stat_date,
             BenchmarkSnapshot.benchmark_code == benchmark_code,
             BenchmarkSnapshot.metric_code == metric_code,
         )
+        .order_by(BenchmarkSnapshot.updated_at.desc(), BenchmarkSnapshot.id.desc())
     )
     action = "updated" if existing is not None else "created"
     snapshot = existing or BenchmarkSnapshot(
@@ -1791,40 +1899,19 @@ async def _upsert_benchmark_snapshot(
         benchmark_code=benchmark_code,
         metric_code=metric_code,
     )
-    snapshot.metric_value = metric_value
-    snapshot.sample_size = sample_size
-    if sample_size is None:
-        snapshot.sample_size = _int_or_none(row.normalized_values.get("publish_count"))
-    snapshot.meta = {
-        "content_format": row.normalized_values.get("content_format"),
-        "vertical": row.normalized_values.get("vertical"),
-        "period_start": _date_or_none(row.normalized_values.get("period_start")),
-        "period_end": _date_or_none(row.normalized_values.get("period_end")),
-    }
+    if "metric_value" in winners:
+        snapshot.metric_value = _float_or_none(winners["metric_value"].value)
+    if "sample_size" in winners:
+        snapshot.sample_size = _int_or_none(winners["sample_size"].value)
+    if "meta" in winners:
+        snapshot.meta = dict(winners["meta"].value)
+    provenance = newest_winner(winners)
+    if provenance is not None:
+        snapshot.import_batch_id = provenance.observation.import_batch_id
+        snapshot.source_kind = provenance.observation.source_kind
     if existing is None:
-        savepoint = await session.begin_nested()
-        try:
-            session.add(snapshot)
-            await session.flush()
-        except IntegrityError:
-            await savepoint.rollback()
-            recovered_snapshot = await session.scalar(
-                select(BenchmarkSnapshot).where(
-                    BenchmarkSnapshot.account_id == batch.account_id,
-                    BenchmarkSnapshot.import_batch_id == batch.id,
-                    BenchmarkSnapshot.stat_date == stat_date,
-                    BenchmarkSnapshot.benchmark_code == benchmark_code,
-                    BenchmarkSnapshot.metric_code == metric_code,
-                )
-            )
-            if recovered_snapshot is None:
-                raise
-            snapshot = recovered_snapshot
-            action = "updated"
-        else:
-            await savepoint.commit()
-    else:
-        await session.flush()
+        session.add(snapshot)
+    await session.flush()
     return snapshot, action
 
 
