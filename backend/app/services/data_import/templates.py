@@ -85,10 +85,10 @@ PERIOD_AGGREGATE_TEMPLATE = TemplateDefinition(
         ColumnDefinition("条均5s完播率", "completion_rate_5s", "ratio"),
         ColumnDefinition("条均2s跳出率", "bounce_rate_2s", "ratio"),
         ColumnDefinition("条均播放时长", "avg_watch_time_seconds", "float"),
-        ColumnDefinition("播放量中位数", "median_play", "int"),
-        ColumnDefinition("条均点赞数", "avg_like_count", "int"),
-        ColumnDefinition("条均评论量", "avg_comment_count", "int"),
-        ColumnDefinition("条均分享量", "avg_share_count", "int"),
+        ColumnDefinition("播放量中位数", "median_play", "float"),
+        ColumnDefinition("条均点赞数", "avg_like_count", "float"),
+        ColumnDefinition("条均评论量", "avg_comment_count", "float"),
+        ColumnDefinition("条均分享量", "avg_share_count", "float"),
     ),
 )
 
