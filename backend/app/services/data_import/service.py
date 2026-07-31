@@ -28,6 +28,7 @@ from app.models import (
     DataConflict,
     DataFieldObservation,
     DataImportBatch,
+    DataImportFile,
     DataImportRow,
     MetricSnapshot,
     PlatformContentRecord,
@@ -51,7 +52,7 @@ from app.services.data_import.merge import (
     benchmark_entity_key,
     content_entity_key,
 )
-from app.services.data_import.parser import SUPPORTED_EXTENSIONS, RowIssue
+from app.services.data_import.parser import SUPPORTED_EXTENSIONS, ParsedDataset, RowIssue
 from app.services.data_import.projection import (
     ProjectionKey,
     deactivate_batch_observations,
@@ -280,6 +281,76 @@ async def create_preview(
         raise
 
     return await _load_batch(session, batch_id=batch_id)
+
+
+async def create_job_dataset_preview(
+    session: AsyncSession,
+    *,
+    user: User,
+    account: Account,
+    job_file: DataImportFile,
+    dataset: ParsedDataset,
+) -> DataImportBatch:
+    _assert_org_account_scope(user=user, account=account)
+    if (
+        job_file.org_id != account.org_id
+        or job_file.account_id != account.id
+    ):
+        raise ValueError("import file does not belong to the selected account")
+    existing = await session.scalar(
+        select(DataImportBatch).where(
+            DataImportBatch.org_id == account.org_id,
+            DataImportBatch.account_id == account.id,
+            DataImportBatch.job_id == job_file.job_id,
+            DataImportBatch.job_file_id == job_file.id,
+            DataImportBatch.dataset_ordinal == dataset.dataset_ordinal,
+        )
+    )
+    if existing is not None:
+        return existing
+
+    batch = DataImportBatch(
+        org_id=account.org_id,
+        account_id=account.id,
+        created_by_id=user.id,
+        job_id=job_file.job_id,
+        job_file_id=job_file.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.PREVIEW_READY,
+        template_code=dataset.template_code,
+        content_sha256=job_file.sha256,
+        parser_version=CURRENT_IMPORT_PARSER_VERSION,
+        sheet_name=dataset.sheet_name,
+        dataset_ordinal=dataset.dataset_ordinal,
+        row_count=dataset.preview.total_rows,
+        period_start=_derive_period_boundary(
+            dataset.rows,
+            field_name="period_start",
+            reducer=min,
+        ),
+        period_end=_derive_period_boundary(
+            dataset.rows,
+            field_name="period_end",
+            reducer=max,
+        ),
+    )
+    session.add(batch)
+    await session.flush()
+    rows: list[DataImportRow] = []
+    conflicts: list[DataConflict] = []
+    for normalized_row in dataset.rows:
+        row, conflict = await _build_row_persistence(
+            session=session,
+            account=account,
+            batch=batch,
+            row=normalized_row,
+        )
+        rows.append(row)
+        if conflict is not None:
+            conflicts.append(conflict)
+    session.add_all([*rows, *conflicts])
+    await session.flush()
+    return batch
 
 
 async def create_manual_preview(

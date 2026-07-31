@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -36,6 +37,16 @@ from app.schemas.account_data import (
     ImportRowView,
     ManualPreviewRequest,
     ResolveImportRowRequest,
+)
+from app.schemas.account_data_jobs import ImportJobOut
+from app.services.data_import.jobs import (
+    MAX_IMPORT_JOB_FILES,
+    DataImportJobNotFoundError,
+    JobUpload,
+    create_import_job,
+    enqueue_account_data_import_job,
+    load_import_job,
+    retry_import_file,
 )
 from app.services.data_import.parser import MAX_FILE_BYTES, ParseFailure
 from app.services.data_import.service import (
@@ -117,6 +128,108 @@ def _batch_out(batch: DataImportBatch) -> ImportBatchOut:
 
 def _bad_request(detail: str, *, status_code: int = status.HTTP_400_BAD_REQUEST) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
+
+
+@router.post(
+    "/{account_id}/import-jobs",
+    response_model=ImportJobOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_bulk_import_job(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    files: Annotated[list[UploadFile], File(...)],
+    client_request_id: Annotated[str | None, Form()] = None,
+) -> ImportJobOut:
+    account = await require_account_access(session, user, account_id, roles=OPERATE_ROLES)
+    if len(files) > MAX_IMPORT_JOB_FILES:
+        raise _bad_request(f"no more than {MAX_IMPORT_JOB_FILES} files are allowed")
+    uploads = [
+        JobUpload(
+            filename=item.filename or "upload.xlsx",
+            content_type=item.content_type or "application/octet-stream",
+            content=await item.read(MAX_FILE_BYTES + 1),
+        )
+        for item in files
+    ]
+    try:
+        job, created = await create_import_job(
+            session,
+            user=user,
+            account=account,
+            client_request_id=client_request_id or uuid4().hex,
+            uploads=uploads,
+        )
+    except ValueError as exc:
+        raise _bad_request(str(exc), status_code=status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    if created or job.status.value == "queued":
+        await enqueue_account_data_import_job(job.id)
+    return ImportJobOut.model_validate(job)
+
+
+@router.get(
+    "/{account_id}/import-jobs/{job_id}",
+    response_model=ImportJobOut,
+)
+async def get_bulk_import_job(
+    account_id: int,
+    job_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ImportJobOut:
+    account = await require_account_access(session, user, account_id)
+    try:
+        job = await load_import_job(
+            session,
+            org_id=user.org_id,
+            account_id=account.id,
+            job_id=job_id,
+        )
+    except DataImportJobNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="import job does not exist",
+        ) from exc
+    return ImportJobOut.model_validate(job)
+
+
+@router.post(
+    "/{account_id}/import-jobs/{job_id}/files/{file_id}/retry",
+    response_model=ImportJobOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_bulk_import_file(
+    account_id: int,
+    job_id: int,
+    file_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ImportJobOut:
+    account = await require_account_access(session, user, account_id, roles=OPERATE_ROLES)
+    try:
+        await retry_import_file(
+            session,
+            org_id=user.org_id,
+            account_id=account.id,
+            job_id=job_id,
+            file_id=file_id,
+        )
+        job = await load_import_job(
+            session,
+            org_id=user.org_id,
+            account_id=account.id,
+            job_id=job_id,
+        )
+    except DataImportJobNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="import job or file does not exist",
+        ) from exc
+    except ValueError as exc:
+        raise _bad_request(str(exc), status_code=status.HTTP_409_CONFLICT) from exc
+    await enqueue_account_data_import_job(job.id)
+    return ImportJobOut.model_validate(job)
 
 
 @router.post(

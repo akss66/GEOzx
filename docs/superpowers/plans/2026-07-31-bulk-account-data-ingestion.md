@@ -214,11 +214,11 @@ class ParsedSourceFile:
 - Create: `backend/tests/test_account_data_import_jobs_api.py`
 - Create: `backend/tests/test_account_data_import_jobs_worker.py`
 
-- [ ] Add failing API tests for `POST /account-data/{account_id}/import-jobs` accepting repeated `files` multipart parts and an optional `client_request_id`.
-- [ ] Add failing tests proving same client request returns the original job and same artifact hash does not double-write observations.
-- [ ] Add failing worker test for five files where four commit and one fails without rollback.
-- [ ] Add failing retry test proving only the failed file is retried.
-- [ ] Implement endpoints:
+- [x] Add failing API tests for `POST /account-data/{account_id}/import-jobs` accepting repeated `files` multipart parts and an optional `client_request_id`.
+- [x] Add failing tests proving same client request returns the original job and same artifact hash does not double-write observations.
+- [x] Add failing worker test for five files where four commit and one fails without rollback.
+- [x] Add failing retry test proving only the failed file is retried.
+- [x] Implement endpoints:
 
 ```text
 POST   /account-data/{account_id}/import-jobs
@@ -226,13 +226,13 @@ GET    /account-data/{account_id}/import-jobs/{job_id}
 POST   /account-data/{account_id}/import-jobs/{job_id}/files/{file_id}/retry
 ```
 
-- [ ] Validate per-file and aggregate byte/file-count limits before queueing.
-- [ ] Persist all file metadata before returning `202 Accepted`.
-- [ ] Implement `execute_account_data_import_job(ctx, job_id)` and register it in `WorkerSettings.functions`.
-- [ ] Process each dataset in a nested transaction/savepoint; update file/job counters after each terminal dataset state.
-- [ ] Publish progress events using account/job-scoped payloads without leaking filenames across accounts.
-- [ ] Preserve the legacy preview/commit endpoints for manual review flows.
-- [ ] Run `cd backend; python -m pytest tests/test_account_data_import_jobs_api.py tests/test_account_data_import_jobs_worker.py -q`.
+- [x] Validate per-file and aggregate byte/file-count limits before queueing.
+- [x] Persist all file metadata before returning `202 Accepted`.
+- [x] Implement `execute_account_data_import_job(ctx, job_id)` and register it in `WorkerSettings.functions`.
+- [x] Process each dataset in a nested transaction/savepoint; update file/job counters after each terminal dataset state.
+- [x] Publish progress events using account/job-scoped payloads without leaking filenames across accounts.
+- [x] Preserve the legacy preview/commit endpoints for manual review flows.
+- [x] Run `cd backend; python -m pytest tests/test_account_data_import_jobs_api.py tests/test_account_data_import_jobs_worker.py -q`.
 - [ ] Commit: `feat(account-data): add resilient bulk import jobs`.
 
 ## Task 8: Add Multi-File Frontend Contracts and Queue

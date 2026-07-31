@@ -91,6 +91,14 @@ async def generate_video(ctx: dict, deliverable_id: int) -> int | None:
         return asset.id if asset else None
 
 
+async def execute_account_data_import_job(ctx: dict, job_id: int) -> int:
+    from app.services.data_import.jobs import process_import_job
+
+    async with async_session() as session:
+        job = await process_import_job(session, job_id=job_id)
+        return job.id
+
+
 async def execute_agent_run(
     ctx: dict,
     run_id: int,
@@ -443,7 +451,12 @@ async def on_shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions = [process_event, generate_video, execute_agent_run]
+    functions = [
+        process_event,
+        generate_video,
+        execute_account_data_import_job,
+        execute_agent_run,
+    ]
     redis_settings = redis_settings()
     on_startup = on_startup
     on_shutdown = on_shutdown
