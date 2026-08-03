@@ -103,7 +103,7 @@ function buildRowPage({
   };
 }
 
-test("reviews and commits a Douyin export in the redesigned data center", async ({ page }) => {
+test("queues a Douyin export in the redesigned data center", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const consoleErrors: string[] = [];
   let batchDetailRequests = 0;
@@ -135,34 +135,19 @@ test("reviews and commits a Douyin export in the redesigned data center", async 
     { length: 30 },
     (_, index) => `作品 ${index + 1},2026-07-18 14:11:20,1min-视频,公开,${81 + index},0.0875,0.375,,0.375,9.53,6,0,3,0,3,0`,
   );
-  await page.getByLabel("选择导入文件").setInputFiles({
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "选择账号数据文件" }).click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles({
     name: "douyin-work-list.csv",
     mimeType: "text/csv",
     buffer: Buffer.from([header, ...csvRows].join("\n"), "utf8"),
   });
 
-  await expect(page.getByText("导入预览已生成")).toBeVisible();
-  await expect(page.getByRole("tabpanel", { name: "导入与补录" })).toBeVisible();
-  await expect(page.getByRole("table", { name: "导入数据校验表" })).toBeVisible();
-  await expect(page.getByRole("table", { name: "导入记录" })).toHaveCount(0);
-  await expect(page.getByText("30 条 · 可写入 30 · 需处理 0")).toBeVisible();
-  await expect(page.getByText("douyin_work_list_v1", { exact: true })).toBeHidden();
-  await expect(page.getByRole("button", { name: "确认写入 30 条" })).toBeVisible();
-
-  await page
-    .getByRole("table", { name: "导入数据校验表" })
-    .locator("tbody tr")
-    .last()
-    .scrollIntoViewIfNeeded();
-  await expect(page.getByRole("button", { name: "确认写入 30 条" })).toBeVisible();
-  await page.getByRole("button", { name: "确认写入 30 条" }).click();
-  await expect(page.getByText("导入已确认", { exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "导入记录" }).click();
-  await expect(page.getByRole("tabpanel", { name: "导入记录" })).toBeVisible();
-  const historyTable = page.getByRole("table", { name: "导入记录" });
-  await expect(historyTable).toBeVisible();
-  await expect(historyTable.getByText("抖音作品列表", { exact: true })).toBeVisible();
-  await expect(historyTable.getByText("系统管理员", { exact: true })).toBeVisible();
+  await expect(page.getByText("douyin-work-list.csv", { exact: true })).toBeVisible();
+  await expect(page.getByText("已写入", { exact: true })).toBeVisible();
+  await expect(page.getByText("抖音作品列表", { exact: true })).toBeVisible();
+  await expect(page.getByText("默认工作表 · 30 行", { exact: true })).toBeVisible();
   expect(batchDetailRequests).toBe(0);
 
   const layout = await page.evaluate(() => ({
@@ -185,7 +170,7 @@ test("keeps the import workspace usable without document overflow on mobile", as
 
   await expect(page.getByRole("tabpanel", { name: "导入与补录" })).toBeVisible();
   await expect(page.locator(".account-data-layout")).toHaveCount(0);
-  await expect(page.getByLabel("选择导入文件")).toBeVisible();
+  await expect(page.getByRole("button", { name: "选择账号数据文件" })).toBeVisible();
   const hasOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
   );
@@ -210,6 +195,7 @@ async function seedWorkspace(page: Page) {
 
 async function mockAccountDataApi(page: Page) {
   let batch: ReturnType<typeof buildBatch> | null = null;
+  let importJob: ReturnType<typeof buildImportJob> | null = null;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -275,6 +261,13 @@ async function mockAccountDataApi(page: Page) {
           : [],
       });
     }
+    if (method === "GET" && path === "/account-data/1/import-jobs") {
+      return json(route, importJob ? [importJob] : []);
+    }
+    if (method === "POST" && path === "/account-data/1/import-jobs") {
+      importJob = buildImportJob();
+      return json(route, importJob);
+    }
     if (method === "POST" && path === "/account-data/1/imports") {
       batch = buildBatch("preview_ready");
       return json(route, batch);
@@ -302,6 +295,41 @@ async function mockAccountDataApi(page: Page) {
 
     return json(route, []);
   });
+}
+
+function buildImportJob() {
+  return {
+    id: 91,
+    account_id: 1,
+    client_request_id: "playwright-import-91",
+    status: "completed",
+    file_count: 1,
+    completed_file_count: 1,
+    failed_file_count: 0,
+    started_at: "2026-07-23T08:00:00Z",
+    completed_at: "2026-07-23T08:00:02Z",
+    files: [{
+      id: 911,
+      retry_of_file_id: null,
+      ordinal: 1,
+      filename: "douyin-work-list.csv",
+      content_type: "text/csv",
+      byte_size: 4096,
+      sha256: "b".repeat(64),
+      status: "completed",
+      error_payload: {},
+      started_at: "2026-07-23T08:00:00Z",
+      completed_at: "2026-07-23T08:00:02Z",
+      datasets: [{
+        id: 912,
+        template_code: "douyin_work_list_v1",
+        sheet_name: null,
+        dataset_ordinal: 1,
+        status: "committed",
+        row_count: 30,
+      }],
+    }],
+  };
 }
 
 function buildReviewWorkspace() {
