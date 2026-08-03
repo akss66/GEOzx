@@ -361,6 +361,30 @@ async def test_gateway_atomically_counts_every_real_provider_attempt(
 
 
 @pytest.mark.asyncio
+async def test_router_budget_disables_fallback_and_caps_timeout(session, admin) -> None:
+    session.add(
+        ModelConfig(
+            org_id=admin.org_id,
+            agent_code="00-router",
+            primary_model="bad",
+            fallback_model="deepseek-chat",
+            params={"routing_config": {"timeout_seconds": 45}},
+        )
+    )
+    await session.commit()
+    adapter = FakeAdapter(fail_models={"bad"})
+
+    with bind_llm_call_context(
+        LLMCallContext(budget={"max_attempts": 1, "timeout_seconds": 8})
+    ):
+        with pytest.raises(LLMError):
+            await _gw(adapter).chat(session, admin.org_id, "00-router", MSG)
+
+    assert adapter.calls == ["bad"]
+    assert adapter.options[0]["timeout_seconds"] == 8
+
+
+@pytest.mark.asyncio
 async def test_parallel_gateway_attempts_do_not_lose_turn_counts(
     session,
     admin,

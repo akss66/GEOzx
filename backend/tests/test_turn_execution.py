@@ -652,6 +652,45 @@ async def test_deterministic_answer_skips_model_classification(session, admin, m
 
 
 @pytest.mark.asyncio
+async def test_low_risk_question_uses_only_the_answer_model(session, admin, monkeypatch) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="single-model-answer",
+    )
+    message = "短视频运营有哪些常见误区？"
+    turn.user_input = message
+    await session.commit()
+    answer_calls = 0
+
+    async def should_not_classify(*_args, **_kwargs):
+        raise AssertionError("low-risk questions must not call the classifier")
+
+    async def answer(*_args, **_kwargs):
+        nonlocal answer_calls
+        answer_calls += 1
+        return "常见误区包括目标不清、只追热点和不做数据复盘。"
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.brain_intelligence.classify_turn",
+        should_not_classify,
+    )
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.answer_turn", answer)
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("single-model-answer", message),
+    )
+
+    assert result.mode is TurnExecutionMode.ANSWER
+    assert result.status == "completed"
+    assert answer_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
     session, admin, monkeypatch
 ) -> None:

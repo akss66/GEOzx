@@ -72,9 +72,51 @@ _AVAILABLE_EXPERTS = [
     AgentCode.ADVERTISER.value,
     AgentCode.CUSTOMER_SERVICE.value,
 ]
+_FORMAL_REQUEST_MARKERS = (
+    "帮我",
+    "给我",
+    "替我",
+    "直接",
+    "立即",
+    "执行",
+    "创建",
+    "生成",
+    "制定",
+    "规划",
+    "安排",
+    "发布",
+    "体检",
+    "复盘",
+    "诊断",
+    "查询",
+    "查看",
+    "读取",
+)
+_ANSWER_PREFIXES = (
+    "什么",
+    "为什么",
+    "为何",
+    "怎么",
+    "如何",
+    "请问",
+    "说说",
+    "介绍",
+    "解释",
+    "聊聊",
+)
 
 
 class BrainIntelligence:
+    def can_answer_without_classification(self, message: str) -> bool:
+        """Recognize low-risk conversational questions that cannot trigger work."""
+
+        normalized = message.strip()
+        if not normalized or any(marker in normalized for marker in _FORMAL_REQUEST_MARKERS):
+            return False
+        return normalized.endswith(("？", "?", "吗", "么", "呢")) or normalized.startswith(
+            _ANSWER_PREFIXES
+        )
+
     async def answer_turn(
         self,
         session: AsyncSession | None,
@@ -527,6 +569,11 @@ async def _structured_chat(
         prompt_hash=prompt.content_hash,
         prompt_schema_version=prompt.spec.schema_version,
         scope={"org_id": org_id},
+        budget=(
+            {"max_attempts": 1, "timeout_seconds": 8}
+            if agent_code == ROUTER_AGENT_CODE
+            else {}
+        ),
         response_format={"type": "json_object"},
     )
     token = set_stream_observer(None)

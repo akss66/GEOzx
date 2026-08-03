@@ -560,6 +560,13 @@ async def _route_turn(
     )
     if deterministic_decision is not None:
         return deterministic_decision
+    if brain_intelligence.can_answer_without_classification(request.message):
+        return TurnRouteDecision(
+            mode=TurnExecutionMode.ANSWER,
+            intent="general_question",
+            confidence=1,
+            reason="low_risk_question_skips_model_classification",
+        )
     decision = await brain_intelligence.classify_turn(
         session,
         user.org_id,

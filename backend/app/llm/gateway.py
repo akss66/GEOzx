@@ -185,6 +185,7 @@ class LLMGateway:
         primary, fallback, options = await resolve_route_targets(session, org_id, agent_code)
         options = _effective_options(options)
         candidates = [candidate for candidate in (primary, fallback) if candidate is not None]
+        candidates = _limit_candidates(candidates)
 
         last_exc: Exception | None = None
         for target in candidates:
@@ -237,7 +238,9 @@ class LLMGateway:
         observer: StreamObserver,
     ) -> tuple[CompletionResult, float]:
         primary, fallback, options = await resolve_route_targets(session, org_id, agent_code)
+        options = _effective_options(options)
         candidates = [candidate for candidate in (primary, fallback) if candidate is not None]
+        candidates = _limit_candidates(candidates)
 
         last_exc: Exception | None = None
         for target in candidates:
@@ -376,6 +379,11 @@ def _effective_options(options: dict[str, Any]) -> dict[str, Any]:
     call_context = _call_context.get()
     if call_context is not None and call_context.response_format is not None:
         effective["response_format"] = dict(call_context.response_format)
+    if call_context is not None and call_context.budget.get("timeout_seconds") is not None:
+        effective["timeout_seconds"] = min(
+            float(effective.get("timeout_seconds") or 90),
+            float(call_context.budget["timeout_seconds"]),
+        )
     if (
         call_context is not None
         and call_context.prompt_id
@@ -384,6 +392,14 @@ def _effective_options(options: dict[str, Any]) -> dict[str, Any]:
     ):
         effective["_deterministic_prompt_id"] = call_context.prompt_id
     return effective
+
+
+def _limit_candidates(candidates: list[ModelTarget]) -> list[ModelTarget]:
+    call_context = _call_context.get()
+    if call_context is None or call_context.budget.get("max_attempts") is None:
+        return candidates
+    limit = max(1, int(call_context.budget["max_attempts"]))
+    return candidates[:limit]
 
 
 def _rough_token_count(text: str) -> int:

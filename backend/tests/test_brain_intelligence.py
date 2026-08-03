@@ -73,7 +73,22 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
     assert captured["context"].prompt_id == "main-agent.intent"
     assert captured["context"].prompt_schema_version == "turn-route-decision/v1"
     assert captured["context"].response_format == {"type": "json_object"}
+    assert captured["context"].budget == {"max_attempts": 1, "timeout_seconds": 8}
     assert "当前平台：xiaohongshu" in captured["messages"][1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("短视频运营有哪些常见误区？", True),
+        ("说说账号定位为什么重要", True),
+        ("帮我分析当前账号", False),
+        ("直接发布这条内容", False),
+        ("查询最近30天播放量", False),
+    ],
+)
+def test_low_risk_answer_fast_path_is_fail_closed(message: str, expected: bool) -> None:
+    assert BrainIntelligence().can_answer_without_classification(message) is expected
 
 
 @pytest.mark.asyncio
