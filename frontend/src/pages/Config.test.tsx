@@ -153,4 +153,25 @@ describe("Config expert management", () => {
     await screen.findByText("专家管理");
     expect(listAgentManagement).toHaveBeenCalledTimes(1);
   });
+
+  it("asks before switching experts when the current draft is unsaved", async () => {
+    renderPage();
+    await screen.findByText("专家管理");
+
+    fireEvent.change(screen.getByLabelText("专家职责"), {
+      target: { value: "尚未保存的主控职责" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /编导文案专家/ }));
+
+    const dialog = screen.getByRole("dialog", { name: "放弃未保存的专家配置？" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "运营大脑" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByLabelText("专家职责")).toHaveValue("尚未保存的主控职责");
+
+    fireEvent.click(screen.getByRole("button", { name: /编导文案专家/ }));
+    fireEvent.click(screen.getByRole("button", { name: "放弃并切换" }));
+    expect(await screen.findByRole("heading", { name: "编导文案专家" })).toBeInTheDocument();
+  });
 });

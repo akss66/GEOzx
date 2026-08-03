@@ -84,6 +84,8 @@ export default function Users() {
   const [createAccessDraft, setCreateAccessDraft] = useState<AccessDraft>(DEFAULT_CREATE_ACCESS);
   const [createdUserId, setCreatedUserId] = useState<number | null>(null);
   const [createFeedback, setCreateFeedback] = useState<string | null>(null);
+  const [accessDirty, setAccessDirty] = useState(false);
+  const [pendingUserId, setPendingUserId] = useState<number | null>(null);
 
   const usersQuery = useQuery({
     queryKey: ["users"],
@@ -185,6 +187,25 @@ export default function Users() {
   const secondaryStatusError = secondaryStatusQuery.isError
     ? presentApiError(secondaryStatusQuery.error, "二级密码状态暂时不可用。").message
     : null;
+
+  useEffect(() => {
+    if (!accessDirty) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [accessDirty]);
+
+  function requestSelectedUser(userId: number) {
+    if (userId === resolvedSelectedUserId) return;
+    if (accessDirty) {
+      setPendingUserId(userId);
+      return;
+    }
+    setSelectedUserId(userId);
+  }
 
   const summaryMetrics = useMemo(() => {
     const unassignedCount = users.filter((user) => user.access_anomaly).length;
@@ -473,7 +494,7 @@ export default function Users() {
                   className={`tz-member-row${resolvedSelectedUserId === user.id ? " is-selected" : ""}`}
                   aria-label={`${user.display_name} ${user.email}`}
                   aria-pressed={resolvedSelectedUserId === user.id}
-                  onClick={() => setSelectedUserId(user.id)}
+                  onClick={() => requestSelectedUser(user.id)}
                 >
                   <span className="tz-member-avatar">{user.display_name.slice(0, 1)}</span>
                   <span className="tz-member-row-copy">
@@ -592,6 +613,7 @@ export default function Users() {
                         detail={selectedDetail}
                         catalog={catalogQuery.data}
                         onSave={handleSaveAccess}
+                        onDirtyChange={setAccessDirty}
                       />
                     ) : null,
                   },
@@ -717,6 +739,21 @@ export default function Users() {
           </div>
         ) : <Skeleton active paragraph={{ rows: 4 }} />}
         {createFeedback ? <p className="tz-inline-feedback is-error" role="alert">{createFeedback}</p> : null}
+      </Modal>
+      <Modal
+        title="放弃未保存的资源权限？"
+        open={pendingUserId != null}
+        okText="放弃并切换"
+        cancelText="继续编辑"
+        onCancel={() => setPendingUserId(null)}
+        onOk={() => {
+          const nextUserId = pendingUserId;
+          setPendingUserId(null);
+          setAccessDirty(false);
+          if (nextUserId != null) setSelectedUserId(nextUserId);
+        }}
+      >
+        <p>当前成员的资源权限尚未保存。切换后，本次修改将被放弃。</p>
       </Modal>
     </div>
   );

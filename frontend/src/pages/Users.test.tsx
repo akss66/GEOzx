@@ -850,7 +850,7 @@ describe("Users", () => {
     expect(screen.getByText("有未保存更改")).toBeInTheDocument();
   });
 
-  it("drops an unsaved access draft when the selected member changes", async () => {
+  it("asks before discarding an unsaved access draft when the selected member changes", async () => {
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
@@ -860,18 +860,20 @@ describe("Users", () => {
     expect(screen.getByText("有未保存更改")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
+    const dialog = screen.getByRole("dialog", { name: "放弃未保存的资源权限？" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /运营同事/ })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByText("有未保存更改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /停用成员/ }));
+    fireEvent.click(screen.getByRole("button", { name: "放弃并切换" }));
     await waitFor(() => expect(
       screen.getByRole("button", { name: /停用成员/ }),
     ).toHaveAttribute("aria-pressed", "true"));
-    fireEvent.click(screen.getByRole("button", { name: /运营同事/ }));
-    await waitFor(() => expect(
-      screen.getByRole("button", { name: /运营同事/ }),
-    ).toHaveAttribute("aria-pressed", "true"));
-    fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
-
-    expect(await screen.findByLabelText("全部可见账号")).toBeChecked();
+    expect(await screen.findByLabelText("仅指定账号")).toBeChecked();
     expect(screen.getByText("已与服务端同步")).toBeInTheDocument();
-    expect(screen.queryByLabelText("数码品牌主号")).not.toBeInTheDocument();
   });
 
   it("translates stable business errors from overview saves", async () => {
