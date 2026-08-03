@@ -42,6 +42,14 @@ class AccountMetricsParams(BaseModel):
     days: int = Field(default=30, ge=1, le=90)
 
 
+class EngagementContextParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    days: int = Field(default=30, ge=1, le=90)
+    content_item_ids: list[int] = Field(default_factory=list, max_length=50)
+    response_scope: str = Field(pattern="^(all|questions|negative_feedback)$")
+
+
 class DeterministicConfirmActionParams(BaseModel):
     """Empty payload for the CI-only approval boundary tool."""
 
@@ -172,6 +180,54 @@ async def _account_metrics_summary(
         "coverage": data_context["coverage"],
         "freshness": data_context["freshness"],
         "conflict_count": data_context["conflict_count"],
+    }
+
+
+async def _account_engagement_context(
+    params: EngagementContextParams,
+    context: ToolExecutionContext,
+) -> dict[str, Any]:
+    if context.account_id is None:
+        raise PermissionError("selected account is required")
+    unique_content_ids = list(dict.fromkeys(params.content_item_ids))
+    if unique_content_ids:
+        owned_ids = set(
+            await context.session.scalars(
+                select(ContentItem.id).where(
+                    ContentItem.account_id == context.account_id,
+                    ContentItem.id.in_(unique_content_ids),
+                )
+            )
+        )
+        if owned_ids != set(unique_content_ids):
+            raise PermissionError("content items do not belong to the selected account")
+    data_context = await _account_data_context(
+        AccountMetricsParams(days=params.days),
+        context,
+    )
+    metric_names = (
+        "engagement_rate",
+        "comment_count",
+        "comment_rate",
+        "like_count",
+        "share_count",
+    )
+    metrics = {
+        name: data_context["metrics"].get(name, {"value": None})
+        for name in metric_names
+    }
+    # Current official/export inputs contain aggregate interaction metrics but
+    # no comment bodies.  Keep this explicit so the expert cannot invent FAQs
+    # or sentiment from counts alone.
+    return {
+        "account_id": context.account_id,
+        "period": data_context["period"],
+        "response_scope": params.response_scope,
+        "content_item_ids": unique_content_ids,
+        "metrics": metrics,
+        "comment_samples": [],
+        "data_sufficiency": "aggregate_only",
+        "sources": data_context["sources"],
     }
 
 
@@ -466,6 +522,14 @@ _RUNTIME_TOOL_SPECS = (
         scope="account",
     ),
     ToolSpec(
+        name="account.engagement_context",
+        handler=_tool_handler(EngagementContextParams, _account_engagement_context),
+        side_effect_level="read",
+        params_model=EngagementContextParams,
+        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+        scope="account",
+    ),
+    ToolSpec(
         name="publish_package_prepare",
         handler=_tool_handler(PublishPackagePrepareParams, _publish_package_prepare),
         side_effect_level="idempotent_write",
@@ -545,6 +609,9 @@ def _tool_description(code: str) -> str:
         "account.profile": "读取当前已选账号的公开概况和接入状态",
         "account.data_context": "读取当前账号统一数据视图、指标证据、覆盖度、时效与冲突",
         "account.metrics_summary": "汇总当前已选账号最近 1-90 天的运营指标",
+        "account.engagement_context": (
+            "读取当前账号互动指标和可核验评论样本；没有评论正文时明确返回数据不足"
+        ),
         "publish_package_prepare": "为当前账号内容生成可审计、可审批的发布准备包",
         "platform.content_publish": (
             "将已审批且版本未变化的发布包交给官方平台通道，并返回真实回执状态"

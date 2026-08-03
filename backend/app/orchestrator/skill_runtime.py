@@ -61,6 +61,7 @@ from app.orchestrator.skills.account_inspection import (
 from app.orchestrator.skills.account_positioning import AccountPositioningReport
 from app.orchestrator.skills.content_calendar_planning import ContentCalendarPlanningReport
 from app.orchestrator.skills.content_publishing import ContentPublishingReceipt
+from app.orchestrator.skills.engagement_review import EngagementReviewReport
 from app.orchestrator.skills.operating_tasks import (
     PerformanceReviewReport,
     PublishingPreparationReport,
@@ -974,9 +975,49 @@ class SkillRuntime:
             if paused is not None:
                 return paused
 
+        if definition.code == "engagement_review":
+            engagement_context = tool_results.get("account.engagement_context", {})
+            if not engagement_context.get("comment_samples"):
+                report = EngagementReviewReport(
+                    account_id=thread.account_id,
+                    period=dict(engagement_context.get("period") or {}),
+                    status="needs_input",
+                    evidence_refs=_evidence_refs(engagement_context),
+                    missing_data=[
+                        "缺少当前账号可核验的评论正文，聚合评论量不能用于推断常见问题或情绪。"
+                    ],
+                ).model_dump(mode="json")
+                output = {
+                    "status": "waiting_user",
+                    "task_id": task.id,
+                    "artifact_id": None,
+                    "artifact_type": "engagement_review",
+                    "report": report,
+                    "response": "已读取互动汇总，但缺少评论正文。请同步评论明细后再做互动复盘。",
+                    "error_code": "ENGAGEMENT_SAMPLES_REQUIRED",
+                }
+                await self._close_skill_state(
+                    session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    status="waiting_user",
+                    response=output["response"],
+                    output_snapshot=output,
+                    error_code=output["error_code"],
+                )
+                return self._existing_result(skill_run)
+
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
-        evidence_refs = _evidence_refs(tool_results.get("account.data_context", {}))
+        evidence_context = (
+            tool_results.get("account.engagement_context", {})
+            if definition.code == "engagement_review"
+            else tool_results.get("account.data_context", {})
+        )
+        evidence_refs = _evidence_refs(evidence_context)
         source_artifacts = await _confirmed_source_artifacts(
             session,
             account_id=thread.account_id,
@@ -1924,6 +1965,12 @@ def _operating_tool_arguments(
         return {}
     if tool_code in {"account.data_context", "account.metrics_summary"}:
         return {"days": int(frozen_input.get("days") or 30)}
+    if tool_code == "account.engagement_context":
+        return {
+            "days": int(frozen_input.get("days") or 30),
+            "content_item_ids": list(frozen_input.get("content_item_ids") or []),
+            "response_scope": str(frozen_input.get("response_scope") or "all"),
+        }
     if tool_code == "publish_package_prepare":
         return {
             "content_item_id": int(frozen_input.get("content_item_id") or content.id),
@@ -2014,7 +2061,11 @@ def _build_operating_report(
                     "publishing_preparation",
                     "content_calendar_planning",
                 }
-                else AgentCode.CONTENT_DIRECTOR.value
+                else (
+                    AgentCode.CUSTOMER_SERVICE.value
+                    if definition.code == "engagement_review"
+                    else AgentCode.CONTENT_DIRECTOR.value
+                )
             )
         )
     )
@@ -2258,6 +2309,32 @@ def _build_operating_report(
                     )
                     or {}
                 ),
+            },
+        )
+
+    if definition.code == "engagement_review":
+        engagement_context = tool_results.get("account.engagement_context", {})
+        report = EngagementReviewReport(
+            account_id=account_id,
+            period=dict(engagement_context.get("period") or {}),
+            status="ready",
+            common_questions=_string_list(latest.get("common_questions")),
+            sentiment=dict(latest.get("sentiment") or {}),
+            response_guidelines=_string_list(latest.get("response_guidelines")),
+            content_opportunities=_string_list(latest.get("content_opportunities")),
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return (
+            data,
+            DeliverableType.CS_RECORD,
+            {
+                "common_questions": data["common_questions"],
+                "sentiment": data["sentiment"],
+                "response_guidelines": data["response_guidelines"],
+                "content_opportunities": data["content_opportunities"],
+                "evidence_refs": data["evidence_refs"],
             },
         )
 

@@ -6,6 +6,7 @@ from app.config import settings
 from app.models import (
     Account,
     AccountMetricSnapshot,
+    ContentItem,
     DataImportBatch,
     MetricSnapshot,
     PlatformContentRecord,
@@ -341,11 +342,48 @@ async def test_runtime_tools_reject_model_supplied_account_id(session, admin) ->
         )
 
 
+@pytest.mark.asyncio
+async def test_engagement_context_is_account_scoped_and_truthful_without_comment_bodies(
+    session, admin
+) -> None:
+    account = await _account(session, admin, nickname="engagement-owner")
+    other = await _account(session, admin, nickname="engagement-other")
+    foreign_content = ContentItem(
+        account_id=other.id,
+        created_by_id=admin.id,
+        title="foreign",
+    )
+    session.add(foreign_content)
+    await session.commit()
+    adapter = build_runtime_tool_adapter()
+
+    with pytest.raises(PermissionError):
+        await adapter.invoke(
+            "account.engagement_context",
+            {
+                "days": 30,
+                "content_item_ids": [foreign_content.id],
+                "response_scope": "all",
+            },
+            ToolExecutionContext(session=session, user=admin, account_id=account.id),
+        )
+
+    result = await adapter.invoke(
+        "account.engagement_context",
+        {"days": 30, "content_item_ids": [], "response_scope": "all"},
+        ToolExecutionContext(session=session, user=admin, account_id=account.id),
+    )
+    assert result["account_id"] == account.id
+    assert result["data_sufficiency"] == "aggregate_only"
+    assert result["comment_samples"] == []
+
+
 def test_runtime_tool_catalog_exposes_read_and_prepare_phases(admin) -> None:
     catalog = runtime_tool_capabilities(admin)
 
     assert {item["code"] for item in catalog} == {
         "account.data_context",
+        "account.engagement_context",
         "account.metrics_summary",
         "account.profile",
         "platform.content_publish",

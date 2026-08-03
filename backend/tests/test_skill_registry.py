@@ -136,6 +136,7 @@ def test_production_registry_covers_the_first_account_operations_loop() -> None:
         "account_positioning",
         "content_calendar_planning",
         "content_publishing",
+        "engagement_review",
         "topic_planning",
         "script_generation",
         "publishing_preparation",
