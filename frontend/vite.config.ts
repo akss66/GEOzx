@@ -20,7 +20,7 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: ["e2e/**", "node_modules/**", "dist/**"],
+    exclude: ["e2e/**", "tests/**", "node_modules/**", "dist/**"],
   },
   server: {
     port: 5173,
