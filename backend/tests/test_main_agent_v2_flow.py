@@ -94,6 +94,7 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
     """A greeting after an Artifact must not steal or duplicate its provenance."""
 
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", True)
     monkeypatch.setattr(settings, "agent_runtime_async_enabled", False)
     account = Account(
         org_id=admin.org_id,
@@ -161,10 +162,11 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
         turn,
         run,
         skill_code,
-        days,
+        capability_request,
     ):
         assert skill_code == "account_inspection"
-        assert days == 30
+        assert capability_request.account_id == thread.account_id
+        days = int(capability_request.structured_input.get("days", 30))
         content = ContentItem(
             account_id=thread.account_id,
             created_by_id=user.id,

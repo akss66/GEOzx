@@ -1366,6 +1366,7 @@ async def test_brain_message_replans_after_each_expert_result(client, session, a
         "account.data_context",
         "account.metrics_summary",
         "account.profile",
+        "publish_package_prepare",
     }
 
 
