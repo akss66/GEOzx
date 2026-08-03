@@ -146,6 +146,12 @@ class ConversationTurn(Base, TimestampMixin):
         default=0,
         nullable=True,
     )
+    next_event_sequence: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default="1",
+        nullable=False,
+    )
 
     thread: Mapped[ConversationThread] = relationship(
         back_populates="turns",

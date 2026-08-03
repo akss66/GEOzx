@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -49,10 +59,24 @@ class Event(Base):
     __tablename__ = "events"
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_events_idempotency_key"),
+        Index(
+            "uq_events_turn_sequence",
+            "turn_id",
+            "sequence",
+            unique=True,
+            postgresql_where=text("turn_id IS NOT NULL AND sequence IS NOT NULL"),
+            sqlite_where=text("turn_id IS NOT NULL AND sequence IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     type: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    org_id: Mapped[int | None] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     content_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("content_items.id", ondelete="CASCADE"), index=True, nullable=True
     )
@@ -79,6 +103,7 @@ class Event(Base):
         index=True,
         nullable=True,
     )
+    sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(
         String(64), nullable=True

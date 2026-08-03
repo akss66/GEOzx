@@ -12,6 +12,100 @@ def test_conversation_models_are_registered() -> None:
     assert hasattr(models, "ConversationTurn")
 
 
+def test_durable_events_declare_account_scope_and_partial_turn_sequence() -> None:
+    event_table = models.Event.__table__
+    assert {"org_id", "account_id", "sequence"} <= set(event_table.columns.keys())
+    assert event_table.c.org_id.nullable is True
+    assert event_table.c.account_id.nullable is True
+    assert event_table.c.sequence.nullable is True
+
+    turn_sequence_index = next(
+        index for index in event_table.indexes if index.name == "uq_events_turn_sequence"
+    )
+    assert turn_sequence_index.unique is True
+    assert tuple(column.name for column in turn_sequence_index.columns) == (
+        "turn_id",
+        "sequence",
+    )
+    expected_predicate = "turn_id IS NOT NULL AND sequence IS NOT NULL"
+    assert str(turn_sequence_index.dialect_options["postgresql"]["where"]) == (
+        expected_predicate
+    )
+    assert str(turn_sequence_index.dialect_options["sqlite"]["where"]) == expected_predicate
+
+
+@pytest.mark.asyncio
+async def test_turn_event_sequence_is_unique_per_turn_and_defaults_cursor_to_one(
+    session,
+    admin,
+) -> None:
+    account = models.Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="event-sequence-account",
+    )
+    session.add(account)
+    await session.flush()
+    thread = models.ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="event sequence",
+    )
+    first_turn = models.ConversationTurn(
+        thread=thread,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        user_input="first",
+    )
+    second_turn = models.ConversationTurn(
+        thread=thread,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        user_input="second",
+    )
+    session.add_all([thread, first_turn, second_turn])
+    await session.flush()
+    session.add_all(
+        [
+            models.Event(
+                type="turn.received",
+                org_id=admin.org_id,
+                account_id=account.id,
+                thread_id=thread.id,
+                turn_id=first_turn.id,
+                sequence=1,
+            ),
+            models.Event(
+                type="turn.received",
+                org_id=admin.org_id,
+                account_id=account.id,
+                thread_id=thread.id,
+                turn_id=second_turn.id,
+                sequence=1,
+            ),
+            models.Event(type="legacy.event"),
+        ]
+    )
+    await session.commit()
+
+    assert first_turn.next_event_sequence == 1
+    assert second_turn.next_event_sequence == 1
+
+    session.add(
+        models.Event(
+            type="step.started",
+            org_id=admin.org_id,
+            account_id=account.id,
+            thread_id=thread.id,
+            turn_id=first_turn.id,
+            sequence=1,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_thread_keeps_each_turn_input_independent(session, admin) -> None:
     account = models.Account(

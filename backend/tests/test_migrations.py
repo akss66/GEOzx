@@ -597,8 +597,230 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_turn_tool_call_count() -> None:
-    assert get_head_revision() == "20260803_0400"
+def test_migration_head_is_scoped_turn_events() -> None:
+    assert get_head_revision() == "20260804_0100"
+
+
+def test_scoped_turn_events_migration_backfills_only_inferable_scope_and_is_reversible(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0100_scope_turn_events"
+    )
+    assert migration.down_revision == "20260803_0400"
+
+    engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    metadata = sa.MetaData()
+    orgs = sa.Table("orgs", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    accounts = sa.Table(
+        "accounts",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+    )
+    threads = sa.Table(
+        "conversation_threads",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.Column("account_id", sa.Integer, nullable=False),
+    )
+    turns = sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("thread_id", sa.Integer, nullable=False),
+        sa.Column("org_id", sa.Integer, nullable=False),
+    )
+    events = sa.Table(
+        "events",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("type", sa.String(length=128), nullable=False),
+        sa.Column("thread_id", sa.Integer, nullable=True),
+        sa.Column("turn_id", sa.Integer, nullable=True),
+        sa.Column("idempotency_key", sa.String(length=64), nullable=True),
+        sa.UniqueConstraint("idempotency_key", name="uq_events_idempotency_key"),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(orgs.insert(), [{"id": 1}, {"id": 2}])
+        connection.execute(
+            accounts.insert(),
+            [{"id": 10, "org_id": 1}, {"id": 20, "org_id": 2}],
+        )
+        connection.execute(
+            threads.insert(),
+            [
+                {"id": 100, "org_id": 1, "account_id": 10},
+                {"id": 200, "org_id": 2, "account_id": 20},
+            ],
+        )
+        connection.execute(
+            turns.insert(),
+            [
+                {"id": 1000, "thread_id": 100, "org_id": 1},
+                {"id": 1001, "thread_id": 100, "org_id": 1},
+                {"id": 2000, "thread_id": 200, "org_id": 2},
+            ],
+        )
+        connection.execute(
+            events.insert(),
+            [
+                {
+                    "id": 1,
+                    "type": "turn.received",
+                    "thread_id": 100,
+                    "turn_id": 1000,
+                    "idempotency_key": "turn-1000-received",
+                },
+                {
+                    "id": 2,
+                    "type": "thread.legacy",
+                    "thread_id": 100,
+                    "turn_id": None,
+                    "idempotency_key": None,
+                },
+                {
+                    "id": 3,
+                    "type": "step.completed",
+                    "thread_id": None,
+                    "turn_id": 1000,
+                    "idempotency_key": "turn-1000-completed",
+                },
+                {
+                    "id": 4,
+                    "type": "legacy.unscoped",
+                    "thread_id": None,
+                    "turn_id": None,
+                    "idempotency_key": None,
+                },
+                {
+                    "id": 5,
+                    "type": "legacy.unknown-thread",
+                    "thread_id": 999,
+                    "turn_id": None,
+                    "idempotency_key": None,
+                },
+                {
+                    "id": 6,
+                    "type": "turn.received",
+                    "thread_id": 200,
+                    "turn_id": 2000,
+                    "idempotency_key": "turn-2000-received",
+                },
+                {
+                    "id": 7,
+                    "type": "legacy.conflicting-scope",
+                    "thread_id": 200,
+                    "turn_id": 1000,
+                    "idempotency_key": None,
+                },
+            ],
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        event_columns = {
+            column["name"]: column for column in inspector.get_columns("events")
+        }
+        turn_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("conversation_turns")
+        }
+        assert {"org_id", "account_id", "sequence"} <= event_columns.keys()
+        assert all(event_columns[name]["nullable"] for name in ("org_id", "account_id", "sequence"))
+        assert turn_columns["next_event_sequence"]["nullable"] is False
+        assert str(turn_columns["next_event_sequence"]["default"]).strip("'()") == "1"
+        assert connection.execute(
+            sa.text(
+                "SELECT id, org_id, account_id, sequence FROM events ORDER BY id"
+            )
+        ).all() == [
+            (1, 1, 10, 1),
+            (2, 1, 10, None),
+            (3, 1, 10, 2),
+            (4, None, None, None),
+            (5, None, None, None),
+            (6, 2, 20, 1),
+            (7, None, None, None),
+        ]
+        assert connection.execute(
+            sa.text(
+                "SELECT id, next_event_sequence FROM conversation_turns ORDER BY id"
+            )
+        ).all() == [(1000, 3), (1001, 1), (2000, 2)]
+
+        indexes = {index["name"]: index for index in inspector.get_indexes("events")}
+        sequence_index = indexes["uq_events_turn_sequence"]
+        assert sequence_index["unique"] == 1
+        assert sequence_index["column_names"] == ["turn_id", "sequence"]
+        assert str(sequence_index["dialect_options"]["sqlite_where"]) == (
+            "turn_id IS NOT NULL AND sequence IS NOT NULL"
+        )
+        foreign_keys = {item["name"]: item for item in inspector.get_foreign_keys("events")}
+        assert foreign_keys["fk_events_org_id_orgs"]["referred_table"] == "orgs"
+        assert foreign_keys["fk_events_org_id_orgs"]["options"]["ondelete"] == "CASCADE"
+        assert foreign_keys["fk_events_account_id_accounts"]["referred_table"] == "accounts"
+        assert foreign_keys["fk_events_account_id_accounts"]["options"]["ondelete"] == "CASCADE"
+
+        connection.execute(
+            sa.text(
+                "INSERT INTO events "
+                "(id, type, org_id, account_id, turn_id, sequence) "
+                "VALUES (8, 'same-sequence-other-turn', 1, 10, 1001, 1)"
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO events "
+                    "(id, type, org_id, account_id, turn_id, sequence) "
+                    "VALUES (9, 'duplicate-sequence', 1, 10, 1000, 1)"
+                )
+            )
+        connection.execute(
+            sa.text("INSERT INTO events (id, type) VALUES (10, 'another-legacy-event')")
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO events (id, type, idempotency_key) "
+                    "VALUES (11, 'duplicate-key', 'turn-1000-received')"
+                )
+            )
+
+        migration.downgrade()
+
+        inspector = sa.inspect(connection)
+        assert {"org_id", "account_id", "sequence"}.isdisjoint(
+            column["name"] for column in inspector.get_columns("events")
+        )
+        assert "next_event_sequence" not in {
+            column["name"] for column in inspector.get_columns("conversation_turns")
+        }
+        assert "uq_events_idempotency_key" in {
+            item["name"] for item in inspector.get_unique_constraints("events")
+        }
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO events (id, type, idempotency_key) "
+                    "VALUES (12, 'duplicate-key-after-downgrade', 'turn-1000-received')"
+                )
+            )
 
 
 def test_turn_tool_call_count_migration_is_linear_and_reversible(monkeypatch) -> None:
