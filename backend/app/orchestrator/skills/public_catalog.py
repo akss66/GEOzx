@@ -21,6 +21,7 @@ class PublicSkillPolicy:
     enabled: bool = True
     allowed_roles: frozenset[UserRole] = frozenset({UserRole.ADMIN, UserRole.USER})
     internal_disabled_reason: str | None = None
+    aliases: tuple[str, ...] = ()
 
 
 PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
@@ -30,6 +31,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         icon="compass",
         requires_account=True,
         surfaces=frozenset({"composer"}),
+        aliases=("账号定位", "人设定位", "定位诊断"),
     ),
     "visual_brief_generation": PublicSkillPolicy(
         code="visual_brief_generation",
@@ -38,6 +40,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer"}),
         required_context=("account", "confirmed_artifact"),
+        aliases=("视觉brief", "视觉方案", "封面方案", "分镜"),
     ),
     "content_calendar_planning": PublicSkillPolicy(
         code="content_calendar_planning",
@@ -46,6 +49,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer"}),
         required_context=("account", "confirmed_artifact"),
+        aliases=("内容排期", "发布排期", "内容日历"),
     ),
     "content_publishing": PublicSkillPolicy(
         code="content_publishing",
@@ -54,6 +58,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer"}),
         required_context=("account", "confirmed_artifact", "platform_connection"),
+        aliases=("内容发布", "立即发布", "直接发布"),
     ),
     "engagement_review": PublicSkillPolicy(
         code="engagement_review",
@@ -62,6 +67,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer"}),
         required_context=("account", "account_data"),
+        aliases=("互动复盘", "评论分析", "用户反馈"),
     ),
     "operation_iteration": PublicSkillPolicy(
         code="operation_iteration",
@@ -70,6 +76,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer", "artifact_center"}),
         required_context=("account", "confirmed_artifact"),
+        aliases=("运营迭代", "下一周期", "下周运营"),
     ),
     "account_inspection": PublicSkillPolicy(
         code="account_inspection",
@@ -77,6 +84,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         icon="activity",
         requires_account=True,
         surfaces=frozenset({"composer"}),
+        aliases=("一键账号体检", "账号体检", "账号诊断"),
     ),
     "topic_planning": PublicSkillPolicy(
         code="topic_planning",
@@ -84,6 +92,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         icon="calendar",
         requires_account=True,
         surfaces=frozenset({"composer"}),
+        aliases=("选题策划", "选题规划", "内容方向"),
     ),
     "script_generation": PublicSkillPolicy(
         code="script_generation",
@@ -91,6 +100,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         icon="file-text",
         requires_account=True,
         surfaces=frozenset({"composer"}),
+        aliases=("脚本生成", "口播脚本", "视频脚本"),
     ),
     "publishing_preparation": PublicSkillPolicy(
         code="publishing_preparation",
@@ -98,6 +108,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         icon="send",
         requires_account=True,
         surfaces=frozenset({"composer"}),
+        aliases=("发布准备", "发布检查", "发布清单"),
     ),
     "performance_review": PublicSkillPolicy(
         code="performance_review",
@@ -105,6 +116,7 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         icon="line-chart",
         requires_account=True,
         surfaces=frozenset({"composer"}),
+        aliases=("数据复盘", "运营复盘", "表现复盘"),
     ),
 }
 

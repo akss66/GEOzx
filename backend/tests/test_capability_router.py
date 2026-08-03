@@ -117,6 +117,10 @@ def test_no_explicit_skill_defers_to_llm_classification(registry: SkillRegistry)
         ("你能做什么？", TurnExecutionMode.ANSWER),
         ("查询当前账号最近30天的数据", TurnExecutionMode.QUERY),
         ("只查询当前账号近30天数据", TurnExecutionMode.QUERY),
+        ("我现在的账号有数据吗？", TurnExecutionMode.QUERY),
+        ("最近30天播放量是多少？", TurnExecutionMode.QUERY),
+        ("看看当前账号本周的点赞", TurnExecutionMode.QUERY),
+        ("你能查询当前账号数据吗？", TurnExecutionMode.ANSWER),
     ],
 )
 def test_deterministic_request_routes_clear_safe_requests(
@@ -197,20 +201,43 @@ def test_deterministic_request_defers_negated_only_data_query(
     )
 
 
-def test_deterministic_request_defers_data_query_capability_question(
+def test_deterministic_request_answers_data_query_capability_question(
     registry: SkillRegistry,
 ) -> None:
-    """Catches a question about querying data being mistaken for a query command."""
-
-    assert (
-        capability_router.route_deterministic_request(
-            "你能查询当前账号数据吗？",
-            platform="douyin",
-            registry=registry,
-            has_account=True,
-        )
-        is None
+    decision = capability_router.route_deterministic_request(
+        "你能查询当前账号数据吗？",
+        platform="douyin",
+        registry=registry,
+        has_account=True,
     )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.ANSWER
+    assert decision.reason == "deterministic_capability_question"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_skill"),
+    [
+        ("给我规划下周内容方向", "topic_planning"),
+        ("生成一个视频脚本", "script_generation"),
+        ("做一份表现复盘", "performance_review"),
+    ],
+)
+def test_public_skill_aliases_route_without_model_classification(
+    message: str,
+    expected_skill: str,
+) -> None:
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == expected_skill
 
 
 def test_deterministic_request_defers_account_inspection_question(

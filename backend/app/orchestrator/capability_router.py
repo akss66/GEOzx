@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import SkillRegistry
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 
@@ -34,7 +35,7 @@ _NEGATION_TERMS = (
     "暂不",
     "停止",
 )
-_QUERY_VERBS = ("查询", "查一下", "查看", "查", "看一下")
+_QUERY_VERBS = ("查询", "查一下", "查看", "看看", "查", "看一下")
 _QUERY_TARGETS = (
     "数据",
     "播放量",
@@ -49,6 +50,15 @@ _QUERY_TARGETS = (
     "涨粉",
     "gmv",
 )
+_DATA_AVAILABILITY_PATTERNS = (
+    "账号有数据吗",
+    "账号有没有数据",
+    "当前账号有数据吗",
+    "现在账号有数据吗",
+    "现在有数据了吗",
+    "已经有数据了吗",
+)
+_METRIC_QUESTION_MARKERS = ("多少", "怎么样", "如何", "高吗", "低吗", "趋势")
 _OPERATION_TERMS = ("体检", "诊断", "分析", "优化", "策划", "生成", "发布", "执行", "制定")
 _ACCOUNT_INSPECTION_CODE = "account_inspection"
 _MIGRATED_OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -86,6 +96,12 @@ def route_deterministic_request(
 
     if _contains_any(normalized, _NEGATION_TERMS):
         return None
+    if _is_capability_question(normalized):
+        return _answer_route("deterministic_capability_question")
+    if _is_data_availability_query(normalized):
+        return _query_route("deterministic_data_availability_query")
+    if _is_metric_lookup(normalized):
+        return _query_route("deterministic_metric_query")
     if _is_question(normalized):
         return None
     if _has_only_data_query_intent(normalized):
@@ -100,6 +116,14 @@ def route_deterministic_request(
             registry=registry,
             has_account=has_account,
         )
+    alias_route = _route_public_skill_alias(
+        normalized,
+        platform=platform,
+        registry=registry,
+        has_account=has_account,
+    )
+    if alias_route is not None:
+        return alias_route
     migrated = route_migrated_operation_request(
         normalized,
         platform=platform,
@@ -241,6 +265,82 @@ def _contains_any(message: str, terms: tuple[str, ...]) -> bool:
 
 def _is_question(message: str) -> bool:
     return message.startswith(_QUESTION_PREFIXES) or message.endswith(("吗", "么", "呢"))
+
+
+def _is_capability_question(message: str) -> bool:
+    return (
+        message.endswith(("吗", "么"))
+        and message.startswith(("你能查询", "你会查询", "你支持查询", "是否支持查询"))
+        and _contains_any(message, _QUERY_TARGETS)
+    )
+
+
+def _is_data_availability_query(message: str) -> bool:
+    compact = message.replace("我的", "").replace("我现在的", "现在")
+    return any(pattern in compact for pattern in _DATA_AVAILABILITY_PATTERNS)
+
+
+def _is_metric_lookup(message: str) -> bool:
+    if not _contains_any(message, _QUERY_TARGETS):
+        return False
+    has_lookup_shape = _contains_any(message, _QUERY_VERBS) or any(
+        marker in message for marker in _METRIC_QUESTION_MARKERS
+    )
+    has_scope = any(
+        marker in message
+        for marker in ("当前账号", "这个账号", "最近", "近7天", "近30天", "本周", "本月")
+    )
+    return has_lookup_shape and has_scope and not _has_positive_operation(message)
+
+
+def _route_public_skill_alias(
+    message: str,
+    *,
+    platform: str,
+    registry: SkillRegistry,
+    has_account: bool,
+) -> TurnRouteDecision | None:
+    matches = [
+        policy.code
+        for policy in PUBLIC_SKILL_POLICIES.values()
+        if policy.enabled and any(alias in message for alias in policy.aliases)
+    ]
+    if len(matches) != 1:
+        return None
+    code = matches[0]
+    if code in {"visual_brief_generation", "content_calendar_planning"}:
+        return _artifact_clarification(
+            skill_code=code,
+            missing_field="source_artifact_ids",
+            question="请先选择要继续加工的已确认成果。",
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+    if code == "operation_iteration":
+        return _artifact_clarification(
+            skill_code=code,
+            missing_field="confirmed_review_artifact_id",
+            question="请先选择一份已确认的复盘报告。",
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+    if code == "content_publishing":
+        return _artifact_clarification(
+            skill_code=code,
+            missing_field="approved_publish_artifact_id",
+            question="请选择一份已审批的发布包后再执行发布。",
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+    return _published_skill_route(
+        skill_code=code,
+        platform=platform,
+        registry=registry,
+        has_account=has_account,
+    )
 
 
 def _answer_route(reason: str) -> TurnRouteDecision:
