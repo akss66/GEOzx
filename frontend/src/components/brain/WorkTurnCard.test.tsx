@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { WorkTurnViewModel } from "../../types";
 import { WorkTurnCard } from "./WorkTurnCard";
 
+function openNativeDisclosure(details: HTMLDetailsElement) {
+  details.open = true;
+  fireEvent(details, new Event("toggle", { bubbles: true }));
+}
+
 const workingTurn: WorkTurnViewModel = {
   key: "org:1:thread:81:message:turn-103",
   turnId: 103,
@@ -62,12 +67,12 @@ describe("WorkTurnCard", () => {
     );
 
     expect(screen.queryByText("Tool #8001 · account.data_context")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByText("查看过程"));
+    openNativeDisclosure(screen.getByText("查看过程").closest("details") as HTMLDetailsElement);
     expect(screen.getByText(/账号定位专家/)).toBeVisible();
     expect(screen.getByText("已核验 2 条业务依据")).toBeVisible();
     expect(screen.queryByText("Tool #8001 · account.data_context")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("技术日志"));
+    openNativeDisclosure(screen.getByText("技术日志").closest("details") as HTMLDetailsElement);
     expect(screen.getByText("Tool #8001 · account.data_context")).toBeVisible();
     expect(screen.getByText("内部消息：103")).toBeVisible();
   });
@@ -85,14 +90,42 @@ describe("WorkTurnCard", () => {
     expect(process).not.toHaveAttribute("open");
     expect(screen.queryByText("技术日志")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("查看过程"));
+    openNativeDisclosure(process as HTMLDetailsElement);
     expect(process).toHaveAttribute("open");
     const technical = screen.getByText("技术日志").closest("details");
     expect(process).toContainElement(technical);
     expect(technical).not.toHaveAttribute("open");
 
-    fireEvent.click(screen.getByText("技术日志"));
+    openNativeDisclosure(technical as HTMLDetailsElement);
     expect(technical).toHaveAttribute("open");
     expect(within(technical as HTMLElement).getByText("Tool #8001 · account.data_context")).toBeVisible();
+  });
+
+  it("keeps progressive disclosures keyboard-focusable with observable expanded state", () => {
+    render(
+      <WorkTurnCard
+        view={workingTurn}
+        evidenceSummary={["已核验 2 条业务依据"]}
+        technicalLog={["Tool #8001 · account.data_context"]}
+      />,
+    );
+
+    const processToggle = screen.getByText("查看过程");
+    expect(processToggle.tagName).toBe("SUMMARY");
+    processToggle.focus();
+    expect(processToggle).toHaveFocus();
+    expect(processToggle.closest("details")).not.toHaveAttribute("open");
+
+    openNativeDisclosure(processToggle.closest("details") as HTMLDetailsElement);
+    expect(processToggle.closest("details")).toHaveAttribute("open");
+
+    const technicalToggle = screen.getByText("技术日志");
+    expect(technicalToggle.tagName).toBe("SUMMARY");
+    technicalToggle.focus();
+    expect(technicalToggle).toHaveFocus();
+    expect(technicalToggle.closest("details")).not.toHaveAttribute("open");
+
+    openNativeDisclosure(technicalToggle.closest("details") as HTMLDetailsElement);
+    expect(technicalToggle.closest("details")).toHaveAttribute("open");
   });
 });

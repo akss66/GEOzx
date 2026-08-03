@@ -149,12 +149,16 @@ describe("TurnStream", () => {
 
     expect(screen.queryByLabelText("Expert update")).not.toBeInTheDocument();
     expect(screen.queryByText("Tool #8001 · account.data_context · completed")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByText("查看过程"));
+    const process = screen.getByText("查看过程").closest("details") as HTMLDetailsElement;
+    process.open = true;
+    fireEvent(process, new Event("toggle", { bubbles: true }));
     expect(within(screen.getByLabelText("调用专家摘要")).getByText(/账号定位专家/)).toBeVisible();
     expect(screen.getByText("已使用 账号数据上下文")).toBeVisible();
     expect(screen.queryByText("Tool #8001 · account.data_context · completed")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("技术日志"));
+    const technical = screen.getByText("技术日志").closest("details") as HTMLDetailsElement;
+    technical.open = true;
+    fireEvent(technical, new Event("toggle", { bubbles: true }));
     expect(screen.getByText("Tool #8001 · account.data_context · completed")).toBeVisible();
     expect(screen.getByText("Agent Run：3002")).toBeVisible();
   });

@@ -16,8 +16,9 @@ export function ProcessDisclosure({
     <details
       className="tz-work-turn__process"
       open={processOpen}
+      onToggle={(event) => setProcessOpen(event.currentTarget.open)}
     >
-      <summary onClick={() => setProcessOpen((open) => !open)}>查看过程</summary>
+      <summary>查看过程</summary>
       {processOpen ? (
         <div>
           {experts.length > 0 ? (
@@ -40,8 +41,9 @@ export function ProcessDisclosure({
           {technicalLog.length > 0 ? (
             <details
               open={technicalOpen}
+              onToggle={(event) => setTechnicalOpen(event.currentTarget.open)}
             >
-              <summary onClick={() => setTechnicalOpen((open) => !open)}>技术日志</summary>
+              <summary>技术日志</summary>
               {technicalOpen ? <ul>{technicalLog.map((item) => <li key={item}>{item}</li>)}</ul> : null}
             </details>
           ) : null}

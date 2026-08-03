@@ -918,6 +918,259 @@
   color: var(--tz-muted);
 }
 
+/* A WorkTurn is a continuous work record, not a stack of chat bubbles. */
+.tz-work-turn {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  color: var(--tz-ink);
+}
+
+.tz-work-turn__user {
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+  color: var(--tz-ink-soft);
+}
+
+.tz-work-turn__user p {
+  max-width: min(66ch, 82%);
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.7;
+  text-align: right;
+  white-space: pre-wrap;
+}
+
+.tz-work-turn__operator {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.tz-work-turn__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  color: var(--tz-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.tz-work-turn__identity .dy-chat-avatar {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+}
+
+.tz-work-turn__identity small {
+  color: var(--tz-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.tz-work-turn__activity,
+.tz-work-turn__response {
+  max-width: 72ch;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--tz-ink-soft);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.tz-work-turn__activity {
+  color: var(--tz-muted);
+  font-size: 12px;
+}
+
+.tz-work-turn__progress,
+.tz-work-turn__process {
+  max-width: 72ch;
+  padding-top: 12px;
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+.tz-work-turn__progress h3 {
+  margin: 0 0 8px;
+  color: var(--tz-ink);
+  font-size: 12px;
+}
+
+.tz-work-turn__progress ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 7px;
+  list-style: none;
+}
+
+.tz-work-turn__progress li {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--tz-ink-soft);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tz-work-turn__progress li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tz-work-turn__progress li small {
+  flex: 0 0 auto;
+  color: var(--tz-muted);
+  font-size: 11px;
+}
+
+.tz-work-turn__progress li[data-step-state="active"] small {
+  color: var(--tz-ink-soft);
+}
+
+.tz-work-turn__process {
+  color: var(--tz-ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.tz-work-turn__process summary,
+.tz-work-turn__process details summary {
+  width: fit-content;
+  color: var(--tz-ink);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tz-work-turn__process summary:focus-visible,
+.tz-work-turn__process details summary:focus-visible,
+.tz-artifact-card__evidence-detail summary:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid color-mix(in srgb, var(--tz-brand-red) 52%, transparent);
+  outline-offset: 3px;
+}
+
+.tz-work-turn__process > div {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.tz-work-turn__process section h3 {
+  margin: 0 0 4px;
+  color: var(--tz-ink);
+  font-size: 12px;
+}
+
+.tz-work-turn__process ul {
+  display: grid;
+  margin: 0;
+  padding-left: 18px;
+  gap: 3px;
+}
+
+.tz-work-turn__process details {
+  padding-top: 9px;
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+.tz-work-turn__process details ul {
+  margin-top: 8px;
+}
+
+.tz-work-turn__deliverables,
+.tz-work-turn__actions {
+  display: grid;
+  min-width: 0;
+  max-width: 72ch;
+  gap: 10px;
+}
+
+.tz-work-turn__actions > section {
+  display: grid;
+  gap: 9px;
+  padding-top: 12px;
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+@media (max-width: 760px) {
+  .tz-brain-toolbar,
+  .tz-brain-empty-actions {
+    padding-inline: 16px;
+  }
+
+  .tz-brain-toolbar {
+    gap: 12px;
+  }
+
+  .tz-brain-toolbar-actions .ant-btn {
+    padding-inline: 7px;
+  }
+
+  .tz-brain-thread .dy-brain-context-strip,
+  .tz-brain-thread .dy-brain-conversation {
+    padding-inline: 16px;
+  }
+
+  .tz-brain-thread .dy-brain-context-strip {
+    display: grid;
+    gap: 9px;
+  }
+
+  .dy-brain-context-actions {
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .tz-work-turn {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .tz-work-turn__user p,
+  .tz-work-turn__activity,
+  .tz-work-turn__response,
+  .tz-work-turn__progress,
+  .tz-work-turn__process,
+  .tz-work-turn__deliverables,
+  .tz-work-turn__actions {
+    max-width: 100%;
+  }
+
+  .tz-work-turn__progress li {
+    display: grid;
+    gap: 2px;
+  }
+
+  .tz-work-turn__progress li small {
+    justify-self: start;
+  }
+
+  .tz-work-turn__identity {
+    align-items: flex-start;
+  }
+
+  .tz-artifact-card__header,
+  .tz-artifact-card__actions,
+  .tz-artifact-card__revision > div {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .tz-artifact-card__sections {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .tz-artifact-card__evidence-pagination {
   display: flex;
   align-items: center;
