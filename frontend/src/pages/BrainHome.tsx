@@ -1,4 +1,5 @@
 import {
+  DownOutlined,
   HistoryOutlined,
   PlusOutlined,
   RedoOutlined,
@@ -76,6 +77,7 @@ export default function BrainHome() {
   const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
   const [artifactSourceOverrides, setArtifactSourceOverrides] = useState<Record<number, Artifact>>({});
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<"conversation" | "results">("conversation");
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [sourceReturnTarget, setSourceReturnTarget] = useState<SourceReturnTarget | null>(null);
@@ -449,6 +451,7 @@ export default function BrainHome() {
     const thread = await ensureAccountThread(account);
     if (!thread) return;
     followLatestMessage.current = true;
+    setShowJumpToLatest(false);
     pendingClientMessageId.current = clientMessageId;
     qc.setQueryData<ConversationThread>(
       ["brain-conversation", thread.id],
@@ -557,6 +560,8 @@ export default function BrainHome() {
     setGoal("");
     setSourceReturnTarget(null);
     setSourceReturnError(null);
+    followLatestMessage.current = true;
+    setShowJumpToLatest(false);
   };
 
   const selectConversation = (threadId: number) => {
@@ -568,6 +573,7 @@ export default function BrainHome() {
     pendingClientMessageId.current = null;
     setWorkspaceMode("conversation");
     followLatestMessage.current = true;
+    setShowJumpToLatest(false);
   };
 
   const handleConversationDeleted = (threadId: number) => {
@@ -577,6 +583,8 @@ export default function BrainHome() {
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     setGoal("");
+    followLatestMessage.current = true;
+    setShowJumpToLatest(false);
   };
 
   const selectCenterArtifact = useCallback((artifact: Artifact | null) => {
@@ -679,6 +687,7 @@ export default function BrainHome() {
       } else {
         conversation.scrollTop = conversation.scrollHeight;
       }
+      setShowJumpToLatest(false);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [
@@ -695,7 +704,24 @@ export default function BrainHome() {
     if (!conversation) return;
     const distanceFromBottom =
       conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
-    followLatestMessage.current = distanceFromBottom <= 96;
+    const isNearLatest = distanceFromBottom <= 96;
+    followLatestMessage.current = isNearLatest;
+    setShowJumpToLatest(!isNearLatest);
+  };
+
+  const jumpToLatestMessage = () => {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    followLatestMessage.current = true;
+    setShowJumpToLatest(false);
+    if (typeof conversation.scrollTo === "function") {
+      conversation.scrollTo({
+        top: conversation.scrollHeight,
+        behavior: "smooth",
+      });
+      return;
+    }
+    conversation.scrollTop = conversation.scrollHeight;
   };
 
   return (
@@ -864,6 +890,18 @@ export default function BrainHome() {
                 />
               )}
             </section>
+
+            {workspaceMode === "conversation" && showJumpToLatest ? (
+              <Button
+                className="tz-brain-jump-latest"
+                icon={<DownOutlined />}
+                size="small"
+                aria-label="回到最新消息"
+                onClick={jumpToLatestMessage}
+              >
+                最新消息
+              </Button>
+            ) : null}
 
             {workspaceMode === "conversation" ? (
               <BrainComposer

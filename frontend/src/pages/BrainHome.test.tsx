@@ -152,6 +152,30 @@ describe("BrainHome V3 conversation projection", () => {
     expect(await screen.findByRole("region", { name: "成果中心" })).toBeInTheDocument();
   });
 
+  it("offers a direct return to the latest message after the reader scrolls away", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "scroll-client", "复盘一下", "这是最新回复"),
+    ]));
+    renderBrainHome();
+
+    const conversation = await screen.findByRole("region", { name: "运营大脑对话流" });
+    const scrollTo = vi.fn();
+    Object.defineProperties(conversation, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1200 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+
+    fireEvent.scroll(conversation);
+    const jumpButton = await screen.findByRole("button", { name: "回到最新消息" });
+    fireEvent.click(jumpButton);
+
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1200, behavior: "smooth" });
+    expect(screen.queryByRole("button", { name: "回到最新消息" })).not.toBeInTheDocument();
+  });
+
   it("uses the public Skill catalog and creates one account-scoped Turn", async () => {
     vi.mocked(listComposerSkills).mockResolvedValue([inspectionSkill()]);
 

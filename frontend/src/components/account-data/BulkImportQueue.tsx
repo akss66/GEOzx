@@ -2,7 +2,6 @@ import { UploadOutlined } from "@ant-design/icons";
 import {
   type ChangeEvent,
   type DragEvent,
-  type KeyboardEvent,
   useEffect,
   useRef,
   useState,
@@ -161,13 +160,6 @@ export function BulkImportQueue({
     void submitFiles(event.dataTransfer.files);
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      inputRef.current?.click();
-    }
-  }
-
   async function retry(jobId: number, fileId: number, replacement: File) {
     setRetryingFileId(fileId);
     setError(null);
@@ -199,23 +191,30 @@ export function BulkImportQueue({
 
       <div
         className="account-data-dropzone"
-        role="button"
-        tabIndex={0}
-        aria-label="拖入或选择账号数据文件"
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={handleKeyDown}
+        role="group"
+        aria-label="拖入账号数据文件"
         onDragOver={(event) => event.preventDefault()}
         onDrop={handleDrop}
       >
-        <UploadOutlined aria-hidden />
-        <strong>{submitting ? "正在加入队列…" : "拖入文件，或点击选择"}</strong>
-        <span>支持同时选择多个 .xlsx、.csv 文件，单次最多 20 个</span>
+        <button
+          type="button"
+          className="account-data-dropzone__picker"
+          aria-label="选择账号数据文件"
+          disabled={submitting}
+          onClick={() => inputRef.current?.click()}
+        >
+          <UploadOutlined aria-hidden />
+          <strong>{submitting ? "正在加入队列…" : "拖入文件，或点击选择"}</strong>
+          <span>支持同时选择多个 .xlsx、.csv 文件，单次最多 20 个</span>
+        </button>
         <input
           ref={inputRef}
           type="file"
           multiple
           accept=".xlsx,.csv"
-          aria-label="选择账号数据文件"
+          data-testid="account-data-file-input"
+          aria-hidden="true"
+          tabIndex={-1}
           disabled={submitting}
           onChange={handleChange}
         />

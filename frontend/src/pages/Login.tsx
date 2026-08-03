@@ -1,4 +1,3 @@
-import { QqOutlined, WechatOutlined } from "@ant-design/icons";
 import { App as AntApp, Button, Form, Input, Typography } from "antd";
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
@@ -132,19 +131,6 @@ export default function Login() {
               进入系统
             </Button>
           </Form>
-          <div className="dy-social-login" aria-label="第三方登录暂未开放">
-            <div className="dy-social-divider">
-              <span>其他方式登录</span>
-            </div>
-            <div className="dy-social-icons">
-              <button type="button" disabled aria-label="通过微信登录">
-                <WechatOutlined className="dy-social-brand-icon dy-social-wechat" />
-              </button>
-              <button type="button" disabled aria-label="通过QQ登录">
-                <QqOutlined className="dy-social-brand-icon dy-social-qq" />
-              </button>
-            </div>
-          </div>
         </div>
       </section>
     </main>

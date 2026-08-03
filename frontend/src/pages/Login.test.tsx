@@ -50,5 +50,8 @@ describe("Login", () => {
     expect(screen.getByLabelText("密码")).toHaveValue("");
     expect(document.body).not.toHaveTextContent("admin@qq.com");
     expect(document.querySelector('input[value="admin123"]')).not.toBeInTheDocument();
+    expect(screen.queryByText("其他方式登录")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /通过微信登录|通过QQ登录/ }))
+      .not.toBeInTheDocument();
   });
 });
