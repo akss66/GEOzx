@@ -53,6 +53,7 @@ def _integration_runtime(monkeypatch):
         del run_id
 
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", True)
     monkeypatch.setattr("app.api.conversations.enqueue_agent_runtime", no_queue)
 
 

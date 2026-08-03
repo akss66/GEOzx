@@ -56,6 +56,7 @@ def _stub_agent_runtime_queue(monkeypatch):
         enqueue_agent_runtime,
         raising=False,
     )
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", True)
 
 
 def _auth(user: User) -> dict[str, str]:
@@ -162,6 +163,26 @@ async def test_every_conversation_route_is_disabled_by_default(client, admin, mo
     assert [response.status_code for response in requests] == [503, 503, 503, 503]
     assert {response.json()["detail"]["code"] for response in requests} == {
         "MAIN_AGENT_V2_DISABLED"
+    }
+
+
+@pytest.mark.asyncio
+async def test_typed_runtime_flag_blocks_new_conversation_routes(
+    client, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", False)
+
+    response = await client.post(
+        "/brain/conversations",
+        headers=_auth(admin),
+        json={"account_id": 1},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "MAIN_AGENT_TYPED_RUNTIME_DISABLED",
+        "message": "Typed main agent runtime is disabled",
     }
 
 

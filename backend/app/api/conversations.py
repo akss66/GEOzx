@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.core.auth import CurrentUser
+from app.core.main_agent_runtime import require_main_agent_runtime_enabled
 from app.db import get_session
 from app.models import (
     AgentInvocation,
@@ -51,23 +51,9 @@ from app.services.conversations import (
 
 router = APIRouter(prefix="/brain", tags=["brain-conversations"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
-_MAIN_AGENT_V2_DISABLED_DETAIL = {
-    "code": "MAIN_AGENT_V2_DISABLED",
-    "message": "Main Agent V2 is disabled",
-}
-
-
-def _require_v2_enabled() -> None:
-    if settings.main_agent_v2_enabled:
-        return
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=_MAIN_AGENT_V2_DISABLED_DETAIL,
-    )
-
-
 def _require_v2_rollout_access(user: CurrentUser) -> None:
-    _require_v2_enabled()
+    del user
+    require_main_agent_runtime_enabled()
 
 
 def _turn_out(

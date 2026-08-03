@@ -18,6 +18,7 @@ def _stub_runtime_queue(monkeypatch):
         "app.api.conversations.enqueue_agent_runtime",
         enqueue_agent_runtime,
     )
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", True)
 
 
 def _auth(user) -> dict[str, str]:
@@ -68,6 +69,30 @@ async def test_attachment_upload_is_owner_and_thread_scoped(
     )
     assert denied_list.status_code == 404
     assert denied_delete.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_typed_runtime_flag_blocks_attachment_routes(
+    client, session, admin, monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "storage_local_dir", str(tmp_path))
+    thread = await _thread(client, session, admin, "attachment-feature-flag")
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", False)
+
+    uploaded = await client.post(
+        f"/brain/conversations/{thread['id']}/attachments",
+        headers=_auth(admin),
+        files=[("files", ("brief.txt", b"campaign objective", "text/plain"))],
+    )
+    listed = await client.get(
+        f"/brain/conversations/{thread['id']}/attachments",
+        headers=_auth(admin),
+    )
+
+    assert uploaded.status_code == 503
+    assert listed.status_code == 503
+    assert uploaded.json()["detail"]["code"] == "MAIN_AGENT_TYPED_RUNTIME_DISABLED"
 
 
 @pytest.mark.asyncio

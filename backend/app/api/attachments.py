@@ -5,8 +5,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.core.auth import CurrentUser
+from app.core.main_agent_runtime import require_main_agent_runtime_enabled
 from app.db import get_session
 from app.schemas.attachment import ConversationAttachmentOut
 from app.services.attachments import (
@@ -33,10 +33,7 @@ async def upload_attachments(
     session: SessionDep,
     files: Annotated[list[UploadFile], File(...)],
 ) -> list[ConversationAttachmentOut]:
-    if not settings.main_agent_v2_enabled:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=503, detail="Main Agent V2 is disabled")
+    require_main_agent_runtime_enabled()
     thread = await get_conversation_thread(session, user, thread_id)
     uploads = [
         AttachmentUpload(
@@ -61,6 +58,7 @@ async def get_attachments(
     user: CurrentUser,
     session: SessionDep,
 ) -> list[ConversationAttachmentOut]:
+    require_main_agent_runtime_enabled()
     thread = await get_conversation_thread(session, user, thread_id)
     rows = await list_conversation_attachments(session, user=user, thread=thread)
     return [ConversationAttachmentOut.model_validate(row) for row in rows]
@@ -76,6 +74,7 @@ async def remove_attachment(
     user: CurrentUser,
     session: SessionDep,
 ) -> None:
+    require_main_agent_runtime_enabled()
     thread = await get_conversation_thread(session, user, thread_id)
     await delete_conversation_attachment(
         session,

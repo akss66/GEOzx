@@ -1,5 +1,40 @@
 # 运营大脑 V3 发布与回滚手册
 
+## Typed runtime release gate（2026-08-03）
+
+类型化主 Agent 运行时由两个后端环境变量共同控制：
+
+- `MAIN_AGENT_V2_ENABLED`：启用 V2 对话基础设施。
+- `MAIN_AGENT_TYPED_RUNTIME_ENABLED`：启用结构化能力请求、正式 Skill、附件、审批门和类型化会话历史；默认值为 `false`。
+
+只有两个开关都为 `true`，系统才接受新的类型化对话和附件请求。关闭类型化运行时后，接口统一返回 HTTP 503 和稳定错误码 `MAIN_AGENT_TYPED_RUNTIME_DISABLED`；旧 `/brain/messages` 是否可用仍遵循 V2 回滚契约。
+
+### 上线前五场景验收
+
+1. “14天10个选题”必须在 Skill 输入快照中保存 `days=14`、`topic_count=10`。
+2. “30秒脚本”必须保存 `duration_seconds=30`，专家默认值不得覆盖用户要求。
+3. 发布准备必须生成真实 `publish_package_prepare` ToolCall，并在完成前停留在 `waiting_permission`。
+4. 其他用户、账号或会话的附件必须返回 404，且不得向 Run 注入部分附件上下文。
+5. 永久删除必须删除消息、附件、Prompt、LLMCall、技术事件和草稿成果，只保留不含内容的审批、发布和成本审计事实。
+
+本版本数据库迁移 head 为 `20260803_0300`。放量前必须在生产克隆上升级至 `head`，并执行后端、前端和迁移全量测试。
+
+### 灰度顺序
+
+1. 先以 `MAIN_AGENT_TYPED_RUNTIME_ENABLED=false` 部署并执行只读健康检查。
+2. 仅在内部环境同时打开两个开关并重启 API 进程。
+3. 执行五场景矩阵，核对 Run、Turn、SkillRun、ToolCall 的终态一致性。
+4. 按稳定的组织/账号批次扩容，同一会话不得跨运行时版本。
+
+持续监控：终态 Run 对应非终态 Turn 必须为 0；等待审批但无审批卡片的 ToolCall 必须为 0；重复消息、ToolCall、成果及跨账号附件泄漏必须为 0；5 分钟内 5xx 或死信超过 1% 时停止放量。
+
+### 一键应用回滚
+
+1. 设置 `MAIN_AGENT_TYPED_RUNTIME_ENABLED=false` 并重启 API，立即阻止新类型化对话和附件请求。
+2. 允许在途只读任务收口；暂停审批和外部副作用任务，发布动作未经新一轮人工审批不得重放。
+3. 数据库保持 `20260803_0300`，正常应用回滚不降级数据库，因为新增表和字段均为加法变更。
+4. 验证旧消息链路、账号选择和只读数据访问，并仅记录组织、账号、会话、Turn、Run ID，不复制 Prompt。
+
 ## 目标
 
 运营大脑 V3 为每个 Turn 增加可验证的路由、首字延迟、完成耗时、总耗时和模型调用次数，并收紧历史接口的公开投影。发布过程不得修改历史 Turn 的指标；历史数据保持 `NULL`，新 Turn 从 `model_call_count = 0` 开始计数。

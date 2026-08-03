@@ -240,6 +240,20 @@ describe("BrainHome V3 conversation projection", () => {
     expect(getConversation).not.toHaveBeenCalled();
   });
 
+  it("restores the composer when the typed runtime rollout gate is closed", async () => {
+    vi.mocked(sendConversationTurn).mockRejectedValue({
+      response: { status: 503, headers: {} },
+    });
+
+    renderBrainHome();
+    const composer = await screen.findByRole("textbox");
+    fireEvent.change(composer, { target: { value: "继续分析账号" } });
+    fireEvent.click(screen.getByRole("button", { name: /发送/ }));
+
+    await waitFor(() => expect(composer).toHaveValue("继续分析账号"));
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+  });
+
   it("binds the HTTP Turn to the optimistic client identity without a duplicate user message", async () => {
     const request = deferred<TurnSubmission>();
     vi.mocked(sendConversationTurn).mockReturnValue(request.promise);

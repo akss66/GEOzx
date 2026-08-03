@@ -221,10 +221,18 @@ describe("brain api", () => {
       updated_at: "2026-07-29T00:01:00Z",
     }];
     apiGet.mockResolvedValueOnce({ data: { data: conversations } });
-    apiDelete.mockResolvedValueOnce({ data: null });
+    const deletionSummary = {
+      messages_deleted: 2,
+      events_deleted: 5,
+      llm_calls_deleted: 1,
+      attachments_deleted: 1,
+      draft_artifacts_deleted: 1,
+      retained_audit_categories: ["approval", "cost", "publish"],
+    };
+    apiDelete.mockResolvedValueOnce({ data: deletionSummary });
 
     await expect(listConversations(3)).resolves.toEqual(conversations);
-    await expect(deleteConversation(21)).resolves.toBeUndefined();
+    await expect(deleteConversation(21)).resolves.toEqual(deletionSummary);
 
     expect(apiGet).toHaveBeenCalledWith("/brain/conversations", {
       params: { account_id: 3 },
