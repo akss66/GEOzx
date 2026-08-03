@@ -126,6 +126,8 @@ jobs:
         run: pnpm build
       - name: Main-agent bundle budget
         run: pnpm check:main-agent-bundle
+      - name: Enforce frontend performance budget
+        run: pnpm perf:check
 
   main-agent-v3-playwright:
     runs-on: ubuntu-latest

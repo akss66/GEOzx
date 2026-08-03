@@ -10,6 +10,7 @@ import type {
   UpdateUserAccessInput,
   UpdateUserInput,
   User,
+  UserRosterItem,
   UserAccessCatalog,
   UserAccessCatalogResponse,
   UserDeletionPreview,
@@ -27,8 +28,8 @@ export async function getMe(): Promise<User> {
   return data;
 }
 
-export async function listUsers(): Promise<User[]> {
-  const { data } = await api.get<User[]>("/users");
+export async function listUsers(): Promise<UserRosterItem[]> {
+  const { data } = await api.get<UserRosterItem[]>("/users");
   return data;
 }
 

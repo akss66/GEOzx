@@ -11,7 +11,7 @@
   --tz-ink: #171614;
   --tz-ink-soft: #4a4640;
   --tz-muted: #666159;
-  --tz-faint: #827c73;
+  --tz-faint: #6f695f;
   --tz-line: #ddd8cf;
   --tz-line-subtle: #ebe7df;
   --tz-success: #2b8152;
@@ -28,6 +28,45 @@
   --tz-weight-medium: 520;
   --tz-weight-semibold: 620;
   --tz-weight-bold: 700;
+
+  /* Compatibility aliases for the remaining dy-* and legacy tz-* modules. */
+  --dy-canvas: var(--tz-work-canvas);
+  --dy-canvas-soft: #fbfaf7;
+  --dy-surface: var(--tz-surface);
+  --dy-elevated: #fbfaf7;
+  --dy-sidebar: var(--tz-brand-frame);
+  --dy-toolbar: rgba(247, 247, 244, 0.96);
+  --dy-border: var(--tz-line);
+  --dy-border-subtle: var(--tz-line-subtle);
+  --dy-border-strong: #cbc4b9;
+  --dy-text: var(--tz-ink);
+  --dy-muted: var(--tz-muted);
+  --dy-faint: var(--tz-faint);
+  --dy-accent: var(--tz-brand-red);
+  --dy-accent-hover: var(--tz-brand-red-hover);
+  --dy-accent-active: var(--tz-brand-red-active);
+  --dy-success: var(--tz-success);
+  --dy-warning: var(--tz-warning);
+  --dy-error: var(--tz-error);
+  --dy-info: var(--tz-info);
+  --dy-accent-wash: rgba(201, 22, 29, 0.06);
+  --dy-accent-wash-strong: rgba(201, 22, 29, 0.11);
+  --dy-focus-ring: 0 0 0 2px rgba(201, 22, 29, 0.18);
+  --dy-font-sans: var(--tz-font-sans);
+  --dy-radius-sm: 6px;
+  --dy-radius-md: 8px;
+  --dy-radius-lg: 10px;
+  --dy-radius-xl: 12px;
+  --dy-paper-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(247, 247, 244, 0.92));
+  --dy-shadow: none;
+  --tz-header-height: 64px;
+  --tz-paper: #fff;
+  --tz-paper-warm: #f7f3ed;
+  --tz-red: var(--tz-brand-red);
+  --tz-ink-muted: var(--tz-muted);
+  --tz-ink-faint: var(--tz-faint);
+  --tz-radius-lg: 10px;
+  --tz-shadow-sm: 0 5px 18px rgba(42, 35, 27, 0.07);
 }
 
 html,

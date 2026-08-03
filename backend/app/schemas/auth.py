@@ -50,6 +50,10 @@ class UserOut(BaseModel):
     is_active: bool
 
 
+class UserRosterItemOut(UserOut):
+    access_anomaly: bool
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

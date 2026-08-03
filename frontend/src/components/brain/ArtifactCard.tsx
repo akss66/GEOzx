@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- artifact copy helper is shared with business-facing views */
 import { Button, Input, Tag } from "antd";
 import { useMemo, useState } from "react";
 

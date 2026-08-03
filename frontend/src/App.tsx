@@ -15,8 +15,6 @@ const pageComponents: Record<AppPage, React.LazyExoticComponent<React.ComponentT
   agents: lazy(() => import("./pages/ExpertTeam")),
   tasks: lazy(() => import("./pages/PipelineBoard")),
   approvals: lazy(() => import("./pages/Approvals")),
-  "customer-service": lazy(() => import("./pages/CustomerService")),
-  advertising: lazy(() => import("./pages/Advertising")),
   review: lazy(() => import("./pages/ReviewDashboard")),
   cost: lazy(() => import("./pages/Cost")),
   risks: lazy(() => import("./pages/Risks")),
@@ -100,6 +98,7 @@ export default function App() {
                 <Route key={route.path} path={route.path} element={<Page />} />
               );
             })}
+            <Route path="pipeline" element={<Navigate to="/tasks" replace />} />
             <Route element={<AdminRoute />}>
               {APP_ROUTES.filter((route) => route.adminOnly).map((route) => {
                 const Page = pageComponents[route.page];

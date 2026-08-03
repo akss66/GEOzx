@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- shell constants and route helpers are tested public contracts */
 import {
   LogoutOutlined,
   MenuOutlined,
@@ -28,14 +29,22 @@ export { buildAppShellMenuItems } from "./shell/navigation";
 
 export const APP_SHELL_BRAND_TITLE = "同舟行AI新媒体平台";
 
+export function selectedNavigationKey(pathname: string) {
+  if (pathname === "/" || pathname === "/brain") return "/";
+  if (pathname === "/pipeline") return "/tasks";
+  if (pathname === "/accounts" || pathname.startsWith("/accounts/")) return "/accounts";
+  return pathname;
+}
+
 export function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const workspace = useCurrentWorkspace();
   const isAdmin = user?.role === "admin";
-  const selectedKey = location.pathname === "/brain" ? "/" : location.pathname;
+  const selectedKey = selectedNavigationKey(location.pathname);
   const contextQuery = useQuery({
     queryKey: ["workspace-context", workspace.clientId, workspace.projectId],
     queryFn: () => getWorkspaceContext(workspace.clientId, workspace.projectId),
@@ -161,7 +170,12 @@ export function AppShell() {
             <GlobalSearch />
             <NotificationCenter />
             <Tooltip title="帮助">
-              <button type="button" className="tz-shell-icon" aria-label="帮助">
+              <button
+                type="button"
+                className="tz-shell-icon"
+                aria-label="帮助"
+                onClick={() => setHelpOpen(true)}
+              >
                 <QuestionCircleOutlined />
               </button>
             </Tooltip>
@@ -188,6 +202,28 @@ export function AppShell() {
           />
         ) : null}
       </div>
+      <Drawer
+        title="平台帮助"
+        placement="right"
+        width={380}
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+      >
+        <div className="tz-help-content">
+          <section>
+            <strong>快速开始</strong>
+            <p>先在顶部确认客户、项目和账号，再进入运营大脑描述目标。系统会按需调度专家，并在外部写入或高风险动作前请求确认。</p>
+          </section>
+          <section>
+            <strong>快捷键</strong>
+            <p><kbd>/</kbd> 打开全局搜索；<kbd>Esc</kbd> 关闭当前浮层。</p>
+          </section>
+          <section>
+            <strong>遇到问题</strong>
+            <p>请保留页面中的诊断编号和发生时间，交给平台管理员定位。</p>
+          </section>
+        </div>
+      </Drawer>
     </div>
   );
 }

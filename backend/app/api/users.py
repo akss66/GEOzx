@@ -4,13 +4,14 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import AdminUser
 from app.core.security import hash_password
 from app.db import get_session
-from app.models import Event, User
+from app.models import ClientMembership, Event, ProjectMembership, User
+from app.models.enums import UserRole
 from app.schemas.auth import (
     CreateUserRequest,
     PermanentDeleteUserOut,
@@ -24,6 +25,7 @@ from app.schemas.auth import (
     UserDeletionImpactOut,
     UserDetailOut,
     UserOut,
+    UserRosterItemOut,
 )
 from app.services.admin_security import get_secondary_password_status, set_secondary_password
 from app.services.user_deletion import (
@@ -75,15 +77,34 @@ async def read_secondary_password_status(
     return _secondary_password_status(credential, deletion_available)
 
 
-@router.get("", response_model=list[UserOut])
+@router.get("", response_model=list[UserRosterItemOut])
 async def list_users(
     admin: AdminUser,
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> list[UserOut]:
-    rows = await session.scalars(
-        select(User).where(User.org_id == admin.org_id).order_by(User.is_active.desc(), User.id)
+) -> list[UserRosterItemOut]:
+    has_client_access = exists(
+        select(ClientMembership.user_id).where(ClientMembership.user_id == User.id)
     )
-    return [UserOut.model_validate(u) for u in rows]
+    has_project_access = exists(
+        select(ProjectMembership.user_id).where(ProjectMembership.user_id == User.id)
+    )
+    access_anomaly = (
+        (User.role != UserRole.ADMIN) & ~has_client_access & ~has_project_access
+    ).label("access_anomaly")
+    rows = (
+        await session.execute(
+            select(User, access_anomaly)
+            .where(User.org_id == admin.org_id)
+            .order_by(User.is_active.desc(), User.id)
+        )
+    ).all()
+    return [
+        UserRosterItemOut(
+            **UserOut.model_validate(user).model_dump(),
+            access_anomaly=bool(anomaly),
+        )
+        for user, anomaly in rows
+    ]
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)

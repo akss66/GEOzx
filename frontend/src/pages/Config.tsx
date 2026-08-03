@@ -5,7 +5,7 @@ import {
   SafetyCertificateOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
-import { App as AntApp, Button, Input, Skeleton, Switch } from "antd";
+import { App as AntApp, Button, Input, Modal, Skeleton, Switch } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
@@ -42,6 +42,7 @@ export default function Config() {
   const queryClient = useQueryClient();
   const [selectedCode, setSelectedCode] = useState<AgentCode | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [pendingCode, setPendingCode] = useState<AgentCode | null>(null);
 
   const expertsQuery = useQuery({
     queryKey: ["agent-management"],
@@ -82,6 +83,25 @@ export default function Config() {
     0,
   );
   const dirty = Boolean(selected && draft && JSON.stringify(draft) !== JSON.stringify(toDraft(selected)));
+
+  useEffect(() => {
+    if (!dirty) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [dirty]);
+
+  const requestSelectedCode = (code: AgentCode) => {
+    if (code === selected.code) return;
+    if (dirty) {
+      setPendingCode(code);
+      return;
+    }
+    setSelectedCode(code);
+  };
 
   if (expertsQuery.isError) {
     const failure = presentApiError(expertsQuery.error, "专家配置暂时不可用。");
@@ -136,7 +156,7 @@ export default function Config() {
                 type="button"
                 className={expert.code === selected.code ? "is-active" : ""}
                 aria-label={`${expert.name}，${expert.enabled ? "已启用" : "已停用"}`}
-                onClick={() => setSelectedCode(expert.code)}
+                onClick={() => requestSelectedCode(expert.code)}
               >
                 <span className="expert-admin__index">{String(index).padStart(2, "0")}</span>
                 <span className="expert-admin__avatar">{monogram(expert)}</span>
@@ -271,6 +291,19 @@ export default function Config() {
           </footer>
         </section>
       </div>
+      <Modal
+        title="放弃未保存的专家配置？"
+        open={pendingCode != null}
+        okText="放弃并切换"
+        cancelText="继续编辑"
+        onCancel={() => setPendingCode(null)}
+        onOk={() => {
+          if (pendingCode) setSelectedCode(pendingCode);
+          setPendingCode(null);
+        }}
+      >
+        <p>当前专家配置尚未保存。切换后，本次修改将被放弃。</p>
+      </Modal>
     </main>
   );
 }

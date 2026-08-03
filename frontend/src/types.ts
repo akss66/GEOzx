@@ -8,6 +8,10 @@ export interface User {
   is_active: boolean;
 }
 
+export interface UserRosterItem extends User {
+  access_anomaly: boolean;
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: string;

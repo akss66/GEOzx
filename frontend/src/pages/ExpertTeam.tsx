@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- the tested scope copy helper belongs to this page */
 import { ArrowUpOutlined, HistoryOutlined, LoadingOutlined } from "@ant-design/icons";
 import { App, Button, Input, Skeleton } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

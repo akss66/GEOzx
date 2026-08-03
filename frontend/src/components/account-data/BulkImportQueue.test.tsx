@@ -103,7 +103,7 @@ describe("BulkImportQueue", () => {
   it("submits every selected file in one request", async () => {
     createJob.mockResolvedValue(jobFixture());
     render(<BulkImportQueue accountId={7} onTerminal={vi.fn()} />);
-    const input = screen.getByLabelText("选择账号数据文件");
+    const input = screen.getByTestId("account-data-file-input");
     const files = [
       new File(["a"], "作品数据.xlsx"),
       new File(["b"], "粉丝数据.xlsx"),
@@ -125,7 +125,8 @@ describe("BulkImportQueue", () => {
   it("accepts dropped files and keeps successful files when one fails", async () => {
     createJob.mockResolvedValue(jobFixture());
     render(<BulkImportQueue accountId={7} onTerminal={vi.fn()} />);
-    const dropzone = screen.getByRole("button", { name: "拖入或选择账号数据文件" });
+    const dropzone = screen.getByRole("group", { name: "拖入账号数据文件" });
+    expect(screen.getByRole("button", { name: "选择账号数据文件" })).toBeInTheDocument();
     const files = [
       new File(["a"], "作品数据.xlsx"),
       new File(["b"], "损坏数据.xlsx"),
@@ -157,7 +158,7 @@ describe("BulkImportQueue", () => {
     });
     getJob.mockResolvedValue(jobFixture());
     render(<BulkImportQueue accountId={7} onTerminal={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("选择账号数据文件"), {
+    fireEvent.change(screen.getByTestId("account-data-file-input"), {
       target: { files: [new File(["b"], "损坏数据.xlsx")] },
     });
     const replacement = new File(["fixed"], "修正数据.xlsx");
@@ -186,7 +187,7 @@ describe("BulkImportQueue", () => {
         }],
       });
     render(<BulkImportQueue accountId={7} onTerminal={vi.fn()} />);
-    const input = screen.getByLabelText("选择账号数据文件");
+    const input = screen.getByTestId("account-data-file-input");
 
     fireEvent.change(input, {
       target: { files: [new File(["a"], "作品数据.xlsx")] },

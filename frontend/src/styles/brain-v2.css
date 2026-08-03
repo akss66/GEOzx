@@ -100,12 +100,24 @@
 }
 
 .tz-brain-thread {
+  position: relative;
   display: grid;
   width: min(100%, 1080px);
   height: 100%;
   min-height: 0;
   margin: 0 auto;
   grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.tz-brain-jump-latest.ant-btn {
+  position: absolute;
+  z-index: 5;
+  right: 72px;
+  bottom: 92px;
+  border-color: var(--tz-line);
+  background: color-mix(in srgb, var(--tz-surface) 94%, transparent);
+  box-shadow: 0 6px 20px rgba(42, 35, 27, 0.12);
+  backdrop-filter: blur(8px);
 }
 
 .tz-brain-page.is-empty .tz-brain-thread {

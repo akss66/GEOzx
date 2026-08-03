@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "check:main-agent-bundle": "node scripts/check-main-agent-bundle.mjs",
+    "perf:check": "node scripts/check-build-performance.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:nginx": "node --test tests/nginx-performance.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

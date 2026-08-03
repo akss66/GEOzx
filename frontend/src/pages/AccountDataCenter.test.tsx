@@ -304,9 +304,9 @@ describe("AccountDataCenter", () => {
     fireEvent.click(addFilesButton);
 
     expect(
-      await screen.findByRole("button", { name: "拖入或选择账号数据文件" }),
+      await screen.findByRole("group", { name: "拖入账号数据文件" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("选择账号数据文件")).toHaveAttribute("multiple");
+    expect(screen.getByTestId("account-data-file-input")).toHaveAttribute("multiple");
     expect(screen.queryByText("更换文件")).not.toBeInTheDocument();
   });
 
@@ -319,7 +319,7 @@ describe("AccountDataCenter", () => {
       new File(["broken"], "损坏数据.xlsx"),
     ];
 
-    fireEvent.change(screen.getByLabelText("选择账号数据文件"), {
+    fireEvent.change(screen.getByTestId("account-data-file-input"), {
       target: { files },
     });
 
@@ -482,7 +482,7 @@ describe("AccountDataCenter", () => {
     );
     renderSwitcher();
     fireEvent.click(await screen.findByRole("tab", { name: "导入与补录" }));
-    fireEvent.change(screen.getByLabelText("选择账号数据文件"), {
+    fireEvent.change(screen.getByTestId("account-data-file-input"), {
       target: { files: [new File(["daily"], "播放数据.xlsx")] },
     });
     expect(await screen.findByText("播放数据.xlsx")).toBeInTheDocument();

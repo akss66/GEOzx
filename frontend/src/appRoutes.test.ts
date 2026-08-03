@@ -38,4 +38,12 @@ describe("app routes", () => {
 
     expect(new Set(paths).size).toBe(paths.length);
   });
+
+  it("keeps placeholder and legacy aliases out of the page registry", () => {
+    const paths = APP_ROUTES.map((route) => route.path ?? "index");
+
+    expect(paths).not.toContain("customer-service");
+    expect(paths).not.toContain("advertising");
+    expect(paths).not.toContain("pipeline");
+  });
 });

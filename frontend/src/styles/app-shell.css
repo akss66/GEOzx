@@ -565,6 +565,10 @@
   color: var(--tz-muted);
 }
 
+.tz-command-input:focus-within {
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--tz-brand-red) 55%, transparent);
+}
+
 .tz-command-input input {
   width: 100%;
   border: 0;
@@ -634,6 +638,27 @@
 .tz-command-enter { color: var(--tz-muted); font-size: 10px; }
 .tz-command-hint { margin: 0; padding: 34px 16px; color: var(--tz-muted); text-align: center; }
 .tz-command-hint.is-error { color: var(--tz-danger); }
+
+.tz-help-content {
+  display: grid;
+  gap: 24px;
+  color: var(--tz-ink-soft);
+}
+
+.tz-help-content section {
+  display: grid;
+  gap: 8px;
+}
+
+.tz-help-content strong { color: var(--tz-ink); }
+.tz-help-content p { margin: 0; line-height: 1.75; }
+.tz-help-content kbd {
+  padding: 2px 6px;
+  border: 1px solid var(--tz-line);
+  border-radius: 5px;
+  background: var(--tz-surface-soft);
+  font: inherit;
+}
 
 .tz-notification-center {
   position: relative;

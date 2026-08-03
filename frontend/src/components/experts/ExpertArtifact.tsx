@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- export helper is intentionally colocated with its presentation */
 import {
   BookOutlined,
   CheckOutlined,

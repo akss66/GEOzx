@@ -1,7 +1,8 @@
 import { ApartmentOutlined, CheckOutlined, DownOutlined } from "@ant-design/icons";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import type { WorkspaceContext } from "../../api/shell";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 
 export function WorkspaceSwitcher({
   context,
@@ -20,6 +21,17 @@ export function WorkspaceSwitcher({
 }) {
   const [open, setOpen] = useState(false);
   const [pendingClientId, setPendingClientId] = useState<number | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  useDismissibleLayer({
+    open,
+    onDismiss: () => {
+      setOpen(false);
+      setPendingClientId(null);
+    },
+    panelRef,
+    triggerRef,
+  });
   const currentClient = useMemo(
     () => context.clients.find((client) => client.id === clientId) ?? context.selected_client,
     [clientId, context.clients, context.selected_client],
@@ -42,6 +54,7 @@ export function WorkspaceSwitcher({
   return (
     <div className="tz-workspace-switcher">
       <button
+        ref={triggerRef}
         type="button"
         className="tz-workspace-trigger"
         aria-label="客户与项目"
@@ -57,7 +70,7 @@ export function WorkspaceSwitcher({
       </button>
 
       {open ? (
-        <section className="tz-switcher-panel" role="dialog" aria-label="切换客户与项目">
+        <section ref={panelRef} className="tz-switcher-panel" role="dialog" aria-label="切换客户与项目">
           {pendingClientId != null ? (
             <div className="tz-switch-confirmation">
               <strong>切换后将清除当前账号上下文</strong>

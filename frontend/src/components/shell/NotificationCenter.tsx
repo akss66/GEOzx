@@ -1,7 +1,7 @@
 import { BellOutlined, CheckOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -11,12 +11,16 @@ import {
   type ShellNotification,
 } from "../../api/shell";
 import { presentApiError } from "../../api/errors";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { OperationalState } from "../ui";
 
 export function NotificationCenter() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  useDismissibleLayer({ open, onDismiss: () => setOpen(false), panelRef, triggerRef });
   const countQuery = useQuery({
     queryKey: ["notifications", "unread-count"],
     queryFn: getUnreadNotificationCount,
@@ -48,6 +52,7 @@ export function NotificationCenter() {
   return (
     <div className="tz-notification-center">
       <button
+        ref={triggerRef}
         type="button"
         className="tz-shell-icon"
         aria-label="通知"
@@ -58,7 +63,7 @@ export function NotificationCenter() {
         {unreadCount > 0 ? <span className="tz-notification-badge">{Math.min(unreadCount, 99)}</span> : null}
       </button>
       {open ? (
-        <section className="tz-notification-panel" aria-label="通知中心">
+        <section ref={panelRef} className="tz-notification-panel" aria-label="通知中心">
           <header><strong>通知</strong>{unreadCount > 0 ? <span>{unreadCount} 条未读</span> : <CheckOutlined />}</header>
           <div>
             {failure ? (

@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- the menu builder is a tested shell contract */
 import {
   ApiOutlined,
   AppstoreOutlined,
@@ -10,6 +11,7 @@ import {
   NodeIndexOutlined,
   TeamOutlined,
   WalletOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import { Menu } from "antd";
 import type { MenuProps } from "antd";
@@ -24,6 +26,7 @@ export function buildAppShellMenuItems(isAdmin: boolean): NonNullable<MenuProps[
     { key: "/tasks", icon: <FundProjectionScreenOutlined />, label: "内容生产" },
     { key: "/approvals", icon: <AuditOutlined />, label: "人工审批" },
     { key: "/review", icon: <LineChartOutlined />, label: "运营复盘" },
+    { key: "/risks", icon: <WarningOutlined />, label: "风险队列" },
     { type: "group", label: "系统资产" },
     { key: "/cost", icon: <WalletOutlined />, label: "使用成本" },
     { key: "/knowledge", icon: <BookOutlined />, label: "知识库" },

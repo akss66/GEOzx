@@ -20,10 +20,12 @@ export function MemberAccess({
   detail,
   catalog,
   onSave,
+  onDirtyChange,
 }: {
   detail: UserDetail;
   catalog: UserAccessCatalog;
   onSave: (draft: AccessDraft) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const initialDraft = detailToAccessDraft(detail);
   const [baseline, setBaseline] = useState<AccessDraft>(initialDraft);
@@ -58,6 +60,10 @@ export function MemberAccess({
   );
 
   const dirty = !areAccessDraftsEqual(baseline, draft);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   useEffect(() => {
     if (!accessDetailAvailable) return;
