@@ -20,6 +20,10 @@ const assetPaths = [
   ...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g),
 ].map((match) => match[1]);
 
+if (assetPaths.length === 0) {
+  throw new Error("Initial HTML did not expose any build assets.");
+}
+
 if (assetPaths.some((assetPath) => assetPath.includes("vendor-charts"))) {
   throw new Error("Initial HTML must not reference vendor-charts.");
 }
