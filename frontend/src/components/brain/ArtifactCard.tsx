@@ -238,7 +238,8 @@ function fallbackEvidenceSummary(evidence: Artifact["evidence_refs"]) {
 
 function evidenceGroupCopy(group: NonNullable<Artifact["evidence_summary"]>["groups"][number]) {
   const metricCopy = group.metric_count > 0 ? `，覆盖 ${group.metric_count} 项指标` : "";
-  const periodCopy = group.period ? `，${group.period}` : "";
+  const period = group.period ? safeText(group.period) : "";
+  const periodCopy = period ? `，${period}` : "";
   return `${safeText(group.label)}：${group.count} 条${metricCopy}${periodCopy}`;
 }
 

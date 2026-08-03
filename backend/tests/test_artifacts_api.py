@@ -363,6 +363,44 @@ async def test_video_script_artifact_projects_the_validated_presentation_format(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("presentation_format", ["spoken", "product_video"])
+async def test_video_script_revision_inherits_missing_presentation_format_from_source(
+    client, session, admin, presentation_format: str,
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name=f"修订格式-{presentation_format}",
+        payload=_video_script_payload(presentation_format),
+        skill_code="script_generation",
+        deliverable_type=DeliverableType.VIDEO_SCRIPT,
+    )
+    revision_payload = _video_script_payload("storyboard")
+    revision_payload.pop("presentation_format")
+    revision_payload["hook"] = "更新后的开场。"
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.post(
+        "/artifact-revisions",
+        headers=_auth(token),
+        json={"artifact_id": seeded[8].id, "payload": revision_payload},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["version"] == 2
+    assert response.json()["presentation_format"] == presentation_format
+    persisted = await session.scalar(
+        select(Deliverable).where(
+            Deliverable.content_item_id == seeded[2].id,
+            Deliverable.type == DeliverableType.VIDEO_SCRIPT,
+            Deliverable.version == 2,
+        )
+    )
+    assert persisted is not None
+    assert persisted.payload["presentation_format"] == presentation_format
+
+
+@pytest.mark.asyncio
 async def test_artifact_aggregates_raw_field_observations_for_operator_summary(
     client, session, admin
 ) -> None:

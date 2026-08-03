@@ -84,6 +84,30 @@ describe("ArtifactCard", () => {
     expect(screen.queryByText(/Traceback/)).not.toBeInTheDocument();
   });
 
+  it("sanitizes banned business copy in evidence group periods", () => {
+    render(<ArtifactCard
+      artifact={{
+        ...reviewArtifact,
+        evidence_summary: {
+          total: 1,
+          groups: [{
+            kind: "metric_snapshot",
+            label: "账号指标快照",
+            count: 1,
+            metric_count: 0,
+            period: "采用成果/正式成果/脚本生成中",
+          }],
+        },
+      }}
+      onAction={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看生成依据" }));
+
+    expect(screen.queryByText(/采用成果|正式成果|脚本生成中|成果/)).not.toBeInTheDocument();
+    expect(screen.getByText("账号指标快照：1 条，运营内容/运营内容/运营内容")).toBeInTheDocument();
+  });
+
   it("paginates raw evidence inside technical details", () => {
     const evidenceRefs = Array.from({ length: 21 }, (_, index) => ({
       kind: "field_observation",

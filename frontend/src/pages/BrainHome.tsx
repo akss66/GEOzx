@@ -1272,6 +1272,9 @@ function buildArtifactRevisionPayload(artifact: Artifact): Record<string, unknow
   return {
     title: artifact.title,
     summary: artifact.summary,
+    ...(artifact.presentation_format
+      ? { presentation_format: artifact.presentation_format }
+      : {}),
     ...Object.fromEntries(
       artifact.sections.map((section) => [section.key, section.content]),
     ),

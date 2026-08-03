@@ -328,7 +328,7 @@ async def create_artifact_revision(
             detail="成果版本已更新，请刷新后重试",
         )
 
-    validated_payload = _validate_revision_payload(source.type, payload)
+    validated_payload = _validate_revision_payload(source.type, payload, source.payload)
     revision = Deliverable(
         content_item_id=source.content_item_id,
         thread_id=source.thread_id,
@@ -530,7 +530,9 @@ async def project_artifact(
 
 
 def _validate_revision_payload(
-    deliverable_type: DeliverableType, payload: dict[str, Any]
+    deliverable_type: DeliverableType,
+    payload: dict[str, Any],
+    source_payload: dict[str, Any],
 ) -> dict[str, Any]:
     schema = get_schema(deliverable_type)
     if schema is None:
@@ -547,6 +549,12 @@ def _validate_revision_payload(
         normalized_payload["optimization_suggestions"] = normalized_payload[
             "recommendations"
         ]
+    if (
+        deliverable_type == DeliverableType.VIDEO_SCRIPT
+        and "presentation_format" not in normalized_payload
+        and isinstance(source_payload.get("presentation_format"), str)
+    ):
+        normalized_payload["presentation_format"] = source_payload["presentation_format"]
     business_payload = {
         key: normalized_payload[key]
         for key in schema.model_fields

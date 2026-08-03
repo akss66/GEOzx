@@ -17,6 +17,7 @@ import {
   getConversation,
   listBrainTasks,
   listComposerSkills,
+  reviseArtifact,
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
@@ -248,6 +249,47 @@ describe("BrainHome V3 conversation projection", () => {
 
     expect(screen.getByLabelText("运营大脑消息")).toHaveValue("");
     expect(screen.queryByText("已确认，已准备下一步运营建议")).not.toBeInTheDocument();
+  });
+
+  it("keeps a video artifact presentation format when requesting a revision", async () => {
+    const source: Artifact = {
+      ...presentationArtifact(),
+      artifact_type: "video_script",
+      presentation_format: "product_video",
+    };
+    const turn = {
+      ...persistedTurn(501, "artifact-client", "检查账号", "已完成账号诊断"),
+      projections: [{
+        type: "artifact" as const,
+        turn_id: 501,
+        artifact_id: source.id,
+        artifact_type: source.artifact_type,
+        skill_run_id: source.skill_run_id!,
+        account_id: source.account_id,
+      }],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [turn]));
+    vi.mocked(getArtifact).mockResolvedValue(source);
+    vi.mocked(reviseArtifact).mockResolvedValue({
+      ...source,
+      id: 5002,
+      version: 2,
+    });
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "提出修改" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), {
+      target: { value: "补充产品卖点镜头" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
+
+    await waitFor(() => expect(reviseArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      artifactId: source.id,
+      payload: expect.objectContaining({ presentation_format: "product_video" }),
+      note: "补充产品卖点镜头",
+    })));
   });
 
   it("offers a direct return to the latest message after the reader scrolls away", async () => {
