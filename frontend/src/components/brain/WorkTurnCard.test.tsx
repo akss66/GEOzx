@@ -2,7 +2,7 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { WorkTurnViewModel } from "../../types";
@@ -70,5 +70,29 @@ describe("WorkTurnCard", () => {
     fireEvent.click(screen.getByText("技术日志"));
     expect(screen.getByText("Tool #8001 · account.data_context")).toBeVisible();
     expect(screen.getByText("内部消息：103")).toBeVisible();
+  });
+
+  it("uses nested native disclosures with independently observable open state", () => {
+    render(
+      <WorkTurnCard
+        view={workingTurn}
+        evidenceSummary={["已核验 2 条业务依据"]}
+        technicalLog={["Tool #8001 · account.data_context"]}
+      />,
+    );
+
+    const process = screen.getByText("查看过程").closest("details");
+    expect(process).not.toHaveAttribute("open");
+    expect(screen.queryByText("技术日志")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("查看过程"));
+    expect(process).toHaveAttribute("open");
+    const technical = screen.getByText("技术日志").closest("details");
+    expect(process).toContainElement(technical);
+    expect(technical).not.toHaveAttribute("open");
+
+    fireEvent.click(screen.getByText("技术日志"));
+    expect(technical).toHaveAttribute("open");
+    expect(within(technical as HTMLElement).getByText("Tool #8001 · account.data_context")).toBeVisible();
   });
 });

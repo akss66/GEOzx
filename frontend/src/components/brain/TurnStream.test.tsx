@@ -166,12 +166,86 @@ describe("TurnStream", () => {
     expect(await screen.findByLabelText("运营内容：账号诊断 · V1")).toBeInTheDocument();
   });
 
+  it("keeps a source Artifact in its original work-turn when later greeting and retry turns arrive", async () => {
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [
+        thread.turns[0],
+        { ...thread.turns[0], id: 102, client_message_id: "turn-102", user_input: "你好", projections: [] },
+        { ...thread.turns[0], id: 103, client_message_id: "turn-103", user_input: "重试诊断", projections: [] },
+      ],
+    }} />);
+
+    await screen.findByLabelText("运营内容：账号诊断 · V1");
+    const roots = screen.getAllByTestId("work-turn");
+    const source = roots.find((root) => root.getAttribute("data-turn-id") === "101");
+    const greeting = roots.find((root) => root.getAttribute("data-turn-id") === "102");
+    const retry = roots.find((root) => root.getAttribute("data-turn-id") === "103");
+
+    expect(within(source as HTMLElement).getByLabelText("运营内容：账号诊断 · V1")).toBeInTheDocument();
+    expect(greeting).not.toHaveTextContent("账号诊断");
+    expect(retry).not.toHaveTextContent("账号诊断");
+  });
+
   it("fails closed when the fetched Artifact does not match its source account or turn", async () => {
     vi.mocked(getArtifact).mockResolvedValue({ ...artifact, account_id: 4, turn_id: 102 });
     render(<TurnStream thread={thread} />);
 
     expect(await screen.findByText("运营内容校验失败，请重试。")).toBeInTheDocument();
     expect(screen.queryByLabelText("运营内容：账号诊断 · V1")).not.toBeInTheDocument();
+  });
+
+  it("fails closed when an Artifact projection belongs to a different account than the active thread", async () => {
+    vi.mocked(getArtifact).mockResolvedValue({ ...artifact, account_id: 4 });
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        projections: [{
+          type: "artifact",
+          turn_id: 101,
+          artifact_id: 5001,
+          artifact_type: "account_inspection_report",
+          skill_run_id: 4001,
+          account_id: 4,
+          report: {},
+        }],
+      }],
+    }} />);
+
+    expect(await screen.findByText("运营内容校验失败，请重试。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("运营内容：账号诊断 · V1")).not.toBeInTheDocument();
+  });
+
+  it("refreshes the exact source Artifact when its refresh key changes", async () => {
+    const callsBefore = vi.mocked(getArtifact).mock.calls.length;
+    vi.mocked(getArtifact)
+      .mockResolvedValueOnce(artifact)
+      .mockResolvedValueOnce({ ...artifact, status: "accepted" });
+    const view = render(<TurnStream thread={thread} artifactRefreshKey={0} />);
+
+    const source = await screen.findByLabelText("运营内容：账号诊断 · V1");
+    view.rerender(<TurnStream thread={thread} artifactRefreshKey={1} />);
+
+    await waitFor(() => expect(getArtifact).toHaveBeenCalledTimes(callsBefore + 2));
+    expect(vi.mocked(getArtifact).mock.calls.slice(callsBefore)).toEqual([[5001], [5001]]);
+    expect(within(source).getByText("已完成")).toBeInTheDocument();
+  });
+
+  it("renders verified persisted V1 and V2 in the same work-turn", async () => {
+    const revision: Artifact = {
+      ...artifact,
+      id: 5002,
+      version: 2,
+      title: "账号体检报告（修订版）",
+      status: "ready_for_review",
+      summary: "已补充转化数据。",
+    };
+    render(<TurnStream thread={thread} revisionArtifacts={{ 5001: [revision] }} />);
+
+    expect(await screen.findByLabelText("运营内容：账号诊断 · V1")).toBeInTheDocument();
+    expect(screen.getByLabelText("运营内容：账号诊断 · V2")).toBeInTheDocument();
+    expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
   });
 
   it("fails closed for a revision whose persisted identity leaves the source chain", async () => {
@@ -181,6 +255,43 @@ describe("TurnStream", () => {
 
     await screen.findByLabelText("运营内容：账号诊断 · V1");
     expect(screen.getByText("修订版本校验失败，请重试。")).toBeInTheDocument();
+  });
+
+  it("preserves verified V1 and V2 with the authoritative source override after a refresh fails", async () => {
+    const revision: Artifact = {
+      ...artifact,
+      id: 5002,
+      version: 2,
+      title: "账号体检报告（修订版）",
+      status: "ready_for_review",
+    };
+    const sourceOverride: Artifact = { ...artifact, status: "superseded" };
+    vi.mocked(getArtifact)
+      .mockResolvedValueOnce(artifact)
+      .mockRejectedValueOnce(new Error("network"));
+    const view = render(
+      <TurnStream
+        thread={thread}
+        revisionArtifacts={{ 5001: [revision] }}
+        sourceArtifactOverrides={{ 5001: sourceOverride }}
+        artifactRefreshKey={0}
+      />,
+    );
+
+    expect(await screen.findByLabelText("运营内容：账号诊断 · V2")).toBeInTheDocument();
+    view.rerender(
+      <TurnStream
+        thread={thread}
+        revisionArtifacts={{ 5001: [revision] }}
+        sourceArtifactOverrides={{ 5001: sourceOverride }}
+        artifactRefreshKey={1}
+      />,
+    );
+
+    expect(await screen.findByText("运营内容更新失败，已保留已验证版本。")).toBeInTheDocument();
+    const v1 = screen.getByLabelText("运营内容：账号诊断 · V1");
+    expect(within(v1).getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByLabelText("运营内容：账号诊断 · V2")).toBeInTheDocument();
   });
 
   it("routes an approval from its source work turn through the supplied business callback", () => {
