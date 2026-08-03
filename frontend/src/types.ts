@@ -482,6 +482,15 @@ export interface ConversationAttachment {
   created_at: string;
 }
 
+export interface ConversationDeletionSummary {
+  messages_deleted: number;
+  events_deleted: number;
+  llm_calls_deleted: number;
+  attachments_deleted: number;
+  draft_artifacts_deleted: number;
+  retained_audit_categories: string[];
+}
+
 export interface ConversationAgentRun {
   id: number;
   org_id: number;

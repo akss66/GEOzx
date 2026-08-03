@@ -67,7 +67,14 @@ describe("ConversationHistoryDrawer", () => {
       created_at: "2026-07-29T00:00:00Z",
       updated_at: "2026-07-29T00:01:00Z",
     }]);
-    vi.mocked(deleteConversation).mockResolvedValue();
+    vi.mocked(deleteConversation).mockResolvedValue({
+      messages_deleted: 2,
+      events_deleted: 8,
+      llm_calls_deleted: 1,
+      attachments_deleted: 0,
+      draft_artifacts_deleted: 0,
+      retained_audit_categories: [],
+    });
     const { onSelect, onDeleted } = renderHistory();
 
     fireEvent.click(await screen.findByRole("button", { name: "账号体检" }));

@@ -273,6 +273,15 @@ class ConversationThreadListOut(BaseModel):
     data: list[ConversationThreadSummaryOut] = Field(default_factory=list)
 
 
+class ConversationDeletionSummary(BaseModel):
+    messages_deleted: int = Field(ge=0)
+    events_deleted: int = Field(ge=0)
+    llm_calls_deleted: int = Field(ge=0)
+    attachments_deleted: int = Field(ge=0)
+    draft_artifacts_deleted: int = Field(ge=0)
+    retained_audit_categories: list[str] = Field(default_factory=list)
+
+
 class ConversationAgentRunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

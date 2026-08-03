@@ -1,35 +1,44 @@
 """Authorized, account-scoped conversation persistence."""
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core import storage
 from app.core.workspace_access import require_account_access
 from app.models import (
     AgentInvocation,
     AgentRun,
     AgentToolCall,
+    AuditRecord,
     BrainTask,
+    ConversationAttachment,
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    DeliverableAcceptance,
     Event,
     LLMCall,
     SkillRun,
     ToolExecutionAttempt,
     User,
 )
-from app.models.enums import AgentInvocationStatus
+from app.models.enums import AgentInvocationStatus, DeliverableStatus
 from app.schemas.conversation import (
+    ConversationDeletionSummary,
     CreateConversationThreadRequest,
     CreateConversationTurnRequest,
 )
 from app.services.runtime_state import runtime_status_family
+
+log = logging.getLogger("dyflow.conversations")
 
 _TERMINAL_INVOCATION_STATUSES = {
     AgentInvocationStatus.DONE,
@@ -38,21 +47,6 @@ _TERMINAL_INVOCATION_STATUSES = {
 }
 _TERMINAL_TOOL_STATUSES = {"success", "failed"}
 _TERMINAL_ATTEMPT_STATUSES = {"success", "failed"}
-
-_DELETABLE_CONVERSATION_EVENT_TYPES = {
-    "brain.runtime.user_message",
-    "brain.runtime.message_start",
-    "brain.runtime.message_delta",
-    "brain.runtime.message_done",
-    "brain.runtime.message_error",
-    "brain.runtime.memory_compacted",
-}
-
-_TECHNICAL_EVENT_TYPE_PREFIXES = (
-    "agent.harness.",
-    "agent.kernel.",
-)
-
 
 def _thread_not_found() -> HTTPException:
     return HTTPException(
@@ -220,7 +214,7 @@ async def delete_conversation_thread(
     session: AsyncSession,
     user: User,
     thread_id: int,
-) -> None:
+) -> ConversationDeletionSummary:
     """Permanently delete one terminal, owned conversation and its private traces."""
 
     try:
@@ -355,56 +349,132 @@ async def delete_conversation_thread(
         if skill_run_ids:
             event_scope_parts.append(Event.skill_run_id.in_(skill_run_ids))
         event_scope = or_(*event_scope_parts)
-        deletable_event_type = or_(
-            Event.type.in_(_DELETABLE_CONVERSATION_EVENT_TYPES),
-            *(Event.type.like(f"{prefix}%") for prefix in _TECHNICAL_EVENT_TYPE_PREFIXES),
-        )
-        await session.execute(delete(Event).where(and_(event_scope, deletable_event_type)))
-        await session.execute(
-            update(Event)
-            .where(and_(event_scope, ~deletable_event_type))
-            .values(thread_id=None, turn_id=None, run_id=None, skill_run_id=None)
+        scoped_events = list(
+            await session.scalars(
+                select(Event)
+                .where(event_scope)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         )
 
         llm_scope = [LLMCall.trace_id == f"conversation-thread-{thread.id}"]
         llm_scope.extend(LLMCall.trace_id == f"agent-run:{run_id}" for run_id in run_ids)
         if invocation_ids:
             llm_scope.append(LLMCall.invocation_id.in_(invocation_ids))
-        await session.execute(
-            delete(LLMCall).where(
-                LLMCall.org_id == user.org_id,
-                LLMCall.created_by_id == user.id,
-                or_(*llm_scope),
-            )
-        )
-        await session.execute(
-            update(Deliverable)
-            .where(
-                or_(
-                    Deliverable.thread_id == thread.id,
-                    *([Deliverable.turn_id.in_(turn_ids)] if turn_ids else []),
-                    *([Deliverable.run_id.in_(run_ids)] if run_ids else []),
-                    *([Deliverable.skill_run_id.in_(skill_run_ids)] if skill_run_ids else []),
+        scoped_llm_calls = list(
+            await session.scalars(
+                select(LLMCall).where(
+                    LLMCall.org_id == user.org_id,
+                    LLMCall.created_by_id == user.id,
+                    or_(*llm_scope),
                 )
             )
-            .values(thread_id=None, turn_id=None, run_id=None, skill_run_id=None)
+        )
+        attachment_rows = list(
+            await session.scalars(
+                select(ConversationAttachment)
+                .where(
+                    ConversationAttachment.org_id == user.org_id,
+                    ConversationAttachment.created_by_id == user.id,
+                    ConversationAttachment.account_id == thread.account_id,
+                    ConversationAttachment.thread_id == thread.id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        deliverable_scope = or_(
+            Deliverable.thread_id == thread.id,
+            *([Deliverable.turn_id.in_(turn_ids)] if turn_ids else []),
+            *([Deliverable.run_id.in_(run_ids)] if run_ids else []),
+            *([Deliverable.skill_run_id.in_(skill_run_ids)] if skill_run_ids else []),
+        )
+        scoped_deliverables = list(
+            await session.scalars(
+                select(Deliverable)
+                .where(deliverable_scope)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        scoped_deliverable_ids = [row.id for row in scoped_deliverables]
+        referenced_deliverable_ids = (
+            set(
+                await session.scalars(
+                    select(DeliverableAcceptance.deliverable_id).where(
+                        DeliverableAcceptance.deliverable_id.in_(scoped_deliverable_ids)
+                    )
+                )
+            )
+            if scoped_deliverable_ids
+            else set()
+        )
+        draft_deliverable_ids = [
+            row.id
+            for row in scoped_deliverables
+            if row.status != DeliverableStatus.APPROVED
+            and row.id not in referenced_deliverable_ids
+        ]
+        retained_deliverable_ids = [
+            row.id for row in scoped_deliverables if row.id not in draft_deliverable_ids
+        ]
+
+        retained_audit_categories = _add_minimal_audit_records(
+            session,
+            user=user,
+            account_id=thread.account_id,
+            events=scoped_events,
+            tool_calls=tool_calls,
+            llm_calls=scoped_llm_calls,
         )
 
-        write_tool_ids = [row.id for row in tool_calls if row.side_effect_level != "read"]
-        if write_tool_ids:
+        if scoped_events:
             await session.execute(
-                update(AgentToolCall)
-                .where(AgentToolCall.id.in_(write_tool_ids))
-                .values(
-                    invocation_id=None,
-                    skill_run_id=None,
-                    thread_id=None,
-                    turn_id=None,
+                delete(Event).where(Event.id.in_([row.id for row in scoped_events]))
+            )
+        if scoped_llm_calls:
+            await session.execute(
+                delete(LLMCall).where(
+                    LLMCall.id.in_([row.id for row in scoped_llm_calls]),
+                    LLMCall.org_id == user.org_id,
+                    LLMCall.created_by_id == user.id,
                 )
             )
-        read_tool_ids = [row.id for row in tool_calls if row.side_effect_level == "read"]
-        if read_tool_ids:
-            await session.execute(delete(AgentToolCall).where(AgentToolCall.id.in_(read_tool_ids)))
+        if draft_deliverable_ids:
+            await session.execute(
+                delete(Deliverable).where(Deliverable.id.in_(draft_deliverable_ids))
+            )
+        if retained_deliverable_ids:
+            await session.execute(
+                update(Deliverable)
+                .where(Deliverable.id.in_(retained_deliverable_ids))
+                .values(thread_id=None, turn_id=None, run_id=None, skill_run_id=None)
+            )
+        attachment_ids = [row.id for row in attachment_rows]
+        attachment_storage_keys = [row.storage_key for row in attachment_rows]
+        if attachment_ids:
+            await session.execute(
+                delete(ConversationAttachment).where(
+                    ConversationAttachment.id.in_(attachment_ids),
+                    ConversationAttachment.org_id == user.org_id,
+                    ConversationAttachment.created_by_id == user.id,
+                )
+            )
+
+        if attempts:
+            await session.execute(
+                delete(ToolExecutionAttempt).where(
+                    ToolExecutionAttempt.id.in_([row.id for row in attempts])
+                )
+            )
+        if tool_call_ids:
+            await session.execute(
+                delete(AgentToolCall).where(
+                    AgentToolCall.id.in_(tool_call_ids),
+                    AgentToolCall.org_id == user.org_id,
+                )
+            )
         if invocation_ids:
             await session.execute(
                 delete(AgentInvocation).where(AgentInvocation.id.in_(invocation_ids))
@@ -415,12 +485,100 @@ async def delete_conversation_thread(
             await session.execute(delete(AgentRun).where(AgentRun.id.in_(run_ids)))
         await session.delete(thread)
         await session.commit()
+        for storage_key in attachment_storage_keys:
+            try:
+                storage.resolve(storage_key).unlink(missing_ok=True)
+            except OSError:
+                log.warning("Could not remove deleted conversation attachment object")
+        return ConversationDeletionSummary(
+            messages_deleted=len(turns),
+            events_deleted=len(scoped_events),
+            llm_calls_deleted=len(scoped_llm_calls),
+            attachments_deleted=len(attachment_rows),
+            draft_artifacts_deleted=len(draft_deliverable_ids),
+            retained_audit_categories=retained_audit_categories,
+        )
     except HTTPException:
         await session.rollback()
         raise
     except Exception:
         await session.rollback()
         raise
+
+
+def _add_minimal_audit_records(
+    session: AsyncSession,
+    *,
+    user: User,
+    account_id: int,
+    events: list[Event],
+    tool_calls: list[AgentToolCall],
+    llm_calls: list[LLMCall],
+) -> list[str]:
+    """Copy only allowlisted business facts before deleting private runtime data."""
+
+    categories: set[str] = set()
+    for event in events:
+        if event.type != "approval.decided":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        approved = payload.get("approved") is True
+        approval_kind = str(payload.get("approval_kind") or "approval")[:120]
+        session.add(
+            AuditRecord(
+                org_id=user.org_id,
+                account_id=account_id,
+                actor_user_id=user.id,
+                category="approval",
+                action=approval_kind,
+                outcome="approved" if approved else "rejected",
+                details={"approved": approved},
+                occurred_at=event.created_at,
+            )
+        )
+        categories.add("approval")
+
+    publish_calls = [
+        row
+        for row in tool_calls
+        if row.status == "success"
+        and row.side_effect_level != "read"
+        and "publish" in row.tool_code.lower()
+    ]
+    for row in publish_calls:
+        session.add(
+            AuditRecord(
+                org_id=user.org_id,
+                account_id=account_id,
+                actor_user_id=user.id,
+                category="publish",
+                action=row.tool_code[:120],
+                outcome="success",
+                details={"provider_status": "success"},
+                occurred_at=row.finished_at or row.updated_at,
+            )
+        )
+        categories.add("publish")
+
+    if llm_calls or tool_calls:
+        total_cost = sum((Decimal(str(row.cost_usd)) for row in llm_calls), Decimal("0"))
+        total_cost += sum((Decimal(row.cost) for row in tool_calls), Decimal("0"))
+        session.add(
+            AuditRecord(
+                org_id=user.org_id,
+                account_id=account_id,
+                actor_user_id=user.id,
+                category="cost",
+                action="conversation_runtime_total",
+                outcome="recorded",
+                amount_usd=total_cost,
+                details={"amount_usd": float(total_cost)},
+                occurred_at=datetime.now(UTC),
+            )
+        )
+        categories.add("cost")
+
+    return sorted(categories)
 
 
 def _is_terminal_runtime_status(value: str) -> bool:
@@ -431,7 +589,7 @@ def _is_terminal_runtime_status(value: str) -> bool:
 
 
 def _is_terminal_skill_status(value: str) -> bool:
-    return value in {"completed", "blocked", "failed", "cancelled"}
+    return value in {"completed", "needs_review", "blocked", "failed", "cancelled"}
 
 
 async def _find_turn(

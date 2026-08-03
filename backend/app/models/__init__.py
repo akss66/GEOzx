@@ -27,6 +27,7 @@ from app.models.ai_coo import (
     StrategyPlan,
 )
 from app.models.attachment import ConversationAttachment
+from app.models.audit_record import AuditRecord
 from app.models.brain import (
     AgentInvocation,
     AgentToolCall,
@@ -102,6 +103,7 @@ __all__ = [
     "ConversationThread",
     "ConversationTurn",
     "ConversationAttachment",
+    "AuditRecord",
     "MatrixDistributionPlan",
     "MatrixDistributionItem",
     "BrainTask",

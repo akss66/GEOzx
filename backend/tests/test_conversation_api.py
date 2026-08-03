@@ -16,10 +16,12 @@ from app.models import (
     AgentInvocation,
     AgentRun,
     AgentToolCall,
+    AuditRecord,
     BrainTask,
     Client,
     ClientMembership,
     ContentItem,
+    ConversationAttachment,
     ConversationThread,
     ConversationTurn,
     Deliverable,
@@ -556,7 +558,9 @@ async def test_owner_can_delete_empty_and_terminal_conversations(
         headers=_auth(admin),
     )
 
-    assert empty_deleted.status_code == terminal_deleted.status_code == 204
+    assert empty_deleted.status_code == terminal_deleted.status_code == 200
+    assert empty_deleted.json()["messages_deleted"] == 0
+    assert terminal_deleted.json()["messages_deleted"] == 1
     assert await session.get(ConversationThread, empty_thread["id"]) is None
     assert await session.get(ConversationThread, terminal_thread["id"]) is None
 
@@ -618,14 +622,28 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     admin,
     member,
     monkeypatch,
+    tmp_path,
 ) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "storage_local_dir", str(tmp_path))
     admin_headers = _auth(admin)
     member_headers = _auth(member)
     account = await _account(session, admin, "永久删除账号")
     account_id = account.id
     admin_id = admin.id
+    org_id = admin.org_id
     thread = await _create_thread(client, admin, account)
+    uploaded = await client.post(
+        f"/brain/conversations/{thread['id']}/attachments",
+        headers=admin_headers,
+        files=[("files", ("private.txt", b"private conversation context", "text/plain"))],
+    )
+    assert uploaded.status_code == 201
+    attachment_id = uploaded.json()[0]["id"]
+    attachment = await session.get(ConversationAttachment, attachment_id)
+    assert attachment is not None
+    attachment_path = tmp_path / attachment.storage_key
+    assert attachment_path.exists()
     submitted = await _submit_turn(
         client,
         admin,
@@ -670,7 +688,19 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         status=DeliverableStatus.PENDING_REVIEW,
         payload={"artifact_type": "account_inspection_report"},
     )
-    session.add(deliverable)
+    approved_deliverable = Deliverable(
+        content_item_id=content_item.id,
+        thread_id=thread["id"],
+        turn_id=submitted.json()["turn"]["id"],
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+        agent_code=AgentCode.OPERATOR.value,
+        type=DeliverableType.REVIEW_REPORT,
+        version=2,
+        status=DeliverableStatus.APPROVED,
+        payload={"artifact_type": "approved_account_inspection_report"},
+    )
+    session.add_all([deliverable, approved_deliverable])
     await session.flush()
     preserved_event = Event(
         type="preserved.audit",
@@ -678,13 +708,19 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         payload={"kept": True},
     )
     formal_event = Event(
-        type="brain.runtime.deliverable_completed",
+        type="approval.decided",
         content_item_id=content_item.id,
         thread_id=thread["id"],
         turn_id=submitted.json()["turn"]["id"],
         run_id=run.id,
         skill_run_id=skill_run.id,
-        payload={"deliverable_id": deliverable.id},
+        payload={
+            "approval_kind": "publish_package",
+            "approved": True,
+            "decided_by": admin.id,
+            "comment": "must not survive",
+            "title": "must not survive",
+        },
     )
     technical_event = Event(
         type="agent.kernel.tool_end",
@@ -703,6 +739,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         trace_id=f"conversation-thread-{thread['id']}",
         provider="test",
         model="test-model",
+        cost_usd=0.125,
     )
     shared_llm_call = LLMCall(
         org_id=admin.org_id,
@@ -742,6 +779,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         provider_idempotency_key="provider-delete-write-audit",
         side_effect_level="non_idempotent_write",
         status="success",
+        cost=Decimal("0.25"),
     )
     session.add_all([owned_llm_call, shared_llm_call, write_tool_call])
     await session.flush()
@@ -762,6 +800,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     )
     content_item_id = content_item.id
     deliverable_id = deliverable.id
+    approved_deliverable_id = approved_deliverable.id
     preserved_event_id = preserved_event.id
     formal_event_id = formal_event.id
     technical_event_id = technical_event.id
@@ -781,7 +820,14 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     )
 
     assert denied.status_code == 404
-    assert deleted.status_code == 204
+    assert deleted.status_code == 200
+    deletion_summary = deleted.json()
+    assert deletion_summary["messages_deleted"] == 1
+    assert deletion_summary["events_deleted"] >= 2
+    assert deletion_summary["llm_calls_deleted"] >= 1
+    assert deletion_summary["attachments_deleted"] == 1
+    assert deletion_summary["draft_artifacts_deleted"] == 1
+    assert deletion_summary["retained_audit_categories"] == ["approval", "cost", "publish"]
     session.expire_all()
     assert await session.get(ConversationThread, thread["id"]) is None
     assert (
@@ -797,12 +843,14 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert preserved_task.content_item_id == content_item_id
     preserved_content = await session.get(ContentItem, content_item_id)
     preserved_deliverable = await session.get(Deliverable, deliverable_id)
+    retained_approved_deliverable = await session.get(Deliverable, approved_deliverable_id)
     assert preserved_content is not None
-    assert preserved_deliverable is not None
-    assert preserved_deliverable.thread_id is None
-    assert preserved_deliverable.turn_id is None
-    assert preserved_deliverable.run_id is None
-    assert preserved_deliverable.skill_run_id is None
+    assert preserved_deliverable is None
+    assert retained_approved_deliverable is not None
+    assert retained_approved_deliverable.thread_id is None
+    assert retained_approved_deliverable.turn_id is None
+    assert retained_approved_deliverable.run_id is None
+    assert retained_approved_deliverable.skill_run_id is None
     assert (
         await session.scalar(
             select(func.count(AgentRun.id)).where(AgentRun.thread_id == thread["id"])
@@ -823,25 +871,32 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert preserved_event_row is not None
     assert preserved_event_row.type == "preserved.audit"
     formal_event_row = await session.get(Event, formal_event_id)
-    assert formal_event_row is not None
-    assert formal_event_row.content_item_id == content_item_id
-    assert formal_event_row.thread_id is None
-    assert formal_event_row.turn_id is None
-    assert formal_event_row.run_id is None
-    assert formal_event_row.skill_run_id is None
-    assert formal_event_row.payload == {"deliverable_id": deliverable_id}
+    assert formal_event_row is None
     assert await session.get(Event, technical_event_id) is None
     assert await session.get(LLMCall, owned_llm_call_id) is None
     assert await session.get(LLMCall, shared_llm_call_id) is not None
     for read_tool_id in read_tool_ids:
         assert await session.get(AgentToolCall, read_tool_id) is None
-    retained_write = await session.get(AgentToolCall, write_tool_call_id)
-    assert retained_write is not None
-    assert retained_write.invocation_id is None
-    assert retained_write.skill_run_id is None
-    assert retained_write.thread_id is None
-    assert retained_write.turn_id is None
-    assert await session.get(ToolExecutionAttempt, write_attempt_id) is not None
+    assert await session.get(AgentToolCall, write_tool_call_id) is None
+    assert await session.get(ToolExecutionAttempt, write_attempt_id) is None
+    assert await session.get(ConversationAttachment, attachment_id) is None
+    assert not attachment_path.exists()
+    audit_rows = list(
+        await session.scalars(
+            select(AuditRecord)
+            .where(
+                AuditRecord.org_id == org_id,
+                AuditRecord.account_id == account_id,
+            )
+            .order_by(AuditRecord.category)
+        )
+    )
+    assert [row.category for row in audit_rows] == ["approval", "cost", "publish"]
+    assert all(not hasattr(row, "thread_id") for row in audit_rows)
+    assert all(
+        row.details.keys() <= {"approved", "amount_usd", "provider_status"}
+        for row in audit_rows
+    )
 
 
 @pytest.mark.asyncio

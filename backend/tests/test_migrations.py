@@ -597,8 +597,50 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_conversation_attachments() -> None:
-    assert get_head_revision() == "20260803_0200"
+def test_migration_head_is_minimal_audit_records() -> None:
+    assert get_head_revision() == "20260803_0300"
+
+
+def test_minimal_audit_records_migration_is_linear_and_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260803_0300_minimal_audit_records"
+    )
+    assert migration.down_revision == "20260803_0200"
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table("orgs", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    sa.Table("accounts", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    sa.Table("users", metadata, sa.Column("id", sa.Integer, primary_key=True))
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        assert inspector.has_table("audit_records")
+        columns = {column["name"] for column in inspector.get_columns("audit_records")}
+        assert {
+            "org_id",
+            "account_id",
+            "actor_user_id",
+            "category",
+            "action",
+            "outcome",
+            "amount_usd",
+            "details",
+            "occurred_at",
+        } <= columns
+        assert {"thread_id", "turn_id", "run_id", "skill_run_id", "prompt"}.isdisjoint(
+            columns
+        )
+
+        migration.downgrade()
+        assert sa.inspect(connection).has_table("audit_records") is False
 
 
 def test_douyin_account_metric_exports_migration_is_linear_and_reversible() -> None:

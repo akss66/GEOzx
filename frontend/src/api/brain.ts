@@ -8,6 +8,7 @@ import type {
   Artifact,
   ArtifactStatus,
   ConversationThread,
+  ConversationDeletionSummary,
   ConversationThreadSummary,
   CreateConversationInput,
   DeliverableAcceptance,
@@ -64,8 +65,13 @@ export async function listConversations(
   return data.data;
 }
 
-export async function deleteConversation(threadId: number): Promise<void> {
-  await api.delete(`/brain/conversations/${threadId}`);
+export async function deleteConversation(
+  threadId: number,
+): Promise<ConversationDeletionSummary> {
+  const { data } = await api.delete<ConversationDeletionSummary>(
+    `/brain/conversations/${threadId}`,
+  );
+  return data;
 }
 
 export async function listComposerSkills(

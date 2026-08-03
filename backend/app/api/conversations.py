@@ -23,6 +23,7 @@ from app.models import (
 from app.schemas.conversation import (
     ConversationAgentRunOut,
     ConversationApprovalOut,
+    ConversationDeletionSummary,
     ConversationExecutionSummaryOut,
     ConversationThreadListOut,
     ConversationThreadOut,
@@ -493,15 +494,15 @@ async def get_thread(
 
 @router.delete(
     "/conversations/{thread_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=ConversationDeletionSummary,
 )
 async def delete_thread(
     thread_id: int,
     user: CurrentUser,
     session: SessionDep,
-) -> None:
+) -> ConversationDeletionSummary:
     _require_v2_rollout_access(user)
-    await delete_conversation_thread(session, user, thread_id)
+    return await delete_conversation_thread(session, user, thread_id)
 
 
 @router.post(
