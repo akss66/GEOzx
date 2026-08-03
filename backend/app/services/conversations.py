@@ -1,6 +1,5 @@
 """Authorized, account-scoped conversation persistence."""
 
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -11,7 +10,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.core import storage
 from app.core.workspace_access import require_account_access
 from app.models import (
     AgentInvocation,
@@ -36,9 +34,8 @@ from app.schemas.conversation import (
     CreateConversationThreadRequest,
     CreateConversationTurnRequest,
 )
+from app.services.attachments import remove_attachment_objects, restore_attachment_objects
 from app.services.runtime_state import runtime_status_family
-
-log = logging.getLogger("dyflow.conversations")
 
 _TERMINAL_INVOCATION_STATUSES = {
     AgentInvocationStatus.DONE,
@@ -47,6 +44,7 @@ _TERMINAL_INVOCATION_STATUSES = {
 }
 _TERMINAL_TOOL_STATUSES = {"success", "failed"}
 _TERMINAL_ATTEMPT_STATUSES = {"success", "failed"}
+
 
 def _thread_not_found() -> HTTPException:
     return HTTPException(
@@ -413,8 +411,7 @@ async def delete_conversation_thread(
         draft_deliverable_ids = [
             row.id
             for row in scoped_deliverables
-            if row.status != DeliverableStatus.APPROVED
-            and row.id not in referenced_deliverable_ids
+            if row.status != DeliverableStatus.APPROVED and row.id not in referenced_deliverable_ids
         ]
         retained_deliverable_ids = [
             row.id for row in scoped_deliverables if row.id not in draft_deliverable_ids
@@ -484,12 +481,12 @@ async def delete_conversation_thread(
         if run_ids:
             await session.execute(delete(AgentRun).where(AgentRun.id.in_(run_ids)))
         await session.delete(thread)
-        await session.commit()
-        for storage_key in attachment_storage_keys:
-            try:
-                storage.resolve(storage_key).unlink(missing_ok=True)
-            except OSError:
-                log.warning("Could not remove deleted conversation attachment object")
+        removed_attachment_objects = remove_attachment_objects(attachment_storage_keys)
+        try:
+            await session.commit()
+        except Exception:
+            restore_attachment_objects(removed_attachment_objects)
+            raise
         return ConversationDeletionSummary(
             messages_deleted=len(turns),
             events_deleted=len(scoped_events),

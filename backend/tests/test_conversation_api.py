@@ -42,6 +42,7 @@ from app.models.enums import (
     WorkspaceRole,
 )
 from app.schemas.conversation import CreateConversationTurnRequest
+from app.services.conversations import delete_conversation_thread
 from app.services.turn_execution import execute_conversation_turn
 from app.worker import recover_agent_runs
 
@@ -873,6 +874,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert retained_approved_deliverable.turn_id is None
     assert retained_approved_deliverable.run_id is None
     assert retained_approved_deliverable.skill_run_id is None
+
     assert (
         await session.scalar(
             select(func.count(AgentRun.id)).where(AgentRun.thread_id == thread["id"])
@@ -916,9 +918,45 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert [row.category for row in audit_rows] == ["approval", "cost", "publish"]
     assert all(not hasattr(row, "thread_id") for row in audit_rows)
     assert all(
-        row.details.keys() <= {"approved", "amount_usd", "provider_status"}
-        for row in audit_rows
+        row.details.keys() <= {"approved", "amount_usd", "provider_status"} for row in audit_rows
     )
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_does_not_claim_success_when_attachment_removal_fails(
+    client,
+    session,
+    admin,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "storage_local_dir", str(tmp_path))
+    account = await _account(session, admin, "附件删除失败账号")
+    thread = await _create_thread(client, admin, account)
+    uploaded = await client.post(
+        f"/brain/conversations/{thread['id']}/attachments",
+        headers=_auth(admin),
+        files=[("files", ("private.txt", b"private", "text/plain"))],
+    )
+    attachment_id = uploaded.json()[0]["id"]
+    attachment = await session.get(ConversationAttachment, attachment_id)
+    assert attachment is not None
+    attachment_path = tmp_path / attachment.storage_key
+
+    def reject_unlink(_path, *args, **kwargs):
+        del args, kwargs
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(type(attachment_path), "unlink", reject_unlink)
+
+    with pytest.raises(OSError, match="storage unavailable"):
+        await delete_conversation_thread(session, admin, thread["id"])
+
+    session.expire_all()
+    assert await session.get(ConversationThread, thread["id"]) is not None
+    assert await session.get(ConversationAttachment, attachment_id) is not None
+    assert attachment_path.exists()
 
 
 @pytest.mark.asyncio

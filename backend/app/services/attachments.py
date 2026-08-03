@@ -40,6 +40,12 @@ class AttachmentUpload:
     content: bytes
 
 
+@dataclass(frozen=True)
+class RemovedAttachmentObject:
+    storage_key: str
+    content: bytes
+
+
 async def create_conversation_attachments(
     session: AsyncSession,
     *,
@@ -145,10 +151,39 @@ async def delete_conversation_attachment(
     )
     if row is None:
         raise _not_found()
-    key = row.storage_key
-    await session.delete(row)
-    await session.commit()
-    storage.resolve(key).unlink(missing_ok=True)
+    removed = remove_attachment_objects([row.storage_key])
+    try:
+        await session.delete(row)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        restore_attachment_objects(removed)
+        raise
+
+
+def remove_attachment_objects(storage_keys: list[str]) -> list[RemovedAttachmentObject]:
+    """Remove stored attachment bytes or fail before the database can claim deletion."""
+
+    removed: list[RemovedAttachmentObject] = []
+    try:
+        for storage_key in storage_keys:
+            path = storage.resolve(storage_key)
+            if not path.exists():
+                continue
+            content = path.read_bytes()
+            path.unlink()
+            removed.append(RemovedAttachmentObject(storage_key=storage_key, content=content))
+    except OSError:
+        restore_attachment_objects(removed)
+        raise
+    return removed
+
+
+def restore_attachment_objects(objects: list[RemovedAttachmentObject]) -> None:
+    """Best-effort transaction compensation when a database deletion rolls back."""
+
+    for item in objects:
+        storage.save_bytes(item.storage_key, item.content)
 
 
 async def resolve_attachment_contexts(
