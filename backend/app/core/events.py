@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Protocol, TypeAlias
 
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -25,6 +25,17 @@ EVENTS_CHANNEL = "dyflow:events"
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 _handlers: dict[str, list[EventHandler]] = {}
+
+TurnEventPayload: TypeAlias = dict[str, object]
+
+
+class TurnEventScopeLike(Protocol):
+    org_id: int
+    account_id: int
+    thread_id: int
+    turn_id: int
+    run_id: int | None
+    skill_run_id: int | None
 
 
 def redis_settings() -> RedisSettings:
@@ -73,6 +84,29 @@ def runtime_event_idempotency_key(
             str(client_message_id),
             str(event_type),
             str(semantic_key),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def turn_event_idempotency_key(
+    scope: TurnEventScopeLike,
+    idempotency_key: str,
+) -> str:
+    """Namespace a logical Turn event inside the existing 64-character key."""
+
+    normalized = json.dumps(
+        [
+            "turn-event-v1",
+            int(scope.org_id),
+            int(scope.account_id),
+            int(scope.thread_id),
+            int(scope.turn_id),
+            int(scope.run_id) if scope.run_id is not None else None,
+            int(scope.skill_run_id) if scope.skill_run_id is not None else None,
+            str(idempotency_key),
         ],
         ensure_ascii=False,
         separators=(",", ":"),
