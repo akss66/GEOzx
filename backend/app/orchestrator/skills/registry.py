@@ -47,6 +47,9 @@ class SkillRegistry:
 from app.orchestrator.skills.account_inspection import (  # noqa: E402
     ACCOUNT_INSPECTION_SKILL,
 )
+from app.orchestrator.skills.account_positioning import (  # noqa: E402
+    ACCOUNT_POSITIONING_SKILL,
+)
 from app.orchestrator.skills.operating_tasks import (  # noqa: E402
     PERFORMANCE_REVIEW_SKILL,
     PUBLISHING_PREPARATION_SKILL,
@@ -57,6 +60,7 @@ from app.orchestrator.skills.operating_tasks import (  # noqa: E402
 skill_registry = SkillRegistry(
     [
         ACCOUNT_INSPECTION_SKILL,
+        ACCOUNT_POSITIONING_SKILL,
         TOPIC_PLANNING_SKILL,
         SCRIPT_GENERATION_SKILL,
         PUBLISHING_PREPARATION_SKILL,

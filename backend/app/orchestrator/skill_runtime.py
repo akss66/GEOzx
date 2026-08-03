@@ -57,6 +57,7 @@ from app.orchestrator.skills.account_inspection import (
     AccountInspectionMetric,
     AccountInspectionReport,
 )
+from app.orchestrator.skills.account_positioning import AccountPositioningReport
 from app.orchestrator.skills.operating_tasks import (
     PerformanceReviewReport,
     PublishingPreparationReport,
@@ -1815,11 +1816,48 @@ def _build_operating_report(
         str(item.invocation.agent_code): dict(item.output or {}) for item in expert_results
     }
     preferred_agent = (
-        AgentCode.OPERATOR.value
-        if definition.code in {"performance_review", "publishing_preparation"}
-        else AgentCode.CONTENT_DIRECTOR.value
+        AgentCode.POSITIONING.value
+        if definition.code == "account_positioning"
+        else (
+            AgentCode.OPERATOR.value
+            if definition.code in {"performance_review", "publishing_preparation"}
+            else AgentCode.CONTENT_DIRECTOR.value
+        )
     )
     latest = outputs_by_agent.get(preferred_agent, outputs[-1] if outputs else {})
+
+    if definition.code == "account_positioning":
+        audience = _string_list(latest.get("audience"))
+        pillars = _string_list(latest.get("content_pillars"))
+        boundaries = _string_list(latest.get("boundaries"))
+        report = AccountPositioningReport(
+            account_id=account_id,
+            positioning_statement=str(
+                latest.get("positioning_statement")
+                or "围绕明确受众的真实问题，持续提供可验证、可执行的专业内容。"
+            ),
+            audience=audience or [str(frozen_input.get("target_audience") or "目标受众待验证")],
+            content_pillars=pillars or ["专业知识", "真实案例", "常见问题"],
+            tone=str(latest.get("tone") or "专业、清晰、克制"),
+            boundaries=boundaries
+            or _string_list(frozen_input.get("differentiation_constraints"))
+            or ["不虚构案例或数据", "不作无法验证的效果承诺"],
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return (
+            data,
+            DeliverableType.POSITIONING_STRATEGY,
+            {
+                "positioning_statement": data["positioning_statement"],
+                "audience": data["audience"],
+                "content_pillars": data["content_pillars"],
+                "tone": data["tone"],
+                "boundaries": data["boundaries"],
+                "evidence_refs": data["evidence_refs"],
+            },
+        )
 
     if definition.code == "script_generation":
         scenes = [str(item).strip() for item in latest.get("scenes", []) if str(item).strip()]

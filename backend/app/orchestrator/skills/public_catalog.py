@@ -24,6 +24,13 @@ class PublicSkillPolicy:
 
 
 PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
+    "account_positioning": PublicSkillPolicy(
+        code="account_positioning",
+        category="quick_operations",
+        icon="compass",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+    ),
     "account_inspection": PublicSkillPolicy(
         code="account_inspection",
         category="quick_operations",
