@@ -50,17 +50,25 @@ from app.orchestrator.skills.account_inspection import (  # noqa: E402
 from app.orchestrator.skills.account_positioning import (  # noqa: E402
     ACCOUNT_POSITIONING_SKILL,
 )
+from app.orchestrator.skills.content_calendar_planning import (  # noqa: E402
+    CONTENT_CALENDAR_PLANNING_SKILL,
+)
 from app.orchestrator.skills.operating_tasks import (  # noqa: E402
     PERFORMANCE_REVIEW_SKILL,
     PUBLISHING_PREPARATION_SKILL,
     SCRIPT_GENERATION_SKILL,
     TOPIC_PLANNING_SKILL,
 )
+from app.orchestrator.skills.visual_brief_generation import (  # noqa: E402
+    VISUAL_BRIEF_GENERATION_SKILL,
+)
 
 skill_registry = SkillRegistry(
     [
         ACCOUNT_INSPECTION_SKILL,
         ACCOUNT_POSITIONING_SKILL,
+        VISUAL_BRIEF_GENERATION_SKILL,
+        CONTENT_CALENDAR_PLANNING_SKILL,
         TOPIC_PLANNING_SKILL,
         SCRIPT_GENERATION_SKILL,
         PUBLISHING_PREPARATION_SKILL,

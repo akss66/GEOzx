@@ -31,6 +31,22 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         requires_account=True,
         surfaces=frozenset({"composer"}),
     ),
+    "visual_brief_generation": PublicSkillPolicy(
+        code="visual_brief_generation",
+        category="quick_operations",
+        icon="picture",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+        required_context=("account", "confirmed_artifact"),
+    ),
+    "content_calendar_planning": PublicSkillPolicy(
+        code="content_calendar_planning",
+        category="quick_operations",
+        icon="calendar",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+        required_context=("account", "confirmed_artifact"),
+    ),
     "account_inspection": PublicSkillPolicy(
         code="account_inspection",
         category="quick_operations",

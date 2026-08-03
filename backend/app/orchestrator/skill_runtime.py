@@ -28,6 +28,7 @@ from app.models import (
     ContentItem,
     ConversationThread,
     ConversationTurn,
+    Deliverable,
     SkillRun,
     TaskBrief,
     ToolExecutionAttempt,
@@ -58,6 +59,7 @@ from app.orchestrator.skills.account_inspection import (
     AccountInspectionReport,
 )
 from app.orchestrator.skills.account_positioning import AccountPositioningReport
+from app.orchestrator.skills.content_calendar_planning import ContentCalendarPlanningReport
 from app.orchestrator.skills.operating_tasks import (
     PerformanceReviewReport,
     PublishingPreparationReport,
@@ -65,6 +67,7 @@ from app.orchestrator.skills.operating_tasks import (
     TopicPlanningReport,
 )
 from app.orchestrator.skills.registry import skill_registry
+from app.orchestrator.skills.visual_brief_generation import VisualBriefGenerationReport
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
@@ -863,6 +866,19 @@ class SkillRuntime:
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
         evidence_refs = _evidence_refs(tool_results.get("account.data_context", {}))
+        source_artifacts = await _confirmed_source_artifacts(
+            session,
+            account_id=thread.account_id,
+            artifact_ids=list(frozen_input.get("source_artifact_ids") or []),
+        )
+        evidence_refs.extend(
+            {
+                "artifact_id": item["artifact_id"],
+                "artifact_type": item["artifact_type"],
+                "version": item["version"],
+            }
+            for item in source_artifacts
+        )
         definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
         for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -891,6 +907,7 @@ class SkillRuntime:
                     "attachment_contexts": list(
                         frozen_input.get("attachment_contexts") or []
                     ),
+                    "source_artifacts": source_artifacts,
                     "expert_outputs": list(upstream_outputs),
                 },
             )
@@ -1799,6 +1816,48 @@ def _operating_tool_arguments(
     raise SkillToolPlanError(f"SKILL_TOOL_ARGUMENTS_UNAVAILABLE:{tool_code}")
 
 
+async def _confirmed_source_artifacts(
+    session: AsyncSession,
+    *,
+    account_id: int,
+    artifact_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Resolve immutable same-account source artifacts and fail closed on any mismatch."""
+
+    unique_ids = list(dict.fromkeys(int(item) for item in artifact_ids))
+    if not unique_ids:
+        return []
+    rows = list(
+        await session.execute(
+            select(Deliverable, ContentItem.account_id)
+            .join(ContentItem, ContentItem.id == Deliverable.content_item_id)
+            .where(Deliverable.id.in_(unique_ids))
+        )
+    )
+    by_id = {
+        deliverable.id: (deliverable, source_account_id)
+        for deliverable, source_account_id in rows
+    }
+    if set(by_id) != set(unique_ids):
+        raise PermissionError("SOURCE_ARTIFACT_NOT_FOUND")
+    resolved: list[dict[str, Any]] = []
+    for artifact_id in unique_ids:
+        deliverable, source_account_id = by_id[artifact_id]
+        if source_account_id != account_id:
+            raise PermissionError("SOURCE_ARTIFACT_SCOPE_MISMATCH")
+        if deliverable.status is not DeliverableStatus.APPROVED:
+            raise PermissionError("SOURCE_ARTIFACT_NOT_APPROVED")
+        resolved.append(
+            {
+                "artifact_id": deliverable.id,
+                "artifact_type": deliverable.type.value,
+                "version": deliverable.version,
+                "payload": dict(deliverable.payload or {}),
+            }
+        )
+    return resolved
+
+
 def _build_operating_report(
     *,
     definition: SkillDefinition,
@@ -1819,9 +1878,18 @@ def _build_operating_report(
         AgentCode.POSITIONING.value
         if definition.code == "account_positioning"
         else (
-            AgentCode.OPERATOR.value
-            if definition.code in {"performance_review", "publishing_preparation"}
-            else AgentCode.CONTENT_DIRECTOR.value
+            AgentCode.ART_DIRECTOR.value
+            if definition.code == "visual_brief_generation"
+            else (
+                AgentCode.OPERATOR.value
+                if definition.code
+                in {
+                    "performance_review",
+                    "publishing_preparation",
+                    "content_calendar_planning",
+                }
+                else AgentCode.CONTENT_DIRECTOR.value
+            )
         )
     )
     latest = outputs_by_agent.get(preferred_agent, outputs[-1] if outputs else {})
@@ -1858,6 +1926,45 @@ def _build_operating_report(
                 "evidence_refs": data["evidence_refs"],
             },
         )
+
+    if definition.code == "visual_brief_generation":
+        report = VisualBriefGenerationReport(
+            account_id=account_id,
+            source_artifact_ids=[int(item) for item in frozen_input["source_artifact_ids"]],
+            cover_copy=str(latest.get("cover_copy") or user_input[:80]),
+            composition=str(latest.get("composition") or "主体清晰，关键信息位于画面安全区"),
+            shot_list=_string_list(latest.get("shot_list")) or ["开场", "主体", "结尾"],
+            asset_checklist=_string_list(latest.get("asset_checklist")) or ["主体素材"],
+            platform_constraints=_string_list(latest.get("platform_constraints"))
+            or ["竖屏 9:16", "字幕保留安全区"],
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.ART_PROMPT, data
+
+    if definition.code == "content_calendar_planning":
+        items = latest.get("items")
+        if not isinstance(items, list) or not items:
+            items = [
+                {
+                    "date": "待确认",
+                    "title": user_input[:120],
+                    "owner": "运营",
+                    "readiness": "needs_input",
+                    "dependencies": list(frozen_input["source_artifact_ids"]),
+                }
+            ]
+        report = ContentCalendarPlanningReport(
+            account_id=account_id,
+            source_artifact_ids=[int(item) for item in frozen_input["source_artifact_ids"]],
+            days=int(frozen_input.get("days") or 7),
+            items=[dict(item) for item in items],
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.PUBLISH_CALENDAR, data
 
     if definition.code == "script_generation":
         scenes = [str(item).strip() for item in latest.get("scenes", []) if str(item).strip()]
