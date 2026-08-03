@@ -174,7 +174,7 @@ export default function ReviewDashboard() {
             <InputNumber min={1} step={1000} precision={0} placeholder="例如 100000" />
           </Form.Item>
           <Form.Item name="target_completion_rate" label="目标平均完播率">
-            <InputNumber min={0.01} max={100} step={1} addonAfter="%" placeholder="例如 35" />
+            <InputNumber min={0.01} max={100} step={1} suffix="%" placeholder="例如 35" />
           </Form.Item>
           <Form.Item name="target_follower_delta" label="目标净增粉丝">
             <InputNumber min={1} step={10} precision={0} placeholder="例如 500" />
