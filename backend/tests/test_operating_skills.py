@@ -12,6 +12,7 @@ from app.models import (
     Account,
     AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ConversationThread,
     ConversationTurn,
@@ -110,6 +111,12 @@ class _Tools:
 
             days: int = 30
 
+        class PublishParams(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            content_item_id: int
+            title: str
+
         async def profile(_params: EmptyParams, context: ToolExecutionContext):
             return {
                 "account_id": context.account_id,
@@ -129,6 +136,17 @@ class _Tools:
                 "sources": [{"batch_id": 7}],
             }
 
+        async def prepare_publish_package(
+            params: PublishParams,
+            context: ToolExecutionContext,
+        ):
+            return {
+                "account_id": context.account_id,
+                "content_item_id": params.content_item_id,
+                "status": "prepared",
+                "publish_package": {"title": params.title},
+            }
+
         self.executor = DurableToolExecutor(
             ToolAdapter(
                 [
@@ -145,6 +163,14 @@ class _Tools:
                         params_model=DaysParams,
                         side_effect_level="read",
                         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+                    ),
+                    ToolSpec(
+                        name="publish_package_prepare",
+                        handler=prepare_publish_package,
+                        params_model=PublishParams,
+                        side_effect_level="idempotent_write",
+                        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+                        execution_phase="prepare",
                     ),
                 ]
             )
@@ -435,3 +461,41 @@ async def test_skill_recovery_rejects_changed_structured_input(session, admin) -
             skill_code="topic_planning",
             capability_request=changed_request,
         )
+
+
+@pytest.mark.asyncio
+async def test_publishing_preparation_executes_declared_prepare_tool(session, admin) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="publishing-tool-plan",
+        message="为这条内容生成发布准备包",
+    )
+    runtime = SkillRuntime(tool_executor=_Tools(), harness=_Harness())
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="publishing_preparation",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="publishing_preparation",
+            structured_input={},
+        ),
+    )
+
+    calls = list(
+        await session.scalars(
+            select(AgentToolCall).where(AgentToolCall.skill_run_id == result.skill_run_id)
+        )
+    )
+    assert [(call.tool_code, call.status) for call in calls] == [
+        ("publish_package_prepare", "success")
+    ]

@@ -50,6 +50,7 @@ from app.orchestrator.ai_coo_critic import (
 from app.orchestrator.brain_intelligence import brain_intelligence
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
+from app.orchestrator.skill_tool_plan import SkillToolPlanError, build_skill_tool_plan
 from app.orchestrator.skills.account_inspection import (
     AccountInspectionCriticOutcome,
     AccountInspectionMetric,
@@ -780,13 +781,14 @@ class SkillRuntime:
 
         tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
-        for tool_code in definition.tool_codes:
-            if tool_code not in {"account.profile", "account.data_context"}:
-                continue
-            arguments = (
-                {"days": int(frozen_input.get("days") or 30)}
-                if tool_code == "account.data_context"
-                else {}
+        tool_plan = build_skill_tool_plan(definition)
+
+        async def execute_tool(tool_code: str) -> SkillExecutionResult | None:
+            arguments = _operating_tool_arguments(
+                tool_code=tool_code,
+                frozen_input=frozen_input,
+                content=content,
+                user_input=turn.user_input,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             outcome = await tool_executor.execute(
@@ -795,7 +797,7 @@ class SkillRuntime:
                 request=RuntimeToolCall(
                     tool_code=tool_code,
                     arguments=arguments,
-                    purpose=f"{definition.name}读取 {tool_code}",
+                    purpose=f"{definition.name}: {tool_code}",
                     idempotency_key=f"{skill_run.id}:{tool_code}",
                 ),
                 project_id=thread.project_id,
@@ -821,6 +823,14 @@ class SkillRuntime:
                 outcome.tool_call.thread_id = thread.id
                 outcome.tool_call.turn_id = turn.id
                 await session.commit()
+            return None
+
+        for step in tool_plan:
+            if step.phase != "read":
+                continue
+            paused = await execute_tool(step.tool_code)
+            if paused is not None:
+                return paused
 
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
@@ -863,6 +873,17 @@ class SkillRuntime:
                         "payload": dict(result.output),
                     }
                 )
+
+        for step in tool_plan:
+            if step.phase == "side_effect":
+                raise SkillToolPlanError(
+                    f"SKILL_SIDE_EFFECT_REQUIRES_APPROVAL:{step.tool_code}"
+                )
+            if step.phase != "prepare":
+                continue
+            paused = await execute_tool(step.tool_code)
+            if paused is not None:
+                return paused
 
         report, deliverable_type, deliverable_payload = _build_operating_report(
             definition=definition,
@@ -1672,6 +1693,25 @@ class SkillRuntime:
             response=response,
             error_code=output.get("error_code") or skill_run.error_code,
         )
+
+
+def _operating_tool_arguments(
+    *,
+    tool_code: str,
+    frozen_input: dict[str, Any],
+    content: ContentItem,
+    user_input: str,
+) -> dict[str, Any]:
+    if tool_code == "account.profile":
+        return {}
+    if tool_code in {"account.data_context", "account.metrics_summary"}:
+        return {"days": int(frozen_input.get("days") or 30)}
+    if tool_code == "publish_package_prepare":
+        return {
+            "content_item_id": int(frozen_input.get("content_item_id") or content.id),
+            "title": user_input[:300],
+        }
+    raise SkillToolPlanError(f"SKILL_TOOL_ARGUMENTS_UNAVAILABLE:{tool_code}")
 
 
 def _build_operating_report(

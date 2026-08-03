@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.workspace_access import require_account_access
-from app.models import DataImportBatch, User
+from app.models import ContentItem, DataImportBatch, User
 from app.models.enums import ImportBatchStatus, UserRole
 from app.services.account_data_view import (
     ACCOUNT_METRICS,
@@ -47,6 +47,13 @@ class DeterministicConfirmActionParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PublishPackagePrepareParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content_item_id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=300)
+
+
 async def _deterministic_confirm_action(
     _params: DeterministicConfirmActionParams,
     context: ToolExecutionContext,
@@ -55,6 +62,38 @@ async def _deterministic_confirm_action(
         "approved": context.approved,
         "account_id": context.account_id,
         "status": "test_action_completed",
+    }
+
+
+async def _publish_package_prepare(
+    params: PublishPackagePrepareParams,
+    context: ToolExecutionContext,
+) -> dict[str, Any]:
+    if context.account_id is None:
+        raise PermissionError("selected account is required")
+    account = await require_account_access(context.session, context.user, context.account_id)
+    content = await context.session.get(ContentItem, params.content_item_id)
+    if content is None or content.account_id != account.id:
+        raise PermissionError("content item does not belong to the selected account")
+    return {
+        "account_id": account.id,
+        "content_item_id": content.id,
+        "status": "prepared",
+        "publish_package": {
+            "platform": account.platform.value,
+            "account_id": account.id,
+            "content_type": "video",
+            "title": params.title,
+            "body": "",
+            "topics": [],
+            "scheduled_at": None,
+            "material_ids": [],
+            "cover_material_id": None,
+            "visibility": "public",
+            "allow_comment": True,
+            "execution_mode": "manual_checklist",
+            "manual_steps": ["确认标题、正文、话题和素材", "确认发布时间与可见范围"],
+        },
     }
 
 
@@ -397,6 +436,15 @@ _RUNTIME_TOOL_SPECS = (
         allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
         scope="account",
     ),
+    ToolSpec(
+        name="publish_package_prepare",
+        handler=_tool_handler(PublishPackagePrepareParams, _publish_package_prepare),
+        side_effect_level="idempotent_write",
+        params_model=PublishPackagePrepareParams,
+        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+        scope="account",
+        execution_phase="prepare",
+    ),
 )
 
 
@@ -424,6 +472,13 @@ def build_runtime_tool_adapter() -> ToolAdapter:
     return ToolAdapter(list(_runtime_tool_specs()))
 
 
+def runtime_tool_phase(tool_code: str) -> str:
+    for spec in _runtime_tool_specs():
+        if spec.name == tool_code:
+            return spec.resolved_execution_phase
+    raise KeyError(tool_code)
+
+
 def runtime_tool_capabilities(user: User) -> list[dict[str, Any]]:
     capabilities: list[dict[str, Any]] = []
     for spec in _runtime_tool_specs():
@@ -436,6 +491,7 @@ def runtime_tool_capabilities(user: User) -> list[dict[str, Any]]:
                 "name": spec.name,
                 "description": _tool_description(spec.name),
                 "permission_mode": spec.permission_mode,
+                "execution_phase": spec.resolved_execution_phase,
                 "scope": spec.scope,
                 "parameters": spec.params_model.model_json_schema(),
             }
@@ -450,4 +506,5 @@ def _tool_description(code: str) -> str:
         "account.profile": "读取当前已选账号的公开概况和接入状态",
         "account.data_context": "读取当前账号统一数据视图、指标证据、覆盖度、时效与冲突",
         "account.metrics_summary": "汇总当前已选账号最近 1-90 天的运营指标",
+        "publish_package_prepare": "为当前账号内容生成可审计、可审批的发布准备包",
     }[code]

@@ -75,6 +75,7 @@ class ToolSpec:
     timeout_seconds: float = 5.0
     permission_mode: Literal["auto", "confirm", "manual", "disabled"] = "auto"
     scope: Literal["organization", "project", "account"] = "organization"
+    execution_phase: Literal["read", "prepare", "side_effect"] | None = None
     redacted_result_fields: frozenset[str] = field(
         default_factory=lambda: frozenset(
             {
@@ -95,6 +96,14 @@ class ToolSpec:
             "non_idempotent_write",
         }:
             raise ValueError("invalid tool side_effect_level")
+        if self.execution_phase == "read" and self.side_effect_level != "read":
+            raise ValueError("read-phase tools must declare read side effects")
+
+    @property
+    def resolved_execution_phase(self) -> Literal["read", "prepare", "side_effect"]:
+        if self.execution_phase is not None:
+            return self.execution_phase
+        return "read" if self.side_effect_level == "read" else "side_effect"
 
 
 class ToolAdapter:

@@ -341,17 +341,25 @@ async def test_runtime_tools_reject_model_supplied_account_id(session, admin) ->
         )
 
 
-def test_runtime_tool_catalog_marks_read_only_tools_as_automatic(admin) -> None:
+def test_runtime_tool_catalog_exposes_read_and_prepare_phases(admin) -> None:
     catalog = runtime_tool_capabilities(admin)
 
     assert {item["code"] for item in catalog} == {
         "account.data_context",
         "account.metrics_summary",
         "account.profile",
+        "publish_package_prepare",
     }
     assert all(item["kind"] == "tool" for item in catalog)
     assert all(item["permission_mode"] == "auto" for item in catalog)
     assert all(item["scope"] == "account" for item in catalog)
+    assert {
+        item["execution_phase"]
+        for item in catalog
+        if item["code"].startswith("account.")
+    } == {"read"}
+    prepare_tool = next(item for item in catalog if item["code"] == "publish_package_prepare")
+    assert prepare_tool["execution_phase"] == "prepare"
 
 
 def test_runtime_tool_catalog_exposes_confirm_tool_only_in_explicit_test_mode(
