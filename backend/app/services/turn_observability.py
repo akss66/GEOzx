@@ -156,6 +156,29 @@ async def increment_model_call_count(session: AsyncSession) -> None:
     )
 
 
+async def increment_tool_call_count(session: AsyncSession) -> None:
+    """Atomically count one terminal tool attempt in the active Turn."""
+
+    scope = _turn_scope.get()
+    if scope is None:
+        return
+    await session.execute(
+        update(ConversationTurn)
+        .where(
+            ConversationTurn.id == scope.turn_id,
+            ConversationTurn.thread_id == scope.thread_id,
+            ConversationTurn.org_id == scope.org_id,
+        )
+        .values(
+            tool_call_count=func.coalesce(
+                ConversationTurn.tool_call_count,
+                0,
+            )
+            + 1
+        )
+    )
+
+
 def apply_turn_closure_metrics(
     turn: ConversationTurn,
     *,

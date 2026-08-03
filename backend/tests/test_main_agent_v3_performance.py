@@ -28,6 +28,7 @@ from app.services.turn_observability import (
     record_first_user_token,
     record_route_completed,
 )
+from app.tools import ToolAdapter, ToolExecutionContext, ToolNotAllowedError
 from app.worker import _execute_v2_conversation_run
 
 
@@ -154,6 +155,35 @@ def test_turn_closure_without_user_message_only_updates_paused_total() -> None:
 
     assert turn.completion_ms is None
     assert turn.total_ms == 950
+
+
+@pytest.mark.asyncio
+async def test_tool_attempts_are_counted_for_the_active_turn(session, admin) -> None:
+    turn, run = await _worker_turn(
+        session,
+        admin,
+        key="tool-attempt-count",
+        message="调用一个不可用工具",
+    )
+    scope = TurnObservabilityScope(
+        org_id=admin.org_id,
+        thread_id=turn.thread_id,
+        turn_id=turn.id,
+        run_id=run.id,
+        turn_created_at=turn.created_at,
+    )
+
+    with bind_turn_observability(scope):
+        with pytest.raises(ToolNotAllowedError):
+            await ToolAdapter().invoke(
+                "missing.tool",
+                {},
+                ToolExecutionContext(session=session, user=admin),
+            )
+        await session.commit()
+
+    await session.refresh(turn)
+    assert turn.tool_call_count == 1
 
 
 class BudgetAdapter:

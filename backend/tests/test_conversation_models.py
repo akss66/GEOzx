@@ -68,6 +68,7 @@ async def test_thread_keeps_each_turn_input_independent(session, admin) -> None:
     assert turns[0].completion_ms is None
     assert turns[0].total_ms is None
     assert turns[0].model_call_count == 0
+    assert turns[0].tool_call_count == 0
 
 
 @pytest.mark.parametrize(
@@ -78,6 +79,7 @@ async def test_thread_keeps_each_turn_input_independent(session, admin) -> None:
         "completion_ms",
         "total_ms",
         "model_call_count",
+        "tool_call_count",
     ],
 )
 @pytest.mark.asyncio

@@ -597,8 +597,52 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_minimal_audit_records() -> None:
-    assert get_head_revision() == "20260803_0300"
+def test_migration_head_is_turn_tool_call_count() -> None:
+    assert get_head_revision() == "20260803_0400"
+
+
+def test_turn_tool_call_count_migration_is_linear_and_reversible(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260803_0400_turn_tool_call_count"
+    )
+    assert migration.down_revision == "20260803_0300"
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(sa.text("INSERT INTO conversation_turns (id) VALUES (1)"))
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {column["name"] for column in inspector.get_columns("conversation_turns")}
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("conversation_turns")
+        }
+        assert "tool_call_count" in columns
+        assert "ck_conversation_turns_tool_call_count" in checks
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text("UPDATE conversation_turns SET tool_call_count = -1 WHERE id = 1")
+            )
+
+        migration.downgrade()
+        assert "tool_call_count" not in {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("conversation_turns")
+        }
 
 
 def test_minimal_audit_records_migration_is_linear_and_reversible(monkeypatch) -> None:

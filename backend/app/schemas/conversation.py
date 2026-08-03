@@ -237,6 +237,7 @@ class ConversationTurnOut(BaseModel):
     completion_ms: int | None = Field(default=None, ge=0)
     total_ms: int | None = Field(default=None, ge=0)
     model_call_count: int | None = Field(default=None, ge=0)
+    tool_call_count: int | None = Field(default=None, ge=0)
     projections: list[ConversationProjectionOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

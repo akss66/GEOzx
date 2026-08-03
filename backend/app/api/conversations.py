@@ -76,6 +76,7 @@ def _turn_out(
             "completion_ms": turn.completion_ms,
             "total_ms": turn.total_ms,
             "model_call_count": turn.model_call_count,
+            "tool_call_count": turn.tool_call_count,
             "projections": _bind_projections_to_turn(turn.id, projections),
             "created_at": turn.created_at,
             "updated_at": turn.updated_at,

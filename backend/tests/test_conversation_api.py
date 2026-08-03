@@ -240,6 +240,7 @@ async def test_create_and_get_thread_with_ordered_turn_history(
     assert [turn["status"] for turn in history["turns"]] == ["queued", "queued"]
     assert all(turn["projections"] == [] for turn in history["turns"])
     assert all(turn["model_call_count"] == 0 for turn in history["turns"])
+    assert all(turn["tool_call_count"] == 0 for turn in history["turns"])
     assert all(turn["route_ms"] is None for turn in history["turns"])
     assert all(turn["first_token_ms"] is None for turn in history["turns"])
     assert all(turn["completion_ms"] is None for turn in history["turns"])
@@ -1380,6 +1381,7 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
     turn.completion_ms = 420
     turn.total_ms = 430
     turn.model_call_count = 2
+    turn.tool_call_count = 1
     turn.intent = {
         "mode": "query",
         "reason": "SECRET_MODEL_REASON",
@@ -1445,6 +1447,7 @@ async def test_turn_projects_sanitized_tool_only_execution_summary(
     assert returned_turn["completion_ms"] == 420
     assert returned_turn["total_ms"] == 430
     assert returned_turn["model_call_count"] == 2
+    assert returned_turn["tool_call_count"] == 1
     assert returned_turn["intent"] == {
         "mode": "query",
         "route_source": "model",

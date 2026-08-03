@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Event, User
 from app.models.enums import UserRole
+from app.services.turn_observability import increment_tool_call_count
 
 
 class ToolExecutionError(RuntimeError):
@@ -259,6 +260,7 @@ class ToolAdapter:
         error: str | None = None,
     ) -> None:
         latency_ms = int((time.monotonic() - start) * 1000)
+        await increment_tool_call_count(context.session)
         context.session.add(
             Event(
                 type="tool.invocation",

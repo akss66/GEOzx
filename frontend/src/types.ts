@@ -706,6 +706,7 @@ export interface ConversationTurn {
   completion_ms?: number | null;
   total_ms?: number | null;
   model_call_count?: number | null;
+  tool_call_count?: number | null;
   projections: TurnProjection[];
   stream_state?: {
     messageId: string;

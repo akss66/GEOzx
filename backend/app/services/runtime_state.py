@@ -170,6 +170,12 @@ async def close_runtime_state(
         )
 
         replaying_terminal = run.status in TERMINAL_STATUSES
+        previous_turn_status = turn.status if turn is not None else None
+        terminal_state_mismatch = (
+            replaying_terminal
+            and turn is not None
+            and turn.status not in TERMINAL_STATUSES
+        )
         effective_status, effective_message, effective_error, result_payload = _first_terminal_wins(
             run=run,
             turn=turn,
@@ -247,6 +253,34 @@ async def close_runtime_state(
                 status=effective_status,
                 message=effective_message,
                 error_code=effective_error,
+                diagnostic_events=tuple(
+                    event
+                    for event in (
+                        RuntimeEventSpec(
+                            event_type="brain.runtime.terminal_state_reconciled",
+                            semantic_key="terminal-state-reconciled",
+                            payload={
+                                "run_status": effective_status,
+                                "previous_turn_status": previous_turn_status,
+                            },
+                        )
+                        if terminal_state_mismatch
+                        else None,
+                        RuntimeEventSpec(
+                            event_type="brain.runtime.skill_stage_timeout",
+                            semantic_key=f"skill-stage-timeout:{skill_run.id}",
+                            payload={
+                                "skill_run_id": skill_run.id,
+                                "error_code": effective_error,
+                            },
+                        )
+                        if skill_run is not None
+                        and effective_error is not None
+                        and "TIMEOUT" in effective_error.upper()
+                        else None,
+                    )
+                    if event is not None
+                ),
             )
         elif turn is None and effective_status in {
             "failed",
@@ -415,6 +449,7 @@ async def _record_delivery_events(
     status: str,
     message: str,
     error_code: str | None,
+    diagnostic_events: tuple[RuntimeEventSpec, ...] = (),
 ) -> list[tuple[Event, str]]:
     lineage = {
         "task_id": task.id if task is not None else None,
@@ -424,6 +459,7 @@ async def _record_delivery_events(
     }
     specs = [
         *scope.extra_events,
+        *diagnostic_events,
         RuntimeEventSpec(
             event_type="brain.runtime.message_done",
             semantic_key=f"runtime-state-message:{status}",

@@ -103,6 +103,10 @@ class ConversationTurn(Base, TimestampMixin):
             "model_call_count IS NULL OR model_call_count >= 0",
             name="ck_conversation_turns_model_call_count",
         ),
+        CheckConstraint(
+            "tool_call_count IS NULL OR tool_call_count >= 0",
+            name="ck_conversation_turns_tool_call_count",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -133,6 +137,11 @@ class ConversationTurn(Base, TimestampMixin):
     completion_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_call_count: Mapped[int | None] = mapped_column(
+        Integer,
+        default=0,
+        nullable=True,
+    )
+    tool_call_count: Mapped[int | None] = mapped_column(
         Integer,
         default=0,
         nullable=True,

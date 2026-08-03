@@ -284,6 +284,79 @@ async def test_close_runtime_state_terminal_message_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_close_runtime_state_records_reconciliation_and_skill_timeout(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-diagnostics",
+    )
+    run.status = "failed"
+    turn.status = "running"
+    await session.commit()
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            turn_id=turn.id,
+            skill_run_id=skill_run.id,
+            task_id=task.id,
+            account_id=account.id,
+            result_payload={"status": "failed"},
+        ),
+        status="failed",
+        message="终态不一致已自动收口。",
+    )
+
+    timeout_account, _thread, timeout_turn, timeout_run, timeout_task, timeout_skill_run = (
+        await _four_ledger_context(
+            session,
+            admin,
+            key="state-timeout-diagnostic",
+        )
+    )
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=timeout_run.id,
+            turn_id=timeout_turn.id,
+            skill_run_id=timeout_skill_run.id,
+            task_id=timeout_task.id,
+            account_id=timeout_account.id,
+            result_payload={"status": "failed"},
+        ),
+        status="failed",
+        message="专家阶段超时，任务已安全收口。",
+        error_code="EXPERT_STAGE_TIMEOUT",
+    )
+
+    events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.run_id.in_({run.id, timeout_run.id}),
+                Event.type.in_(
+                    {
+                        "brain.runtime.terminal_state_reconciled",
+                        "brain.runtime.skill_stage_timeout",
+                    }
+                ),
+            )
+        )
+    )
+    assert {event.type for event in events} == {
+        "brain.runtime.terminal_state_reconciled",
+        "brain.runtime.skill_stage_timeout",
+    }
+    reconciled = next(
+        event for event in events if event.type == "brain.runtime.terminal_state_reconciled"
+    )
+    assert reconciled.payload["previous_turn_status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_close_runtime_state_pause_then_complete_delivers_both_messages_once(
     session,
     admin,
