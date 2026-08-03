@@ -27,6 +27,7 @@ from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
+    TurnExecutionResult,
     TurnRouteDecision,
 )
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
@@ -493,6 +494,58 @@ def _decision(mode: TurnExecutionMode, **updates) -> TurnRouteDecision:
     }
     values.update(updates)
     return TurnRouteDecision(**values)
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_receives_account_scoped_capability_request(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="typed-capability-request",
+    )
+    turn.user_input = "规划未来14天的10个选题"
+    await session.commit()
+    captured = {}
+
+    async def capture_capability_request(*_args, **kwargs):
+        captured["request"] = kwargs["capability_request"]
+        return TurnExecutionResult(
+            mode=TurnExecutionMode.SKILL,
+            status="completed",
+            response="ok",
+        )
+
+    monkeypatch.setattr(
+        "app.services.turn_execution._execute_composite_skill",
+        capture_capability_request,
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        CreateConversationTurnRequest(
+            client_message_id="typed-capability-request",
+            message="规划未来14天的10个选题",
+            requested_skill_code="topic_planning",
+            execution_preference="FORMAL_TASK",
+            attachment_ids=[41, 41, 43],
+        ),
+    )
+
+    assert result.status == "completed"
+    capability_request = captured["request"]
+    assert capability_request.org_id == admin.org_id
+    assert capability_request.user_id == admin.id
+    assert capability_request.account_id == thread.account_id
+    assert capability_request.structured_input == {"days": 14, "topic_count": 10}
+    assert capability_request.attachment_ids == [41, 43]
+    assert run.request_payload["structured_input"] == {"days": 14, "topic_count": 10}
 
 
 @pytest.mark.asyncio

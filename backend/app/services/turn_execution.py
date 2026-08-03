@@ -43,12 +43,14 @@ from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_runtime import skill_input_hash, skill_runtime
 from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import skill_registry
+from app.schemas.capability_request import CapabilityRequest
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
     TurnExecutionResult,
     TurnRouteDecision,
 )
+from app.services.capability_request import build_capability_request
 from app.services.runtime_state import (
     RuntimeEventSpec,
     RuntimeStateScope,
@@ -152,6 +154,19 @@ async def _execute_conversation_turn(
     if thread is None:
         raise PermissionError("conversation Thread is unavailable")
     account = await require_account_access(session, user, thread.account_id)
+    capability_request = build_capability_request(
+        user=user,
+        thread=thread,
+        turn=turn,
+        run=run,
+        request_payload=request.model_dump(mode="python"),
+    )
+    run.request_payload = {
+        **dict(run.request_payload or {}),
+        "structured_input": capability_request.structured_input,
+        "constraints": capability_request.constraints,
+        "attachment_ids": capability_request.attachment_ids,
+    }
     try:
         decision = (
             _route_persisted_skill_run(resume_skill_run)
@@ -301,6 +316,7 @@ async def _execute_conversation_turn(
             turn=turn,
             run=run,
             decision=decision,
+            capability_request=capability_request,
             execution_owner=execution_owner,
             resume_skill_run=resume_skill_run,
         )
@@ -322,9 +338,11 @@ async def _execute_composite_skill(
     turn: ConversationTurn,
     run: AgentRun,
     decision: TurnRouteDecision,
+    capability_request: CapabilityRequest,
     execution_owner: str | None = None,
     resume_skill_run: SkillRun | None = None,
 ) -> TurnExecutionResult:
+    del capability_request  # Task 2 wires this validated request into the Skill input model.
     account_id = thread.account_id
     project_id = thread.project_id
     execution_kwargs: dict[str, Any] = {
