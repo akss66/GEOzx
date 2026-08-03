@@ -1,6 +1,11 @@
-import type { Artifact } from "../../types";
+import {
+  KNOWN_ARTIFACT_TYPES,
+  type Artifact,
+  type ContentArtifactFormat,
+  type KnownArtifactType,
+} from "../../types";
 
-type PrimaryActionKind = "open" | "plan" | "shoot" | "schedule" | "review";
+type PrimaryActionKind = "open";
 type SecondaryActionKind = "edit" | "export" | "regenerate";
 
 export interface DeliverablePresentation {
@@ -16,28 +21,81 @@ const DEFAULT_SECONDARY_ACTIONS: DeliverablePresentation["secondaryActions"] = [
   { kind: "regenerate", label: "重新生成" },
 ];
 
-const PRESENTATIONS: Record<string, DeliverablePresentation> = {
-  account_inspection_report: presentation("账号诊断", "已完成当前账号运营诊断", "open", "查看账号诊断"),
-  account_positioning: presentation("账号定位方案", "已整理当前账号定位方向", "plan", "查看定位方案"),
-  positioning_strategy: presentation("账号定位方案", "已整理当前账号定位方向", "plan", "查看定位方案"),
-  topic_plan: presentation("选题清单", "已规划 5 个可执行选题", "plan", "查看 5 个选题"),
-  video_script: presentation("口播拍摄稿", "已生成 5 条可直接拍摄的口播稿", "open", "查看 5 条拍摄稿"),
-  visual_brief: presentation("视觉拍摄方案", "已整理拍摄画面与素材要求", "shoot", "查看拍摄方案"),
-  art_prompt: presentation("视觉拍摄方案", "已整理拍摄画面与素材要求", "shoot", "查看拍摄方案"),
-  video_asset: presentation("拍摄素材清单", "已整理可用拍摄素材", "shoot", "查看素材清单"),
-  edited_video: presentation("成片制作清单", "已整理剪辑与交付要求", "review", "查看成片清单"),
-  content_calendar: presentation("内容排期表", "已排好未来 7 天内容", "schedule", "查看 7 天排期"),
-  publish_calendar: presentation("发布准备清单", "已完成发布前检查", "review", "查看发布前检查"),
-  platform_publish_receipt: presentation("发布记录", "已记录本次发布结果", "review", "查看发布记录"),
-  review_report: presentation("运营复盘", "已完成本周期数据复盘", "review", "查看复盘建议"),
-  engagement_review: presentation("互动复盘", "已整理近期互动反馈", "review", "查看互动建议"),
-  ad_plan: presentation("投放计划", "已整理投放目标与预算建议", "plan", "查看投放计划"),
-  cs_record: presentation("用户互动记录", "已整理用户反馈与回复建议", "review", "查看互动记录"),
-  operation_execution_plan: presentation("本周运营执行计划", "已整理本周执行步骤", "plan", "查看本周执行计划"),
+const PRESENTATIONS: Partial<Record<KnownArtifactType, DeliverablePresentation>> = {
+  account_inspection_report: fixedPresentation("账号诊断", "已完成当前账号运营诊断"),
+  account_positioning: fixedPresentation("账号定位方案", "已整理当前账号定位方向"),
+  positioning_strategy: fixedPresentation("账号定位方案", "已整理当前账号定位方向"),
+  visual_brief: fixedPresentation("视觉制作说明", "已整理画面与素材要求"),
+  art_prompt: fixedPresentation("视觉制作说明", "已整理画面与素材要求"),
+  video_asset: fixedPresentation("视频素材清单", "已整理可用视频素材"),
+  edited_video: fixedPresentation("成片制作清单", "已整理剪辑与交付要求"),
+  publish_calendar: fixedPresentation("发布准备清单", "已完成发布前检查"),
+  platform_publish_receipt: fixedPresentation("发布记录", "已记录本次发布结果"),
+  review_report: fixedPresentation("运营复盘", "已完成本周期数据复盘"),
+  engagement_review: fixedPresentation("互动复盘", "已整理近期互动反馈"),
+  ad_plan: fixedPresentation("投放计划", "已整理投放目标与预算建议"),
+  cs_record: fixedPresentation("用户互动记录", "已整理用户反馈与回复建议"),
+  operation_execution_plan: fixedPresentation("本周运营执行计划", "已整理本周执行步骤"),
+} satisfies Partial<Record<KnownArtifactType, DeliverablePresentation>>;
+
+const CONTENT_FORMATS: Record<ContentArtifactFormat, string> = {
+  spoken_video: "口播拍摄稿",
+  storyboard: "分镜拍摄稿",
+  product_video: "产品视频拍摄稿",
+  article_post: "图文发布稿",
+  livestream_runbook: "直播流程与话术稿",
 };
 
 export function presentDeliverable(artifact: Artifact): DeliverablePresentation {
-  const presentation = PRESENTATIONS[artifact.artifact_type] ?? genericReportPresentation(artifact);
+  const presentation = artifact.artifact_type === "video_script"
+    ? scriptPresentation(artifact)
+    : artifact.artifact_type === "topic_plan"
+      ? topicPresentation(artifact)
+      : artifact.artifact_type === "content_calendar"
+        ? calendarPresentation(artifact)
+        : isKnownArtifactType(artifact.artifact_type)
+          ? PRESENTATIONS[artifact.artifact_type] ?? genericReportPresentation()
+          : genericReportPresentation();
+  return clonePresentation(presentation);
+}
+
+function fixedPresentation(typeLabel: string, completionLabel: string): DeliverablePresentation {
+  return presentation(typeLabel, completionLabel, `查看${typeLabel}`);
+}
+
+function scriptPresentation(artifact: Artifact): DeliverablePresentation {
+  const typeLabel = contentFormatLabel(artifact.presentation_format);
+  return presentation(typeLabel, `已生成可直接拍摄的${typeLabel}`, `查看${typeLabel}`);
+}
+
+function topicPresentation(artifact: Artifact): DeliverablePresentation {
+  const count = listSectionCount(artifact, "topics");
+  return count == null
+    ? presentation("选题清单", "已完成选题规划", "查看选题清单")
+    : presentation("选题清单", `已规划 ${count} 个可执行选题`, `查看 ${count} 个选题`);
+}
+
+function calendarPresentation(artifact: Artifact): DeliverablePresentation {
+  const days = positiveIntegerSection(artifact, "days", 90);
+  return days == null
+    ? presentation("内容排期表", "已完成内容排期", "查看内容排期")
+    : presentation("内容排期表", `已排好未来 ${days} 天内容`, `查看 ${days} 天排期`);
+}
+
+function genericReportPresentation(): DeliverablePresentation {
+  return presentation("账号运营分析", "已完成账号运营分析", "查看账号运营分析");
+}
+
+function presentation(typeLabel: string, completionLabel: string, label: string): DeliverablePresentation {
+  return {
+    typeLabel,
+    completionLabel,
+    primaryAction: { kind: "open", label },
+    secondaryActions: DEFAULT_SECONDARY_ACTIONS,
+  };
+}
+
+function clonePresentation(presentation: DeliverablePresentation): DeliverablePresentation {
   return {
     ...presentation,
     primaryAction: { ...presentation.primaryAction },
@@ -45,30 +103,27 @@ export function presentDeliverable(artifact: Artifact): DeliverablePresentation 
   };
 }
 
-function presentation(
-  typeLabel: string,
-  completionLabel: string,
-  kind: PrimaryActionKind,
-  label: string,
-): DeliverablePresentation {
-  return {
-    typeLabel,
-    completionLabel,
-    primaryAction: { kind, label },
-    secondaryActions: DEFAULT_SECONDARY_ACTIONS,
-  };
+function listSectionCount(artifact: Artifact, key: string) {
+  const content = artifact.sections.find((section) => section.key === key)?.content;
+  return Array.isArray(content) && content.length > 0 ? content.length : null;
 }
 
-function genericReportPresentation(artifact: Artifact): DeliverablePresentation {
-  const title = artifact.title.replace(/\s+/g, " ").trim();
-  const typeLabel = hasChinese(title) && !title.includes("成果") ? title : "运营工作单";
-  const completionLabel = artifact.sections.length > 0
-    ? `已整理 ${artifact.sections.length} 项运营信息`
-    : "已整理当前运营信息";
-
-  return presentation(typeLabel, completionLabel, "open", "查看运营详情");
+function positiveIntegerSection(artifact: Artifact, key: string, max: number) {
+  const value = artifact.sections.find((section) => section.key === key)?.content;
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim())
+      ? Number(value)
+      : null;
+  return parsed != null && Number.isInteger(parsed) && parsed > 0 && parsed <= max ? parsed : null;
 }
 
-function hasChinese(value: string) {
-  return /[\u3400-\u9fff]/.test(value);
+function isKnownArtifactType(value: Artifact["artifact_type"]): value is KnownArtifactType {
+  return (KNOWN_ARTIFACT_TYPES as readonly string[]).includes(value);
+}
+
+function contentFormatLabel(value: unknown) {
+  return typeof value === "string" && value in CONTENT_FORMATS
+    ? CONTENT_FORMATS[value as ContentArtifactFormat]
+    : CONTENT_FORMATS.storyboard;
 }

@@ -98,12 +98,12 @@ export function TurnArtifact({
           {revisionChain === null ? <span>修订版本校验失败，请重试。</span> : null}
         </>
       ) : null}
-      {state.kind === "loading" ? <span>正在校验成果…</span> : null}
-      {state.kind === "refreshing" ? <span>正在更新成果…</span> : null}
-      {state.kind === "invalid" ? <span>成果校验失败，请重试。</span> : null}
-      {state.kind === "error" ? <span>成果暂时无法加载，请重试。</span> : null}
-      {state.kind === "refresh-invalid" ? <span>成果更新校验失败，已保留已验证版本。</span> : null}
-      {state.kind === "refresh-error" ? <span>成果更新失败，已保留已验证版本。</span> : null}
+      {state.kind === "loading" ? <span>正在校验运营内容…</span> : null}
+      {state.kind === "refreshing" ? <span>正在更新运营内容…</span> : null}
+      {state.kind === "invalid" ? <span>运营内容校验失败，请重试。</span> : null}
+      {state.kind === "error" ? <span>运营内容暂时无法加载，请重试。</span> : null}
+      {state.kind === "refresh-invalid" ? <span>运营内容更新校验失败，已保留已验证版本。</span> : null}
+      {state.kind === "refresh-error" ? <span>运营内容更新失败，已保留已验证版本。</span> : null}
       {(state.kind !== "ready" && state.kind !== "loading" && state.kind !== "refreshing") || revisionChain === null ? (
         <Button size="small" onClick={() => setAttempt((value) => value + 1)}>重试</Button>
       ) : null}

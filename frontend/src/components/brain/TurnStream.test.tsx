@@ -379,7 +379,7 @@ describe("TurnStream", () => {
     const retryTurn = screen.getByTestId("conversation-turn-103");
 
     await waitFor(() => expect(getArtifact).toHaveBeenCalledWith(5001));
-    expect(within(sourceTurn).getByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    expect(within(sourceTurn).getByLabelText("运营内容：账号诊断 · V1")).toBeInTheDocument();
     expect(greetingTurn).not.toHaveTextContent("账号体检报告");
     expect(retryTurn).not.toHaveTextContent("账号体检报告");
   });
@@ -389,7 +389,7 @@ describe("TurnStream", () => {
 
     render(<TurnStream thread={thread} />);
 
-    expect(await screen.findByText("成果校验失败，请重试。")) .toBeInTheDocument();
+    expect(await screen.findByText("运营内容校验失败，请重试。")) .toBeInTheDocument();
     expect(screen.queryByText("账号体检报告")).not.toBeInTheDocument();
   });
 
@@ -413,7 +413,7 @@ describe("TurnStream", () => {
 
     render(<TurnStream thread={mismatchedProjectionThread} />);
 
-    expect(await screen.findByText("成果校验失败，请重试。")).toBeInTheDocument();
+    expect(await screen.findByText("运营内容校验失败，请重试。")).toBeInTheDocument();
     expect(screen.queryByText("账号体检报告")).not.toBeInTheDocument();
   });
 
@@ -421,13 +421,13 @@ describe("TurnStream", () => {
     const callsBefore = vi.mocked(getArtifact).mock.calls.length;
     vi.mocked(getArtifact)
       .mockResolvedValueOnce(artifact)
-      .mockResolvedValueOnce({ ...artifact, title: "已采用的账号体检报告", status: "accepted" });
+      .mockResolvedValueOnce({ ...artifact, title: "已确认的账号体检报告", status: "accepted" });
     const view = render(<TurnStream thread={thread} artifactRefreshKey={0} />);
 
-    await screen.findByText("账号体检报告");
+    await screen.findByLabelText("运营内容：账号诊断 · V1");
     view.rerender(<TurnStream thread={thread} artifactRefreshKey={1} />);
 
-    expect(await screen.findByText("已采用的账号体检报告")).toBeInTheDocument();
+    expect(await screen.findByText("已完成")).toBeInTheDocument();
     expect(getArtifact).toHaveBeenCalledTimes(callsBefore + 2);
   });
 
@@ -448,8 +448,8 @@ describe("TurnStream", () => {
       />,
     );
 
-    expect(await screen.findByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
-    expect(screen.getByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
+    expect(await screen.findByLabelText("运营内容：账号诊断 · V1")).toBeInTheDocument();
+    expect(screen.getByLabelText("运营内容：账号诊断 · V2")).toBeInTheDocument();
     expect(screen.getByText("修订后的最新版本 V2")).toBeInTheDocument();
   });
 
@@ -463,9 +463,9 @@ describe("TurnStream", () => {
       />,
     );
 
-    expect(await screen.findByLabelText("Artifact: 账号体检报告")).toBeInTheDocument();
+    expect(await screen.findByLabelText("运营内容：账号诊断 · V1")).toBeInTheDocument();
     expect(screen.getByText("修订版本校验失败，请重试。")) .toBeInTheDocument();
-    expect(screen.queryByLabelText("Artifact: 不可信修订版")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("运营内容：账号诊断 · V2")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /重\s*试/ })).toBeInTheDocument();
   });
 
@@ -490,7 +490,7 @@ describe("TurnStream", () => {
       />,
     );
 
-    expect(await screen.findByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
+    expect(await screen.findByLabelText("运营内容：账号诊断 · V2")).toBeInTheDocument();
     view.rerender(
       <TurnStream
         thread={thread}
@@ -500,12 +500,12 @@ describe("TurnStream", () => {
       />,
     );
 
-    expect(await screen.findByText("成果更新失败，已保留已验证版本。")) .toBeInTheDocument();
-    const v1Card = screen.getByLabelText("Artifact: 账号体检报告");
-    expect(within(v1Card).getByText("已更新")).toBeInTheDocument();
-    expect(within(v1Card).queryByRole("button", { name: "仅采用报告" })).not.toBeInTheDocument();
+    expect(await screen.findByText("运营内容更新失败，已保留已验证版本。")) .toBeInTheDocument();
+    const v1Card = screen.getByLabelText("运营内容：账号诊断 · V1");
+    expect(within(v1Card).getByText("已完成")).toBeInTheDocument();
+    expect(within(v1Card).queryByRole("button", { name: "确认当前内容" })).not.toBeInTheDocument();
     expect(within(v1Card).queryByRole("button", { name: "提出修改" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Artifact: 账号体检报告（修订版）")).toBeInTheDocument();
+    expect(screen.getByLabelText("运营内容：账号诊断 · V2")).toBeInTheDocument();
   });
 
   it("uses the server Turn order and durable IDs for Turn and projection identity", () => {

@@ -9,8 +9,10 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  acceptArtifact,
   approveToolCall,
   createConversation,
+  getArtifact,
   getBrainTaskRuntime,
   getConversation,
   listBrainTasks,
@@ -24,6 +26,7 @@ import {
 } from "../api/attachments";
 import type {
   Account,
+  Artifact,
   ConversationAgentRun,
   ConversationThread,
   ConversationTurn,
@@ -173,8 +176,37 @@ describe("BrainHome V3 conversation projection", () => {
     expect(await screen.findByText("账号运营周会")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    fireEvent.click(screen.getByRole("button", { name: "成果视图" }));
-    expect(await screen.findByRole("region", { name: "成果中心" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "运营内容视图" }));
+    expect(await screen.findByRole("region", { name: "运营内容中心" })).toBeInTheDocument();
+  });
+
+  it("shows confirmation feedback from an artifact action and retains the safe failure feedback", async () => {
+    const source = presentationArtifact();
+    const turn = {
+      ...persistedTurn(501, "artifact-client", "检查账号", "已完成账号诊断"),
+      projections: [{
+        type: "artifact" as const,
+        turn_id: 501,
+        artifact_id: source.id,
+        artifact_type: source.artifact_type,
+        skill_run_id: source.skill_run_id!,
+        account_id: source.account_id,
+      }],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [turn]));
+    vi.mocked(getArtifact).mockResolvedValue(source);
+    vi.mocked(acceptArtifact).mockResolvedValue({ ...source, status: "accepted" });
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "确认当前内容" }));
+    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(source.id));
+    expect(await screen.findByText("当前运营内容已确认")).toBeInTheDocument();
+
+    vi.mocked(acceptArtifact).mockRejectedValueOnce(new Error("network down"));
+    fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
+    expect(await screen.findByText("网络连接中断，请检查连接后重试。")).toBeInTheDocument();
   });
 
   it("offers a direct return to the latest message after the reader scrolls away", async () => {
@@ -615,6 +647,27 @@ function submission(turn: ConversationTurn): TurnSubmission {
     updated_at: "2026-07-28T00:00:01Z",
   };
   return { turn, run, task_id: null, projections: [] };
+}
+
+function presentationArtifact(): Artifact {
+  return {
+    id: 5001,
+    account_id: 3,
+    thread_id: 81,
+    turn_id: 501,
+    run_id: 7001,
+    skill_run_id: 4001,
+    task_id: null,
+    artifact_type: "account_inspection_report",
+    title: "不应展示的服务端标题",
+    version: 1,
+    status: "ready_for_review",
+    summary: "账号诊断已完成。",
+    sections: [{ key: "core_conclusion", title: "核心结论", content: "建议持续跟进内容表现。" }],
+    evidence_refs: [],
+    quality: null,
+    created_at: "2026-07-28T00:00:00Z",
+  };
 }
 
 function inspectionSkill(): PublicSkill {

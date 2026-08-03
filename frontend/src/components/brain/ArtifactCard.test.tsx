@@ -55,7 +55,9 @@ describe("ArtifactCard", () => {
 
     expect(screen.getByRole("heading", { name: "账号诊断" })).toBeInTheDocument();
     expect(screen.getByText("已完成当前账号运营诊断")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看账号诊断" })).toBeInTheDocument();
+    const viewButton = screen.getByRole("button", { name: "查看账号诊断" });
+    expect(viewButton).toHaveAttribute("aria-expanded", "false");
+    expect(viewButton).toHaveAttribute("aria-controls", "artifact-details-5001-1");
     expect(screen.getByText("V1")).toBeInTheDocument();
     expect(screen.getByText("核心结论")).toBeInTheDocument();
     expect(screen.getByText("数据周期")).toBeInTheDocument();
@@ -123,10 +125,14 @@ describe("ArtifactCard", () => {
     const onAction = vi.fn();
     render(<ArtifactCard artifact={reviewArtifact} onAction={onAction} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "查看账号诊断" }));
+    const viewButton = screen.getByRole("button", { name: "查看账号诊断" });
+    fireEvent.click(viewButton);
+    expect(viewButton).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById("artifact-details-5001-1")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认并继续规划" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并准备下一步建议" }));
     fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
+    expect(screen.getByRole("region", { name: "修改运营内容" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交修改" })).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), {
       target: { value: "请补充三个可执行选题。" },
@@ -143,6 +149,7 @@ describe("ArtifactCard", () => {
     });
     expect(screen.queryByText(/采用成果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/正式成果/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("修改成果")).not.toBeInTheDocument();
   });
 
   it("shows one status and a separate V2 progress row while a revision is pending", () => {

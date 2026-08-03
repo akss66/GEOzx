@@ -26,12 +26,13 @@ import {
 import { presentApiError } from "../api/errors";
 import { getWorkspaceContext } from "../api/shell";
 import { AgentAvatar } from "../components/agents/AgentAvatar";
-import { ArtifactCard, businessArtifactTitle, type ArtifactAction } from "../components/brain/ArtifactCard";
+import { ArtifactCard, type ArtifactAction } from "../components/brain/ArtifactCard";
 import { ArtifactCenter } from "../components/brain/ArtifactCenter";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import type { DraftAttachment } from "../components/brain/AttachmentTray";
 import { ConversationHistoryDrawer } from "../components/brain/ConversationHistoryDrawer";
 import { TurnStream } from "../components/brain/TurnStream";
+import { presentDeliverable } from "../components/brain/deliverablePresentation";
 import {
   applyConversationEvent,
   appendOptimisticTurn,
@@ -351,7 +352,7 @@ export default function BrainHome() {
       acceptArtifact(input.sourceArtifact.id),
     onSuccess: (accepted, input) => {
       if (!matchesArtifactResponse(accepted, input.sourceArtifact, "accept")) {
-        message.error("成果返回校验失败，请重试。");
+        message.error("运营内容返回校验失败，请重试。");
         return;
       }
       setArtifactRevisionChains((current) => updateExistingArtifactChain(current, accepted));
@@ -371,10 +372,10 @@ export default function BrainHome() {
         });
       }
       if (input.createNextStep) setGoal(nextStepGoal(accepted));
-      message.success("报告已采用");
+      message.success(input.createNextStep ? "已确认，已准备下一步运营建议" : "当前运营内容已确认");
     },
     onError: (error) => message.error(
-      presentApiError(error, "报告采用失败，请稍后重试。").message,
+      presentApiError(error, "确认当前运营内容失败，请稍后重试。").message,
     ),
   });
 
@@ -390,7 +391,7 @@ export default function BrainHome() {
     }),
     onSuccess: (revision, input) => {
       if (!matchesArtifactResponse(revision, input.sourceArtifact, "revision")) {
-        message.error("修订成果校验失败，请重试。");
+        message.error("修订运营内容校验失败，请重试。");
         return;
       }
       setArtifactRevisionChains((current) =>
@@ -732,7 +733,7 @@ export default function BrainHome() {
         queryKey: ["brain-conversation", target.threadId],
         queryFn: () => getConversation(target.threadId),
       }).then(() => setSourceReturnTarget(target)).catch(() => {
-        setSourceReturnError("来源对话暂时无法加载，请在成果中心重试。");
+        setSourceReturnError("来源对话暂时无法加载，请在运营内容中心重试。");
       });
       return;
     }
@@ -746,7 +747,7 @@ export default function BrainHome() {
       return;
     }
     if (conversationQuery.isError) {
-      setSourceReturnError("来源对话暂时无法加载，请在成果中心重试。");
+      setSourceReturnError("来源对话暂时无法加载，请在运营内容中心重试。");
       setSourceReturnTarget(null);
       return;
     }
@@ -756,12 +757,12 @@ export default function BrainHome() {
       source.id !== sourceReturnTarget.threadId
       || source.account_id !== sourceReturnTarget.accountId
     ) {
-      setSourceReturnError("来源对话与当前成果不匹配，请在成果中心重试。");
+      setSourceReturnError("来源对话与当前运营内容不匹配，请在运营内容中心重试。");
       setSourceReturnTarget(null);
       return;
     }
     if (!source.turns.some((turn) => turn.id === sourceReturnTarget.turnId)) {
-      setSourceReturnError("来源对话未包含该成果所在轮次，请在成果中心重试。");
+      setSourceReturnError("来源对话未包含该运营内容所在轮次，请在运营内容中心重试。");
       setSourceReturnTarget(null);
       return;
     }
@@ -917,7 +918,7 @@ export default function BrainHome() {
                   && selectedArtifact.account_id === effectiveAccount?.id ? (
                     <section
                       className="tz-artifact-center__detail"
-                      aria-label="Artifact detail"
+                      aria-label="运营内容详情"
                     >
                       <ArtifactCard
                         artifact={selectedArtifact}
@@ -1112,9 +1113,9 @@ function ContextStrip({
             type={workspaceMode === "results" ? "primary" : "text"}
             size="small"
             onClick={() => onWorkspaceModeChange("results")}
-            aria-label="成果视图"
+            aria-label="运营内容视图"
           >
-            成果
+            运营内容
           </Button>
         </div>
         <Tag style={{ marginInlineEnd: 0 }}>抖音</Tag>
@@ -1255,7 +1256,7 @@ function buildArtifactRevisionPayload(artifact: Artifact): Record<string, unknow
 }
 
 function nextStepGoal(artifact: Artifact) {
-  return `已采用《${businessArtifactTitle(artifact)}》（成果 #${artifact.id}）。请基于该报告提出下一步执行建议。`;
+  return `已确认${presentDeliverable(artifact).typeLabel}（编号 #${artifact.id}）。请生成下一步运营建议。`;
 }
 
 function asRuntimePayload(payload: DyEvent["payload"]) {

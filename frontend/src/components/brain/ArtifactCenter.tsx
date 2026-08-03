@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { listArtifacts } from "../../api/brain";
 import type { Artifact, ArtifactStatus } from "../../types";
+import { presentDeliverable } from "./deliverablePresentation";
 
 type Filters = {
   artifactType: string;
@@ -21,10 +22,10 @@ const INITIAL_FILTERS: Filters = {
 
 const STATUS_OPTIONS: Array<{ value: ArtifactStatus; label: string }> = [
   { value: "draft", label: "草稿" },
-  { value: "ready_for_review", label: "待采用" },
-  { value: "accepted", label: "已采用" },
-  { value: "revision_requested", label: "修改中" },
-  { value: "superseded", label: "已更新" },
+  { value: "ready_for_review", label: "待你确认" },
+  { value: "accepted", label: "已完成" },
+  { value: "revision_requested", label: "需要修改" },
+  { value: "superseded", label: "已完成" },
 ];
 
 const ARTIFACT_TYPE_OPTIONS = [
@@ -95,21 +96,21 @@ export function ArtifactCenter({
   };
 
   if (accountId == null) {
-    return <section className="tz-artifact-center" aria-label="成果中心">请先选择账号，再查看该账号的正式成果。</section>;
+    return <section className="tz-artifact-center" aria-label="运营内容中心">请先选择账号，再查看该账号的运营内容。</section>;
   }
 
   return (
-    <section className="tz-artifact-center" aria-label="成果中心">
+    <section className="tz-artifact-center" aria-label="运营内容中心">
       <header className="tz-artifact-center__header">
         <div>
           <span>当前账号</span>
-          <h2>成果中心</h2>
+          <h2>运营内容中心</h2>
         </div>
         <small>{filters.createdFrom || filters.createdTo ? "仅筛当前页" : `第 ${page} 页`}</small>
       </header>
-      <div className="tz-artifact-center__filters" aria-label="成果筛选">
+      <div className="tz-artifact-center__filters" aria-label="运营内容筛选">
         <label>
-          成果类型
+          内容类型
           <select value={filters.artifactType} onChange={(event) => updateFilter("artifactType", event.target.value)}>
             <option value="">全部类型</option>
             {ARTIFACT_TYPE_OPTIONS.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
@@ -132,24 +133,24 @@ export function ArtifactCenter({
         </label>
       </div>
 
-      {query.isPending ? <p role="status">正在加载成果…</p> : null}
+      {query.isPending ? <p role="status">正在加载运营内容…</p> : null}
       {query.isError ? (
         <div className="tz-artifact-center__error" role="alert">
-          <p>成果暂时无法加载，请重试。</p>
-          <Button onClick={() => void query.refetch()} aria-label="重试加载成果">重新加载</Button>
+          <p>运营内容暂时无法加载，请重试。</p>
+          <Button onClick={() => void query.refetch()} aria-label="重试加载运营内容">重新加载</Button>
         </div>
       ) : null}
       {!query.isPending && !query.isError && visibleArtifacts.length === 0 ? (
-        <p className="tz-artifact-center__empty">当前账号下没有符合筛选条件的成果。</p>
+        <p className="tz-artifact-center__empty">当前账号下没有符合筛选条件的运营内容。</p>
       ) : null}
       <div className="tz-artifact-center__list">
         {visibleArtifacts.map((artifact) => (
           <article key={artifact.id} className="tz-artifact-center__row">
             <div>
-              <strong>{artifact.title}</strong>
-              <span>{artifactTypeLabel(artifact.artifact_type)} · V{artifact.version} · {statusLabel(artifact.status)}</span>
+              <strong>{presentDeliverable(artifact).typeLabel}</strong>
+              <span>V{artifact.version} · {statusLabel(artifact.status)}</span>
             </div>
-            <Button onClick={() => onSelect(artifact)} aria-label={`打开成果：${artifact.title}`}>查看</Button>
+            <Button onClick={() => onSelect(artifact)} aria-label={`打开运营内容：${presentDeliverable(artifact).typeLabel}`}>查看</Button>
           </article>
         ))}
       </div>
@@ -168,10 +169,6 @@ export function ArtifactCenter({
       ) : null}
     </section>
   );
-}
-
-function artifactTypeLabel(value: string) {
-  return ARTIFACT_TYPE_OPTIONS.find((option) => option.value === value)?.label ?? "其他成果";
 }
 
 function statusLabel(value: ArtifactStatus) {

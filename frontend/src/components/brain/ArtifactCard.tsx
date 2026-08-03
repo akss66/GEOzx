@@ -91,7 +91,7 @@ export function ArtifactCard({
   const editAction = presentation.secondaryActions.find((action) => action.kind === "edit");
 
   return (
-    <article className="tz-artifact-card" aria-label={`运营内容：${presentation.typeLabel}`}>
+    <article className="tz-artifact-card" aria-label={`运营内容：${presentation.typeLabel} · V${artifact.version}`}>
       <header className="tz-artifact-card__header">
         <div>
           <span className="tz-artifact-card__eyebrow">版本 · <strong>V{artifact.version}</strong></span>
@@ -115,14 +115,20 @@ export function ArtifactCard({
         调用专家 / 依据：{evidenceSummary.total > 0 ? `已核验 ${evidenceSummary.total} 条依据` : "暂无额外可核查依据"}
       </p>
 
-      {fullReportOpen && remainingSections.length > 0 ? (
-        <div className="tz-artifact-card__sections tz-artifact-card__sections--remaining">
+      <div
+        id={`artifact-details-${artifact.id}-${artifact.version}`}
+        className="tz-artifact-card__sections tz-artifact-card__sections--remaining"
+        hidden={!fullReportOpen}
+      >
+        {remainingSections.length > 0 ? (
+          <>
           {remainingSections.map((section) => <BusinessSection key={section.key} section={section} />)}
-        </div>
-      ) : null}
+          </>
+        ) : null}
+      </div>
 
       <div className="tz-artifact-card__actions">
-        <Button onClick={() => {
+        <Button type="primary" aria-expanded={fullReportOpen} aria-controls={`artifact-details-${artifact.id}-${artifact.version}`} onClick={() => {
           setFullReportOpen((open) => !open);
           onAction({ type: "view_full_report", artifact });
         }}>
@@ -130,15 +136,15 @@ export function ArtifactCard({
         </Button>
         {canAct ? <>
           <Button onClick={() => onAction({ type: "accept", artifact })}>确认当前内容</Button>
-          <Button type="primary" onClick={() => onAction({ type: "accept_and_continue", artifact })}>
-            确认并继续规划
+          <Button onClick={() => onAction({ type: "accept_and_continue", artifact })}>
+            确认并准备下一步建议
           </Button>
           <Button onClick={() => setEditingRevision((open) => !open)}>{editAction?.label ?? "提出修改"}</Button>
         </> : null}
       </div>
 
       {editingRevision ? (
-        <section className="tz-artifact-card__revision" aria-label="修改成果">
+        <section className="tz-artifact-card__revision" aria-label="修改运营内容">
           <Input.TextArea
             aria-label="修改说明"
             value={revisionNote}
@@ -245,6 +251,7 @@ function BusinessSection({ section }: { section: ArtifactSection }) {
 
 function renderContent(content: ArtifactSection["content"]) {
   if (typeof content === "string") return isSafeText(content) ? safeText(content) : "—";
+  if (typeof content === "number" || typeof content === "boolean") return String(content);
   if (Array.isArray(content)) {
     const items = content.map((item) => renderBusinessValue(item)).filter(Boolean);
     return items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : "—";

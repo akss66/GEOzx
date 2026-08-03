@@ -531,7 +531,7 @@ export interface SkillRun {
 export interface ArtifactSection {
   key: string;
   title: string;
-  content: string | unknown[] | Record<string, unknown>;
+  content: string | number | boolean | unknown[] | Record<string, unknown>;
 }
 
 export interface ArtifactEvidenceRef {
@@ -564,6 +564,35 @@ export type ArtifactStatus =
   | "revision_requested"
   | "superseded";
 
+export const KNOWN_ARTIFACT_TYPES = [
+  "account_inspection_report",
+  "account_positioning",
+  "positioning_strategy",
+  "topic_plan",
+  "video_script",
+  "visual_brief",
+  "art_prompt",
+  "video_asset",
+  "edited_video",
+  "content_calendar",
+  "publish_calendar",
+  "platform_publish_receipt",
+  "review_report",
+  "engagement_review",
+  "ad_plan",
+  "cs_record",
+  "operation_execution_plan",
+] as const;
+
+export type KnownArtifactType = typeof KNOWN_ARTIFACT_TYPES[number];
+
+export type ContentArtifactFormat =
+  | "spoken_video"
+  | "storyboard"
+  | "product_video"
+  | "article_post"
+  | "livestream_runbook";
+
 export interface Artifact {
   id: number;
   account_id: number;
@@ -572,7 +601,8 @@ export interface Artifact {
   run_id: number | null;
   skill_run_id: number | null;
   task_id: number | null;
-  artifact_type: string;
+  artifact_type: KnownArtifactType | (string & {});
+  presentation_format?: ContentArtifactFormat | null;
   title: string;
   version: number;
   status: ArtifactStatus;
