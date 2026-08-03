@@ -38,7 +38,7 @@ class SkillRun(Base, TimestampMixin):
         ),
         CheckConstraint(
             "status IN ("
-            "'running', 'retry_wait', 'waiting_permission', 'completed', "
+            "'running', 'retry_wait', 'waiting_permission', 'needs_review', 'completed', "
             "'blocked', 'failed', 'cancelled', 'stopped'"
             ")",
             name="ck_skill_runs_status",

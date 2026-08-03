@@ -23,6 +23,7 @@ from app.models.enums import (
     AccountStatus,
     AgentCode,
     AgentInvocationStatus,
+    DeliverableStatus,
     Platform,
     UserRole,
 )
@@ -278,31 +279,35 @@ async def test_bounded_stage_waits_for_all_failures_before_raising():
 
 
 @pytest.mark.parametrize(
-    ("skill_code", "message", "artifact_type", "expert_codes"),
+    ("skill_code", "message", "artifact_type", "expert_codes", "expected_status"),
     [
         (
             "topic_planning",
             "给我策划未来一周的五个选题",
             "topic_plan",
             [AgentCode.CONTENT_DIRECTOR],
+            "completed",
         ),
         (
             "script_generation",
             "写一个玻璃贴膜避坑短视频脚本",
             "video_script",
             [AgentCode.CONTENT_DIRECTOR],
+            "completed",
         ),
         (
             "publishing_preparation",
             "给这个内容生成发布前检查清单",
             "publish_calendar",
             [AgentCode.OPERATOR],
+            "waiting_permission",
         ),
         (
             "performance_review",
             "复盘最近30天的账号表现",
             "review_report",
             [AgentCode.OPERATOR, AgentCode.CONTENT_DIRECTOR],
+            "completed",
         ),
     ],
 )
@@ -314,6 +319,7 @@ async def test_operating_skill_executes_bounded_experts_and_persists_artifact(
     message,
     artifact_type,
     expert_codes,
+    expected_status,
 ) -> None:
     account, thread, turn, run = await _scope(
         session,
@@ -333,7 +339,7 @@ async def test_operating_skill_executes_bounded_experts_and_persists_artifact(
         skill_code=skill_code,
     )
 
-    assert result.status == "completed"
+    assert result.status == expected_status
     assert result.artifact_type == artifact_type
     assert result.artifact_id is not None
     assert result.report["account_id"] == account.id
@@ -496,6 +502,84 @@ async def test_publishing_preparation_executes_declared_prepare_tool(session, ad
             select(AgentToolCall).where(AgentToolCall.skill_run_id == result.skill_run_id)
         )
     )
+    assert result.status == "waiting_permission"
     assert [(call.tool_code, call.status) for call in calls] == [
-        ("publish_package_prepare", "success")
+        ("publish_package_prepare", "waiting_approval")
     ]
+    assert calls[0].requires_human_confirmation is True
+    assert calls[0].permission_mode == "confirm"
+    skill_run = await session.get(SkillRun, result.skill_run_id)
+    assert skill_run is not None
+    assert skill_run.status == "waiting_permission"
+    await session.refresh(run)
+    await session.refresh(turn)
+    assert run.status == "waiting_permission"
+    assert turn.status == "waiting_permission"
+
+
+@pytest.mark.parametrize(
+    ("approved", "expected_runtime_status", "expected_deliverable_status"),
+    [
+        (True, "completed", DeliverableStatus.APPROVED),
+        (False, "blocked", DeliverableStatus.REJECTED),
+    ],
+)
+@pytest.mark.asyncio
+async def test_publishing_finish_approval_converges_typed_skill_without_legacy_resume(
+    client,
+    session,
+    admin,
+    approved,
+    expected_runtime_status,
+    expected_deliverable_status,
+) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key=f"publishing-finish-approval-{approved}",
+        message="为这条内容生成发布准备包",
+    )
+    result = await SkillRuntime(tool_executor=_Tools(), harness=_Harness()).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="publishing_preparation",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="publishing_preparation",
+            structured_input={},
+        ),
+    )
+    call = await session.scalar(
+        select(AgentToolCall).where(AgentToolCall.skill_run_id == result.skill_run_id)
+    )
+    assert call is not None
+    login = await client.post(
+        "/auth/login",
+        json={"email": "admin@test.com", "password": "admin-pw-123"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    response = await client.post(
+        f"/brain/tool-calls/{call.id}/approve",
+        headers=headers,
+        json={"approved": approved, "comment": "人工审批结论"},
+    )
+
+    assert response.status_code == 200
+    await session.refresh(run)
+    await session.refresh(turn)
+    skill_run = await session.get(SkillRun, result.skill_run_id)
+    deliverable = await session.get(Deliverable, result.artifact_id)
+    assert skill_run is not None
+    assert deliverable is not None
+    assert run.status == expected_runtime_status
+    assert turn.status == expected_runtime_status
+    assert skill_run.status == expected_runtime_status
+    assert deliverable.status is expected_deliverable_status

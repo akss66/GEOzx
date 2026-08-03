@@ -46,6 +46,7 @@ SKILL_RUN_STATUSES = frozenset(
         "running",
         "retry_wait",
         "waiting_permission",
+        "needs_review",
         "completed",
         "blocked",
         "failed",
@@ -81,6 +82,7 @@ class RuntimeStateScope:
     content_item_id: int | None = None
     result_payload: dict[str, Any] | None = None
     skill_output_snapshot: dict[str, Any] | None = None
+    skill_status_override: str | None = None
     intent: dict[str, Any] | None = None
     error_detail: str | None = None
     response_streamed: bool = False
@@ -212,7 +214,9 @@ async def close_runtime_state(
                 and family == "active"
             )
             if not preserve_terminal_skill:
-                skill_run.status = _skill_status(effective_status)
+                skill_run.status = _skill_status(
+                    scope.skill_status_override or effective_status
+                )
                 skill_run.error_code = effective_error
                 if scope.skill_output_snapshot is not None and not replaying_terminal:
                     skill_run.output_snapshot = scope.skill_output_snapshot

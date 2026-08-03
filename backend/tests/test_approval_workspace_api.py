@@ -1,12 +1,13 @@
 import pytest
 from sqlalchemy import select
 
-from app.core.approval_access import task_project_ids
+from app.core.approval_access import require_task_approval_access, task_project_ids
 from app.models import (
     Account,
     AgentToolCall,
     BrainTask,
     Client,
+    ClientMembership,
     ComplianceCheck,
     ContentItem,
     Deliverable,
@@ -71,6 +72,56 @@ async def test_task_project_ids_fall_back_to_account_scope_when_content_has_no_p
     await session.commit()
 
     assert await task_project_ids(session, task) == {project.id}
+
+
+@pytest.mark.asyncio
+async def test_projectless_skill_owner_can_approve_after_account_scope_is_verified(
+    session, admin, member
+) -> None:
+    workspace_client = Client(org_id=admin.org_id, name="Account-only client")
+    session.add(workspace_client)
+    await session.flush()
+    account = Account(
+        org_id=admin.org_id,
+        client_id=workspace_client.id,
+        platform=Platform.DOUYIN,
+        nickname="Account-only approval",
+    )
+    session.add(account)
+    await session.flush()
+    content = ContentItem(
+        project_id=None,
+        account_id=account.id,
+        created_by_id=member.id,
+        title="Projectless Skill output",
+    )
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=member.id,
+        content_item_id=None,
+        title="Projectless Skill approval",
+    )
+    session.add_all(
+        [
+            content,
+            task,
+            ClientMembership(
+                client_id=workspace_client.id,
+                user_id=member.id,
+                role=WorkspaceRole.REVIEWER,
+            ),
+        ]
+    )
+    await session.flush()
+    task.content_item_id = content.id
+    task.brief = TaskBrief(
+        goal="Confirm account-scoped Skill",
+        account_ids=[account.id],
+        platforms=["douyin"],
+    )
+    await session.commit()
+
+    assert await require_task_approval_access(session, member, task) is None
 
 
 async def _approval_data(admin, member, session):

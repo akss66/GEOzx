@@ -111,6 +111,11 @@ async def require_task_approval_access(
     if user.role == UserRole.ADMIN:
         return visible_project_id
     if not project_ids:
+        account_ids = await task_account_ids(session, task)
+        if task.created_by_id == user.id and account_ids:
+            for account_id in account_ids:
+                await require_account_access(session, user, account_id)
+            return None
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="该审批没有可验证的项目上下文",

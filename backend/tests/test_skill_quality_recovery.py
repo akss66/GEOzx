@@ -71,7 +71,7 @@ async def test_required_generic_skill_cannot_bypass_failed_quality_gate(
     )
 
     assert critic.calls == 1
-    assert result.status == "completed"
+    assert result.status == "needs_review"
     assert result.artifact_id is not None
     deliverable = await session.get(Deliverable, result.artifact_id)
     assert deliverable is not None
@@ -143,7 +143,7 @@ async def test_required_generic_skill_failed_quality_gate_is_terminal_and_idempo
         skill_code="topic_planning",
     )
 
-    assert first.status == "completed"
+    assert first.status == "needs_review"
     assert first.artifact_id is not None
     assert duplicate == first
     assert critic.calls == 1
@@ -151,6 +151,7 @@ async def test_required_generic_skill_failed_quality_gate_is_terminal_and_idempo
     assert harness.calls == [required.expert_stages[0][0]]
     skill_run = await session.scalar(select(SkillRun).where(SkillRun.id == first.skill_run_id))
     assert skill_run is not None
+    assert skill_run.status == "needs_review"
     assert skill_run.quality_score == Decimal("0.55")
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
 

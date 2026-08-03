@@ -483,7 +483,7 @@ async def test_account_inspection_critic_retry_budget_delivers_for_human_review(
         days=30,
     )
 
-    assert result.status == "completed"
+    assert result.status == "needs_review"
     assert result.error_code is None
     assert result.artifact_id is not None
     assert result.report["critic"]["passed"] is False

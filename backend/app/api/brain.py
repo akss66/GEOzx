@@ -117,6 +117,10 @@ from app.services.agent_runs import (
 )
 from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.publishing import sync_publish_jobs_after_approval
+from app.services.skill_approvals import (
+    SkillApprovalConflict,
+    finalize_skill_finish_approval,
+)
 
 router = APIRouter(prefix="/brain", tags=["brain"])
 log = logging.getLogger("dyflow.brain")
@@ -1711,8 +1715,24 @@ async def approve_tool_call(
         approved=body.approved,
         comment=body.comment,
     )
+    try:
+        skill_finish_handled = await finalize_skill_finish_approval(
+            session,
+            tool_call=tool_call,
+            task=task,
+            approved=body.approved,
+            comment=body.comment,
+        )
+    except SkillApprovalConflict as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     await session.commit()
     await session.refresh(tool_call)
+    if skill_finish_handled:
+        return AgentToolCallOut.model_validate(tool_call)
     remaining_permission = await session.scalar(
         select(AgentToolCall.id).where(
             AgentToolCall.task_id == task.id,

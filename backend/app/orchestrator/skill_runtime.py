@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.approval_audit import add_approval_requested
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.models import (
     AgentInvocation,
@@ -302,6 +303,7 @@ class SkillRuntime:
             "stopped",
             "waiting_permission",
             "waiting_user",
+            "needs_review",
         }:
             return self._existing_result(existing)
         recovering = False
@@ -960,6 +962,56 @@ class SkillRuntime:
             ),
         )
         content.status = ContentStatus.DRAFT
+        if definition.approval_policy == "before_finish":
+            approval_call = await session.scalar(
+                select(AgentToolCall)
+                .where(
+                    AgentToolCall.skill_run_id == skill_run.id,
+                    AgentToolCall.status == "success",
+                )
+                .order_by(AgentToolCall.id.desc())
+            )
+            if approval_call is None:
+                raise SkillRecoveryConflict("SKILL_FINISH_APPROVAL_TOOL_MISSING")
+            approval_call.status = "waiting_approval"
+            approval_call.permission_mode = "confirm"
+            approval_call.requires_human_confirmation = True
+            approval_call.meta = {
+                **(approval_call.meta or {}),
+                "approval_stage": "before_finish",
+                "artifact_id": deliverable.id,
+            }
+            await add_approval_requested(
+                session,
+                org_id=task.org_id,
+                project_id=thread.project_id,
+                content_item_id=task.content_item_id,
+                approval_kind="skill_finish",
+                source_id=approval_call.id,
+                title=f"{definition.name}待确认",
+                body="发布准备包已经生成，确认后本次 Skill 才会完成。",
+            )
+            output = {
+                "status": "waiting_permission",
+                "task_id": task.id,
+                "artifact_id": deliverable.id,
+                "artifact_type": definition.artifact_type or definition.code,
+                "report": report,
+                "response": f"{definition.name}已生成，等待你确认后完成。",
+                "approval_tool_call_id": approval_call.id,
+            }
+            await self._close_skill_state(
+                session,
+                thread=thread,
+                turn=turn,
+                run=run,
+                task=task,
+                skill_run=skill_run,
+                status="waiting_permission",
+                response=output["response"],
+                output_snapshot=output,
+            )
+            return self._existing_result(skill_run)
         output = {
             "status": "completed",
             "task_id": task.id,
@@ -1020,7 +1072,7 @@ class SkillRuntime:
             skill_run.quality_score = Decimal(str(quality_score / 100))
         await session.flush()
         output = {
-            "status": "completed",
+            "status": "needs_review",
             "task_id": task.id,
             "artifact_id": deliverable.id,
             "artifact_type": definition.artifact_type or definition.code,
@@ -1038,6 +1090,7 @@ class SkillRuntime:
             status="completed",
             response=output["response"],
             output_snapshot=output,
+            skill_status="needs_review",
         )
         return SkillRuntime._existing_result(skill_run)
 
@@ -1421,7 +1474,7 @@ class SkillRuntime:
 
         skill_run.quality_score = Decimal(str(report.critic.score / 100))
         output_snapshot = {
-            "status": "completed",
+            "status": "needs_review",
             "task_id": task.id,
             "artifact_id": deliverable.id,
             "artifact_type": "account_inspection_report",
@@ -1441,6 +1494,7 @@ class SkillRuntime:
             status="completed",
             response=output_snapshot["response"],
             output_snapshot=output_snapshot,
+            skill_status="needs_review",
         )
         return SkillRuntime._existing_result(skill_run)
 
@@ -1514,6 +1568,7 @@ class SkillRuntime:
         response: str,
         output_snapshot: dict[str, Any],
         error_code: str | None = None,
+        skill_status: str | None = None,
     ) -> None:
         if thread is None:
             raise RuntimeError("Skill execution ConversationThread disappeared")
@@ -1563,6 +1618,7 @@ class SkillRuntime:
                     "error_code": error_code,
                 },
                 skill_output_snapshot=output_snapshot,
+                skill_status_override=skill_status,
             ),
             status=status,
             message=response,
