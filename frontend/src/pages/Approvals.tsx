@@ -83,10 +83,9 @@ export default function Approvals() {
     qc.invalidateQueries({ queryKey: ["approval-workspace"] });
   });
 
-  const items = query.data?.items ?? [];
   const visibleItems = useMemo(
-    () => filterApprovalItems(items, filter),
-    [filter, items],
+    () => filterApprovalItems(query.data?.items ?? [], filter),
+    [filter, query.data?.items],
   );
 
   useEffect(() => {

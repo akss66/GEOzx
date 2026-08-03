@@ -99,18 +99,20 @@ export default function Knowledge() {
     );
   }, [entriesQuery.data, search]);
   const suggestions = suggestionsQuery.data ?? [];
+  const firstEntryId = entries[0]?.id ?? null;
+  const firstSuggestionId = suggestions[0]?.id ?? null;
   const selectedEntry = entries.find((item) => item.id === selectedEntryId) ?? entries[0] ?? null;
   const selectedSuggestion = suggestions.find((item) => item.id === selectedSuggestionId)
     ?? suggestions[0]
     ?? null;
 
   useEffect(() => {
-    setSelectedEntryId(entries[0]?.id ?? null);
+    setSelectedEntryId(firstEntryId);
     setEditing(null);
-  }, [category, client?.id, project?.id, entries[0]?.id]);
+  }, [category, client?.id, firstEntryId, project?.id]);
   useEffect(() => {
-    setSelectedSuggestionId(suggestions[0]?.id ?? null);
-  }, [client?.id, project?.id, suggestions[0]?.id]);
+    setSelectedSuggestionId(firstSuggestionId);
+  }, [client?.id, firstSuggestionId, project?.id]);
 
   const citationsQuery = useQuery({
     queryKey: ["knowledge-citations", selectedEntry?.id, client?.id, project?.id],

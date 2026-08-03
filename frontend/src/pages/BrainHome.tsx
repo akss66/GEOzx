@@ -163,6 +163,7 @@ export default function BrainHome() {
   });
 
   const effectiveAccount = activeAccount;
+  const effectiveAccountId = effectiveAccount?.id ?? null;
   const accountReady = Boolean(
     effectiveAccount
     && (
@@ -173,14 +174,14 @@ export default function BrainHome() {
 
   useEffect(() => {
     setActiveConversationThreadId(
-      effectiveAccount ? getActiveConversationThreadId(effectiveAccount.id) : null,
+      effectiveAccountId != null ? getActiveConversationThreadId(effectiveAccountId) : null,
     );
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     setSelectedArtifact(null);
     setSourceReturnTarget(null);
     setSourceReturnError(null);
-  }, [effectiveAccount?.id]);
+  }, [effectiveAccountId]);
 
   const conversationQuery = useQuery({
     queryKey: ["brain-conversation", activeConversationThreadId],

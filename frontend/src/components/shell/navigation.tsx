@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- the menu builder is a tested shell contract */
 import {
   ApiOutlined,
   AppstoreOutlined,

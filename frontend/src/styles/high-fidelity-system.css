@@ -4,36 +4,6 @@
  * while making every module speak the same visual language as the approved UI.
  */
 
-:root {
-  --dy-canvas: var(--tz-work-canvas);
-  --dy-canvas-soft: #fbfaf7;
-  --dy-surface: var(--tz-surface);
-  --dy-elevated: #fbfaf7;
-  --dy-sidebar: var(--tz-brand-frame);
-  --dy-toolbar: rgba(247, 247, 244, 0.96);
-  --dy-border: var(--tz-line);
-  --dy-border-subtle: var(--tz-line-subtle);
-  --dy-border-strong: #cbc4b9;
-  --dy-text: var(--tz-ink);
-  --dy-muted: var(--tz-muted);
-  --dy-faint: var(--tz-faint);
-  --dy-accent: var(--tz-brand-red);
-  --dy-accent-hover: var(--tz-brand-red-hover);
-  --dy-radius-sm: 6px;
-  --dy-radius-md: 8px;
-  --dy-radius-lg: 10px;
-  --dy-radius-xl: 12px;
-  --dy-shadow: none;
-  --tz-header-height: 64px;
-  --tz-paper: #fff;
-  --tz-paper-warm: #f7f3ed;
-  --tz-red: var(--tz-brand-red);
-  --tz-ink-muted: var(--tz-muted);
-  --tz-ink-faint: var(--tz-faint);
-  --tz-radius-lg: 10px;
-  --tz-shadow-sm: 0 5px 18px rgba(42, 35, 27, 0.07);
-}
-
 html,
 body,
 #root {

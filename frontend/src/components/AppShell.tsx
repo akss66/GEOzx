@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- shell constants and route helpers are tested public contracts */
 import {
   LogoutOutlined,
   MenuOutlined,

@@ -565,6 +565,10 @@
   color: var(--tz-muted);
 }
 
+.tz-command-input:focus-within {
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--tz-brand-red) 55%, transparent);
+}
+
 .tz-command-input input {
   width: 100%;
   border: 0;

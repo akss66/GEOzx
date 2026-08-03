@@ -15,7 +15,7 @@ export const DESIGN_TOKENS = {
   ink: "#171614",
   inkSoft: "#4A4640",
   muted: "#666159",
-  faint: "#827C73",
+  faint: "#6F695F",
   line: "#DDD8CF",
   lineSubtle: "#EBE7DF",
   success: "#2B8152",
