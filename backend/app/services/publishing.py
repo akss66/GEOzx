@@ -7,6 +7,7 @@ external action is allowed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -30,6 +31,8 @@ from app.models import (
     Account,
     AccountClient,
     AgentToolCall,
+    ContentItem,
+    Deliverable,
     Event,
     MaterialAsset,
     PlatformAccountAuth,
@@ -43,11 +46,13 @@ from app.models.enums import (
     AccountStatus,
     ContentIdentityConfidence,
     DataSourceKind,
+    DeliverableStatus,
     MaterialStatus,
     Platform,
     WorkspaceRole,
 )
 from app.models.publishing import PlatformPublishJob, PlatformPublishJobStatus
+from app.schemas.orchestrator import PublishPackageOut
 from app.schemas.publishing import (
     CreatePublishJobRequest,
     DouyinCreateVideoCallback,
@@ -74,6 +79,179 @@ class PublishingServiceError(RuntimeError):
         self.retryable = retryable
         self.status_code = status_code
         self.details = details or {}
+
+
+_CONNECTION_ERROR_CODES = frozenset(
+    {
+        "DOUYIN_H5_PUBLISH_DISABLED",
+        "DOUYIN_APP_NOT_CONFIGURED",
+        "DOUYIN_ACCOUNT_NOT_AUTHORIZED",
+        "DOUYIN_PUBLISH_SCOPE_MISSING",
+    }
+)
+
+
+async def publish_approved_artifact(
+    session: AsyncSession,
+    user: User,
+    *,
+    account_id: int,
+    artifact_id: int,
+    artifact_version: int,
+    scheduled_at: datetime | None,
+    visibility: str,
+    allow_comment: bool,
+) -> dict[str, Any]:
+    """Create or replay an official publish handoff from one approved version.
+
+    Approval is bound to the immutable Deliverable version.  If a newer
+    version exists, callers must approve that version before any external
+    action can run.
+    """
+
+    await require_account_access(
+        session,
+        user,
+        account_id,
+        roles={WorkspaceRole.LEAD, WorkspaceRole.OPERATOR},
+    )
+    artifact = await session.scalar(
+        select(Deliverable)
+        .join(ContentItem, ContentItem.id == Deliverable.content_item_id)
+        .where(
+            Deliverable.id == artifact_id,
+            Deliverable.version == artifact_version,
+            ContentItem.account_id == account_id,
+        )
+    )
+    if artifact is None:
+        raise PublishingServiceError(
+            "PUBLISH_ARTIFACT_NOT_FOUND",
+            "找不到当前账号对应的发布成果版本。",
+            status_code=404,
+        )
+    if artifact.status is not DeliverableStatus.APPROVED:
+        raise PublishingServiceError(
+            "PUBLISH_ARTIFACT_NOT_APPROVED",
+            "发布包尚未通过人工审批。",
+            status_code=422,
+        )
+    newer_version = await session.scalar(
+        select(Deliverable.id).where(
+            Deliverable.content_item_id == artifact.content_item_id,
+            Deliverable.type == artifact.type,
+            Deliverable.version > artifact.version,
+        )
+    )
+    if newer_version is not None:
+        raise PublishingServiceError(
+            "PUBLISH_APPROVAL_VERSION_STALE",
+            "发布包已有新版本，旧版本审批已失效。",
+            status_code=409,
+        )
+
+    payload = dict(artifact.payload or {})
+    package_payload = payload.get("publish_package")
+    tool_call_id = payload.get("approval_tool_call_id")
+    if not isinstance(package_payload, dict) or not isinstance(tool_call_id, int):
+        raise PublishingServiceError(
+            "PUBLISH_ARTIFACT_CONTRACT_INVALID",
+            "已审批成果缺少可执行发布包或审批来源。",
+            status_code=422,
+        )
+    package = PublishPackageOut.model_validate(package_payload)
+    requested_schedule = scheduled_at.isoformat() if scheduled_at else None
+    approved_schedule = package.scheduled_at.isoformat() if package.scheduled_at else None
+    if (
+        approved_schedule != requested_schedule
+        or package.visibility != visibility
+        or package.allow_comment != allow_comment
+    ):
+        raise PublishingServiceError(
+            "PUBLISH_APPROVAL_PACKAGE_MISMATCH",
+            "发布时间或可见性设置已变化，请重新生成并审批发布包。",
+            status_code=409,
+        )
+
+    digest = hashlib.sha256(
+        _canonical(
+            {
+                "artifact_id": artifact.id,
+                "version": artifact.version,
+                "scheduled_at": requested_schedule,
+                "visibility": visibility,
+                "allow_comment": allow_comment,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    job = await create_publish_job(
+        session,
+        user,
+        CreatePublishJobRequest(
+            account_id=account_id,
+            active_project_id=None,
+            active_client_id=None,
+            tool_call_id=tool_call_id,
+            idempotency_key=f"approved-artifact:{digest}",
+            publish_package=package,
+        ),
+    )
+
+    if job.status in {
+        PlatformPublishJobStatus.HANDOFF_READY,
+        PlatformPublishJobStatus.USER_PUBLISHING,
+        PlatformPublishJobStatus.WAITING_BIND,
+        PlatformPublishJobStatus.BOUND,
+        PlatformPublishJobStatus.OBSERVING,
+        PlatformPublishJobStatus.COMPLETED,
+    }:
+        return _publish_artifact_receipt(job, artifact)
+
+    try:
+        handoff = await prepare_douyin_handoff(session, user, job.id)
+    except PublishingServiceError as exc:
+        if exc.code not in _CONNECTION_ERROR_CODES:
+            raise
+        return {
+            "account_id": account_id,
+            "source_artifact_id": artifact.id,
+            "source_artifact_version": artifact.version,
+            "platform_receipt_id": None,
+            "status": "blocked",
+            "published_at": None,
+            "retryable": exc.retryable,
+            "connection_state": "needs_connection",
+            "reason": exc.code,
+        }
+    return _publish_artifact_receipt(handoff.job, artifact)
+
+
+def _publish_artifact_receipt(
+    job: PlatformPublishJob | PublishJobOut,
+    artifact: Deliverable,
+) -> dict[str, Any]:
+    status_value = (
+        job.status.value
+        if isinstance(job.status, PlatformPublishJobStatus)
+        else str(job.status)
+    )
+    if status_value in {"bound", "observing", "completed"}:
+        status = "published"
+    elif status_value in {"waiting_bind", "user_publishing"}:
+        status = "waiting_platform_confirmation"
+    else:
+        status = "handoff_ready"
+    return {
+        "account_id": job.account_id,
+        "source_artifact_id": artifact.id,
+        "source_artifact_version": artifact.version,
+        "platform_receipt_id": job.id,
+        "status": status,
+        "published_at": job.bound_at if status == "published" else None,
+        "retryable": False,
+        "connection_state": "connected",
+        "reason": None,
+    }
 
 
 async def create_publish_job(

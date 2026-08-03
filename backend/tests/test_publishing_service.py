@@ -7,6 +7,8 @@ from app.models import (
     Account,
     AgentToolCall,
     BrainTask,
+    ContentItem,
+    Deliverable,
     MaterialAsset,
     PlatformAccountAuth,
     PlatformContentRecord,
@@ -17,6 +19,8 @@ from app.models.enums import (
     BrainTaskStatus,
     BrainTaskType,
     DataSourceKind,
+    DeliverableStatus,
+    DeliverableType,
     MaterialStatus,
     Platform,
 )
@@ -25,6 +29,39 @@ from app.schemas.orchestrator import PublishPackageOut
 from app.schemas.publishing import CreatePublishJobRequest, DouyinCreateVideoCallback
 from app.services import publishing as publishing_service
 from app.services.publishing import PublishingServiceError
+
+
+async def _approved_publish_artifact(
+    session,
+    admin,
+    *,
+    account,
+    package,
+    tool_call,
+    version: int = 1,
+    status=DeliverableStatus.APPROVED,
+):
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="approved publish package",
+    )
+    session.add(content)
+    await session.flush()
+    artifact = Deliverable(
+        content_item_id=content.id,
+        agent_code="06-operator",
+        type=DeliverableType.PUBLISH_CALENDAR,
+        version=version,
+        status=status,
+        payload={
+            "publish_package": package.model_dump(mode="json"),
+            "approval_tool_call_id": tool_call.id,
+        },
+    )
+    session.add(artifact)
+    await session.commit()
+    return artifact
 
 
 async def _seed_publish_context(session, admin, *, approved: bool):
@@ -168,6 +205,141 @@ async def test_unapproved_publish_job_cannot_start_external_handoff(
 
     assert captured.value.code == "PUBLISH_APPROVAL_REQUIRED"
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_publish_approved_artifact_rejects_unapproved_and_stale_versions(
+    session, admin
+) -> None:
+    account, _material, package, tool_call = await _seed_publish_context(
+        session, admin, approved=True
+    )
+    unapproved = await _approved_publish_artifact(
+        session,
+        admin,
+        account=account,
+        package=package,
+        tool_call=tool_call,
+        status=DeliverableStatus.PENDING_REVIEW,
+    )
+    with pytest.raises(PublishingServiceError) as captured:
+        await publishing_service.publish_approved_artifact(
+            session,
+            admin,
+            account_id=account.id,
+            artifact_id=unapproved.id,
+            artifact_version=unapproved.version,
+            scheduled_at=None,
+            visibility="public",
+            allow_comment=True,
+        )
+    assert captured.value.code == "PUBLISH_ARTIFACT_NOT_APPROVED"
+
+    unapproved.status = DeliverableStatus.APPROVED
+    newer = Deliverable(
+        content_item_id=unapproved.content_item_id,
+        agent_code="06-operator",
+        type=DeliverableType.PUBLISH_CALENDAR,
+        version=2,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=dict(unapproved.payload),
+    )
+    session.add(newer)
+    await session.commit()
+    with pytest.raises(PublishingServiceError) as captured:
+        await publishing_service.publish_approved_artifact(
+            session,
+            admin,
+            account_id=account.id,
+            artifact_id=unapproved.id,
+            artifact_version=unapproved.version,
+            scheduled_at=None,
+            visibility="public",
+            allow_comment=True,
+        )
+    assert captured.value.code == "PUBLISH_APPROVAL_VERSION_STALE"
+
+
+@pytest.mark.asyncio
+async def test_publish_approved_artifact_returns_no_fake_receipt_without_connection(
+    session, admin, monkeypatch
+) -> None:
+    account, _material, package, tool_call = await _seed_publish_context(
+        session, admin, approved=True
+    )
+    artifact = await _approved_publish_artifact(
+        session,
+        admin,
+        account=account,
+        package=package,
+        tool_call=tool_call,
+    )
+    monkeypatch.setattr(publishing_service.settings, "douyin_h5_publish_enabled", False)
+
+    receipt = await publishing_service.publish_approved_artifact(
+        session,
+        admin,
+        account_id=account.id,
+        artifact_id=artifact.id,
+        artifact_version=artifact.version,
+        scheduled_at=None,
+        visibility="public",
+        allow_comment=True,
+    )
+
+    assert receipt["status"] == "blocked"
+    assert receipt["connection_state"] == "needs_connection"
+    assert receipt["platform_receipt_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_publish_approved_artifact_replays_one_platform_receipt(
+    session, admin, monkeypatch
+) -> None:
+    account, _material, package, tool_call = await _seed_publish_context(
+        session, admin, approved=True
+    )
+    artifact = await _approved_publish_artifact(
+        session,
+        admin,
+        account=account,
+        package=package,
+        tool_call=tool_call,
+    )
+    monkeypatch.setattr(publishing_service.settings, "douyin_h5_publish_enabled", True)
+    monkeypatch.setenv("TEST_DOUYIN_CLIENT_SECRET", "client-secret")
+    share_calls = 0
+
+    async def fake_client_token(**_kwargs):
+        return "client-token"
+
+    async def fake_open_ticket(**_kwargs):
+        return "open-ticket"
+
+    async def fake_share_id(**_kwargs):
+        nonlocal share_calls
+        share_calls += 1
+        return {"share_id": "artifact-share-1", "log_id": "artifact-log-1"}
+
+    monkeypatch.setattr(publishing_service, "get_douyin_client_token", fake_client_token)
+    monkeypatch.setattr(publishing_service, "get_douyin_open_ticket", fake_open_ticket)
+    monkeypatch.setattr(publishing_service, "create_douyin_share_id", fake_share_id)
+    kwargs = {
+        "account_id": account.id,
+        "artifact_id": artifact.id,
+        "artifact_version": artifact.version,
+        "scheduled_at": None,
+        "visibility": "public",
+        "allow_comment": True,
+    }
+
+    first = await publishing_service.publish_approved_artifact(session, admin, **kwargs)
+    second = await publishing_service.publish_approved_artifact(session, admin, **kwargs)
+
+    assert first == second
+    assert first["status"] == "handoff_ready"
+    assert first["platform_receipt_id"] is not None
+    assert share_calls == 1
 
 
 @pytest.mark.asyncio

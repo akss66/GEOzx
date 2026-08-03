@@ -60,6 +60,7 @@ from app.orchestrator.skills.account_inspection import (
 )
 from app.orchestrator.skills.account_positioning import AccountPositioningReport
 from app.orchestrator.skills.content_calendar_planning import ContentCalendarPlanningReport
+from app.orchestrator.skills.content_publishing import ContentPublishingReceipt
 from app.orchestrator.skills.operating_tasks import (
     PerformanceReviewReport,
     PublishingPreparationReport,
@@ -462,6 +463,20 @@ class SkillRuntime:
                     ),
                     lease_owner=lease_owner,
                 )
+            if definition.code == "content_publishing":
+                return await self._execute_content_publishing(
+                    session,
+                    user=user,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=runtime_scope,
+                    definition=definition,
+                    frozen_input=dict(skill_run.input_snapshot or {}),
+                    lease_owner=lease_owner,
+                )
             return await self._execute_operating_skill(
                 session,
                 user=user,
@@ -476,6 +491,7 @@ class SkillRuntime:
                 frozen_input=dict(skill_run.input_snapshot or {}),
                 lease_owner=lease_owner,
             )
+
         except _SkillLeaseLost:
             await session.rollback()
             persisted = await session.get(SkillRun, skill_run_id)
@@ -548,6 +564,101 @@ class SkillRuntime:
                 response=response,
                 error_code=error_code,
             )
+
+    async def _execute_content_publishing(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
+        frozen_input: dict[str, Any],
+        lease_owner: str,
+    ) -> SkillExecutionResult:
+        """Execute the single approved side effect without an expert detour."""
+
+        artifact_id = int(frozen_input["approved_publish_artifact_id"])
+        sources = await _confirmed_source_artifacts(
+            session,
+            account_id=thread.account_id,
+            artifact_ids=[artifact_id],
+        )
+        source = sources[0]
+        await self._heartbeat(session, run=run, lease_owner=lease_owner)
+        tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
+        outcome = await tool_executor.execute(
+            task=task,
+            user=user,
+            request=RuntimeToolCall(
+                tool_code="platform.content_publish",
+                arguments={
+                    "approved_publish_artifact_id": artifact_id,
+                    "source_artifact_version": int(source["version"]),
+                    "scheduled_at": frozen_input.get("scheduled_at"),
+                    "visibility": str(frozen_input.get("visibility") or "public"),
+                    "allow_comment": bool(frozen_input.get("allow_comment", True)),
+                },
+                purpose="执行已审批发布包并获取平台回执",
+                idempotency_key=f"{skill_run.id}:platform.content_publish",
+            ),
+            project_id=thread.project_id,
+            agent_code=AgentCode.DECISION.value,
+            scope=scope,
+        )
+        await self._heartbeat(session, run=run, lease_owner=lease_owner)
+        if outcome.status != "success" or outcome.result is None:
+            return await self._pause_for_tool(
+                session,
+                thread=thread,
+                turn=turn,
+                run=run,
+                skill_run=skill_run,
+                task=task,
+                status=outcome.status,
+                skill_name=definition.name,
+                artifact_type=definition.artifact_type or definition.code,
+            )
+        self._require_tool_scope(outcome.result, thread.account_id)
+        receipt = ContentPublishingReceipt.model_validate(
+            {"artifact_type": "platform_publish_receipt", **outcome.result}
+        ).model_dump(mode="json")
+        blocked = receipt["status"] == "blocked"
+        response = (
+            "当前账号尚未接通可用的平台发布通道，未执行发布。"
+            if blocked
+            else (
+                "平台已确认发布成功。"
+                if receipt["status"] == "published"
+                else "发布包已进入官方平台通道，正在等待平台确认；当前不视为已发布。"
+            )
+        )
+        output = {
+            "status": "blocked" if blocked else "completed",
+            "task_id": task.id,
+            "artifact_id": None,
+            "artifact_type": "platform_publish_receipt",
+            "report": receipt,
+            "response": response,
+            "error_code": receipt.get("reason") if blocked else None,
+        }
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status=output["status"],
+            response=response,
+            output_snapshot=output,
+            error_code=output["error_code"],
+        )
+        return self._existing_result(skill_run)
 
     async def _execute_account_inspection(
         self,
@@ -1027,6 +1138,11 @@ class SkillRuntime:
                 "approval_stage": "before_finish",
                 "artifact_id": deliverable.id,
             }
+            if definition.code == "publishing_preparation":
+                deliverable.payload = {
+                    **dict(deliverable.payload or {}),
+                    "approval_tool_call_id": approval_call.id,
+                }
             await add_approval_requested(
                 session,
                 org_id=task.org_id,
@@ -1813,6 +1929,16 @@ def _operating_tool_arguments(
             "content_item_id": int(frozen_input.get("content_item_id") or content.id),
             "title": user_input[:300],
         }
+    if tool_code == "platform.content_publish":
+        return {
+            "approved_publish_artifact_id": int(
+                frozen_input["approved_publish_artifact_id"]
+            ),
+            "source_artifact_version": int(frozen_input["source_artifact_version"]),
+            "scheduled_at": frozen_input.get("scheduled_at"),
+            "visibility": str(frozen_input.get("visibility") or "public"),
+            "allow_comment": bool(frozen_input.get("allow_comment", True)),
+        }
     raise SkillToolPlanError(f"SKILL_TOOL_ARGUMENTS_UNAVAILABLE:{tool_code}")
 
 
@@ -2126,6 +2252,12 @@ def _build_operating_report(
                 "period": data["period"],
                 "items": data["items"],
                 "operating_notes": data["operating_notes"],
+                "publish_package": dict(
+                    tool_results.get("publish_package_prepare", {}).get(
+                        "publish_package"
+                    )
+                    or {}
+                ),
             },
         )
 

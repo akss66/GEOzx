@@ -28,6 +28,7 @@ async def test_runtime_capabilities_include_role_scoped_tools(session, admin) ->
         "account.data_context",
         "account.metrics_summary",
         "account.profile",
+        "platform.content_publish",
         "publish_package_prepare",
     }
     assert "01-positioning" in expert_codes

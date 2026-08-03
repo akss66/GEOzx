@@ -8,7 +8,7 @@ each handler before data is read.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +26,7 @@ from app.services.account_data_view import (
     AccountDataView,
     AccountDataViewService,
 )
+from app.services.publishing import publish_approved_artifact
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 ParamsT = TypeVar("ParamsT", bound=BaseModel)
@@ -52,6 +53,16 @@ class PublishPackagePrepareParams(BaseModel):
 
     content_item_id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=300)
+
+
+class ContentPublishParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved_publish_artifact_id: int = Field(gt=0)
+    source_artifact_version: int = Field(gt=0)
+    scheduled_at: datetime | None = None
+    visibility: str = Field(pattern="^(public|friends|private)$")
+    allow_comment: bool = True
 
 
 async def _deterministic_confirm_action(
@@ -95,6 +106,24 @@ async def _publish_package_prepare(
             "manual_steps": ["确认标题、正文、话题和素材", "确认发布时间与可见范围"],
         },
     }
+
+
+async def _content_publish(
+    params: ContentPublishParams,
+    context: ToolExecutionContext,
+) -> dict[str, Any]:
+    if context.account_id is None:
+        raise PermissionError("selected account is required")
+    return await publish_approved_artifact(
+        context.session,
+        context.user,
+        account_id=context.account_id,
+        artifact_id=params.approved_publish_artifact_id,
+        artifact_version=params.source_artifact_version,
+        scheduled_at=params.scheduled_at,
+        visibility=params.visibility,
+        allow_comment=params.allow_comment,
+    )
 
 
 async def _account_profile(
@@ -445,6 +474,16 @@ _RUNTIME_TOOL_SPECS = (
         scope="account",
         execution_phase="prepare",
     ),
+    ToolSpec(
+        name="platform.content_publish",
+        handler=_tool_handler(ContentPublishParams, _content_publish),
+        side_effect_level="idempotent_write",
+        params_model=ContentPublishParams,
+        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+        scope="account",
+        execution_phase="side_effect",
+        timeout_seconds=30.0,
+    ),
 )
 
 
@@ -507,4 +546,7 @@ def _tool_description(code: str) -> str:
         "account.data_context": "读取当前账号统一数据视图、指标证据、覆盖度、时效与冲突",
         "account.metrics_summary": "汇总当前已选账号最近 1-90 天的运营指标",
         "publish_package_prepare": "为当前账号内容生成可审计、可审批的发布准备包",
+        "platform.content_publish": (
+            "将已审批且版本未变化的发布包交给官方平台通道，并返回真实回执状态"
+        ),
     }[code]

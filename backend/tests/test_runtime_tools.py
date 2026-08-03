@@ -348,6 +348,7 @@ def test_runtime_tool_catalog_exposes_read_and_prepare_phases(admin) -> None:
         "account.data_context",
         "account.metrics_summary",
         "account.profile",
+        "platform.content_publish",
         "publish_package_prepare",
     }
     assert all(item["kind"] == "tool" for item in catalog)
@@ -360,6 +361,8 @@ def test_runtime_tool_catalog_exposes_read_and_prepare_phases(admin) -> None:
     } == {"read"}
     prepare_tool = next(item for item in catalog if item["code"] == "publish_package_prepare")
     assert prepare_tool["execution_phase"] == "prepare"
+    publish_tool = next(item for item in catalog if item["code"] == "platform.content_publish")
+    assert publish_tool["execution_phase"] == "side_effect"
 
 
 def test_runtime_tool_catalog_exposes_confirm_tool_only_in_explicit_test_mode(

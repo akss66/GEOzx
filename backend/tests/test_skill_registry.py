@@ -133,17 +133,22 @@ def test_catalog_item_projects_stable_business_fields_without_python_model_types
 def test_production_registry_covers_the_first_account_operations_loop() -> None:
     expected = {
         "account_inspection",
+        "account_positioning",
+        "content_calendar_planning",
+        "content_publishing",
         "topic_planning",
         "script_generation",
         "publishing_preparation",
         "performance_review",
+        "visual_brief_generation",
     }
 
     assert {item.code for item in skill_registry.list_for("douyin")} == expected
     for code in expected:
         definition = skill_registry.get(code)
         assert definition.version >= 1
-        assert definition.expert_codes
+        if code != "content_publishing":
+            assert definition.expert_codes
         assert definition.artifact_type
 
 
