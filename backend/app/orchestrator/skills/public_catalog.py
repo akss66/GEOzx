@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 
 from app.models.enums import UserRole
-from app.schemas.skills import PublicSkillCategory, SkillCatalogSurface
+from app.schemas.skills import (
+    CapabilityRequiredContext,
+    PublicSkillCategory,
+    SkillCatalogSurface,
+)
 
 
 @dataclass(frozen=True)
@@ -13,6 +17,7 @@ class PublicSkillPolicy:
     icon: str
     requires_account: bool
     surfaces: frozenset[SkillCatalogSurface]
+    required_context: tuple[CapabilityRequiredContext, ...] = ("account",)
     enabled: bool = True
     allowed_roles: frozenset[UserRole] = frozenset({UserRole.ADMIN, UserRole.USER})
     internal_disabled_reason: str | None = None

@@ -76,9 +76,14 @@ export async function deleteConversation(
 
 export async function listComposerSkills(
   platform = "douyin",
+  accountId?: number | null,
 ): Promise<PublicSkill[]> {
   const { data } = await api.get<{ data: PublicSkill[] }>("/skills", {
-    params: { platform, surface: "composer" },
+    params: {
+      platform,
+      surface: "composer",
+      ...(accountId == null ? {} : { account_id: accountId }),
+    },
   });
   return data.data;
 }

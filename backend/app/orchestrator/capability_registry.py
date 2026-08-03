@@ -10,9 +10,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import User
+from app.models import Account, User
 from app.models.enums import AgentCode
 from app.orchestrator.runtime_tools import runtime_tool_capabilities
+from app.schemas.skills import CapabilityAvailability, CapabilityRequiredContext
 from app.services.agent_management import available_tools, get_business_config
 
 _EXPERT_CODES = (
@@ -76,3 +77,25 @@ async def runtime_capabilities(
         )
     capabilities.extend(runtime_tool_capabilities(user))
     return capabilities
+
+
+def resolve_capability_availability(
+    *,
+    enabled: bool,
+    role_allowed: bool,
+    required_context: tuple[CapabilityRequiredContext, ...],
+    account: Account | None,
+) -> tuple[CapabilityAvailability, str | None]:
+    """Resolve user-facing availability from declared context, never client guesses."""
+
+    if not enabled or not role_allowed:
+        return "coming_soon", "暂不可用"
+    if "account" in required_context and account is None:
+        return "needs_input", "请选择账号后再使用该能力"
+    if (
+        "platform_connection" in required_context
+        and account is not None
+        and account.auth_status not in {"authorized", "manual"}
+    ):
+        return "needs_connection", "当前账号尚未完成平台连接"
+    return "available", None

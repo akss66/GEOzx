@@ -250,6 +250,9 @@ describe("brain api", () => {
         category: "quick_operations",
         icon: "activity",
         requires_account: true,
+        availability: "available",
+        reason: null,
+        required_context: ["account"],
         is_available: true,
         unavailable_reason: null,
       },
@@ -262,7 +265,7 @@ describe("brain api", () => {
       .mockResolvedValueOnce({ data: { data: skills } })
       .mockResolvedValueOnce({ data: artifacts });
 
-    await expect(listComposerSkills()).resolves.toEqual(skills);
+    await expect(listComposerSkills("douyin", 3)).resolves.toEqual(skills);
     await expect(
       listArtifacts({
         accountId: 3,
@@ -274,7 +277,7 @@ describe("brain api", () => {
     ).resolves.toEqual(artifacts);
 
     expect(apiGet).toHaveBeenNthCalledWith(1, "/skills", {
-      params: { platform: "douyin", surface: "composer" },
+      params: { platform: "douyin", surface: "composer", account_id: 3 },
     });
     expect(apiGet).toHaveBeenNthCalledWith(2, "/artifacts", {
       params: {

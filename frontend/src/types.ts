@@ -586,6 +586,11 @@ export interface PublicSkill {
   category: "quick_operations" | "context" | "expert_help";
   icon: string;
   requires_account: boolean;
+  availability: "available" | "needs_input" | "needs_connection" | "coming_soon";
+  reason: string | null;
+  required_context: Array<
+    "account" | "account_data" | "platform_connection" | "confirmed_artifact"
+  >;
   is_available: boolean;
   unavailable_reason: string | null;
 }

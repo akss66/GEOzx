@@ -19,6 +19,9 @@ const accountInspectionSkill = {
   category: "quick_operations" as const,
   icon: "activity",
   requires_account: true,
+  availability: "available" as const,
+  reason: null,
+  required_context: ["account" as const],
   is_available: true,
   unavailable_reason: null,
 };

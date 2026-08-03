@@ -23,6 +23,9 @@ const accountInspection: PublicSkill = {
   category: "quick_operations",
   icon: "activity",
   requires_account: true,
+  availability: "available",
+  reason: null,
+  required_context: ["account"],
   is_available: true,
   unavailable_reason: null,
 };
@@ -35,6 +38,9 @@ const expertHelp: PublicSkill = {
   category: "expert_help",
   icon: "compass",
   requires_account: false,
+  availability: "available",
+  reason: null,
+  required_context: [],
   is_available: true,
   unavailable_reason: null,
 };
@@ -47,6 +53,9 @@ const contextSkill: PublicSkill = {
   category: "context",
   icon: "file",
   requires_account: false,
+  availability: "available",
+  reason: null,
+  required_context: [],
   is_available: true,
   unavailable_reason: null,
 };

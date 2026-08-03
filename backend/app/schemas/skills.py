@@ -87,6 +87,18 @@ class SkillCatalogItem(BaseModel):
 
 PublicSkillCategory = Literal["quick_operations", "context", "expert_help"]
 SkillCatalogSurface = Literal["composer", "artifact_center", "expert_panel"]
+CapabilityAvailability = Literal[
+    "available",
+    "needs_input",
+    "needs_connection",
+    "coming_soon",
+]
+CapabilityRequiredContext = Literal[
+    "account",
+    "account_data",
+    "platform_connection",
+    "confirmed_artifact",
+]
 
 
 class PublicSkillCatalogItem(BaseModel):
@@ -101,6 +113,9 @@ class PublicSkillCatalogItem(BaseModel):
     category: PublicSkillCategory
     icon: str
     requires_account: bool
+    availability: CapabilityAvailability
+    reason: str | None = None
+    required_context: list[CapabilityRequiredContext]
     is_available: bool
     unavailable_reason: str | None = None
 

@@ -561,6 +561,9 @@ function inspectionSkill(): PublicSkill {
     category: "quick_operations",
     icon: "inspection",
     requires_account: true,
+    availability: "available",
+    reason: null,
+    required_context: ["account"],
     is_available: true,
     unavailable_reason: null,
   };

@@ -3,7 +3,8 @@ from importlib import import_module
 
 import pytest
 
-from app.models.enums import UserRole
+from app.models import Account
+from app.models.enums import Platform, UserRole
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 
 
@@ -44,8 +45,11 @@ async def test_douyin_composer_exposes_only_stable_business_skill_fields(client,
         "category": "quick_operations",
         "icon": "activity",
         "requires_account": True,
-        "is_available": True,
-        "unavailable_reason": None,
+        "availability": "needs_input",
+        "reason": "请选择账号后再使用该能力",
+        "required_context": ["account"],
+        "is_available": False,
+        "unavailable_reason": "请选择账号后再使用该能力",
     }
     assert set(item) == {
         "code",
@@ -55,6 +59,9 @@ async def test_douyin_composer_exposes_only_stable_business_skill_fields(client,
         "category",
         "icon",
         "requires_account",
+        "availability",
+        "reason",
+        "required_context",
         "is_available",
         "unavailable_reason",
     }
@@ -74,6 +81,32 @@ async def test_douyin_composer_exposes_only_stable_business_skill_fields(client,
         "output_model",
     ]:
         assert internal_field not in serialized
+
+
+@pytest.mark.asyncio
+async def test_catalog_resolves_availability_for_the_authorized_account(
+    client, session, admin
+):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="catalog-account",
+        auth={"auth_status": "manual"},
+    )
+    session.add(account)
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/skills?platform=douyin&surface=composer&account_id={account.id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    item = next(row for row in response.json()["data"] if row["code"] == "account_inspection")
+    assert item["availability"] == "available"
+    assert item["reason"] is None
+    assert item["is_available"] is True
 
 
 @pytest.mark.asyncio
@@ -127,6 +160,8 @@ async def test_disabled_skill_uses_generic_public_unavailability_reason(client, 
     assert response.status_code == 200
     item = response.json()["data"][0]
     assert item["is_available"] is False
+    assert item["availability"] == "coming_soon"
+    assert item["reason"] == "暂不可用"
     assert item["unavailable_reason"] == "暂不可用"
     serialized = str(response.json()).lower()
     assert "provider credentials" not in serialized
@@ -154,6 +189,8 @@ async def test_role_incompatible_skill_does_not_reveal_authorization_policy(
     assert response.status_code == 200
     item = response.json()["data"][0]
     assert item["is_available"] is False
+    assert item["availability"] == "coming_soon"
+    assert item["reason"] == "暂不可用"
     assert item["unavailable_reason"] == "暂不可用"
     assert "admin" not in str(response.json()).lower()
 

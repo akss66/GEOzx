@@ -115,8 +115,8 @@ export default function BrainHome() {
   effectiveAccountIdRef.current = activeAccount?.id ?? null;
 
   const composerSkillsQuery = useQuery({
-    queryKey: ["composer-skills", "douyin"],
-    queryFn: () => listComposerSkills("douyin"),
+    queryKey: ["composer-skills", "douyin", activeAccount?.id ?? null],
+    queryFn: () => listComposerSkills("douyin", activeAccount?.id),
   });
 
   useEventStream((event) => {
