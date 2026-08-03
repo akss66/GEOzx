@@ -63,6 +63,14 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         surfaces=frozenset({"composer"}),
         required_context=("account", "account_data"),
     ),
+    "operation_iteration": PublicSkillPolicy(
+        code="operation_iteration",
+        category="quick_operations",
+        icon="repeat",
+        requires_account=True,
+        surfaces=frozenset({"composer", "artifact_center"}),
+        required_context=("account", "confirmed_artifact"),
+    ),
     "account_inspection": PublicSkillPolicy(
         code="account_inspection",
         category="quick_operations",

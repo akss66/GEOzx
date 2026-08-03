@@ -137,6 +137,7 @@ def test_production_registry_covers_the_first_account_operations_loop() -> None:
         "content_calendar_planning",
         "content_publishing",
         "engagement_review",
+        "operation_iteration",
         "topic_planning",
         "script_generation",
         "publishing_preparation",
@@ -148,7 +149,7 @@ def test_production_registry_covers_the_first_account_operations_loop() -> None:
     for code in expected:
         definition = skill_registry.get(code)
         assert definition.version >= 1
-        if code != "content_publishing":
+        if code not in {"content_publishing", "operation_iteration"}:
             assert definition.expert_codes
         assert definition.artifact_type
 

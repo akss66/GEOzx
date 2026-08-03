@@ -50,6 +50,7 @@ from app.orchestrator.ai_coo_critic import (
     ai_coo_critic_service,
 )
 from app.orchestrator.brain_intelligence import brain_intelligence
+from app.orchestrator.composite_skill_runtime import composite_skill_runtime
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_tool_plan import SkillToolPlanError, build_skill_tool_plan
@@ -68,6 +69,7 @@ from app.orchestrator.skills.operating_tasks import (
     ScriptGenerationReport,
     TopicPlanningReport,
 )
+from app.orchestrator.skills.operation_iteration import OperationIterationPlan
 from app.orchestrator.skills.registry import skill_registry
 from app.orchestrator.skills.visual_brief_generation import VisualBriefGenerationReport
 from app.orchestrator.tool_executor import DurableToolExecutor
@@ -478,6 +480,18 @@ class SkillRuntime:
                     frozen_input=dict(skill_run.input_snapshot or {}),
                     lease_owner=lease_owner,
                 )
+            if definition.code == "operation_iteration":
+                return await self._execute_operation_iteration(
+                    session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    content=content,
+                    skill_run=skill_run,
+                    scope=runtime_scope,
+                    frozen_input=dict(skill_run.input_snapshot or {}),
+                )
             return await self._execute_operating_skill(
                 session,
                 user=user,
@@ -658,6 +672,86 @@ class SkillRuntime:
             response=response,
             output_snapshot=output,
             error_code=output["error_code"],
+        )
+        return self._existing_result(skill_run)
+
+    async def _execute_operation_iteration(
+        self,
+        session: AsyncSession,
+        *,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        content: ContentItem,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        frozen_input: dict[str, Any],
+    ) -> SkillExecutionResult:
+        """Persist a child-Skill DAG without impersonating its specialists."""
+
+        review_id = int(frozen_input["confirmed_review_artifact_id"])
+        positioning_id = frozen_input.get("positioning_artifact_id")
+        artifact_ids = [review_id]
+        if positioning_id is not None:
+            artifact_ids.append(int(positioning_id))
+        sources = await _confirmed_source_artifacts(
+            session,
+            account_id=thread.account_id,
+            artifact_ids=artifact_ids,
+        )
+        by_id = {int(item["artifact_id"]): item for item in sources}
+        if by_id[review_id]["artifact_type"] != DeliverableType.REVIEW_REPORT.value:
+            raise PermissionError("OPERATION_ITERATION_REVIEW_ARTIFACT_INVALID")
+        if positioning_id is not None and (
+            by_id[int(positioning_id)]["artifact_type"]
+            != DeliverableType.POSITIONING_STRATEGY.value
+        ):
+            raise PermissionError("OPERATION_ITERATION_POSITIONING_ARTIFACT_INVALID")
+        source_refs = [
+            {
+                "artifact_id": item["artifact_id"],
+                "artifact_type": item["artifact_type"],
+                "version": item["version"],
+            }
+            for item in sources
+        ]
+        report = OperationIterationPlan.model_validate(
+            composite_skill_runtime.build(
+                account_id=thread.account_id,
+                cycle_days=int(frozen_input.get("cycle_days") or 7),
+                source_artifacts=source_refs,
+            )
+        ).model_dump(mode="json")
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
+            agent_code=AgentCode.DECISION.value,
+            deliverable_type=DeliverableType.PUBLISH_CALENDAR,
+            version=1,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=report,
+            note="business_artifact_type=operation_execution_plan; deterministic child Skill DAG",
+        )
+        output = {
+            "status": "completed",
+            "task_id": task.id,
+            "artifact_id": deliverable.id,
+            "artifact_type": "operation_execution_plan",
+            "report": report,
+            "response": "下一运营周期的执行图已生成；各专业成果仍将由对应子 Skill 产出。",
+        }
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=output["response"],
+            output_snapshot=output,
         )
         return self._existing_result(skill_run)
 

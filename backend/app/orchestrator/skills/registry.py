@@ -65,6 +65,9 @@ from app.orchestrator.skills.operating_tasks import (  # noqa: E402
     SCRIPT_GENERATION_SKILL,
     TOPIC_PLANNING_SKILL,
 )
+from app.orchestrator.skills.operation_iteration import (  # noqa: E402
+    OPERATION_ITERATION_SKILL,
+)
 from app.orchestrator.skills.visual_brief_generation import (  # noqa: E402
     VISUAL_BRIEF_GENERATION_SKILL,
 )
@@ -77,6 +80,7 @@ skill_registry = SkillRegistry(
         CONTENT_CALENDAR_PLANNING_SKILL,
         CONTENT_PUBLISHING_SKILL,
         ENGAGEMENT_REVIEW_SKILL,
+        OPERATION_ITERATION_SKILL,
         TOPIC_PLANNING_SKILL,
         SCRIPT_GENERATION_SKILL,
         PUBLISHING_PREPARATION_SKILL,
