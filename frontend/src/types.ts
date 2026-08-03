@@ -774,6 +774,39 @@ export type TurnPhase =
   | "completed"
   | "failed";
 
+export type WorkTurnStatus =
+  | "working"
+  | "waiting_user"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "cancelled";
+
+export interface WorkTurnStep {
+  code: string;
+  label: string;
+  state: "done" | "active" | "waiting" | "failed";
+  detail?: string;
+}
+
+export interface WorkTurnAssistant {
+  identity: "运营大脑";
+  steps: WorkTurnStep[];
+}
+
+export interface WorkTurnViewModel {
+  key: string;
+  turnId: number | null;
+  userMessage: string;
+  status: WorkTurnStatus;
+  currentActivity: string | null;
+  assistantText: string | null;
+  steps: WorkTurnStep[];
+  experts: Array<{ name: string; status: string }>;
+  deliverableIds: number[];
+  assistant: WorkTurnAssistant;
+}
+
 export interface ConversationThread {
   id: number;
   org_id: number;

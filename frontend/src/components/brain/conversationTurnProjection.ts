@@ -1,5 +1,6 @@
 import type { DyEvent } from "../../hooks/useEventStream";
 import type { ConversationThread, ConversationTurn, TurnPhase } from "../../types";
+import { reduceWorkTurnStreamFrame } from "./workTurnProjection";
 
 export type TurnIdentity = {
   threadId: number;
@@ -132,16 +133,16 @@ function reduceTurnEvent(
   }
 
   if (event.type === "brain.runtime.message_start") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "start", turnPhase);
+    return reduceWorkTurnStreamFrame(turn, payload, eventTurnId, "start", turnPhase);
   }
   if (event.type === "brain.runtime.message_delta") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "delta", turnPhase);
+    return reduceWorkTurnStreamFrame(turn, payload, eventTurnId, "delta", turnPhase);
   }
   if (event.type === "brain.runtime.message_done") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "done", turnPhase);
+    return reduceWorkTurnStreamFrame(turn, payload, eventTurnId, "done", turnPhase);
   }
   if (event.type === "brain.runtime.message_error") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "error", turnPhase);
+    return reduceWorkTurnStreamFrame(turn, payload, eventTurnId, "error", turnPhase);
   }
 
   const status = eventStatus(event.type, payload);
@@ -150,48 +151,6 @@ function reduceTurnEvent(
     ...turn,
     ...(turn.id == null && eventTurnId != null ? { id: eventTurnId } : {}),
     ...(status ? { status } : {}),
-    ...(turnPhase ? { turn_phase: turnPhase } : {}),
-  };
-}
-
-function reduceStreamFrame(
-  turn: ConversationTurn,
-  payload: Record<string, unknown>,
-  eventTurnId: number | null,
-  phase: "start" | "delta" | "done" | "error",
-  turnPhase: TurnPhase | null,
-): ConversationTurn {
-  const sequence = nonNegativeInteger(payload.stream_seq);
-  if (sequence == null) return turn;
-  const messageId = stringValue(payload.message_id) ?? "";
-  const previous = turn.stream_state;
-  if (previous?.terminal) return turn;
-  if (previous && previous.messageId === messageId && sequence <= previous.lastSequence) {
-    return turn;
-  }
-
-  const content = phase === "delta"
-    ? `${turn.assistant_response ?? ""}${String(payload.delta ?? "")}`
-    : phase === "done"
-      ? String(payload.content ?? payload.message ?? "")
-      : phase === "error"
-        ? String(payload.error ?? payload.message ?? "")
-        : turn.assistant_response;
-  const terminal = phase === "done" || phase === "error";
-  return {
-    ...turn,
-    ...(turn.id == null && eventTurnId != null ? { id: eventTurnId } : {}),
-    assistant_response: content,
-    status: phase === "error"
-      ? "failed"
-      : phase === "done"
-        ? stringValue(payload.status) ?? "completed"
-        : "running",
-    stream_state: {
-      messageId,
-      lastSequence: sequence,
-      terminal,
-    },
     ...(turnPhase ? { turn_phase: turnPhase } : {}),
   };
 }
@@ -231,9 +190,4 @@ function stringValue(value: unknown) {
 function positiveInteger(value: unknown) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
-}
-
-function nonNegativeInteger(value: unknown) {
-  const number = Number(value);
-  return Number.isInteger(number) && number >= 0 ? number : null;
 }
