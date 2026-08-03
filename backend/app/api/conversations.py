@@ -39,6 +39,7 @@ from app.services.agent_runs import (
     get_agent_run,
     mark_agent_run_queued,
 )
+from app.services.attachments import resolve_attachment_contexts
 from app.services.conversations import (
     append_conversation_turn,
     create_conversation_thread,
@@ -516,6 +517,13 @@ async def submit_turn(
 ) -> TurnSubmissionOut:
     _require_v2_rollout_access(user)
     thread = await get_conversation_thread(session, user, thread_id)
+    attachment_contexts = await resolve_attachment_contexts(
+        session,
+        user=user,
+        thread=thread,
+        attachment_ids=body.attachment_ids,
+    )
+    attachment_ids = [item.id for item in attachment_contexts]
     existing_run = await get_agent_run(
         session,
         org_id=user.org_id,
@@ -538,7 +546,8 @@ async def submit_turn(
     )
     request_payload = {
         "account_id": thread.account_id,
-        "attachment_ids": body.attachment_ids,
+        "attachment_ids": attachment_ids,
+        "attachment_contexts": [item.model_dump(mode="json") for item in attachment_contexts],
         "client_message_id": body.client_message_id,
         "execution_preference": body.execution_preference,
         "message": body.message,

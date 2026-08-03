@@ -128,6 +128,20 @@ def _validated_skill_input(
     return definition.input_model.model_validate(input_payload)
 
 
+def _capability_attachment_snapshot(
+    capability_request: CapabilityRequest,
+) -> dict[str, Any]:
+    contexts = [
+        item.model_dump(mode="json") for item in capability_request.attachment_contexts
+    ]
+    if not contexts:
+        return {}
+    return {
+        "attachment_ids": list(capability_request.attachment_ids),
+        "attachment_contexts": contexts,
+    }
+
+
 @dataclass(frozen=True)
 class SkillExecutionResult:
     status: str
@@ -256,6 +270,7 @@ class SkillRuntime:
                 requested_snapshot = {
                     "account_id": thread.account_id,
                     **requested_input.model_dump(mode="json"),
+                    **_capability_attachment_snapshot(capability_request),
                 }
                 if requested_snapshot != frozen_snapshot:
                     raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
@@ -270,6 +285,11 @@ class SkillRuntime:
             frozen_snapshot = {
                 "account_id": thread.account_id,
                 **frozen_input.model_dump(mode="json"),
+                **(
+                    _capability_attachment_snapshot(capability_request)
+                    if capability_request is not None
+                    else {}
+                ),
             }
         idempotency_key = f"skill:{definition.code}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
@@ -433,6 +453,9 @@ class SkillRuntime:
                     scope=runtime_scope,
                     definition=definition,
                     days=frozen_input.days,
+                    attachment_contexts=list(
+                        (skill_run.input_snapshot or {}).get("attachment_contexts") or []
+                    ),
                     lease_owner=lease_owner,
                 )
             return await self._execute_operating_skill(
@@ -446,7 +469,7 @@ class SkillRuntime:
                 skill_run=skill_run,
                 scope=runtime_scope,
                 definition=definition,
-                frozen_input=frozen_input.model_dump(mode="json"),
+                frozen_input=dict(skill_run.input_snapshot or {}),
                 lease_owner=lease_owner,
             )
         except _SkillLeaseLost:
@@ -536,6 +559,7 @@ class SkillRuntime:
         scope: RuntimeScope,
         definition: SkillDefinition,
         days: int,
+        attachment_contexts: list[dict[str, Any]],
         lease_owner: str,
     ) -> SkillExecutionResult:
         tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
@@ -599,6 +623,7 @@ class SkillRuntime:
                 },
                 upstream={
                     "tool_results": {"items": tool_packet},
+                    "attachment_contexts": attachment_contexts,
                     "expert_outputs": list(upstream_outputs),
                 },
             )
@@ -862,6 +887,9 @@ class SkillRuntime:
                             for key, value in tool_results.items()
                         ]
                     },
+                    "attachment_contexts": list(
+                        frozen_input.get("attachment_contexts") or []
+                    ),
                     "expert_outputs": list(upstream_outputs),
                 },
             )

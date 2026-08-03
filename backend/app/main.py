@@ -19,6 +19,7 @@ from app.api import (
     agents,
     approvals,
     artifacts,
+    attachments,
     auth,
     brain,
     clients,
@@ -102,6 +103,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(approvals.router)
 app.include_router(artifacts.router)
+app.include_router(attachments.router)
 app.include_router(users.router)
 app.include_router(clients.router)
 app.include_router(workspace_context.router)

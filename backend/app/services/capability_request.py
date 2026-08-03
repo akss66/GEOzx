@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from app.schemas.attachment import AttachmentContext
 from app.schemas.capability_request import CapabilityRequest
 
 _DAY_PATTERN = re.compile(r"(?P<value>\d{1,3})\s*天")
@@ -58,6 +59,7 @@ def build_capability_request(
     turn: Any,
     run: Any,
     request_payload: Mapping[str, Any],
+    attachment_contexts: list[AttachmentContext] | None = None,
 ) -> CapabilityRequest:
     """Create one immutable request while preserving explicit-field precedence."""
 
@@ -88,6 +90,7 @@ def build_capability_request(
         structured_input=structured_input,
         constraints=constraints,
         attachment_ids=attachment_ids,
+        attachment_contexts=attachment_contexts or [],
     )
 
 

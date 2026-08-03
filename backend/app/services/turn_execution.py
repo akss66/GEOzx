@@ -50,6 +50,7 @@ from app.schemas.conversation import (
     TurnExecutionResult,
     TurnRouteDecision,
 )
+from app.services.attachments import resolve_attachment_contexts
 from app.services.capability_request import build_capability_request
 from app.services.runtime_state import (
     RuntimeEventSpec,
@@ -154,18 +155,28 @@ async def _execute_conversation_turn(
     if thread is None:
         raise PermissionError("conversation Thread is unavailable")
     account = await require_account_access(session, user, thread.account_id)
+    attachment_contexts = await resolve_attachment_contexts(
+        session,
+        user=user,
+        thread=thread,
+        attachment_ids=request.attachment_ids,
+    )
     capability_request = build_capability_request(
         user=user,
         thread=thread,
         turn=turn,
         run=run,
         request_payload=request.model_dump(mode="python"),
+        attachment_contexts=attachment_contexts,
     )
     run.request_payload = {
         **dict(run.request_payload or {}),
         "structured_input": capability_request.structured_input,
         "constraints": capability_request.constraints,
         "attachment_ids": capability_request.attachment_ids,
+        "attachment_contexts": [
+            item.model_dump(mode="json") for item in capability_request.attachment_contexts
+        ],
     }
     try:
         decision = (

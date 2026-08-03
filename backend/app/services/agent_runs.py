@@ -109,7 +109,8 @@ def _require_compatible_claim(
     if (
         run.thread_id != thread_id
         or run.turn_id != turn_id
-        or run.request_payload != request_payload
+        or _immutable_request_payload(run.request_payload)
+        != _immutable_request_payload(request_payload)
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -118,6 +119,23 @@ def _require_compatible_claim(
                 "message": "client_message_id is already bound to another request",
             },
         )
+
+
+def _immutable_request_payload(value: dict) -> dict:
+    """Compare only user-submitted fields; workers may add frozen execution context."""
+
+    keys = (
+        "account_id",
+        "attachment_ids",
+        "attachment_contexts",
+        "client_message_id",
+        "execution_preference",
+        "message",
+        "requested_skill_code",
+        "thread_id",
+        "turn_id",
+    )
+    return {key: value.get(key) for key in keys}
 
 
 async def get_agent_run(

@@ -877,7 +877,7 @@ async def test_submit_turn_claims_one_owned_run_without_task(
         client_message_id="turn-api-1",
         message="查看最近七天数据",
         requested_skill_code="account_data_query",
-        attachment_ids=[7, 8],
+        attachment_ids=[],
     )
 
     assert response.status_code == 202
@@ -902,7 +902,8 @@ async def test_submit_turn_claims_one_owned_run_without_task(
     assert run.turn_id == body["turn"]["id"]
     assert run.request_payload == {
         "account_id": account.id,
-        "attachment_ids": [7, 8],
+        "attachment_ids": [],
+        "attachment_contexts": [],
         "client_message_id": "turn-api-1",
         "execution_preference": "AUTO",
         "message": "查看最近七天数据",

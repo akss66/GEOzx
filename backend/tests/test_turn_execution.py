@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, Platform
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
+from app.schemas.attachment import AttachmentContext
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
@@ -524,6 +525,27 @@ async def test_explicit_skill_receives_account_scoped_capability_request(
         capture_capability_request,
     )
 
+    async def resolve_contexts(*_args, **_kwargs):
+        return [
+            AttachmentContext(
+                id=41,
+                filename="brief.txt",
+                mime_type="text/plain",
+                parsed_context={"text": "brief"},
+            ),
+            AttachmentContext(
+                id=43,
+                filename="metrics.csv",
+                mime_type="text/csv",
+                parsed_context={"text": "metric,value"},
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.resolve_attachment_contexts",
+        resolve_contexts,
+    )
+
     result = await execute_conversation_turn(
         session,
         admin,
@@ -545,6 +567,7 @@ async def test_explicit_skill_receives_account_scoped_capability_request(
     assert capability_request.account_id == thread.account_id
     assert capability_request.structured_input == {"days": 14, "topic_count": 10}
     assert capability_request.attachment_ids == [41, 43]
+    assert [item.id for item in capability_request.attachment_contexts] == [41, 43]
     assert run.request_payload["structured_input"] == {"days": 14, "topic_count": 10}
 
 

@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from app.schemas.attachment import AttachmentContext
+
 
 class CapabilityRequest(BaseModel):
     """The single validated business request passed from routing into execution."""
@@ -22,6 +24,7 @@ class CapabilityRequest(BaseModel):
     structured_input: dict[str, JsonValue] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     attachment_ids: list[int] = Field(default_factory=list)
+    attachment_contexts: list[AttachmentContext] = Field(default_factory=list)
 
 
 __all__ = ["CapabilityRequest"]

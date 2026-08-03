@@ -597,8 +597,8 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_skill_review_state() -> None:
-    assert get_head_revision() == "20260803_0100"
+def test_migration_head_is_conversation_attachments() -> None:
+    assert get_head_revision() == "20260803_0200"
 
 
 def test_douyin_account_metric_exports_migration_is_linear_and_reversible() -> None:

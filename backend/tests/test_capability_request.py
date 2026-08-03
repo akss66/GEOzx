@@ -57,6 +57,7 @@ def test_builds_frozen_account_scoped_capability_request() -> None:
         "structured_input": {"days": 14, "topic_count": 10},
         "constraints": [],
         "attachment_ids": [23, 29],
+        "attachment_contexts": [],
     }
 
     with pytest.raises(ValidationError):
