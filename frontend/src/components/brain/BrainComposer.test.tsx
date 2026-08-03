@@ -199,6 +199,7 @@ describe("BrainComposer", () => {
     expect(input).not.toHaveAttribute("placeholder");
     expect(input).toHaveAttribute("data-autosize-min-rows", "1");
     expect(input).toHaveAttribute("data-autosize-max-rows", "6");
+    expect(input).toHaveFocus();
     expect(screen.getByRole("button", { name: "发送给运营大脑" })).toHaveClass(
       "dy-brain-send-button",
     );
@@ -226,6 +227,30 @@ describe("BrainComposer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
     expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("does not submit from the keyboard while disabled", () => {
+    const onSubmit = vi.fn();
+    render(
+      <BrainComposer
+        value="分析当前账号"
+        disabled
+        loading={false}
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "运营大脑消息" }), {
+      key: "Enter",
+      code: "Enter",
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("replaces the send action with a real stop action while generating", () => {

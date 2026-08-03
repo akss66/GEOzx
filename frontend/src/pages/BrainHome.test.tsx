@@ -27,6 +27,7 @@ import type {
   ConversationAgentRun,
   ConversationThread,
   ConversationTurn,
+  Platform,
   PublicSkill,
   TurnSubmission,
 } from "../types";
@@ -49,7 +50,7 @@ const mocks = vi.hoisted(() => {
   const workspace = {
     clientId: 1 as number | null,
     projectId: 2 as number | null,
-    platform: "douyin" as const,
+    platform: "douyin" as Platform,
     accountId: 3 as number | null,
     setAccountId: vi.fn(),
   };
@@ -136,6 +137,8 @@ describe("BrainHome V3 conversation projection", () => {
     vi.clearAllMocks();
     localStorage.clear();
     mocks.workspace.accountId = 3;
+    mocks.workspace.platform = "douyin";
+    mocks.account.platform = "douyin";
     mocks.account.auth_status = "manual";
     mocks.event.handler = null;
     mocks.event.options = null;
@@ -191,6 +194,16 @@ describe("BrainHome V3 conversation projection", () => {
     }));
     expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads"))
       .toContain('"3":82');
+  });
+
+  it("loads the composer catalog for the selected account platform", async () => {
+    mocks.workspace.platform = "xiaohongshu";
+    mocks.account.platform = "xiaohongshu";
+
+    renderBrainHome();
+
+    await waitFor(() => expect(listComposerSkills).toHaveBeenCalledWith("xiaohongshu", 3));
+    expect(listComposerSkills).not.toHaveBeenCalledWith("douyin", 3);
   });
 
   it("exposes operation Skills from the catalog and keeps blocked actions non-executable", async () => {

@@ -17,6 +17,7 @@ import type {
   ReflectionRecordSummary,
   RerunScope,
   PublicSkill,
+  Platform,
   SendConversationTurnInput,
   TurnSubmission,
 } from "../types";
@@ -75,7 +76,7 @@ export async function deleteConversation(
 }
 
 export async function listComposerSkills(
-  platform = "douyin",
+  platform: Platform = "douyin",
   accountId?: number | null,
 ): Promise<PublicSkill[]> {
   const { data } = await api.get<{ data: PublicSkill[] }>("/skills", {

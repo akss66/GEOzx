@@ -88,6 +88,7 @@ export default function BrainHome() {
   const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
   const pendingClientMessageId = useRef<string | null>(null);
   const activeConversationThreadIdRef = useRef<number | null>(null);
+  const previousAccountIdRef = useRef<number | null>(null);
   const launcherRequestInFlight = useRef(false);
   const effectiveAccountIdRef = useRef<number | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
@@ -115,8 +116,8 @@ export default function BrainHome() {
   effectiveAccountIdRef.current = activeAccount?.id ?? null;
 
   const composerSkillsQuery = useQuery({
-    queryKey: ["composer-skills", "douyin", activeAccount?.id ?? null],
-    queryFn: () => listComposerSkills("douyin", activeAccount?.id),
+    queryKey: ["composer-skills", activeAccount?.platform ?? platform, activeAccount?.id ?? null],
+    queryFn: () => listComposerSkills(activeAccount?.platform ?? platform, activeAccount?.id),
   });
 
   useEventStream((event) => {
@@ -176,11 +177,16 @@ export default function BrainHome() {
   );
 
   useEffect(() => {
+    const nextAccountId = effectiveAccount?.id ?? null;
+    const accountChanged = previousAccountIdRef.current != null
+      && previousAccountIdRef.current !== nextAccountId;
+    previousAccountIdRef.current = nextAccountId;
     setActiveConversationThreadId(
       effectiveAccount ? getActiveConversationThreadId(effectiveAccount.id) : null,
     );
     setPendingTurn(null);
     pendingClientMessageId.current = null;
+    if (accountChanged) setGoal("");
     setDraftAttachments([]);
     setSelectedArtifact(null);
     setSourceReturnTarget(null);

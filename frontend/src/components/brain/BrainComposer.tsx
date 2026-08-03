@@ -74,6 +74,7 @@ export function BrainComposer({
 
   const mode = pendingPermission ? "permission" : "message";
   const comment = approvalComment.trim() || undefined;
+  const textAreaAutoSize = supportsMeasuredTextArea();
 
   return (
     <section
@@ -170,8 +171,10 @@ export function BrainComposer({
               aria-label="运营大脑消息"
               value={value}
               disabled={disabled || loading}
+              autoFocus
               onChange={(event) => onChange(event.target.value)}
-              autoSize={{ minRows: 1, maxRows: 6 }}
+              autoSize={textAreaAutoSize ? { minRows: 1, maxRows: 6 } : false}
+              rows={textAreaAutoSize ? undefined : 1}
               data-autosize-min-rows="1"
               data-autosize-max-rows="6"
               maxLength={420}
@@ -224,6 +227,12 @@ export function BrainComposer({
       </div>
     </section>
   );
+}
+
+function supportsMeasuredTextArea() {
+  if (typeof window === "undefined" || typeof document === "undefined") return false;
+  if (typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent)) return false;
+  return window.getComputedStyle(document.documentElement).lineHeight !== "";
 }
 
 function appendPrompt(value: string, prompt: string) {
