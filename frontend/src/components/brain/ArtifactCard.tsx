@@ -3,6 +3,7 @@ import { Button, Input, Tag } from "antd";
 import { useMemo, useState } from "react";
 
 import type { Artifact, ArtifactSection } from "../../types";
+import { presentDeliverable } from "./deliverablePresentation";
 
 export type ArtifactAction =
   | { type: "view_full_report"; artifact: Artifact }
@@ -85,19 +86,21 @@ export function ArtifactCard({
   );
   const canAct = ["draft", "ready_for_review"].includes(artifact.status);
   const revisionInProgress = revisionPending || artifact.status === "revision_requested";
-  const title = businessArtifactTitle(artifact);
-  const summary = businessText(artifact.summary, "成果内容已完成安全核验。");
+  const presentation = presentDeliverable(artifact);
+  const summary = businessText(artifact.summary, "当前运营内容已完成安全核验。");
+  const editAction = presentation.secondaryActions.find((action) => action.kind === "edit");
 
   return (
-    <article className="tz-artifact-card" aria-label={`Artifact: ${title}`}>
+    <article className="tz-artifact-card" aria-label={`运营内容：${presentation.typeLabel}`}>
       <header className="tz-artifact-card__header">
         <div>
-          <span className="tz-artifact-card__eyebrow">正式成果 · <strong>V{artifact.version}</strong></span>
-          <h3>{title}</h3>
+          <span className="tz-artifact-card__eyebrow">版本 · <strong>V{artifact.version}</strong></span>
+          <h3>{presentation.typeLabel}</h3>
         </div>
         <Tag color={statusColor(artifact.status)}>{statusCopy(artifact.status)}</Tag>
       </header>
 
+      <p className="tz-artifact-card__completion">{presentation.completionLabel}</p>
       <p className="tz-artifact-card__summary">{summary}</p>
 
       <div className="tz-artifact-card__sections">
@@ -105,7 +108,7 @@ export function ArtifactCard({
       </div>
 
       {revisionInProgress ? (
-        <div className="tz-artifact-card__revision-progress" role="status">正在生成 V{artifact.version + 1}</div>
+        <div className="tz-artifact-card__revision-progress" role="status">正在准备 V{artifact.version + 1} 更新内容</div>
       ) : null}
 
       <p className="tz-artifact-card__evidence-summary">
@@ -123,14 +126,14 @@ export function ArtifactCard({
           setFullReportOpen((open) => !open);
           onAction({ type: "view_full_report", artifact });
         }}>
-          查看完整报告
+          {presentation.primaryAction.label}
         </Button>
         {canAct ? <>
-          <Button onClick={() => onAction({ type: "accept", artifact })}>仅采用报告</Button>
+          <Button onClick={() => onAction({ type: "accept", artifact })}>确认当前内容</Button>
           <Button type="primary" onClick={() => onAction({ type: "accept_and_continue", artifact })}>
-            采用并创建下一步
+            确认并继续规划
           </Button>
-          <Button onClick={() => setEditingRevision((open) => !open)}>提出修改</Button>
+          <Button onClick={() => setEditingRevision((open) => !open)}>{editAction?.label ?? "提出修改"}</Button>
         </> : null}
       </div>
 
@@ -291,7 +294,7 @@ function businessText(value: string, fallback: string) {
 }
 
 export function businessArtifactTitle(artifact: Artifact) {
-  return businessText(artifact.title, "正式成果");
+  return businessText(artifact.title, "运营报告");
 }
 
 function businessObjectLabel(key: string) {
@@ -311,10 +314,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function statusCopy(status: Artifact["status"]) {
   return {
     draft: "草稿",
-    ready_for_review: "待采用",
-    accepted: "已采用",
-    revision_requested: "已提出修改",
-    superseded: "已更新",
+    ready_for_review: "待你确认",
+    accepted: "已完成",
+    revision_requested: "需要修改",
+    superseded: "已完成",
   }[status];
 }
 

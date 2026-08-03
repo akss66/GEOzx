@@ -53,7 +53,9 @@ describe("ArtifactCard", () => {
   it("renders business sections and hides internal schema, checklist, and raw-log copy", () => {
     render(<ArtifactCard artifact={reviewArtifact} onAction={vi.fn()} />);
 
-    expect(screen.getByText("账号体检报告")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "账号诊断" })).toBeInTheDocument();
+    expect(screen.getByText("已完成当前账号运营诊断")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看账号诊断" })).toBeInTheDocument();
     expect(screen.getByText("V1")).toBeInTheDocument();
     expect(screen.getByText("核心结论")).toBeInTheDocument();
     expect(screen.getByText("数据周期")).toBeInTheDocument();
@@ -117,13 +119,13 @@ describe("ArtifactCard", () => {
     expect(screen.queryByText("field_observation #1")).not.toBeInTheDocument();
   });
 
-  it("exposes the four typed business actions and requires a concrete revision note", () => {
+  it("uses concrete operations labels and requires a concrete revision note", () => {
     const onAction = vi.fn();
     render(<ArtifactCard artifact={reviewArtifact} onAction={onAction} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "查看完整报告" }));
-    fireEvent.click(screen.getByRole("button", { name: "仅采用报告" }));
-    fireEvent.click(screen.getByRole("button", { name: "采用并创建下一步" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看账号诊断" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并继续规划" }));
     fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
     expect(screen.getByRole("button", { name: "提交修改" })).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), {
@@ -139,12 +141,14 @@ describe("ArtifactCard", () => {
       artifact: reviewArtifact,
       note: "请补充三个可执行选题。",
     });
+    expect(screen.queryByText(/采用成果/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/正式成果/)).not.toBeInTheDocument();
   });
 
   it("shows one status and a separate V2 progress row while a revision is pending", () => {
     render(<ArtifactCard artifact={{ ...reviewArtifact, status: "revision_requested" }} onAction={vi.fn()} />);
 
-    expect(screen.getByText("正在生成 V2")).toBeInTheDocument();
+    expect(screen.getByText("正在准备 V2 更新内容")).toBeInTheDocument();
     expect(screen.queryByText("正式成果 V1")).not.toBeInTheDocument();
     expect(screen.queryByText("重做中")).not.toBeInTheDocument();
   });
@@ -170,8 +174,8 @@ describe("ArtifactCard", () => {
       onAction={vi.fn()}
     />);
 
-    expect(screen.getByRole("heading", { name: "正式成果" })).toBeInTheDocument();
-    expect(screen.getByText("成果内容已完成安全核验。")) .toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "账号诊断" })).toBeInTheDocument();
+    expect(screen.getByText("当前运营内容已完成安全核验。")) .toBeInTheDocument();
     expect(screen.getByText("互动率：4.8%")).toBeInTheDocument();
     expect(screen.getByText("质量审核")).toBeInTheDocument();
     expect(screen.getByText("质量审核已完成，详细依据请查看生成依据。")) .toBeInTheDocument();
