@@ -1,9 +1,10 @@
 import { SearchOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { searchWorkspace } from "../../api/shell";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { useCurrentWorkspace } from "../../stores/currentWorkspace";
 
 const kindLabels = { client: "客户", project: "项目", account: "账号" } as const;
@@ -14,6 +15,10 @@ export function GlobalSearch() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const closeSearch = useCallback(() => setOpen(false), []);
+  useDismissibleLayer({ open, onDismiss: closeSearch, panelRef, triggerRef });
   const normalizedQuery = query.trim();
   const resultsQuery = useQuery({
     queryKey: ["workspace-search", normalizedQuery],
@@ -24,13 +29,13 @@ export function GlobalSearch() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const isEditing = target?.matches("input, textarea, [contenteditable='true']");
+      const target = event.target;
+      const isEditing = target instanceof Element
+        && target.matches("input, textarea, [contenteditable='true']");
       if (event.key === "/" && !isEditing) {
         event.preventDefault();
         setOpen(true);
       }
-      if (event.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -55,6 +60,7 @@ export function GlobalSearch() {
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         className="tz-global-search-trigger"
         aria-label="全局搜索"
@@ -67,11 +73,30 @@ export function GlobalSearch() {
       {open ? (
         <div className="tz-command-backdrop" role="presentation" onMouseDown={() => setOpen(false)}>
           <section
+            ref={panelRef}
             className="tz-command-panel"
             role="dialog"
             aria-modal="true"
             aria-label="全局搜索"
             onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const focusable = Array.from(
+                panelRef.current?.querySelectorAll<HTMLElement>(
+                  "input, button:not([disabled]), [href], [tabindex]:not([tabindex='-1'])",
+                ) ?? [],
+              );
+              if (!focusable.length) return;
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }}
           >
             <label className="tz-command-input">
               <SearchOutlined />
