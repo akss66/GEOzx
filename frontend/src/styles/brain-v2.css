@@ -889,6 +889,24 @@
   margin: 0 0 5px;
 }
 
+.tz-artifact-card__evidence-detail details {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+.tz-artifact-card__evidence-detail summary {
+  cursor: pointer;
+  color: var(--tz-muted);
+}
+
+.tz-artifact-card__evidence-pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .tz-brain-artifact-details li strong {
   color: var(--tz-ink);
   font-size: 12px;

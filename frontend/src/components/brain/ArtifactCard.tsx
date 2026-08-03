@@ -67,12 +67,21 @@ export function ArtifactCard({
 }) {
   const [fullReportOpen, setFullReportOpen] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [technicalEvidenceOpen, setTechnicalEvidenceOpen] = useState(false);
+  const [evidencePage, setEvidencePage] = useState(1);
   const [editingRevision, setEditingRevision] = useState(false);
   const [revisionNote, setRevisionNote] = useState("");
   const sections = useMemo(() => artifact.sections.filter(isBusinessSection), [artifact.sections]);
   const primarySections = sections.filter((section) => PRIMARY_KEYS.includes(section.key));
   const remainingSections = sections.filter((section) => !PRIMARY_KEYS.includes(section.key));
   const evidence = artifact.evidence_refs.filter((item) => isSafeText(item.kind) && isSafeText(item.label));
+  const evidenceSummary = artifact.evidence_summary ?? fallbackEvidenceSummary(evidence);
+  const evidencePageSize = 10;
+  const evidencePages = Math.max(1, Math.ceil(evidence.length / evidencePageSize));
+  const visibleEvidence = evidence.slice(
+    (evidencePage - 1) * evidencePageSize,
+    evidencePage * evidencePageSize,
+  );
   const canAct = ["draft", "ready_for_review"].includes(artifact.status);
   const revisionInProgress = revisionPending || artifact.status === "revision_requested";
   const title = businessArtifactTitle(artifact);
@@ -99,7 +108,7 @@ export function ArtifactCard({
       ) : null}
 
       <p className="tz-artifact-card__evidence-summary">
-        调用专家 / 依据：{evidence.length > 0 ? `已引用 ${evidence.length} 项可核查依据` : "暂无额外可核查依据"}
+        调用专家 / 依据：{evidenceSummary.total > 0 ? `已核验 ${evidenceSummary.total} 条依据` : "暂无额外可核查依据"}
       </p>
 
       {fullReportOpen && remainingSections.length > 0 ? (
@@ -156,12 +165,69 @@ export function ArtifactCard({
         {evidenceOpen ? (
           <div className="tz-artifact-card__evidence-detail">
             <p>{artifact.quality ? `质量${artifact.quality.passed ? "通过" : "待复核"}（${Math.round(artifact.quality.score)} 分）` : "质量结果待补充"}</p>
-            {evidence.length > 0 ? <ul>{evidence.map((item) => <li key={`${item.kind}-${item.id}`}>{safeText(item.label)}</li>)}</ul> : null}
+            {evidenceSummary.groups.length > 0 ? (
+              <ul aria-label="业务依据摘要">
+                {evidenceSummary.groups.map((group) => (
+                  <li key={group.kind}>{evidenceGroupCopy(group)}</li>
+                ))}
+              </ul>
+            ) : null}
+            {evidence.length > 0 ? (
+              <details
+                open={technicalEvidenceOpen}
+                onToggle={(event) => setTechnicalEvidenceOpen(event.currentTarget.open)}
+              >
+                <summary>技术依据（{evidence.length} 条）</summary>
+                <ul>
+                  {visibleEvidence.map((item) => (
+                    <li key={`${item.kind}-${item.id}`}>{safeText(item.label)}</li>
+                  ))}
+                </ul>
+                {evidencePages > 1 ? (
+                  <div className="tz-artifact-card__evidence-pagination">
+                    <Button
+                      size="small"
+                      disabled={evidencePage === 1}
+                      onClick={() => setEvidencePage((page) => Math.max(1, page - 1))}
+                    >
+                      上一页
+                    </Button>
+                    <span>{evidencePage} / {evidencePages}</span>
+                    <Button
+                      size="small"
+                      disabled={evidencePage === evidencePages}
+                      onClick={() => setEvidencePage((page) => Math.min(evidencePages, page + 1))}
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                ) : null}
+              </details>
+            ) : null}
           </div>
         ) : null}
       </section>
     </article>
   );
+}
+
+function fallbackEvidenceSummary(evidence: Artifact["evidence_refs"]) {
+  return {
+    total: evidence.length,
+    groups: evidence.length > 0 ? [{
+      kind: "business_evidence",
+      label: "业务数据依据",
+      count: evidence.length,
+      metric_count: 0,
+      period: null,
+    }] : [],
+  };
+}
+
+function evidenceGroupCopy(group: NonNullable<Artifact["evidence_summary"]>["groups"][number]) {
+  const metricCopy = group.metric_count > 0 ? `，覆盖 ${group.metric_count} 项指标` : "";
+  const periodCopy = group.period ? `，${group.period}` : "";
+  return `${safeText(group.label)}：${group.count} 条${metricCopy}${periodCopy}`;
 }
 
 function BusinessSection({ section }: { section: ArtifactSection }) {

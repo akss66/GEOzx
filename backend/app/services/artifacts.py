@@ -29,6 +29,8 @@ from app.models import (
 )
 from app.models.enums import DeliverableStatus, DeliverableType, WorkspaceRole
 from app.schemas.artifacts import (
+    ArtifactEvidenceGroup,
+    ArtifactEvidenceSummary,
     ArtifactOut,
     ArtifactPageOut,
     ArtifactPagination,
@@ -510,6 +512,7 @@ async def project_artifact(
             business_artifact_type=business_artifact_type,
         ),
         evidence_refs=_evidence_refs(payload, quality),
+        evidence_summary=_evidence_summary(payload, quality),
         quality=(
             ArtifactQuality(
                 score=float(quality.score),
@@ -784,12 +787,7 @@ def _looks_like_internal_confirmation(value: str) -> bool:
 
 
 def _evidence_refs(payload: dict[str, Any], quality: AgentQualityScore | None) -> list[EvidenceRef]:
-    candidates: list[Any] = []
-    raw_payload_refs = payload.get("evidence_refs", [])
-    if isinstance(raw_payload_refs, list):
-        candidates.extend(raw_payload_refs)
-    if quality is not None and isinstance(quality.evidence_refs, list):
-        candidates.extend(quality.evidence_refs)
+    candidates = _evidence_candidates(payload, quality)
 
     refs: list[EvidenceRef] = []
     seen: set[tuple[str, int]] = set()
@@ -813,6 +811,88 @@ def _evidence_refs(payload: dict[str, Any], quality: AgentQualityScore | None) -
             safe_label = f"{kind} #{evidence_id}"
         refs.append(EvidenceRef(kind=kind, id=evidence_id, label=safe_label))
     return refs
+
+
+_EVIDENCE_KIND_LABELS = {
+    "field_observation": "账号数据字段",
+    "data_import_batch": "数据导入批次",
+    "account_metric_snapshot": "账号指标快照",
+    "metric_snapshot": "账号指标快照",
+    "specialist": "专家分析",
+    "agent_invocation": "专家分析",
+    "artifact": "已采用成果",
+}
+
+
+def _evidence_summary(
+    payload: dict[str, Any], quality: AgentQualityScore | None
+) -> ArtifactEvidenceSummary:
+    groups: dict[str, dict[str, Any]] = {}
+    seen: set[tuple[str, int]] = set()
+    for candidate in _evidence_candidates(payload, quality):
+        if not isinstance(candidate, dict):
+            continue
+        kind = candidate.get("kind") or candidate.get("source_type")
+        evidence_id = _safe_evidence_id(candidate.get("id") or candidate.get("source_id"))
+        if not isinstance(kind, str) or not kind.strip() or evidence_id is None:
+            continue
+        identity = (kind, evidence_id)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        group = groups.setdefault(
+            kind,
+            {
+                "kind": kind,
+                "label": _EVIDENCE_KIND_LABELS.get(kind, "业务数据依据"),
+                "count": 0,
+                "metrics": set(),
+                "periods": set(),
+            },
+        )
+        group["count"] += 1
+        metric = candidate.get("metric") or candidate.get("metric_name")
+        if isinstance(metric, str) and metric.strip():
+            group["metrics"].add(metric.strip())
+        period = _candidate_period(candidate)
+        if period:
+            group["periods"].add(period)
+
+    summaries = [
+        ArtifactEvidenceGroup(
+            kind=group["kind"],
+            label=group["label"],
+            count=group["count"],
+            metric_count=len(group["metrics"]),
+            period=(next(iter(group["periods"])) if len(group["periods"]) == 1 else None),
+        )
+        for group in groups.values()
+    ]
+    summaries.sort(key=lambda item: (-item.count, item.label, item.kind))
+    return ArtifactEvidenceSummary(total=len(seen), groups=summaries)
+
+
+def _evidence_candidates(
+    payload: dict[str, Any], quality: AgentQualityScore | None
+) -> list[Any]:
+    candidates: list[Any] = []
+    raw_payload_refs = payload.get("evidence_refs", [])
+    if isinstance(raw_payload_refs, list):
+        candidates.extend(raw_payload_refs)
+    if quality is not None and isinstance(quality.evidence_refs, list):
+        candidates.extend(quality.evidence_refs)
+    return candidates
+
+
+def _candidate_period(candidate: dict[str, Any]) -> str | None:
+    explicit = candidate.get("period") or candidate.get("data_period")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    start = candidate.get("period_start")
+    end = candidate.get("period_end")
+    if isinstance(start, str) and start.strip() and isinstance(end, str) and end.strip():
+        return f"{start.strip()} 至 {end.strip()}"
+    return None
 
 
 def _require_content_account_id(content: ContentItem) -> int:

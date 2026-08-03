@@ -26,6 +26,19 @@ class EvidenceRef(BaseModel):
     label: str
 
 
+class ArtifactEvidenceGroup(BaseModel):
+    kind: str
+    label: str
+    count: int = Field(ge=1)
+    metric_count: int = Field(ge=0)
+    period: str | None = None
+
+
+class ArtifactEvidenceSummary(BaseModel):
+    total: int = Field(ge=0)
+    groups: list[ArtifactEvidenceGroup] = Field(default_factory=list)
+
+
 class ArtifactQuality(BaseModel):
     score: float = Field(ge=0, le=100)
     passed: bool
@@ -47,6 +60,7 @@ class ArtifactOut(BaseModel):
     summary: str
     sections: list[ArtifactSection]
     evidence_refs: list[EvidenceRef]
+    evidence_summary: ArtifactEvidenceSummary
     quality: ArtifactQuality | None
     created_at: datetime
 

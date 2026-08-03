@@ -536,6 +536,17 @@ export interface ArtifactEvidenceRef {
   label: string;
 }
 
+export interface ArtifactEvidenceSummary {
+  total: number;
+  groups: Array<{
+    kind: string;
+    label: string;
+    count: number;
+    metric_count: number;
+    period: string | null;
+  }>;
+}
+
 export interface ArtifactQuality {
   score: number;
   passed: boolean;
@@ -564,6 +575,7 @@ export interface Artifact {
   summary: string;
   sections: ArtifactSection[];
   evidence_refs: ArtifactEvidenceRef[];
+  evidence_summary?: ArtifactEvidenceSummary;
   quality: ArtifactQuality | null;
   created_at: string;
 }

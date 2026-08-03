@@ -304,10 +304,68 @@ async def test_artifact_list_detail_share_business_projection_and_provenance(
     assert listed["evidence_refs"] == [
         {"kind": "account_metric_snapshot", "id": 81, "label": "近28天账号指标"}
     ]
+    assert listed["evidence_summary"] == {
+        "total": 1,
+        "groups": [
+            {
+                "kind": "account_metric_snapshot",
+                "label": "账号指标快照",
+                "count": 1,
+                "metric_count": 0,
+                "period": None,
+            }
+        ],
+    }
     assert listed["quality"] == {
         "score": 91.0,
         "passed": True,
         "issues": ["建议补充粉丝转化数据"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_artifact_aggregates_raw_field_observations_for_operator_summary(
+    client, session, admin
+) -> None:
+    payload = _review_payload()
+    payload["evidence_refs"] = [
+        {
+            "kind": "field_observation",
+            "id": index,
+            "label": f"field_observation #{index}",
+            "metric": "播放量" if index <= 40 else "互动率",
+            "period_start": "2026-07-01",
+            "period_end": "2026-07-30",
+        }
+        for index in range(1, 80)
+    ]
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="证据聚合账号",
+        payload=payload,
+    )
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["evidence_refs"]) == 79
+    assert body["evidence_summary"] == {
+        "total": 79,
+        "groups": [
+            {
+                "kind": "field_observation",
+                "label": "账号数据字段",
+                "count": 79,
+                "metric_count": 2,
+                "period": "2026-07-01 至 2026-07-30",
+            }
+        ],
     }
 
 

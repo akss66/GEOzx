@@ -36,6 +36,13 @@ const reviewArtifact = {
     { kind: "metric_snapshot", id: 2, label: "近 21 天账号指标" },
     { kind: "raw_tool_log", id: 3, label: "Traceback: secret-token" },
   ],
+  evidence_summary: {
+    total: 2,
+    groups: [
+      { kind: "specialist", label: "专家分析", count: 1, metric_count: 0, period: null },
+      { kind: "metric_snapshot", label: "账号指标快照", count: 1, metric_count: 2, period: "近 21 天" },
+    ],
+  },
   quality: { score: 92, passed: true, issues: [] },
   created_at: "2026-07-28T00:00:00Z",
 } satisfies Artifact;
@@ -66,10 +73,48 @@ describe("ArtifactCard", () => {
     expect(screen.queryByText("近 21 天账号指标")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看生成依据" }));
 
-    expect(screen.getAllByText("内容策略专家")).toHaveLength(2);
-    expect(screen.getByText("近 21 天账号指标")).toBeInTheDocument();
+    expect(screen.getByText("专家分析：1 条")).toBeInTheDocument();
+    expect(screen.getByText("账号指标快照：1 条，覆盖 2 项指标，近 21 天")).toBeInTheDocument();
     expect(screen.getByText("质量通过（92 分）")).toBeInTheDocument();
+    expect(screen.getByText("近 21 天账号指标")).not.toBeVisible();
+    fireEvent.click(screen.getByText("技术依据（2 条）"));
+    expect(screen.getByText("近 21 天账号指标")).toBeInTheDocument();
     expect(screen.queryByText(/Traceback/)).not.toBeInTheDocument();
+  });
+
+  it("paginates raw evidence inside technical details", () => {
+    const evidenceRefs = Array.from({ length: 21 }, (_, index) => ({
+      kind: "field_observation",
+      id: index + 1,
+      label: `field_observation #${index + 1}`,
+    }));
+    render(<ArtifactCard
+      artifact={{
+        ...reviewArtifact,
+        evidence_refs: evidenceRefs,
+        evidence_summary: {
+          total: 21,
+          groups: [{
+            kind: "field_observation",
+            label: "账号数据字段",
+            count: 21,
+            metric_count: 2,
+            period: "2026-07-01 至 2026-07-30",
+          }],
+        },
+      }}
+      onAction={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看生成依据" }));
+    expect(screen.getByText("账号数据字段：21 条，覆盖 2 项指标，2026-07-01 至 2026-07-30")).toBeInTheDocument();
+    expect(screen.getByText("field_observation #1")).not.toBeVisible();
+    fireEvent.click(screen.getByText("技术依据（21 条）"));
+    expect(screen.getByText("field_observation #1")).toBeInTheDocument();
+    expect(screen.queryByText("field_observation #11")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(screen.getByText("field_observation #11")).toBeInTheDocument();
+    expect(screen.queryByText("field_observation #1")).not.toBeInTheDocument();
   });
 
   it("exposes the four typed business actions and requires a concrete revision note", () => {
