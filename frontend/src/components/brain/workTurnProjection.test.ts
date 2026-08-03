@@ -122,4 +122,42 @@ describe("projectWorkTurn", () => {
       }],
     })).currentActivity).toBeNull();
   });
+
+  it.each([
+    ["blocked", "blocked"],
+    ["cancelled", "cancelled"],
+    ["stopped", "cancelled"],
+    ["dead_letter", "failed"],
+    ["failed", "failed"],
+    ["completed", "completed"],
+  ] as const)("lets persisted %s override a stale waiting approval phase", (status, expected) => {
+    expect(projectWorkTurn(turn({
+      status,
+      turn_phase: "waiting_approval",
+    }))).toMatchObject({
+      status: expected,
+      currentActivity: null,
+    });
+  });
+
+  it("clears current activity when a blocked Turn retains its reading phase", () => {
+    expect(projectWorkTurn(turn({
+      status: "blocked",
+      turn_phase: "reading_data",
+    })).currentActivity).toBeNull();
+  });
+
+  it.each(["blocked", "cancelled", "stopped", "dead_letter"])(
+    "marks a terminal execution summary with %s as failed",
+    (status) => {
+      expect(projectWorkTurn(turn({
+        status: "failed",
+        projections: [{ ...executionSummary, status }],
+      })).steps).toEqual([{
+        code: "account_review",
+        label: "account_review",
+        state: "failed",
+      }]);
+    },
+  );
 });

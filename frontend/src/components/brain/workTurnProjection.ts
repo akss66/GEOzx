@@ -7,16 +7,48 @@ import type {
   WorkTurnViewModel,
 } from "../../types";
 
+const TERMINAL_WORK_TURN_STATUSES: Record<string, WorkTurnStatus> = {
+  blocked: "blocked",
+  cancelled: "cancelled",
+  stopped: "cancelled",
+  failed: "failed",
+  dead_letter: "failed",
+  completed: "completed",
+};
+
+const PAUSED_WORK_TURN_STATUSES = new Set([
+  "waiting_permission",
+  "waiting_decision",
+  "waiting_user",
+]);
+
+const TERMINAL_WORK_TURN_VIEW_STATUSES = new Set<WorkTurnStatus>([
+  "completed",
+  "blocked",
+  "failed",
+  "cancelled",
+]);
+
+const FAILED_STEP_STATUSES = new Set([
+  "failed",
+  "error",
+  "blocked",
+  "cancelled",
+  "stopped",
+  "dead_letter",
+]);
+
 export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
   const projections = projectionsForTurn(turn);
   const steps = projectSteps(projections);
+  const status = projectStatus(turn.status, turn.turn_phase);
 
   return {
     key: workTurnKey(turn),
     turnId: turn.id,
     userMessage: turn.user_input,
-    status: projectStatus(turn.status, turn.turn_phase),
-    currentActivity: projectCurrentActivity(turn.turn_phase, turn.status, steps),
+    status,
+    currentActivity: projectCurrentActivity(status, turn.turn_phase, turn.status, steps),
     assistantText: turn.assistant_response ?? latestAnswer(projections),
     steps,
     experts: projectExperts(projections),
@@ -85,29 +117,22 @@ function projectionsForTurn(turn: ConversationTurn) {
 }
 
 function projectStatus(status: string, phase: TurnPhase | undefined): WorkTurnStatus {
+  const terminalStatus = TERMINAL_WORK_TURN_STATUSES[status];
+  if (terminalStatus) return terminalStatus;
+  if (PAUSED_WORK_TURN_STATUSES.has(status)) return "waiting_user";
   if (phase === "waiting_approval") return "waiting_user";
   if (phase === "failed") return "failed";
-  if (["waiting_permission", "waiting_decision", "waiting_user"].includes(status)) {
-    return "waiting_user";
-  }
-  if (["blocked"].includes(status)) return "blocked";
-  if (["failed", "dead_letter"].includes(status)) return "failed";
-  if (["cancelled", "stopped"].includes(status)) return "cancelled";
-  if (["completed"].includes(status) || phase === "completed") return "completed";
+  if (phase === "completed") return "completed";
   return "working";
 }
 
 function projectCurrentActivity(
+  status: WorkTurnStatus,
   phase: TurnPhase | undefined,
-  status: string,
+  persistedStatus: string,
   steps: WorkTurnStep[],
 ) {
-  if (
-    ["completed", "failed"].includes(phase ?? "")
-    || ["completed", "failed", "dead_letter", "cancelled", "stopped"].includes(status)
-  ) {
-    return null;
-  }
+  if (TERMINAL_WORK_TURN_VIEW_STATUSES.has(status)) return null;
   const phaseActivity: Partial<Record<TurnPhase, string>> = {
     understanding: "正在理解需求",
     reading_data: "正在读取账号数据",
@@ -119,8 +144,10 @@ function projectCurrentActivity(
   if (phase && phaseActivity[phase]) return phaseActivity[phase];
   const activeStep = steps.find((step) => step.state === "active" || step.state === "waiting");
   if (activeStep) return activeStep.label;
-  if (["queued", "claimed", "waiting_predecessor"].includes(status)) return "等待执行";
-  if (status === "retry_wait") return "正在恢复执行";
+  if (["queued", "claimed", "waiting_predecessor"].includes(persistedStatus)) {
+    return "等待执行";
+  }
+  if (persistedStatus === "retry_wait") return "正在恢复执行";
   return null;
 }
 
@@ -154,7 +181,7 @@ function projectSteps(projections: TurnProjection[]): WorkTurnStep[] {
 
 function projectStepState(status: string | null | undefined): WorkTurnStep["state"] {
   if (["done", "completed", "success", "skipped"].includes(status ?? "")) return "done";
-  if (["failed", "error"].includes(status ?? "")) return "failed";
+  if (FAILED_STEP_STATUSES.has(status ?? "")) return "failed";
   if (["running", "active", "in_progress"].includes(status ?? "")) return "active";
   return "waiting";
 }

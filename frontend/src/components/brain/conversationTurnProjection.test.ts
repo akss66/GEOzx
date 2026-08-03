@@ -177,6 +177,28 @@ describe("conversation Turn projection", () => {
     expect(lateStart.turns[0].assistant_response).toBe("已输出");
   });
 
+  it("accepts the same sequence when a new streamed message begins", () => {
+    const first = applyConversationEvent(
+      thread,
+      frame("brain.runtime.message_delta", 1, { delta: "first" }),
+    );
+    const second = applyConversationEvent(
+      first,
+      frame("brain.runtime.message_delta", 1, {
+        message_id: "client-1:00-decision:2",
+        delta: " second",
+      }),
+    );
+
+    expect(second.turns[0]).toMatchObject({
+      assistant_response: "first second",
+      stream_state: {
+        messageId: "client-1:00-decision:2",
+        lastSequence: 1,
+      },
+    });
+  });
+
   it("completes without start and ignores deltas after done", () => {
     const done = applyConversationEvent(
       thread,
