@@ -38,6 +38,7 @@ from app.orchestrator.capability_router import (
     SkillUnavailable,
     route_deterministic_request,
     route_explicit_request,
+    route_migrated_operation_request,
 )
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_runtime import skill_input_hash, skill_runtime
@@ -567,11 +568,24 @@ async def _route_turn(
         platform=platform,
         registry=skill_registry,
     )
-    return _normalize_model_skill_route(
+    normalized_decision = _normalize_model_skill_route(
         decision,
         user=user,
         platform=platform,
     )
+    if normalized_decision.mode in {
+        TurnExecutionMode.TASK,
+        TurnExecutionMode.ACTION,
+    }:
+        migrated = route_migrated_operation_request(
+            request.message,
+            platform=platform,
+            registry=skill_registry,
+            has_account=True,
+        )
+        if migrated is not None:
+            return migrated
+    return normalized_decision
 
 
 def _normalize_model_skill_route(

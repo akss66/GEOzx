@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -23,6 +24,7 @@ from app.models import (
     StrategyPlan,
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, Platform
+from app.orchestrator.brain_runtime import runtime_graph
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.attachment import AttachmentContext
 from app.schemas.conversation import (
@@ -1324,6 +1326,63 @@ async def test_formal_task_forces_non_clarify_route_into_task(session, admin, mo
     assert result.mode is TurnExecutionMode.TASK
     assert result.task_id is not None
     assert routed_modes == [TurnExecutionMode.TASK]
+
+
+@pytest.mark.asyncio
+async def test_migrated_operation_never_enters_legacy_operation_task(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="typed-topic-route"
+    )
+    message = "给我做7天5个选题"
+    turn.user_input = message
+    await session.commit()
+    captured: list[str] = []
+
+    async def execute_skill(*_args, **kwargs):
+        captured.append(kwargs["decision"].skill_code)
+        return TurnExecutionResult(
+            mode=TurnExecutionMode.SKILL,
+            status="completed",
+            response="typed skill",
+        )
+
+    async def forbidden_legacy(*_args, **_kwargs):
+        raise AssertionError("migrated operation must not enter legacy task graph")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution._execute_composite_skill", execute_skill
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution._execute_operation_task", forbidden_legacy
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("typed-topic-route", message=message),
+    )
+
+    assert result.mode is TurnExecutionMode.SKILL
+    assert captured == ["topic_planning"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_runtime_rejects_migrated_operation_intent() -> None:
+    decision = _decision(
+        TurnExecutionMode.TASK,
+        intent="topic_planning",
+    )
+
+    with pytest.raises(ValueError, match="MIGRATED_OPERATION_REQUIRES_TYPED_SKILL"):
+        await runtime_graph.start_routed(
+            None,
+            SimpleNamespace(),
+            route_decision=decision,
+        )
 
 
 @pytest.mark.parametrize(

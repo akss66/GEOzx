@@ -4,6 +4,7 @@ from pydantic import BaseModel, ValidationError
 from app.orchestrator import capability_router
 from app.orchestrator.capability_router import SkillUnavailable, route_explicit_request
 from app.orchestrator.skills.registry import SkillRegistry
+from app.orchestrator.skills.registry import skill_registry as production_skill_registry
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.schemas.skills import SkillDefinition
 
@@ -226,6 +227,60 @@ def test_deterministic_request_defers_account_inspection_question(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_skill"),
+    [
+        ("帮我重新做账号定位", "account_positioning"),
+        ("给我做7天5个选题", "topic_planning"),
+        ("写一个30秒口播脚本", "script_generation"),
+        ("做发布准备检查", "publishing_preparation"),
+        ("复盘最近30天的数据", "performance_review"),
+        ("分析一下最近的评论互动复盘", "engagement_review"),
+    ],
+)
+def test_migrated_operation_intents_route_to_typed_skills(
+    message: str,
+    expected_skill: str,
+) -> None:
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == expected_skill
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_skill", "missing_field"),
+    [
+        ("现在直接发布", "content_publishing", "approved_publish_artifact_id"),
+        ("根据脚本做视觉方案", "visual_brief_generation", "source_artifact_ids"),
+        ("把这些内容排期", "content_calendar_planning", "source_artifact_ids"),
+        ("安排下一周期运营", "operation_iteration", "confirmed_review_artifact_id"),
+    ],
+)
+def test_migrated_operations_with_missing_artifact_request_clarification(
+    message: str,
+    expected_skill: str,
+    missing_field: str,
+) -> None:
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.CLARIFY
+    assert decision.skill_code == expected_skill
+    assert decision.missing_field == missing_field
 
 
 @pytest.mark.parametrize("confidence", [-0.01, 1.01])

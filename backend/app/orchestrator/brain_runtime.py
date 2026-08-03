@@ -96,6 +96,21 @@ from app.services.runtime_state import (
     close_runtime_state,
 )
 
+_MIGRATED_OPERATION_INTENTS = frozenset(
+    {
+        "account_positioning",
+        "topic_planning",
+        "script_generation",
+        "visual_brief_generation",
+        "content_calendar_planning",
+        "publishing_preparation",
+        "content_publishing",
+        "engagement_review",
+        "performance_review",
+        "operation_iteration",
+    }
+)
+
 
 class BrainRuntimeState(TypedDict, total=False):
     task_id: int
@@ -785,6 +800,12 @@ class BrainRuntimeGraph:
         agent_run_attempt: int = 0,
     ) -> BrainTask:
         """Start one turn through the graph selected by its persisted route."""
+
+        if (
+            route_decision.mode in {TurnExecutionMode.TASK, TurnExecutionMode.ACTION}
+            and route_decision.intent.strip().lower() in _MIGRATED_OPERATION_INTENTS
+        ):
+            raise ValueError("MIGRATED_OPERATION_REQUIRES_TYPED_SKILL")
 
         effective_intent = intent or _intent_for_route(route_decision)
         return await self._start_routed_with_intent(
