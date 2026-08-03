@@ -63,8 +63,11 @@ describe("ArtifactCenter", () => {
     expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1, account_id: 3 }));
   });
 
-  it("uses business and status filters, filters the loaded page by creation time, and paginates", async () => {
+  it("sends date filters before pagination so a matching later-page artifact appears on page one", async () => {
     vi.mocked(listArtifacts).mockImplementation(async (input) => {
+      if (input.createdFrom || input.createdTo) {
+        return page([{ ...artifact(3, 3, "2026-07-28T23:59:59Z"), status: "accepted" }], 1, 1);
+      }
       if (input.page === 2) return page([artifact(3)], 2, 2);
       return page([artifact(1, 3, "2026-07-27T08:00:00Z"), { ...artifact(2), artifact_type: "review_report" }], 1, 2);
     });
@@ -81,14 +84,44 @@ describe("ArtifactCenter", () => {
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
       accountId: 3, status: "accepted", page: 1,
     })));
-    fireEvent.change(screen.getByLabelText("创建时间（起）"), { target: { value: "2026-07-28" } });
-    expect(screen.queryByText("账号诊断")).not.toBeInTheDocument();
-    expect(screen.getByText("仅筛当前页")).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    fireEvent.click(await screen.findByRole("button", { name: "下一页" }));
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 })));
+
+    fireEvent.change(screen.getByLabelText("创建时间（起）"), { target: { value: "2026-07-28" } });
+    fireEvent.change(screen.getByLabelText("创建时间（止）"), { target: { value: "2026-07-28" } });
+    await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
+      accountId: 3,
+      status: "accepted",
+      createdFrom: "2026-07-28",
+      createdTo: "2026-07-28",
+      page: 1,
+    })));
     expect(await screen.findByText("账号诊断")).toBeInTheDocument();
+    expect(screen.queryByText("当前账号下没有符合筛选条件的方案与内容。")).not.toBeInTheDocument();
+    expect(screen.queryByText("仅筛当前页")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下一页" })).not.toBeInTheDocument();
+  });
+
+  it("shows the server range-validation message instead of a retryable load failure", async () => {
+    vi.mocked(listArtifacts).mockImplementation(async (input) => {
+      if (input.createdFrom && input.createdTo && input.createdFrom > input.createdTo) {
+        throw {
+          response: {
+            status: 422,
+            data: { detail: "created_from must be on or before created_to" },
+          },
+        };
+      }
+      return page([]);
+    });
+    renderCenter(3);
+    await screen.findByText("当前账号下没有符合筛选条件的方案与内容。");
+
+    fireEvent.change(screen.getByLabelText("创建时间（起）"), { target: { value: "2026-07-29" } });
+    fireEvent.change(screen.getByLabelText("创建时间（止）"), { target: { value: "2026-07-28" } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("开始日期不能晚于结束日期");
+    expect(screen.queryByText("方案与内容暂时无法加载，请重试。")).not.toBeInTheDocument();
   });
 
   it("shows a retryable error and clears list selection before another account loads", async () => {

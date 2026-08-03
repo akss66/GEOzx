@@ -3,6 +3,7 @@
 import re
 from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
 from math import ceil
 from typing import Any, TypeAlias
 
@@ -237,10 +238,12 @@ async def list_artifacts(
     artifact_type: str | DeliverableType | None,
     artifact_types: Collection[str] | None,
     artifact_status: ArtifactStatus | None,
+    created_from: date | None,
+    created_to: date | None,
     page: int,
     page_size: int,
 ) -> ArtifactPageOut:
-    """List only artifacts whose ContentItem is explicitly bound to the selected account."""
+    """List account artifacts, treating date bounds as inclusive UTC calendar days."""
     account = await require_account_access(session, user, account_id)
     filters = [ContentItem.account_id == account_id]
     requested_artifact_types = _normalize_artifact_types(artifact_type, artifact_types)
@@ -251,6 +254,16 @@ async def list_artifacts(
         filters.append(Deliverable.type.in_(database_types))
     if artifact_status is not None:
         filters.append(Deliverable.status == _ARTIFACT_TO_STATUS[artifact_status])
+    if created_from is not None:
+        filters.append(
+            Deliverable.created_at
+            >= datetime.combine(created_from, time.min, tzinfo=UTC)
+        )
+    if created_to is not None:
+        filters.append(
+            Deliverable.created_at
+            < datetime.combine(created_to + timedelta(days=1), time.min, tzinfo=UTC)
+        )
 
     candidates = list(
         (

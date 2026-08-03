@@ -1,8 +1,9 @@
 """Account Artifact Center and artifact action endpoints."""
 
+from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
@@ -33,9 +34,22 @@ async def artifact_center(
     artifact_type: Annotated[str | None, Query(max_length=120)] = None,
     artifact_types: Annotated[list[str] | None, Query()] = None,
     artifact_status: Annotated[ArtifactStatus | None, Query(alias="status")] = None,
+    created_from: Annotated[
+        date | None,
+        Query(description="Inclusive creation date, interpreted as a UTC calendar day"),
+    ] = None,
+    created_to: Annotated[
+        date | None,
+        Query(description="Inclusive creation date, interpreted as a UTC calendar day"),
+    ] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> ArtifactPageOut:
+    if created_from is not None and created_to is not None and created_from > created_to:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="created_from must be on or before created_to",
+        )
     return await list_artifacts(
         session,
         user,
@@ -43,6 +57,8 @@ async def artifact_center(
         artifact_type=artifact_type,
         artifact_types=artifact_types,
         artifact_status=artifact_status,
+        created_from=created_from,
+        created_to=created_to,
         page=page,
         page_size=page_size,
     )

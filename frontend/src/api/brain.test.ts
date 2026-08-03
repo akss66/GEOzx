@@ -311,6 +311,29 @@ describe("brain api", () => {
     });
   });
 
+  it("sends UTC calendar-day artifact boundaries to the server", async () => {
+    const artifacts = { data: [], pagination: { page: 1, page_size: 20, total: 0, pages: 0 } };
+    apiGet.mockResolvedValueOnce({ data: artifacts });
+
+    await expect(listArtifacts({
+      accountId: 3,
+      createdFrom: "2026-07-10",
+      createdTo: "2026-07-12",
+    })).resolves.toEqual(artifacts);
+
+    expect(apiGet).toHaveBeenCalledWith("/artifacts", {
+      params: {
+        account_id: 3,
+        artifact_type: undefined,
+        status: undefined,
+        created_from: "2026-07-10",
+        created_to: "2026-07-12",
+        page: 1,
+        page_size: 20,
+      },
+    });
+  });
+
   it("retrieves and acts on the exact persisted Artifact identity", async () => {
     const artifact = { id: 5001, account_id: 3, status: "ready_for_review" };
     apiGet.mockResolvedValueOnce({ data: artifact });

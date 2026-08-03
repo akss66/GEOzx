@@ -82,11 +82,21 @@ export function ArtifactCenter({
   }, [accountId]);
 
   const query = useQuery({
-    queryKey: ["account-artifacts", accountId, groupTypes(filters.businessGroup), filters.status, page],
+    queryKey: [
+      "account-artifacts",
+      accountId,
+      groupTypes(filters.businessGroup),
+      filters.status,
+      filters.createdFrom,
+      filters.createdTo,
+      page,
+    ],
     queryFn: () => listArtifacts({
       accountId: accountId!,
       ...(groupTypes(filters.businessGroup) ? { artifactTypes: groupTypes(filters.businessGroup) } : {}),
       status: filters.status || undefined,
+      ...(filters.createdFrom ? { createdFrom: filters.createdFrom } : {}),
+      ...(filters.createdTo ? { createdTo: filters.createdTo } : {}),
       page,
       pageSize: 20,
     }),
@@ -96,18 +106,15 @@ export function ArtifactCenter({
     () => (query.data?.data ?? []).filter((artifact) => artifact.account_id === accountId),
     [accountId, query.data?.data],
   );
-  const visibleArtifacts = useMemo(
-    () => accountArtifacts.filter((artifact) => isInDateRange(artifact.created_at, filters)),
-    [accountArtifacts, filters],
-  );
   const groupedArtifacts = useMemo(() => BUSINESS_GROUPS.map((group) => ({
     ...group,
-    artifacts: visibleArtifacts.filter((artifact) => groupFor(artifact) === group.key),
-  })), [visibleArtifacts]);
+    artifacts: accountArtifacts.filter((artifact) => groupFor(artifact) === group.key),
+  })), [accountArtifacts]);
   const unclassifiedArtifacts = useMemo(
-    () => visibleArtifacts.filter((artifact) => groupFor(artifact) == null),
-    [visibleArtifacts],
+    () => accountArtifacts.filter((artifact) => groupFor(artifact) == null),
+    [accountArtifacts],
   );
+  const dateRangeError = isReversedDateRangeError(query.error);
   const updateFilter = <Key extends keyof Filters>(key: Key, value: Filters[Key]) => {
     setPage(1);
     setFilters((current) => ({ ...current, [key]: value }));
@@ -124,7 +131,7 @@ export function ArtifactCenter({
           <span>当前账号</span>
           <h2>方案与内容</h2>
         </div>
-        <small>{filters.createdFrom || filters.createdTo ? "仅筛当前页" : `第 ${page} 页`}</small>
+        <small>第 {page} 页</small>
       </header>
       <div className="tz-artifact-center__filters" aria-label="方案与内容筛选">
         <label>
@@ -159,11 +166,13 @@ export function ArtifactCenter({
       {query.isPending ? <p role="status">正在加载方案与内容…</p> : null}
       {query.isError ? (
         <div className="tz-artifact-center__error" role="alert">
-          <p>方案与内容暂时无法加载，请重试。</p>
-          <Button onClick={() => void query.refetch()} aria-label="重新加载方案与内容">重新加载</Button>
+          <p>{dateRangeError ? "创建时间的开始日期不能晚于结束日期。" : "方案与内容暂时无法加载，请重试。"}</p>
+          {!dateRangeError ? (
+            <Button onClick={() => void query.refetch()} aria-label="重新加载方案与内容">重新加载</Button>
+          ) : null}
         </div>
       ) : null}
-      {!query.isPending && !query.isError && visibleArtifacts.length === 0 ? (
+      {!query.isPending && !query.isError && accountArtifacts.length === 0 ? (
         <p className="tz-artifact-center__empty">当前账号下没有符合筛选条件的方案与内容。</p>
       ) : null}
       <div className="tz-artifact-center__list">
@@ -212,10 +221,12 @@ function statusLabel(value: ArtifactStatus) {
   return STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
-function isInDateRange(createdAt: string, filters: Filters) {
-  const day = createdAt.slice(0, 10);
-  return (!filters.createdFrom || day >= filters.createdFrom)
-    && (!filters.createdTo || day <= filters.createdTo);
+function isReversedDateRangeError(error: unknown) {
+  const response = (error as {
+    response?: { status?: unknown; data?: { detail?: unknown } };
+  } | null)?.response;
+  return response?.status === 422
+    && response.data?.detail === "created_from must be on or before created_to";
 }
 
 function dataPeriod(artifact: Artifact) {

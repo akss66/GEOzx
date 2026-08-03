@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -554,6 +555,72 @@ async def test_artifact_types_filter_is_validated_before_pagination(client, sess
         headers=_auth(token),
     )
     assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_artifact_created_date_filter_runs_before_pagination_with_inclusive_utc_days(
+    client, session, admin
+):
+    seeded = await _seed_artifact(session, admin, account_name="日期分页账号")
+    matching = seeded[8]
+    matching.created_at = datetime(2026, 7, 10, 23, 59, 59, tzinfo=UTC)
+    newer_outside_range = Deliverable(
+        content_item_id=seeded[2].id,
+        thread_id=seeded[3].id,
+        turn_id=seeded[4].id,
+        run_id=seeded[6].id,
+        skill_run_id=seeded[7].id,
+        agent_code="06-operator",
+        type=DeliverableType.REVIEW_REPORT,
+        version=2,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=_review_payload(summary="日期范围外的较新复盘"),
+        created_at=datetime(2026, 7, 11, 0, 0, 0, tzinfo=UTC),
+    )
+    session.add(newer_outside_range)
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts?account_id={seeded[1].id}"
+        "&created_from=2026-07-10&created_to=2026-07-10&page=1&page_size=1",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pagination"] == {
+        "page": 1,
+        "page_size": 1,
+        "total": 1,
+        "pages": 1,
+    }
+    assert [row["id"] for row in response.json()["data"]] == [matching.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected_detail"),
+    [
+        ("created_from=not-a-date", "valid date"),
+        (
+            "created_from=2026-07-11&created_to=2026-07-10",
+            "created_from must be on or before created_to",
+        ),
+    ],
+)
+async def test_artifact_created_date_filter_rejects_invalid_or_reversed_ranges(
+    client, session, admin, query, expected_detail
+):
+    seeded = await _seed_artifact(session, admin, account_name=f"无效日期-{query}")
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts?account_id={seeded[1].id}&{query}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 422
+    assert expected_detail in response.text
 
 
 @pytest.mark.asyncio

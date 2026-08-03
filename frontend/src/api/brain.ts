@@ -94,6 +94,8 @@ export async function listArtifacts(input: {
   artifactType?: string;
   artifactTypes?: string[];
   status?: ArtifactStatus;
+  createdFrom?: string;
+  createdTo?: string;
   page?: number;
   pageSize?: number;
 }): Promise<ArtifactPage> {
@@ -103,6 +105,8 @@ export async function listArtifacts(input: {
       artifact_type: input.artifactType,
       ...(input.artifactTypes ? { artifact_types: input.artifactTypes } : {}),
       status: input.status,
+      ...(input.createdFrom ? { created_from: input.createdFrom } : {}),
+      ...(input.createdTo ? { created_to: input.createdTo } : {}),
       page: input.page ?? 1,
       page_size: input.pageSize ?? 20,
     },
