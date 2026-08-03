@@ -193,6 +193,34 @@ describe("BrainHome V3 conversation projection", () => {
       .toContain('"3":82');
   });
 
+  it("exposes operation Skills from the catalog and keeps blocked actions non-executable", async () => {
+    vi.mocked(listComposerSkills).mockResolvedValue([
+      operationSkill("topic_planning", "选题策划"),
+      operationSkill("content_publishing", "内容发布", {
+        availability: "needs_connection",
+        reason: "请先连接抖音发布能力",
+        is_available: false,
+        unavailable_reason: "请先连接抖音发布能力",
+      }),
+    ]);
+
+    renderBrainHome();
+
+    await waitFor(() => expect(listComposerSkills).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    expect(await screen.findByRole("menuitem", { name: /内容发布/ })).toBeDisabled();
+    expect(await screen.findByText("请先连接抖音发布能力")).toBeVisible();
+    fireEvent.click(await screen.findByRole("menuitem", { name: /选题策划/ }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(
+      82,
+      expect.objectContaining({
+        message: "选题策划",
+        requested_skill_code: "topic_planning",
+      }),
+    ));
+  });
+
   it("uploads composer files and binds their immutable ids to the submitted Turn", async () => {
     saveThread(3, 82);
     renderBrainHome();
@@ -566,6 +594,28 @@ function inspectionSkill(): PublicSkill {
     required_context: ["account"],
     is_available: true,
     unavailable_reason: null,
+  };
+}
+
+function operationSkill(
+  code: string,
+  name: string,
+  overrides: Partial<PublicSkill> = {},
+): PublicSkill {
+  return {
+    code,
+    version: 1,
+    name,
+    description: `${name}能力`,
+    category: "quick_operations",
+    icon: "operation",
+    requires_account: true,
+    availability: "available",
+    reason: null,
+    required_context: ["account"],
+    is_available: true,
+    unavailable_reason: null,
+    ...overrides,
   };
 }
 

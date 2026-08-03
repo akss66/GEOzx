@@ -1364,8 +1364,10 @@ async def test_brain_message_replans_after_each_expert_result(client, session, a
     }
     assert {item["code"] for item in available_catalogs[0] if item["kind"] == "tool"} == {
         "account.data_context",
+        "account.engagement_context",
         "account.metrics_summary",
         "account.profile",
+        "platform.content_publish",
         "publish_package_prepare",
     }
 
