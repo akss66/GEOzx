@@ -3,8 +3,6 @@ export type AppPage =
   | "agents"
   | "tasks"
   | "approvals"
-  | "customer-service"
-  | "advertising"
   | "review"
   | "cost"
   | "risks"
@@ -27,10 +25,7 @@ export const APP_ROUTES: readonly AppRouteItem[] = [
   { path: "brain", page: "brain" },
   { path: "agents", page: "agents" },
   { path: "tasks", page: "tasks" },
-  { path: "pipeline", page: "tasks" },
   { path: "approvals", page: "approvals" },
-  { path: "customer-service", page: "customer-service" },
-  { path: "advertising", page: "advertising" },
   { path: "review", page: "review" },
   { path: "cost", page: "cost" },
   { path: "risks", page: "risks" },

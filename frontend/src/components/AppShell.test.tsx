@@ -2,7 +2,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { APP_SHELL_BRAND_TITLE, buildAppShellMenuItems } from "./AppShell";
+import {
+  APP_SHELL_BRAND_TITLE,
+  buildAppShellMenuItems,
+  selectedNavigationKey,
+} from "./AppShell";
 
 function menuKeys(isAdmin: boolean) {
   return buildAppShellMenuItems(isAdmin)
@@ -23,23 +27,30 @@ describe("AppShell navigation", () => {
 
   it("shows valid Chinese navigation without deferred modules", () => {
     expect(menuKeys(false)).toEqual([
-      "/", "/agents", "/accounts", "/tasks", "/approvals", "/review", "/cost", "/knowledge",
+      "/", "/agents", "/accounts", "/tasks", "/approvals", "/review", "/risks", "/cost", "/knowledge",
     ]);
     expect(menuLabels(false)).toEqual([
       "AI 运营", "运营大脑", "专家团", "运营执行", "账号矩阵", "内容生产",
-      "人工审批", "运营复盘", "系统资产", "使用成本", "知识库",
+      "人工审批", "运营复盘", "风险队列", "系统资产", "使用成本", "知识库",
     ]);
     expect(menuLabels(false).join("")).not.toContain("????");
   });
 
   it("adds the approved administration routes for admins", () => {
     expect(menuKeys(true)).toEqual([
-      "/", "/agents", "/accounts", "/tasks", "/approvals", "/review", "/cost",
+      "/", "/agents", "/accounts", "/tasks", "/approvals", "/review", "/risks", "/cost",
       "/knowledge", "/users", "/config", "/models",
     ]);
     expect(menuLabels(true)).toContain("管理中心");
     expect(menuLabels(true)).toContain("用户管理");
     expect(menuLabels(true)).toContain("专家管理");
     expect(menuLabels(true)).toContain("模型基础设施");
+  });
+
+  it("selects canonical navigation entries for nested and legacy paths", () => {
+    expect(selectedNavigationKey("/brain")).toBe("/");
+    expect(selectedNavigationKey("/pipeline")).toBe("/tasks");
+    expect(selectedNavigationKey("/accounts/42/data")).toBe("/accounts");
+    expect(selectedNavigationKey("/review")).toBe("/review");
   });
 });

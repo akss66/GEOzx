@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { getMe } from "./api/auth";
@@ -7,31 +7,28 @@ import { APP_ROUTES, type AppPage } from "./appRoutes";
 import { AppShell } from "./components/AppShell";
 import { AdminRoute, ProtectedRoute } from "./components/RouteGuards";
 import { OperationalState } from "./components/ui";
-import Accounts from "./pages/Accounts";
-import AccountDataCenter from "./pages/AccountDataCenter";
-import Advertising from "./pages/Advertising";
-import Approvals from "./pages/Approvals";
-import BrainHome from "./pages/BrainHome";
-import Config from "./pages/Config";
-import Cost from "./pages/Cost";
-import CustomerService from "./pages/CustomerService";
-import ExpertTeam from "./pages/ExpertTeam";
-import Knowledge from "./pages/Knowledge";
-import Login from "./pages/Login";
-import ModelInfrastructure from "./pages/ModelInfrastructure";
-import PipelineBoard from "./pages/PipelineBoard";
-import ReviewDashboard from "./pages/ReviewDashboard";
-import Risks from "./pages/Risks";
-import Users from "./pages/Users";
 import { useAuth } from "./stores/auth";
+
+const Accounts = lazy(() => import("./pages/Accounts"));
+const AccountDataCenter = lazy(() => import("./pages/AccountDataCenter"));
+const Approvals = lazy(() => import("./pages/Approvals"));
+const BrainHome = lazy(() => import("./pages/BrainHome"));
+const Config = lazy(() => import("./pages/Config"));
+const Cost = lazy(() => import("./pages/Cost"));
+const ExpertTeam = lazy(() => import("./pages/ExpertTeam"));
+const Knowledge = lazy(() => import("./pages/Knowledge"));
+const Login = lazy(() => import("./pages/Login"));
+const ModelInfrastructure = lazy(() => import("./pages/ModelInfrastructure"));
+const PipelineBoard = lazy(() => import("./pages/PipelineBoard"));
+const ReviewDashboard = lazy(() => import("./pages/ReviewDashboard"));
+const Risks = lazy(() => import("./pages/Risks"));
+const Users = lazy(() => import("./pages/Users"));
 
 const pageElements: Record<AppPage, JSX.Element> = {
   brain: <BrainHome />,
   agents: <ExpertTeam />,
   tasks: <PipelineBoard />,
   approvals: <Approvals />,
-  "customer-service": <CustomerService />,
-  advertising: <Advertising />,
   review: <ReviewDashboard />,
   cost: <Cost />,
   risks: <Risks />,
@@ -102,7 +99,8 @@ export default function App() {
   }
 
   return (
-    <Routes>
+    <Suspense fallback={<div className="tz-route-loading" role="status">正在加载页面…</div>}>
+      <Routes>
       <Route path="/login" element={<Login />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
@@ -113,6 +111,7 @@ export default function App() {
               <Route key={route.path} path={route.path} element={pageElements[route.page]} />
             ),
           )}
+          <Route path="pipeline" element={<Navigate to="/tasks" replace />} />
           <Route element={<AdminRoute />}>
             {APP_ROUTES.filter((route) => route.adminOnly).map((route) => (
               <Route key={route.path} path={route.path} element={pageElements[route.page]} />
@@ -121,6 +120,7 @@ export default function App() {
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }

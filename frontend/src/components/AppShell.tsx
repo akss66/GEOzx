@@ -28,6 +28,13 @@ export { buildAppShellMenuItems } from "./shell/navigation";
 
 export const APP_SHELL_BRAND_TITLE = "同舟行AI新媒体平台";
 
+export function selectedNavigationKey(pathname: string) {
+  if (pathname === "/" || pathname === "/brain") return "/";
+  if (pathname === "/pipeline") return "/tasks";
+  if (pathname === "/accounts" || pathname.startsWith("/accounts/")) return "/accounts";
+  return pathname;
+}
+
 export function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -35,7 +42,7 @@ export function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const workspace = useCurrentWorkspace();
   const isAdmin = user?.role === "admin";
-  const selectedKey = location.pathname === "/brain" ? "/" : location.pathname;
+  const selectedKey = selectedNavigationKey(location.pathname);
   const contextQuery = useQuery({
     queryKey: ["workspace-context", workspace.clientId, workspace.projectId],
     queryFn: () => getWorkspaceContext(workspace.clientId, workspace.projectId),
