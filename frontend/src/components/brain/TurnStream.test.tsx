@@ -175,6 +175,27 @@ describe("TurnStream", () => {
     expect(screen.queryByText("状态：completed")).not.toBeInTheDocument();
   });
 
+  it("renders exactly one operator-facing status for an active Turn", () => {
+    render(
+      <TurnStream
+        thread={{
+          ...thread,
+          turns: [{
+            ...thread.turns[2],
+            assistant_response: null,
+            turn_phase: "consulting_experts",
+          }],
+        }}
+      />,
+    );
+
+    const assistant = screen.getByLabelText("Assistant response");
+    expect(within(assistant).getAllByRole("status")).toHaveLength(1);
+    expect(within(assistant).getByText("正在咨询专家…")).toBeInTheDocument();
+    expect(within(assistant).queryByText("执行中")).not.toBeInTheDocument();
+    expect(within(assistant).queryByText("正在处理…")).not.toBeInTheDocument();
+  });
+
   it("uses the established chat anatomy for persisted user and operations-brain messages", () => {
     render(<TurnStream thread={thread} />);
 

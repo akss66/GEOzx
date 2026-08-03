@@ -701,6 +701,7 @@ export interface ConversationTurn {
     skill_code: string | null;
   } | null;
   status: string;
+  turn_phase?: TurnPhase;
   route_ms?: number | null;
   first_token_ms?: number | null;
   completion_ms?: number | null;
@@ -716,6 +717,16 @@ export interface ConversationTurn {
   created_at: string;
   updated_at: string;
 }
+
+export type TurnPhase =
+  | "understanding"
+  | "reading_data"
+  | "consulting_experts"
+  | "quality_review"
+  | "waiting_approval"
+  | "composing_artifact"
+  | "completed"
+  | "failed";
 
 export interface ConversationThread {
   id: number;

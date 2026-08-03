@@ -1691,7 +1691,7 @@ async def test_task_free_events_have_turn_lineage_and_publish_after_commit(
         )
     )
     assert set(published) == {event.id for event in events}
-    assert len(published) > len(events)
+    assert len(published) == len(events)
     assert events
     for event in events:
         payload = event.payload

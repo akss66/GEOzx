@@ -150,6 +150,23 @@ describe("conversation Turn projection", () => {
     expect(done.turns[0].status).toBe("completed");
   });
 
+  it("replaces the current public phase instead of stacking status messages", () => {
+    const reading = applyConversationEvent(
+      thread,
+      frame("brain.runtime.tool_started", 0, { turn_phase: "reading_data" }),
+    );
+    const consulting = applyConversationEvent(
+      reading,
+      frame("brain.runtime.subagent_started", 1, {
+        turn_phase: "consulting_experts",
+        agent_code: "01-positioning",
+      }),
+    );
+
+    expect(reading.turns[0].turn_phase).toBe("reading_data");
+    expect(consulting.turns[0].turn_phase).toBe("consulting_experts");
+  });
+
   it("does not clear a delta when a late start arrives", () => {
     const delta = applyConversationEvent(
       thread,

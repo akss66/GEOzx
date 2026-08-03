@@ -1122,7 +1122,6 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
         response,
         message="你好",
     )
-    response_text = result.response
     response_events = [
         (event_type, payload)
         for event_type, payload in realtime_events
@@ -1133,19 +1132,10 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
             "brain.runtime.message_done",
         }
     ]
-    assert response_events[0][0] == "brain.runtime.message_start"
-    assert response_events[-1][0] == "brain.runtime.message_done"
-    assert [payload["stream_seq"] for _, payload in response_events] == list(
-        range(len(response_events))
-    )
-    response_deltas = [
-        payload["delta"]
-        for event_type, payload in response_events
-        if event_type == "brain.runtime.message_delta"
+    assert [event_type for event_type, _payload in response_events] == [
+        "brain.runtime.message_done"
     ]
-    assert response_deltas
-    assert all(len(delta) <= 2 for delta in response_deltas)
-    assert "".join(response_deltas) == response_text
+    assert response_events[0][1]["content"] == result.response
     assert all(
         payload["client_message_id"] == "task-free-stream-1"
         and payload["thread_id"] == thread["id"]

@@ -1,5 +1,5 @@
 import type { DyEvent } from "../../hooks/useEventStream";
-import type { ConversationThread, ConversationTurn } from "../../types";
+import type { ConversationThread, ConversationTurn, TurnPhase } from "../../types";
 
 export type TurnIdentity = {
   threadId: number;
@@ -126,27 +126,31 @@ function reduceTurnEvent(
   eventTurnId: number | null,
 ): ConversationTurn {
   const agentCode = stringValue(payload.agent_code);
-  if (agentCode && agentCode !== "00-decision") return turn;
+  const turnPhase = publicTurnPhase(payload.turn_phase);
+  if (agentCode && agentCode !== "00-decision") {
+    return turnPhase ? { ...turn, turn_phase: turnPhase } : turn;
+  }
 
   if (event.type === "brain.runtime.message_start") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "start");
+    return reduceStreamFrame(turn, payload, eventTurnId, "start", turnPhase);
   }
   if (event.type === "brain.runtime.message_delta") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "delta");
+    return reduceStreamFrame(turn, payload, eventTurnId, "delta", turnPhase);
   }
   if (event.type === "brain.runtime.message_done") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "done");
+    return reduceStreamFrame(turn, payload, eventTurnId, "done", turnPhase);
   }
   if (event.type === "brain.runtime.message_error") {
-    return reduceStreamFrame(turn, payload, eventTurnId, "error");
+    return reduceStreamFrame(turn, payload, eventTurnId, "error", turnPhase);
   }
 
   const status = eventStatus(event.type, payload);
-  if (!status) return turn;
+  if (!status && !turnPhase) return turn;
   return {
     ...turn,
     ...(turn.id == null && eventTurnId != null ? { id: eventTurnId } : {}),
-    status,
+    ...(status ? { status } : {}),
+    ...(turnPhase ? { turn_phase: turnPhase } : {}),
   };
 }
 
@@ -155,6 +159,7 @@ function reduceStreamFrame(
   payload: Record<string, unknown>,
   eventTurnId: number | null,
   phase: "start" | "delta" | "done" | "error",
+  turnPhase: TurnPhase | null,
 ): ConversationTurn {
   const sequence = nonNegativeInteger(payload.stream_seq);
   if (sequence == null) return turn;
@@ -187,7 +192,21 @@ function reduceStreamFrame(
       lastSequence: sequence,
       terminal,
     },
+    ...(turnPhase ? { turn_phase: turnPhase } : {}),
   };
+}
+
+function publicTurnPhase(value: unknown): TurnPhase | null {
+  return [
+    "understanding",
+    "reading_data",
+    "consulting_experts",
+    "quality_review",
+    "waiting_approval",
+    "composing_artifact",
+    "completed",
+    "failed",
+  ].includes(String(value)) ? value as TurnPhase : null;
 }
 
 function eventStatus(type: string, payload: Record<string, unknown>) {

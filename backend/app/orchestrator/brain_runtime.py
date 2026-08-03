@@ -419,24 +419,6 @@ class BrainRuntimeGraph:
         for event_row, event_type in broadcasts:
             await session.refresh(event_row)
             payload = dict(event_row.payload or {})
-            if event_type == "brain.runtime.message_done" and not response_streamed:
-                stream_payload = {
-                    key: value
-                    for key, value in payload.items()
-                    if key not in {"content", "message"}
-                }
-                await publish_realtime_event(
-                    "brain.runtime.message_start",
-                    stream_payload,
-                    event_id=event_row.id,
-                )
-                for delta in _realtime_text_chunks(response, size=2):
-                    await publish_realtime_event(
-                        "brain.runtime.message_delta",
-                        {**stream_payload, "delta": delta},
-                        event_id=event_row.id,
-                    )
-                    await asyncio.sleep(0.035)
             await publish_realtime_event(
                 event_type,
                 payload,

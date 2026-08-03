@@ -86,3 +86,21 @@ async def test_realtime_event_can_carry_the_persisted_event_id(monkeypatch) -> N
     )
 
     assert json.loads(published[0])["id"] == 41
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_event_exposes_one_normalized_turn_phase(monkeypatch) -> None:
+    published: list[str] = []
+
+    class FakeRedis:
+        async def publish(self, _channel: str, payload: str) -> None:
+            published.append(payload)
+
+    monkeypatch.setattr(ev, "get_redis", lambda: FakeRedis(), raising=False)
+
+    await ev.publish_realtime_event(
+        "brain.runtime.subagent_started",
+        {"thread_id": 81, "turn_id": 101},
+    )
+
+    assert json.loads(published[0])["payload"]["turn_phase"] == "consulting_experts"

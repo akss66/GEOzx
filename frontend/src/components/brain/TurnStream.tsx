@@ -3,6 +3,7 @@ import type {
   ConversationApproval,
   ConversationThread,
   ConversationTurn,
+  TurnPhase,
   TurnProjection,
 } from "../../types";
 import { Button, Input, Tag, Typography } from "antd";
@@ -130,19 +131,25 @@ function TurnArticle({
         <div className="dy-chat-bubble">
           <div className="dy-chat-title-line">
             <span>运营大脑</span>
-            <Tag style={{ marginInlineEnd: 0 }}>
-              {executionBlocked ? "需处理" : turnStatusCopy(turn.status)}
-            </Tag>
+            {isActiveConversationTurnStatus(turn.status) ? (
+              <span className="tz-conversation-turn__live-status" role="status" aria-live="polite">
+                {turnPhaseCopy(turn.turn_phase, turn.status)}
+              </span>
+            ) : (
+              <Tag style={{ marginInlineEnd: 0 }}>
+                {executionBlocked ? "需处理" : turnStatusCopy(turn.status)}
+              </Tag>
+            )}
           </div>
           {turn.assistant_response ? (
             <Typography.Paragraph style={{ color: "inherit", margin: 0, whiteSpace: "pre-wrap" }}>
               {turn.assistant_response}
             </Typography.Paragraph>
-          ) : (
+          ) : !isActiveConversationTurnStatus(turn.status) ? (
             <Typography.Text type="secondary">
-              {isActiveConversationTurnStatus(turn.status) ? "正在处理…" : "暂无回复"}
+              暂无回复
             </Typography.Text>
-          )}
+          ) : null}
         </div>
       </section>
       <div className="tz-conversation-turn__projections">
@@ -171,6 +178,18 @@ function TurnArticle({
       <TurnTechnicalDetails turn={turn} />
     </article>
   );
+}
+
+function turnPhaseCopy(phase: TurnPhase | undefined, status: string) {
+  if (phase === "understanding") return "正在理解需求…";
+  if (phase === "reading_data") return "正在读取账号数据…";
+  if (phase === "consulting_experts") return "正在咨询专家…";
+  if (phase === "quality_review") return "正在质量审核…";
+  if (phase === "waiting_approval") return "等待你的确认";
+  if (phase === "composing_artifact") return "正在整理回复…";
+  if (status === "queued" || status === "waiting_predecessor") return "等待执行…";
+  if (status === "retry_wait") return "正在恢复执行…";
+  return "正在理解需求…";
 }
 
 function TurnTechnicalDetails({ turn }: { turn: ConversationTurn }) {

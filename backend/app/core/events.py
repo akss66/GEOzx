@@ -192,10 +192,13 @@ async def publish_realtime_event(
     or persisted as Event rows. Durable checkpoints still use publish_event or
     explicit Event inserts.
     """
+    from app.services.runtime_phase import with_runtime_phase
+
+    public_payload = with_runtime_phase(event_type, payload)
     event = {
         "id": event_id,
         "type": event_type,
-        "payload": payload,
+        "payload": public_payload,
         "content_item_id": content_item_id,
         "project_id": project_id,
     }

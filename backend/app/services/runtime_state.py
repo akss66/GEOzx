@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -471,15 +470,7 @@ async def _record_delivery_events(
                 "agent_name": OPERATIONS_BRAIN_DISPLAY_NAME,
                 "model": "system",
                 "status": status,
-                # The durable done frame follows start=0 and delta=1..N.
-                # It therefore needs its own monotonically increasing sequence
-                # so the client reducer cannot mistake it for a duplicate of
-                # the final delta.
-                "stream_seq": (
-                    scope.stream_seq_start
-                    if scope.response_streamed
-                    else scope.stream_seq_start + len(_realtime_text_chunks(message)) + 1
-                ),
+                "stream_seq": scope.stream_seq_start,
             },
         ),
         RuntimeEventSpec(
@@ -533,29 +524,6 @@ async def _publish_delivery_events(
 
     for event, event_type in broadcasts:
         payload = dict(event.payload or {})
-        if event_type == "brain.runtime.message_done" and not response_streamed:
-            stream_payload = {
-                key: value for key, value in payload.items() if key not in {"content", "message"}
-            }
-            chunks = _realtime_text_chunks(message)
-            done_sequence = int(payload["stream_seq"])
-            stream_start_sequence = done_sequence - len(chunks) - 1
-            await brain_runtime.publish_realtime_event(
-                "brain.runtime.message_start",
-                {**stream_payload, "stream_seq": stream_start_sequence},
-                content_item_id=event.content_item_id,
-                project_id=event.project_id,
-                event_id=event.id,
-            )
-            for index, delta in enumerate(chunks, start=stream_start_sequence + 1):
-                await brain_runtime.publish_realtime_event(
-                    "brain.runtime.message_delta",
-                    {**stream_payload, "delta": delta, "stream_seq": index},
-                    content_item_id=event.content_item_id,
-                    project_id=event.project_id,
-                    event_id=event.id,
-                )
-                await asyncio.sleep(0)
         await brain_runtime.publish_realtime_event(
             event_type,
             payload,
@@ -563,15 +531,6 @@ async def _publish_delivery_events(
             project_id=event.project_id,
             event_id=event.id,
         )
-
-
-def _realtime_text_chunks(content: str, size: int = 2) -> list[str]:
-    bounded_size = max(size, (len(content) + 39) // 40)
-    return [
-        content[offset : offset + bounded_size] for offset in range(0, len(content), bounded_size)
-    ]
-
-
 async def _record_run_only_terminal_event(
     session: AsyncSession,
     *,
