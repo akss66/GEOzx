@@ -2253,6 +2253,7 @@ def _build_operating_report(
             duration_seconds=int(
                 frozen_input.get("duration_seconds") or latest.get("duration_seconds") or 60
             ),
+            presentation_format=frozen_input.get("presentation_format", "storyboard"),
             bgm_suggestion=latest.get("bgm_suggestion"),
             participating_experts=participants,
         )
@@ -2267,6 +2268,7 @@ def _build_operating_report(
                     "hook",
                     "scenes",
                     "duration_seconds",
+                    "presentation_format",
                     "bgm_suggestion",
                 )
             },

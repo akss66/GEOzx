@@ -38,6 +38,7 @@ from app.schemas.artifacts import (
     ArtifactSection,
     ArtifactStatus,
     EvidenceRef,
+    ScriptPresentationFormat,
 )
 from app.schemas.deliverable import get_schema, validate_payload
 
@@ -124,7 +125,8 @@ _SECTION_TITLES.update(
         "critic": "质量审核",
     }
 )
-_NON_SECTION_KEYS = {"title", "summary", "evidence_refs"}
+_NON_SECTION_KEYS = {"title", "summary", "evidence_refs", "presentation_format"}
+_SCRIPT_PRESENTATION_FORMATS = {"spoken", "storyboard", "product_video", "image_post", "live_flow"}
 _INTERNAL_KEY_MARKERS = {
     "acceptance",
     "checklist",
@@ -502,6 +504,7 @@ async def project_artifact(
         skill_run_id=deliverable.skill_run_id,
         task_id=provenance.task_id,
         artifact_type=business_artifact_type,
+        presentation_format=_presentation_format(payload, business_artifact_type),
         title=_artifact_title(payload, content),
         version=deliverable.version,
         status=_STATUS_TO_ARTIFACT[deliverable.status],
@@ -689,6 +692,15 @@ def _artifact_summary(payload: dict[str, Any], content: ContentItem) -> str:
     if isinstance(summary, str) and summary.strip():
         return summary.strip()
     return content.title
+
+
+def _presentation_format(
+    payload: dict[str, Any], business_artifact_type: str
+) -> ScriptPresentationFormat | None:
+    if business_artifact_type != DeliverableType.VIDEO_SCRIPT.value:
+        return None
+    value = payload.get("presentation_format")
+    return value if value in _SCRIPT_PRESENTATION_FORMATS else "storyboard"
 
 
 def _safe_payload(

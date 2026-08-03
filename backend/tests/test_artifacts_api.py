@@ -64,6 +64,7 @@ async def _seed_artifact(
     status: DeliverableStatus = DeliverableStatus.PENDING_REVIEW,
     payload: dict | None = None,
     skill_code: str = "account_review",
+    deliverable_type: DeliverableType = DeliverableType.REVIEW_REPORT,
 ):
     project = Project(org_id=admin.org_id, name=f"{account_name}项目")
     session.add(project)
@@ -146,7 +147,7 @@ async def _seed_artifact(
         run_id=run.id,
         skill_run_id=skill_run.id,
         agent_code="06-operator",
-        type=DeliverableType.REVIEW_REPORT,
+        type=deliverable_type,
         version=version,
         status=status,
         payload=payload or _review_payload(),
@@ -173,6 +174,16 @@ async def _seed_artifact(
     session.add(quality)
     await session.commit()
     return project, account, content, thread, turn, task, run, skill_run, deliverable
+
+
+def _video_script_payload(presentation_format: str) -> dict:
+    return {
+        "title": "拍摄稿",
+        "hook": "先说结论。",
+        "scenes": ["开场", "讲解", "结尾"],
+        "duration_seconds": 60,
+        "presentation_format": presentation_format,
+    }
 
 
 @pytest.mark.asyncio
@@ -321,6 +332,34 @@ async def test_artifact_list_detail_share_business_projection_and_provenance(
         "passed": True,
         "issues": ["建议补充粉丝转化数据"],
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "presentation_format",
+    ["spoken", "storyboard", "product_video", "image_post", "live_flow"],
+)
+async def test_video_script_artifact_projects_the_validated_presentation_format(
+    client, session, admin, presentation_format: str,
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name=f"脚本格式-{presentation_format}",
+        payload=_video_script_payload(presentation_format),
+        skill_code="script_generation",
+        deliverable_type=DeliverableType.VIDEO_SCRIPT,
+    )
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["artifact_type"] == "video_script"
+    assert response.json()["presentation_format"] == presentation_format
 
 
 @pytest.mark.asyncio

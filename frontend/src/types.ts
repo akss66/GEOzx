@@ -587,11 +587,11 @@ export const KNOWN_ARTIFACT_TYPES = [
 export type KnownArtifactType = typeof KNOWN_ARTIFACT_TYPES[number];
 
 export type ContentArtifactFormat =
-  | "spoken_video"
+  | "spoken"
   | "storyboard"
   | "product_video"
-  | "article_post"
-  | "livestream_runbook";
+  | "image_post"
+  | "live_flow";
 
 export interface Artifact {
   id: number;

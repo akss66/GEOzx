@@ -12,6 +12,13 @@ ArtifactStatus = Literal[
     "revision_requested",
     "superseded",
 ]
+ScriptPresentationFormat = Literal[
+    "spoken",
+    "storyboard",
+    "product_video",
+    "image_post",
+    "live_flow",
+]
 
 
 class ArtifactSection(BaseModel):
@@ -54,6 +61,7 @@ class ArtifactOut(BaseModel):
     skill_run_id: int | None
     task_id: int | None
     artifact_type: str
+    presentation_format: ScriptPresentationFormat | None = None
     title: str
     version: int
     status: ArtifactStatus

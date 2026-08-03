@@ -39,11 +39,11 @@ const PRESENTATIONS: Partial<Record<KnownArtifactType, DeliverablePresentation>>
 } satisfies Partial<Record<KnownArtifactType, DeliverablePresentation>>;
 
 const CONTENT_FORMATS: Record<ContentArtifactFormat, string> = {
-  spoken_video: "口播拍摄稿",
+  spoken: "口播拍摄稿",
   storyboard: "分镜拍摄稿",
   product_video: "产品视频拍摄稿",
-  article_post: "图文发布稿",
-  livestream_runbook: "直播流程与话术稿",
+  image_post: "图文发布稿",
+  live_flow: "直播流程与话术稿",
 };
 
 export function presentDeliverable(artifact: Artifact): DeliverablePresentation {

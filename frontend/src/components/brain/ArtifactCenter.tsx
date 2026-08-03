@@ -33,7 +33,7 @@ const ARTIFACT_TYPE_OPTIONS = [
   { value: "positioning_strategy", label: "账号定位策略" },
   { value: "topic_plan", label: "选题规划" },
   { value: "publish_calendar", label: "发布日历" },
-  { value: "video_script", label: "视频脚本" },
+  { value: "video_script", label: "拍摄与发布稿" },
   { value: "art_prompt", label: "美术提示词" },
   { value: "video_asset", label: "视频素材" },
   { value: "edited_video", label: "剪辑成片" },

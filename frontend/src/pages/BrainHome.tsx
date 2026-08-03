@@ -348,9 +348,14 @@ export default function BrainHome() {
   });
 
   const formalArtifactAcceptMutation = useMutation({
-    mutationFn: (input: { sourceArtifact: Artifact; createNextStep: boolean }) =>
+    mutationFn: (input: {
+      sourceArtifact: Artifact;
+      createNextStep: boolean;
+      accountId: number;
+    }) =>
       acceptArtifact(input.sourceArtifact.id),
     onSuccess: (accepted, input) => {
+      if (effectiveAccountIdRef.current !== input.accountId) return;
       if (!matchesArtifactResponse(accepted, input.sourceArtifact, "accept")) {
         message.error("运营内容返回校验失败，请重试。");
         return;
@@ -374,9 +379,10 @@ export default function BrainHome() {
       if (input.createNextStep) setGoal(nextStepGoal(accepted));
       message.success(input.createNextStep ? "已确认，已准备下一步运营建议" : "当前运营内容已确认");
     },
-    onError: (error) => message.error(
-      presentApiError(error, "确认当前运营内容失败，请稍后重试。").message,
-    ),
+    onError: (error, input) => {
+      if (effectiveAccountIdRef.current !== input.accountId) return;
+      message.error(presentApiError(error, "确认当前运营内容失败，请稍后重试。").message);
+    },
   });
 
   const formalArtifactRevisionMutation = useMutation({
@@ -384,12 +390,14 @@ export default function BrainHome() {
       sourceArtifact: Artifact;
       payload: Record<string, unknown>;
       note: string;
+      accountId: number;
     }) => reviseArtifact({
       artifactId: input.sourceArtifact.id,
       payload: input.payload,
       note: input.note,
     }),
     onSuccess: (revision, input) => {
+      if (effectiveAccountIdRef.current !== input.accountId) return;
       if (!matchesArtifactResponse(revision, input.sourceArtifact, "revision")) {
         message.error("修订运营内容校验失败，请重试。");
         return;
@@ -417,9 +425,10 @@ export default function BrainHome() {
       }
       message.success("修改请求已提交，正在生成新版本");
     },
-    onError: (error) => message.error(
-      presentApiError(error, "修改请求提交失败，请稍后重试。").message,
-    ),
+    onError: (error, input) => {
+      if (effectiveAccountIdRef.current !== input.accountId) return;
+      message.error(presentApiError(error, "修改请求提交失败，请稍后重试。").message);
+    },
   });
 
   const contextError = contextQuery.isError
@@ -1158,22 +1167,36 @@ function ConversationEmpty({
 
 function handleArtifactAction(
   action: ArtifactAction,
-  accept: (input: { sourceArtifact: Artifact; createNextStep: boolean }) => void,
+  accept: (input: {
+    sourceArtifact: Artifact;
+    createNextStep: boolean;
+    accountId: number;
+  }) => void,
   revise: (input: {
     sourceArtifact: Artifact;
     payload: Record<string, unknown>;
     note: string;
+    accountId: number;
   }) => void,
 ) {
   if (action.type === "accept") {
-    accept({ sourceArtifact: action.artifact, createNextStep: false });
+    accept({
+      sourceArtifact: action.artifact,
+      createNextStep: false,
+      accountId: action.artifact.account_id,
+    });
   } else if (action.type === "accept_and_continue") {
-    accept({ sourceArtifact: action.artifact, createNextStep: true });
+    accept({
+      sourceArtifact: action.artifact,
+      createNextStep: true,
+      accountId: action.artifact.account_id,
+    });
   } else if (action.type === "request_revision") {
     revise({
       sourceArtifact: action.artifact,
       payload: buildArtifactRevisionPayload(action.artifact),
       note: action.note,
+      accountId: action.artifact.account_id,
     });
   }
 }

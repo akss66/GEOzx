@@ -12,6 +12,7 @@ export type ArtifactAction =
   | { type: "request_revision"; artifact: Artifact; note: string };
 
 const INTERNAL = /(?:acceptance|checklist|debug|kernel|policy|prompt|trace|raw|tool[ _-]?log|credential|stack)/i;
+const BANNED_BUSINESS_COPY = /脚本生成中|正式成果|采用成果|成果/g;
 
 const BUSINESS_TITLES: Record<string, string> = {
   core_conclusion: "核心结论",
@@ -76,6 +77,7 @@ export function ArtifactCard({
   const sections = useMemo(() => artifact.sections.filter(isBusinessSection), [artifact.sections]);
   const primarySections = sections.filter((section) => PRIMARY_KEYS.includes(section.key));
   const remainingSections = sections.filter((section) => !PRIMARY_KEYS.includes(section.key));
+  const hasRemainingDetails = remainingSections.length > 0;
   const evidence = artifact.evidence_refs.filter((item) => isSafeText(item.kind) && isSafeText(item.label));
   const evidenceSummary = artifact.evidence_summary ?? fallbackEvidenceSummary(evidence);
   const evidencePageSize = 10;
@@ -115,25 +117,25 @@ export function ArtifactCard({
         调用专家 / 依据：{evidenceSummary.total > 0 ? `已核验 ${evidenceSummary.total} 条依据` : "暂无额外可核查依据"}
       </p>
 
-      <div
-        id={`artifact-details-${artifact.id}-${artifact.version}`}
-        className="tz-artifact-card__sections tz-artifact-card__sections--remaining"
-        hidden={!fullReportOpen}
-      >
-        {remainingSections.length > 0 ? (
-          <>
+      {hasRemainingDetails ? (
+        <div
+          id={`artifact-details-${artifact.id}-${artifact.version}`}
+          className="tz-artifact-card__sections tz-artifact-card__sections--remaining"
+          hidden={!fullReportOpen}
+        >
           {remainingSections.map((section) => <BusinessSection key={section.key} section={section} />)}
-          </>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <div className="tz-artifact-card__actions">
-        <Button type="primary" aria-expanded={fullReportOpen} aria-controls={`artifact-details-${artifact.id}-${artifact.version}`} onClick={() => {
-          setFullReportOpen((open) => !open);
-          onAction({ type: "view_full_report", artifact });
-        }}>
-          {presentation.primaryAction.label}
-        </Button>
+        {hasRemainingDetails && !fullReportOpen ? (
+          <Button type="primary" aria-expanded="false" aria-controls={`artifact-details-${artifact.id}-${artifact.version}`} onClick={() => {
+            setFullReportOpen(true);
+            onAction({ type: "view_full_report", artifact });
+          }}>
+            {presentation.primaryAction.label}
+          </Button>
+        ) : null}
         {canAct ? <>
           <Button onClick={() => onAction({ type: "accept", artifact })}>确认当前内容</Button>
           <Button onClick={() => onAction({ type: "accept_and_continue", artifact })}>
@@ -292,7 +294,7 @@ function isSafeText(value: string) {
 }
 
 function safeText(value: string) {
-  return value.replace(/\s+/g, " ").trim();
+  return value.replace(/\s+/g, " ").trim().replace(BANNED_BUSINESS_COPY, "运营内容");
 }
 
 function businessText(value: string, fallback: string) {

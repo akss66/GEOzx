@@ -55,9 +55,7 @@ describe("ArtifactCard", () => {
 
     expect(screen.getByRole("heading", { name: "账号诊断" })).toBeInTheDocument();
     expect(screen.getByText("已完成当前账号运营诊断")).toBeInTheDocument();
-    const viewButton = screen.getByRole("button", { name: "查看账号诊断" });
-    expect(viewButton).toHaveAttribute("aria-expanded", "false");
-    expect(viewButton).toHaveAttribute("aria-controls", "artifact-details-5001-1");
+    expect(screen.queryByRole("button", { name: "查看账号诊断" })).not.toBeInTheDocument();
     expect(screen.getByText("V1")).toBeInTheDocument();
     expect(screen.getByText("核心结论")).toBeInTheDocument();
     expect(screen.getByText("数据周期")).toBeInTheDocument();
@@ -123,11 +121,15 @@ describe("ArtifactCard", () => {
 
   it("uses concrete operations labels and requires a concrete revision note", () => {
     const onAction = vi.fn();
-    render(<ArtifactCard artifact={reviewArtifact} onAction={onAction} />);
+    const artifactWithDetails = {
+      ...reviewArtifact,
+      sections: [...reviewArtifact.sections, { key: "execution_detail", title: "执行细节", content: "先完成账号检查。" }],
+    };
+    render(<ArtifactCard artifact={artifactWithDetails} onAction={onAction} />);
 
     const viewButton = screen.getByRole("button", { name: "查看账号诊断" });
     fireEvent.click(viewButton);
-    expect(viewButton).toHaveAttribute("aria-expanded", "true");
+    expect(viewButton).not.toBeInTheDocument();
     expect(document.getElementById("artifact-details-5001-1")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
     fireEvent.click(screen.getByRole("button", { name: "确认并准备下一步建议" }));
@@ -139,17 +141,23 @@ describe("ArtifactCard", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
 
-    expect(onAction).toHaveBeenCalledWith({ type: "view_full_report", artifact: reviewArtifact });
-    expect(onAction).toHaveBeenCalledWith({ type: "accept", artifact: reviewArtifact });
-    expect(onAction).toHaveBeenCalledWith({ type: "accept_and_continue", artifact: reviewArtifact });
+    expect(onAction).toHaveBeenCalledWith({ type: "view_full_report", artifact: artifactWithDetails });
+    expect(onAction).toHaveBeenCalledWith({ type: "accept", artifact: artifactWithDetails });
+    expect(onAction).toHaveBeenCalledWith({ type: "accept_and_continue", artifact: artifactWithDetails });
     expect(onAction).toHaveBeenCalledWith({
       type: "request_revision",
-      artifact: reviewArtifact,
+      artifact: artifactWithDetails,
       note: "请补充三个可执行选题。",
     });
     expect(screen.queryByText(/采用成果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/正式成果/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("修改成果")).not.toBeInTheDocument();
+  });
+
+  it("only offers the one-way detail action when extra business details exist", () => {
+    render(<ArtifactCard artifact={reviewArtifact} onAction={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "查看账号诊断" })).not.toBeInTheDocument();
   });
 
   it("shows one status and a separate V2 progress row while a revision is pending", () => {
@@ -187,5 +195,28 @@ describe("ArtifactCard", () => {
     expect(screen.getByText("质量审核")).toBeInTheDocument();
     expect(screen.getByText("质量审核已完成，详细依据请查看生成依据。")) .toBeInTheDocument();
     expect(screen.queryByText(/secret-token|Traceback|raw prompt|passed|score|iterations|key_metrics|critic/)).not.toBeInTheDocument();
+  });
+
+  it("replaces banned business copy in summaries, section titles, nested values, and accessible names", () => {
+    render(<ArtifactCard
+      artifact={{
+        ...reviewArtifact,
+        title: "脚本生成中",
+        summary: "脚本生成中，采用成果即将可用",
+        sections: [{
+          key: "业务说明",
+          title: "正式成果",
+          content: {
+            "采用成果": ["脚本生成中", { "正式成果": "采用成果" }],
+          },
+        }],
+      }}
+      onAction={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看账号诊断" }));
+
+    expect(screen.queryByText(/脚本生成中|正式成果|采用成果|成果/)).not.toBeInTheDocument();
+    expect(screen.getByRole("article")).not.toHaveAccessibleName(/脚本生成中|正式成果|采用成果|成果/);
   });
 });

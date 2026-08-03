@@ -8,6 +8,7 @@ schema 校验，确保结构正确。这里建立注册表骨架 + 注册 1~2 �
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import DeliverableType
+from app.schemas.artifacts import ScriptPresentationFormat
 
 
 class DeliverablePayload(BaseModel):
@@ -67,6 +68,7 @@ class VideoScriptPayload(DeliverablePayload):
     hook: str = Field(min_length=1)
     scenes: list[str] = Field(min_length=3)
     duration_seconds: int = Field(gt=0)
+    presentation_format: ScriptPresentationFormat = "storyboard"
     bgm_suggestion: str | None = None
 
 

@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.artifacts import ScriptPresentationFormat
 from app.schemas.skills import SkillDefinition
 
 _PLATFORMS = frozenset({"douyin", "xiaohongshu", "shipinhao"})
@@ -35,6 +36,7 @@ class ScriptGenerationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     duration_seconds: int = Field(default=60, ge=10, le=600)
+    presentation_format: ScriptPresentationFormat = "storyboard"
 
 
 class ScriptGenerationReport(BaseModel):
@@ -46,6 +48,7 @@ class ScriptGenerationReport(BaseModel):
     hook: str = Field(min_length=1)
     scenes: list[str] = Field(min_length=3)
     duration_seconds: int = Field(gt=0)
+    presentation_format: ScriptPresentationFormat = "storyboard"
     bgm_suggestion: str | None = None
     participating_experts: list[str] = Field(default_factory=list)
 

@@ -413,7 +413,10 @@ async def test_script_skill_prefers_explicit_duration_over_expert_default(sessio
             turn=turn,
             run=run,
             skill_code="script_generation",
-            structured_input={"duration_seconds": 30},
+            structured_input={
+                "duration_seconds": 30,
+                "presentation_format": "product_video",
+            },
         ),
     )
 
@@ -422,8 +425,10 @@ async def test_script_skill_prefers_explicit_duration_over_expert_default(sessio
     assert skill_run.input_snapshot == {
         "account_id": account.id,
         "duration_seconds": 30,
+        "presentation_format": "product_video",
     }
     assert result.report["duration_seconds"] == 30
+    assert result.report["presentation_format"] == "product_video"
 
 
 @pytest.mark.asyncio

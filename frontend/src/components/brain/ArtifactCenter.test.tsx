@@ -40,7 +40,7 @@ const ARTIFACT_TYPE_CASES = [
   ["账号定位策略", "positioning_strategy"],
   ["选题规划", "topic_plan"],
   ["发布日历", "publish_calendar"],
-  ["视频脚本", "video_script"],
+  ["拍摄与发布稿", "video_script"],
   ["美术提示词", "art_prompt"],
   ["视频素材", "video_asset"],
   ["剪辑成片", "edited_video"],

@@ -38,11 +38,11 @@ describe("presentDeliverable", () => {
   });
 
   it.each([
-    ["spoken_video", "口播拍摄稿"],
+    ["spoken", "口播拍摄稿"],
     ["storyboard", "分镜拍摄稿"],
     ["product_video", "产品视频拍摄稿"],
-    ["article_post", "图文发布稿"],
-    ["livestream_runbook", "直播流程与话术稿"],
+    ["image_post", "图文发布稿"],
+    ["live_flow", "直播流程与话术稿"],
   ])("uses the explicit %s content format instead of guessing from the title", (presentation_format, typeLabel) => {
     expect(presentDeliverable({
       ...artifact("video_script", { title: "脚本生成中" }),

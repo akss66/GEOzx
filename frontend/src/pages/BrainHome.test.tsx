@@ -50,6 +50,12 @@ const mocks = vi.hoisted(() => {
     data_sync_status: "manual",
     created_at: "2026-07-01T00:00:00Z",
   };
+  const secondaryAccount: Account = {
+    ...account,
+    id: 4,
+    nickname: "切换后的账号",
+    external_account_id: "secondary",
+  };
   const workspace = {
     clientId: 1 as number | null,
     projectId: 2 as number | null,
@@ -65,7 +71,7 @@ const mocks = vi.hoisted(() => {
     }) => void) | null,
     options: null as { onReconnect?: () => void } | null,
   };
-  return { account, workspace, event };
+  return { account, secondaryAccount, workspace, event };
 });
 
 vi.mock("../api/shell", () => ({
@@ -74,7 +80,7 @@ vi.mock("../api/shell", () => ({
     selected_client: null,
     projects: [],
     selected_project: null,
-    accounts: [mocks.account],
+    accounts: [mocks.account, mocks.secondaryAccount],
   })),
 }));
 
@@ -207,6 +213,41 @@ describe("BrainHome V3 conversation projection", () => {
     vi.mocked(acceptArtifact).mockRejectedValueOnce(new Error("network down"));
     fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
     expect(await screen.findByText("网络连接中断，请检查连接后重试。")).toBeInTheDocument();
+  });
+
+  it("silently discards a delayed confirmation from the previous account", async () => {
+    const source = presentationArtifact();
+    const request = deferred<Artifact>();
+    const turn = {
+      ...persistedTurn(501, "artifact-client", "检查账号", "已完成账号诊断"),
+      projections: [{
+        type: "artifact" as const,
+        turn_id: 501,
+        artifact_id: source.id,
+        artifact_type: source.artifact_type,
+        skill_run_id: source.skill_run_id!,
+        account_id: source.account_id,
+      }],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [turn]));
+    vi.mocked(getArtifact).mockResolvedValue(source);
+    vi.mocked(acceptArtifact).mockReturnValue(request.promise);
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "确认并准备下一步建议" }));
+    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(source.id));
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("button", { name: "运营内容视图" }));
+    fireEvent.click(screen.getByRole("button", { name: "对话视图" }));
+    await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
+
+    await act(async () => request.resolve({ ...source, status: "accepted" }));
+
+    expect(screen.getByLabelText("运营大脑消息")).toHaveValue("");
+    expect(screen.queryByText("已确认，已准备下一步运营建议")).not.toBeInTheDocument();
   });
 
   it("offers a direct return to the latest message after the reader scrolls away", async () => {
