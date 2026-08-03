@@ -24,11 +24,11 @@ describe("theme tokens", () => {
     expect(buildTheme().algorithm).toBeUndefined();
   });
 
-  it("ships Geist without bundling the full Chinese variable font", () => {
+  it("keeps the approved Geist and Noto Sans SC typography", () => {
     const entrypoint = readFileSync(new URL("../main.tsx", import.meta.url), "utf8");
 
     expect(entrypoint).toContain('@fontsource-variable/geist/wght.css');
-    expect(entrypoint).not.toContain("@fontsource-variable/noto-sans-sc/wght.css");
+    expect(entrypoint).toContain('@fontsource-variable/noto-sans-sc/wght.css');
   });
 
   it("keeps one accessible light-theme token source", () => {

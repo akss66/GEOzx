@@ -1,10 +1,9 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 const INITIAL_GZIP_BUDGET_BYTES = 500 * 1024;
-const MAX_WOFF2_FILES = 5;
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const frontendDirectory = join(scriptDirectory, "..");
@@ -41,23 +40,11 @@ for (const assetPath of assetPaths) {
   initialGzipBytes += gzipSync(content, { level: 9 }).byteLength;
 }
 
-const assetsDirectory = join(distDirectory, "assets");
-const woff2Files = existsSync(assetsDirectory)
-  ? readdirSync(assetsDirectory).filter((fileName) => fileName.endsWith(".woff2"))
-  : [];
-const woff2Bytes = woff2Files.reduce(
-  (total, fileName) => total + statSync(join(assetsDirectory, fileName)).size,
-  0,
-);
-
 const summary = {
   initialAssets: assetPaths,
   initialRawBytes,
   initialGzipBytes,
   initialGzipBudgetBytes: INITIAL_GZIP_BUDGET_BYTES,
-  woff2Files: woff2Files.length,
-  woff2Bytes,
-  maxWoff2Files: MAX_WOFF2_FILES,
 };
 
 console.log(JSON.stringify(summary, null, 2));
@@ -65,11 +52,5 @@ console.log(JSON.stringify(summary, null, 2));
 if (initialGzipBytes > INITIAL_GZIP_BUDGET_BYTES) {
   throw new Error(
     `Initial gzip size ${initialGzipBytes} exceeds budget ${INITIAL_GZIP_BUDGET_BYTES}.`,
-  );
-}
-
-if (woff2Files.length > MAX_WOFF2_FILES) {
-  throw new Error(
-    `WOFF2 file count ${woff2Files.length} exceeds limit ${MAX_WOFF2_FILES}.`,
   );
 }

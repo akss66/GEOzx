@@ -20,11 +20,11 @@
 
 延续当前分支的页面级 `React.lazy` 和稳定 vendor chunk 配置。构建门禁必须证明首页 HTML 不预加载 `vendor-charts`，防止图表、复盘和管理页面重新进入运营大脑首屏依赖链。
 
-### 2. 减少中文字体静态负担
+### 2. 保持已批准的中文字体视觉
 
-删除全量 `@fontsource-variable/noto-sans-sc` CSS 导入，继续使用现有字体栈中的系统中文字体：macOS 使用 PingFang SC，Windows 使用 Microsoft YaHei UI，其他平台回退到 Segoe UI/sans-serif。保留 Geist Variable 用于拉丁字符和数字，避免改变现有数字与英文视觉风格。
+保留 `@fontsource-variable/noto-sans-sc` CSS 导入以及 Geist Variable，确保不同操作系统上的中文字形、字重和排版与已批准页面一致。字体采用 unicode-range 切片按需下载；性能门槛约束实际首屏 gzip 传输量，不以删除品牌字体换取静态文件数量下降。
 
-这项调整不会删除字体栈中的 `Noto Sans SC Variable` 名称，以兼容用户系统已经安装该字体的情况；只停止随应用分发 103 个字体切片。
+2026-08-03 的首次性能发布曾移除 Noto Sans SC，导致生产页面回退到系统中文字体并产生明显视觉回归。该取舍已撤销，后续测试会固定入口中的两项字体导入。
 
 ### 3. 优化 Nginx 静态资源交付
 
@@ -41,7 +41,7 @@
 
 - 首页不能引用或预加载 `vendor-charts`。
 - 首页 gzip 资源总量不得超过 500 KiB。
-- 构建产物中的 WOFF2 总数不得超过 5 个，防止全量中文字体切片回归。
+- 入口必须保留 Geist Variable 与 Noto Sans SC Variable，防止字体视觉回归。
 
 该脚本作为 `pnpm perf:check` 运行，并加入 CI 前端作业的生产构建之后。
 
@@ -49,7 +49,7 @@
 
 - 首页构建依赖中不存在 `vendor-charts`。
 - 首页 gzip 估算资源量不高于 500 KiB。
-- 构建产物中的 WOFF2 文件不超过 5 个。
+- 字体契约测试确认 Geist Variable 与 Noto Sans SC Variable 均随应用发布。
 - 生产哈希资源返回 gzip 编码和一年期 immutable 缓存。
 - 生产 `index.html` 返回 `no-cache`。
 - 全量前端测试、Lint、TypeScript、生产构建和桌面端 E2E 通过。
