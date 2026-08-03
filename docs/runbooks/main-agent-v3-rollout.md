@@ -79,7 +79,7 @@
 
 按版本、组织、路由模式和 Skill 分组：
 
-- `route_ms`：p95 不高于 800 ms；5 分钟窗口较基线恶化超过 30% 告警。
+- `route_ms`：显式 Skill p95 不高于 50 ms；确定性问候、身份、能力、数据可用性和常用指标查询 p95 不高于 100 ms；其他路由 5 分钟窗口较基线恶化超过 30% 告警。
 - `first_token_ms`：answer 路径 p95 不高于 3 s；连续 10 分钟超过 4 s 停止放量。
 - `completion_ms`、`total_ms`：p95 较 V2 基线恶化超过 30% 停止放量。
 - `model_call_count`：
@@ -143,3 +143,97 @@
 - 无跨账号/跨用户会话或成果泄漏。
 - 延迟、失败率和模型调用预算均在阈值内。
 - 运维、产品和研发共同确认后才可关闭发布观察。
+
+## 阶段三：性能与状态一致性门禁
+
+阶段三先在 CI 中执行无外网的性能契约，再进入内部账号 24 小时观察。CI 必须同时通过后端主 Agent 定向测试、前端主 Agent 组件契约、TypeScript、生产构建和首屏包体预算。首屏不得预加载图表 vendor，初始 JavaScript 不得超过 900 KB，`BrainHome` 懒加载块不得超过 180 KB。
+
+本地性能契约采用进程内确定性路由和本地数据库只读 Tool，不访问模型或外部平台：显式 Skill 路由 p95 < 50 ms，确定性 answer/query 路由 p95 < 100 ms，`account.data_context` p95 < 2 s。生产环境以数据库指标为准，不能用 CI 机器耗时替代真实观测。
+
+### 24 小时观测 SQL（PostgreSQL）
+
+路由、首字和总耗时按模式查看：
+
+```sql
+SELECT
+  COALESCE(lower(intent->>'mode'), 'unknown') AS route_mode,
+  count(*) AS turns,
+  round(percentile_cont(0.95) WITHIN GROUP (ORDER BY route_ms)::numeric, 1) AS route_p95_ms,
+  round((percentile_cont(0.95) WITHIN GROUP (ORDER BY first_token_ms)
+    FILTER (WHERE first_token_ms IS NOT NULL))::numeric, 1) AS first_token_p95_ms,
+  round((percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms)
+    FILTER (WHERE total_ms IS NOT NULL))::numeric, 1) AS total_p95_ms,
+  round(avg(model_call_count)::numeric, 2) AS avg_model_calls,
+  round(avg(tool_call_count)::numeric, 2) AS avg_tool_calls
+FROM conversation_turns
+WHERE created_at >= now() - interval '24 hours'
+GROUP BY 1
+ORDER BY 1;
+```
+
+只读查询总耗时预算：
+
+```sql
+SELECT
+  count(*) AS query_turns,
+  round(percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms)::numeric, 1) AS query_p95_ms
+FROM conversation_turns
+WHERE created_at >= now() - interval '24 hours'
+  AND lower(intent->>'mode') = 'query'
+  AND status = 'completed';
+```
+
+终态 Run 与 Turn 不一致必须为 0：
+
+```sql
+SELECT count(*) AS terminal_mismatches
+FROM agent_runs r
+JOIN conversation_turns t ON t.id = r.turn_id
+WHERE r.created_at >= now() - interval '24 hours'
+  AND r.status IN ('completed','blocked','failed','dead_letter','cancelled','stopped')
+  AND t.status IN ('queued','running','retry_wait','waiting_permission','waiting_decision');
+```
+
+客户端消息幂等冲突必须为 0：
+
+```sql
+SELECT thread_id, client_message_id, count(*) AS duplicate_count
+FROM conversation_turns
+WHERE created_at >= now() - interval '24 hours'
+  AND client_message_id IS NOT NULL
+GROUP BY thread_id, client_message_id
+HAVING count(*) > 1;
+```
+
+Skill 阶段更新不能静默停滞。以下结果必须为空；出现记录表示运行中 Skill 超过 30 秒没有新的运行事件：
+
+```sql
+SELECT sr.id AS skill_run_id, sr.skill_code, sr.status,
+       max(e.created_at) AS last_event_at
+FROM skill_runs sr
+LEFT JOIN events e ON e.skill_run_id = sr.id
+WHERE sr.created_at >= now() - interval '24 hours'
+  AND sr.status IN ('running','retry_wait','waiting_permission','needs_review')
+GROUP BY sr.id, sr.skill_code, sr.status
+HAVING COALESCE(max(e.created_at), min(sr.created_at)) < now() - interval '30 seconds';
+```
+
+失败和死信按路由/Skill 汇总，内部观察期要求为 0：
+
+```sql
+SELECT COALESCE(sr.skill_code, lower(t.intent->>'mode'), 'unknown') AS path,
+       count(*) AS failed_runs
+FROM agent_runs r
+LEFT JOIN conversation_turns t ON t.id = r.turn_id
+LEFT JOIN skill_runs sr ON sr.run_id = r.id
+WHERE r.created_at >= now() - interval '24 hours'
+  AND r.status IN ('failed','dead_letter')
+GROUP BY 1
+ORDER BY 2 DESC;
+```
+
+### 扩容与回滚判定
+
+内部账号连续 24 小时必须满足：错误/死信、重复消息、终态不一致、跨账号泄漏、伪造成果均为 0；answer 首字 p95 < 3 s；query 总耗时 p95 < 2 s；显式 Skill 路由 p95 < 50 ms；确定性路由 p95 < 100 ms；运行中 Skill 每 30 秒内至少有一次阶段更新。任何一项不满足都不得扩大流量。
+
+回滚时先关闭 `MAIN_AGENT_TYPED_RUNTIME_ENABLED`，并从 Capability Registry 隐藏故障 Skill；不降级数据库、不自动重放副作用 ToolCall。只有重新完成无外网性能契约、十场景矩阵和新的 24 小时内部观察后，才可重新放量。

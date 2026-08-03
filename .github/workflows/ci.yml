@@ -25,6 +25,7 @@ jobs:
           pytest -q
           tests/test_main_agent_v3_integration.py
           tests/test_main_agent_v3_performance.py
+          tests/test_main_agent_performance_contract.py
           tests/test_llm_gateway.py
           tests/test_conversation_api.py
           tests/test_conversation_models.py
@@ -111,10 +112,20 @@ jobs:
         run: pnpm install
       - name: Lint (eslint)
         run: pnpm lint
+      - name: Type check
+        run: pnpm exec tsc --noEmit
+      - name: Main-agent UI contracts
+        run: >-
+          pnpm exec vitest run --reporter=dot
+          src/api/brain.test.ts
+          src/components/brain/BrainComposer.test.tsx
+          src/pages/BrainHome.test.tsx
       - name: Unit tests
         run: pnpm test
       - name: Build
         run: pnpm build
+      - name: Main-agent bundle budget
+        run: pnpm check:main-agent-bundle
 
   main-agent-v3-playwright:
     runs-on: ubuntu-latest
