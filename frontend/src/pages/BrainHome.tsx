@@ -18,12 +18,17 @@ import {
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
+import {
+  deleteConversationAttachment,
+  uploadConversationAttachments,
+} from "../api/attachments";
 import { presentApiError } from "../api/errors";
 import { getWorkspaceContext } from "../api/shell";
 import { AgentAvatar } from "../components/agents/AgentAvatar";
 import { ArtifactCard, businessArtifactTitle, type ArtifactAction } from "../components/brain/ArtifactCard";
 import { ArtifactCenter } from "../components/brain/ArtifactCenter";
 import { BrainComposer } from "../components/brain/BrainComposer";
+import type { DraftAttachment } from "../components/brain/AttachmentTray";
 import { ConversationHistoryDrawer } from "../components/brain/ConversationHistoryDrawer";
 import { TurnStream } from "../components/brain/TurnStream";
 import {
@@ -72,6 +77,7 @@ export default function BrainHome() {
   const [pendingTurn, setPendingTurn] = useState<PendingTurn | null>(null);
   const [launcherPending, setLauncherPending] = useState(false);
   const [approvalComment, setApprovalComment] = useState("");
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
   const [artifactRevisionChains, setArtifactRevisionChains] = useState<Record<number, Artifact[]>>({});
   const [artifactSourceOverrides, setArtifactSourceOverrides] = useState<Record<number, Artifact>>({});
@@ -175,10 +181,11 @@ export default function BrainHome() {
     );
     setPendingTurn(null);
     pendingClientMessageId.current = null;
+    setDraftAttachments([]);
     setSelectedArtifact(null);
     setSourceReturnTarget(null);
     setSourceReturnError(null);
-  }, [effectiveAccount?.id]);
+  }, [effectiveAccount]);
 
   const conversationQuery = useQuery({
     queryKey: ["brain-conversation", activeConversationThreadId],
@@ -234,11 +241,13 @@ export default function BrainHome() {
       content,
       clientMessageId,
       requestedSkillCode,
+      attachmentIds,
     }: {
       threadId: number;
       content: string;
       clientMessageId: string;
       requestedSkillCode: string | null;
+      attachmentIds: number[];
       accountId: number;
     }) => sendConversationTurn(
       threadId,
@@ -246,13 +255,14 @@ export default function BrainHome() {
         ? {
             client_message_id: clientMessageId,
             message: content,
+            attachment_ids: attachmentIds,
           }
         : {
             client_message_id: clientMessageId,
             message: content,
             requested_skill_code: requestedSkillCode,
             execution_preference: "AUTO",
-            attachment_ids: [],
+            attachment_ids: attachmentIds,
           },
     ),
     onSuccess: (submission, variables) => {
@@ -264,6 +274,7 @@ export default function BrainHome() {
         queryKey: ["brain-conversation", variables.threadId],
       });
       if (effectiveAccountIdRef.current !== variables.accountId) return;
+      setDraftAttachments([]);
       if (isTerminalConversationRunStatus(submission.run.status)) {
         setPendingTurn(null);
         pendingClientMessageId.current = null;
@@ -439,9 +450,11 @@ export default function BrainHome() {
   const submitTurn = useCallback(async ({
     content,
     requestedSkillCode,
+    attachmentIds,
   }: {
     content: string;
     requestedSkillCode: string | null;
+    attachmentIds?: number[];
   }) => {
     const account = effectiveAccount;
     if (!account) return;
@@ -462,15 +475,119 @@ export default function BrainHome() {
       content,
       clientMessageId,
       requestedSkillCode,
+      attachmentIds: attachmentIds ?? draftAttachments
+        .filter((item) => item.status === "ready" && item.id != null)
+        .map((item) => item.id as number),
       accountId: account.id,
     });
-  }, [conversationTurnMutation, effectiveAccount, ensureAccountThread, qc]);
+  }, [conversationTurnMutation, draftAttachments, effectiveAccount, ensureAccountThread, qc]);
+
+  const requestAccountSelection = useCallback(() => {
+    const selector = document.querySelector<HTMLButtonElement>('[aria-label="当前账号"]');
+    if (selector) {
+      selector.focus();
+      selector.click();
+      return;
+    }
+    message.info("请在顶部选择抖音账号");
+  }, [message]);
+
+  const uploadDraftFiles = useCallback(async (files: File[]) => {
+    const account = effectiveAccount;
+    if (!account) {
+      requestAccountSelection();
+      return;
+    }
+    const available = Math.max(0, 5 - draftAttachments.length);
+    const accepted = files.slice(0, available);
+    if (accepted.length < files.length) message.warning("每轮最多添加 5 个附件");
+    if (accepted.length === 0) return;
+    const thread = await ensureAccountThread(account);
+    if (!thread) return;
+    const items: DraftAttachment[] = accepted.map((file) => ({
+      key: `${Date.now()}-${file.name}-${Math.random().toString(36).slice(2)}`,
+      filename: file.name,
+      file,
+      threadId: thread.id,
+      id: null,
+      status: "uploading",
+    }));
+    setDraftAttachments((current) => [...current, ...items]);
+    await Promise.all(items.map(async (item) => {
+      try {
+        const [uploaded] = await uploadConversationAttachments(thread.id, [item.file]);
+        if (!uploaded) throw new Error("附件上传未返回结果");
+        setDraftAttachments((current) => current.map((candidate) =>
+          candidate.key === item.key
+            ? { ...candidate, id: uploaded.id, status: "ready", error: undefined }
+            : candidate
+        ));
+      } catch (error) {
+        const detail = presentApiError(error, "上传失败，请重试").message;
+        setDraftAttachments((current) => current.map((candidate) =>
+          candidate.key === item.key
+            ? { ...candidate, status: "error", error: detail }
+            : candidate
+        ));
+      }
+    }));
+  }, [draftAttachments.length, effectiveAccount, ensureAccountThread, message, requestAccountSelection]);
+
+  const retryDraftAttachment = useCallback(async (attachment: DraftAttachment) => {
+    setDraftAttachments((current) => current.map((item) =>
+      item.key === attachment.key
+        ? { ...item, status: "uploading", error: undefined }
+        : item
+    ));
+    try {
+      const [uploaded] = await uploadConversationAttachments(
+        attachment.threadId,
+        [attachment.file],
+      );
+      if (!uploaded) throw new Error("附件上传未返回结果");
+      setDraftAttachments((current) => current.map((item) =>
+        item.key === attachment.key
+          ? { ...item, id: uploaded.id, status: "ready", error: undefined }
+          : item
+      ));
+    } catch (error) {
+      setDraftAttachments((current) => current.map((item) =>
+        item.key === attachment.key
+          ? { ...item, status: "error", error: presentApiError(error, "上传失败，请重试").message }
+          : item
+      ));
+    }
+  }, []);
+
+  const removeDraftAttachment = useCallback(async (attachment: DraftAttachment) => {
+    if (attachment.id == null) {
+      setDraftAttachments((current) => current.filter((item) => item.key !== attachment.key));
+      return;
+    }
+    setDraftAttachments((current) => current.map((item) =>
+      item.key === attachment.key ? { ...item, status: "removing" } : item
+    ));
+    try {
+      await deleteConversationAttachment(attachment.threadId, attachment.id);
+      setDraftAttachments((current) => current.filter((item) => item.key !== attachment.key));
+    } catch (error) {
+      setDraftAttachments((current) => current.map((item) =>
+        item.key === attachment.key
+          ? { ...item, status: "error", error: presentApiError(error, "移除失败").message }
+          : item
+      ));
+    }
+  }, []);
 
   const startWorkflow = async () => {
     if (launcherRequestInFlight.current || isGenerating) return;
     const content = goal.trim();
     if (!content) {
       message.warning("先写下要交给运营大脑的运营目标");
+      return;
+    }
+    if (draftAttachments.some((item) => item.status === "error")) {
+      message.warning("请先重试或移除上传失败的附件");
       return;
     }
     if (!effectiveAccount) {
@@ -493,16 +610,6 @@ export default function BrainHome() {
       setLauncherPending(false);
     }
   };
-
-  const requestAccountSelection = useCallback(() => {
-    const selector = document.querySelector<HTMLButtonElement>('[aria-label="当前账号"]');
-    if (selector) {
-      selector.focus();
-      selector.click();
-      return;
-    }
-    message.info("请在顶部选择抖音账号");
-  }, [message]);
 
   const launchComposerSkill = useCallback(async (skillCode: string) => {
     if (launcherRequestInFlight.current || isGenerating) return;
@@ -555,6 +662,7 @@ export default function BrainHome() {
     pendingClientMessageId.current = null;
     setApprovalComment("");
     setGoal("");
+    setDraftAttachments([]);
     setSourceReturnTarget(null);
     setSourceReturnError(null);
   };
@@ -564,6 +672,7 @@ export default function BrainHome() {
     clearActiveBrainTaskId(effectiveAccount.id);
     persistActiveConversationThreadId(effectiveAccount.id, threadId);
     setActiveConversationThreadId(threadId);
+    setDraftAttachments([]);
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     setWorkspaceMode("conversation");
@@ -574,6 +683,7 @@ export default function BrainHome() {
     if (threadId !== activeConversationThreadId || !effectiveAccount) return;
     clearActiveConversationThreadId(effectiveAccount.id);
     setActiveConversationThreadId(null);
+    setDraftAttachments([]);
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     setGoal("");
@@ -872,7 +982,13 @@ export default function BrainHome() {
                 loading={isGenerating}
                 skills={composerSkillsQuery.data ?? []}
                 onSelectSkill={launchComposerSkill}
-                onAddFilesAndMaterials={() => message.info("尚未接入文件或素材附件")}
+                attachments={draftAttachments}
+                attachmentBusy={draftAttachments.some((item) =>
+                  item.status === "uploading" || item.status === "removing"
+                )}
+                onFilesSelected={(files) => void uploadDraftFiles(files)}
+                onRemoveAttachment={(attachment) => void removeDraftAttachment(attachment)}
+                onRetryAttachment={retryDraftAttachment}
                 onAddAccountDataPackage={() => message.info("尚未接入账号数据包附件")}
                 onAddHistoricalArtifacts={() => setWorkspaceMode("results")}
                 onSelectAccount={requestAccountSelection}

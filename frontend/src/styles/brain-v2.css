@@ -203,7 +203,7 @@
 .tz-artifact-center__filters input {
   min-width: 0;
   padding: 6px 8px;
-  border: 1px solid var(--tz-line);
+  border: 0;
   border-radius: 7px;
   background: var(--tz-surface);
   color: var(--tz-ink);
@@ -1377,6 +1377,62 @@
 
 .tz-brain-thread .dy-brain-composer-box .ant-input-suffix {
   display: none;
+}
+
+.dy-brain-attachment-tray {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: flex;
+  max-height: 132px;
+  margin: 0;
+  padding: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--tz-line);
+  border-radius: var(--tz-radius-object);
+  background: var(--tz-surface);
+  box-shadow: var(--tz-shadow-floating);
+  list-style: none;
+}
+
+.dy-brain-attachment-tray li {
+  display: grid;
+  min-width: 0;
+  max-width: min(100%, 320px);
+  grid-template-columns: auto minmax(80px, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 8px;
+  border-radius: var(--tz-radius-control);
+  background: var(--tz-surface-soft);
+  color: var(--tz-ink-soft);
+  font-size: 12px;
+}
+
+.dy-brain-attachment-tray li[data-status="error"] {
+  background: color-mix(in srgb, var(--tz-error) 8%, var(--tz-surface));
+  color: var(--tz-error);
+}
+
+.dy-brain-attachment-tray li > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dy-brain-attachment-tray li > small {
+  grid-column: 2 / -1;
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .dy-brain-attachment-tray li {
+    width: 100%;
+    max-width: none;
+  }
 }
 
 .tz-tool-details {

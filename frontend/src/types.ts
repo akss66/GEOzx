@@ -468,6 +468,20 @@ export interface SendConversationTurnInput {
   attachment_ids?: number[];
 }
 
+export interface ConversationAttachment {
+  id: number;
+  account_id: number;
+  thread_id: number;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  scan_status: "pending" | "clean" | "rejected";
+  parse_status: "pending" | "ready" | "failed";
+  parsed_context: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface ConversationAgentRun {
   id: number;
   org_id: number;

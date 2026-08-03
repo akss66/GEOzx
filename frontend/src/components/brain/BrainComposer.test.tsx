@@ -50,6 +50,40 @@ const permission: AgentToolCall = {
 };
 
 describe("BrainComposer", () => {
+  it("selects multiple files and blocks sending while an attachment is uploading", () => {
+    const onFilesSelected = vi.fn();
+    const file = new File(["account context"], "context.txt", { type: "text/plain" });
+    render(
+      <BrainComposer
+        value="分析附件"
+        disabled={false}
+        loading={false}
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        attachments={[{
+          key: "context",
+          filename: file.name,
+          file,
+          threadId: 82,
+          id: null,
+          status: "uploading",
+        }]}
+        attachmentBusy
+        onFilesSelected={onFilesSelected}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByLabelText("选择对话附件");
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(onFilesSelected).toHaveBeenCalledWith([file]);
+    expect(screen.getByRole("button", { name: "发送给运营大脑" })).toBeDisabled();
+  });
+
   it("places the capability launcher at the left of the composer and hides it for permission confirmation", () => {
     const { rerender } = render(
       <BrainComposer

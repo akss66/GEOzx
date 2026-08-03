@@ -18,6 +18,10 @@ import {
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
+import {
+  deleteConversationAttachment,
+  uploadConversationAttachments,
+} from "../api/attachments";
 import type {
   Account,
   ConversationAgentRun,
@@ -105,6 +109,11 @@ vi.mock("../api/brain", () => ({
   })),
 }));
 
+vi.mock("../api/attachments", () => ({
+  deleteConversationAttachment: vi.fn(async () => undefined),
+  uploadConversationAttachments: vi.fn(),
+}));
+
 vi.mock("../hooks/useEventStream", () => ({
   useEventStream: vi.fn((handler, options) => {
     mocks.event.handler = handler;
@@ -136,6 +145,19 @@ describe("BrainHome V3 conversation projection", () => {
     vi.mocked(sendConversationTurn).mockResolvedValue(
       submission(persistedTurn(201, "default-client", "默认消息", "默认回复")),
     );
+    vi.mocked(uploadConversationAttachments).mockResolvedValue([{
+      id: 91,
+      account_id: 3,
+      thread_id: 82,
+      filename: "context.txt",
+      mime_type: "text/plain",
+      size_bytes: 7,
+      sha256: "sha256",
+      scan_status: "clean",
+      parse_status: "ready",
+      parsed_context: { text: "context" },
+      created_at: "2026-08-03T00:00:00Z",
+    }]);
   });
   afterEach(cleanup);
 
@@ -169,6 +191,31 @@ describe("BrainHome V3 conversation projection", () => {
     }));
     expect(localStorage.getItem("tongzhouxing_brain_active_conversation_threads"))
       .toContain('"3":82');
+  });
+
+  it("uploads composer files and binds their immutable ids to the submitted Turn", async () => {
+    saveThread(3, 82);
+    renderBrainHome();
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith(82));
+
+    const file = new File(["context"], "context.txt", { type: "text/plain" });
+    fireEvent.change(await screen.findByLabelText("选择对话附件"), {
+      target: { files: [file] },
+    });
+    await waitFor(() => expect(uploadConversationAttachments).toHaveBeenCalledWith(82, [file]));
+    expect(await screen.findByText("context.txt")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("运营大脑消息"), {
+      target: { value: "根据附件诊断账号" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(
+      82,
+      expect.objectContaining({ attachment_ids: [91] }),
+    ));
+    await waitFor(() => expect(screen.queryByText("context.txt")).not.toBeInTheDocument());
+    expect(deleteConversationAttachment).not.toHaveBeenCalled();
   });
 
   it("renders a new-thread optimistic request immediately and never fetches an empty copy on mount", async () => {
