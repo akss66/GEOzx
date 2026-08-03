@@ -444,7 +444,8 @@ describe("BrainHome V3 conversation projection", () => {
       target: { value: "诊断内容方向" },
     });
     fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
-    await screen.findByText("诊断内容方向");
+    const optimisticMessage = await screen.findByText("诊断内容方向");
+    const optimisticArticle = optimisticMessage.closest("article");
     const submittedInput = vi.mocked(sendConversationTurn).mock.calls[0][1];
     const serverTurn = persistedTurn(
       301,
@@ -459,7 +460,8 @@ describe("BrainHome V3 conversation projection", () => {
     await waitFor(() => expect(screen.getByText("已完成诊断")).toBeInTheDocument());
     expect(screen.getAllByText("诊断内容方向")).toHaveLength(1);
     expect(screen.getAllByRole("article")).toHaveLength(1);
-    expect(screen.getByRole("article")).toHaveAttribute("data-turn-id", "301");
+    expect(screen.getByRole("article")).toBe(optimisticArticle);
+    expect(optimisticArticle).toHaveAttribute("data-turn-id", "301");
   });
 
   it("projects SSE deltas into that same Turn and ignores another Thread", async () => {
@@ -513,6 +515,74 @@ describe("BrainHome V3 conversation projection", () => {
     );
     expect(screen.queryByText("污染")).not.toBeInTheDocument();
     expect(screen.getAllByRole("article")).toHaveLength(1);
+  });
+
+  it("keeps a Skill phase in the existing work turn while answer deltas stream in", async () => {
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+
+    renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "检查账号" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    const optimistic = await screen.findByText("检查账号");
+    const article = optimistic.closest("article");
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+
+    await act(async () => {
+      mocks.event.handler?.({
+        id: 92,
+        type: "brain.runtime.message_start",
+        payload: runtimePayload(82, 401, clientMessageId, 0),
+      });
+    });
+    await waitFor(() => expect(article).toHaveAttribute("data-turn-status", "running"));
+    await act(async () => {
+      mocks.event.handler?.({
+        id: 93,
+        type: "brain.runtime.subagent_started",
+        payload: {
+          ...runtimePayload(82, 401, clientMessageId, 1),
+          agent_code: "01-positioning",
+          turn_phase: "consulting_experts",
+        },
+      });
+      mocks.event.handler?.({
+        id: 94,
+        type: "brain.runtime.message_delta",
+        payload: { ...runtimePayload(82, 401, clientMessageId, 2), delta: "账号情况正常" },
+      });
+    });
+
+    await waitFor(() => expect(within(article as HTMLElement).getByText("账号情况正常")).toBeInTheDocument());
+    expect(screen.getByRole("article")).toBe(article);
+    expect(within(article as HTMLElement).getByText("正在咨询专家")).toBeInTheDocument();
+    expect(screen.queryByText("思考中")).not.toBeInTheDocument();
+  });
+
+  it("does not restore a failed request into the composer after selecting another Thread", async () => {
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+    vi.mocked(getConversation).mockImplementation(async (threadId) =>
+      thread(threadId, threadId === 81 ? [persistedTurn(501, "history-client", "历史请求", "历史回复")] : []),
+    );
+
+    renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "不应回填到新会话" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await screen.findByText("不应回填到新会话");
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    expect(await screen.findByText("历史回复")).toBeInTheDocument();
+
+    await act(async () => request.reject(new Error("network")));
+
+    await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
+    expect(screen.queryByText("不应回填到新会话")).not.toBeInTheDocument();
   });
 
   it("replaces an incomplete live overlay with the durable Thread after reconnect", async () => {

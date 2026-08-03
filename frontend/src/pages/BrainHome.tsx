@@ -45,7 +45,9 @@ import {
   clearActiveBrainTaskId,
   clearActiveConversationThreadId,
   getActiveConversationThreadId,
+  isCurrentConversationRequest,
   setActiveConversationThreadId as persistActiveConversationThreadId,
+  upsertTurnByClientMessageId,
 } from "../stores/brainConversation";
 import {
   resolveWorkspaceAccount,
@@ -63,6 +65,11 @@ interface PendingTurn {
   clientMessageId: string;
   content: string;
   taskId: number | null;
+}
+
+interface ConversationRequestTarget {
+  accountId: number;
+  threadId: number;
 }
 
 interface SourceReturnTarget {
@@ -90,6 +97,7 @@ export default function BrainHome() {
   const [sourceReturnTarget, setSourceReturnTarget] = useState<SourceReturnTarget | null>(null);
   const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
   const pendingClientMessageId = useRef<string | null>(null);
+  const conversationRequestTargetRef = useRef<ConversationRequestTarget | null>(null);
   const activeConversationThreadIdRef = useRef<number | null>(null);
   const previousAccountIdRef = useRef<number | null>(null);
   const launcherRequestInFlight = useRef(false);
@@ -278,12 +286,33 @@ export default function BrainHome() {
     onSuccess: (submission, variables) => {
       qc.setQueryData<ConversationThread>(
         ["brain-conversation", variables.threadId],
-        (current) => current ? mergeConversationTurn(current, submission.turn) : current,
+        (current) => {
+          if (!current) return current;
+          const clientMessageId = submission.turn.client_message_id || variables.clientMessageId;
+          const merged = mergeConversationTurn(current, {
+            ...submission.turn,
+            client_message_id: clientMessageId,
+          });
+          const mergedTurn = merged.turns.find(
+            (turn) => turn.client_message_id === clientMessageId,
+          ) ?? submission.turn;
+          return upsertTurnByClientMessageId(
+            current,
+            variables.threadId,
+            clientMessageId,
+            () => mergedTurn,
+          );
+        },
       );
       void qc.invalidateQueries({
         queryKey: ["brain-conversation", variables.threadId],
       });
-      if (effectiveAccountIdRef.current !== variables.accountId) return;
+      if (!isCurrentConversationRequest({
+        activeAccountId: effectiveAccountIdRef.current,
+        activeThreadId: activeConversationThreadIdRef.current,
+        accountId: variables.accountId,
+        threadId: variables.threadId,
+      })) return;
       setDraftAttachments([]);
       if (isTerminalConversationRunStatus(submission.run.status)) {
         setPendingTurn(null);
@@ -300,7 +329,12 @@ export default function BrainHome() {
       pendingClientMessageId.current = clientMessageId;
     },
     onError: (error, variables) => {
-      if (effectiveAccountIdRef.current !== variables.accountId) return;
+      if (!isCurrentConversationRequest({
+        activeAccountId: effectiveAccountIdRef.current,
+        activeThreadId: activeConversationThreadIdRef.current,
+        accountId: variables.accountId,
+        threadId: variables.threadId,
+      })) return;
       setPendingTurn((current) => {
         if (current?.clientMessageId === variables.clientMessageId) {
           setGoal((value) => value || current.content);
@@ -480,6 +514,10 @@ export default function BrainHome() {
     const clientMessageId = createClientMessageId();
     const thread = await ensureAccountThread(account);
     if (!thread) return;
+    conversationRequestTargetRef.current = {
+      accountId: account.id,
+      threadId: thread.id,
+    };
     followLatestMessage.current = true;
     setShowJumpToLatest(false);
     pendingClientMessageId.current = clientMessageId;
@@ -624,6 +662,12 @@ export default function BrainHome() {
     try {
       await submitTurn({ content, requestedSkillCode: null });
     } catch {
+      const requestTarget = conversationRequestTargetRef.current;
+      if (!requestTarget || !isCurrentConversationRequest({
+        activeAccountId: effectiveAccountIdRef.current,
+        activeThreadId: activeConversationThreadIdRef.current,
+        ...requestTarget,
+      })) return;
       setGoal((current) => current || content);
     } finally {
       launcherRequestInFlight.current = false;
@@ -1295,7 +1339,11 @@ function isEphemeralConversationEvent(type: string) {
   return [
     "brain.runtime.started",
     "brain.runtime.intent_classified",
+    "brain.runtime.tool_started",
     "brain.runtime.tool_completed",
+    "brain.runtime.subagent_started",
+    "brain.runtime.subagent_completed",
+    "brain.runtime.subagent_failed",
     "brain.runtime.message_start",
     "brain.runtime.message_delta",
   ].includes(type);

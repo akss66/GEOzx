@@ -1,3 +1,5 @@
+import type { ConversationThread, ConversationTurn } from "../types";
+
 const ACTIVE_BRAIN_TASKS_KEY = "tongzhouxing_brain_active_tasks";
 const ACTIVE_CONVERSATION_THREADS_KEY =
   "tongzhouxing_brain_active_conversation_threads";
@@ -11,6 +13,43 @@ const EMPTY_ACTIVE_TASKS: StoredActiveBrainTasks = {
   version: 1,
   accounts: {},
 };
+
+export function upsertTurnByClientMessageId(
+  thread: ConversationThread,
+  threadId: number,
+  clientMessageId: string,
+  update: (current: ConversationTurn | null) => ConversationTurn | null,
+): ConversationThread {
+  if (thread.id !== threadId) return thread;
+
+  const turnIndex = thread.turns.findIndex(
+    (turn) => turn.client_message_id === clientMessageId,
+  );
+  const current = turnIndex >= 0 ? thread.turns[turnIndex] : null;
+  const next = update(current);
+  if (next == null || next === current) return thread;
+
+  return turnIndex < 0
+    ? { ...thread, turns: [...thread.turns, next] }
+    : {
+        ...thread,
+        turns: thread.turns.map((turn, index) => index === turnIndex ? next : turn),
+      };
+}
+
+export function isCurrentConversationRequest({
+  activeAccountId,
+  activeThreadId,
+  accountId,
+  threadId,
+}: {
+  activeAccountId: number | null;
+  activeThreadId: number | null;
+  accountId: number;
+  threadId: number;
+}) {
+  return activeAccountId === accountId && activeThreadId === threadId;
+}
 
 function readActiveTasks(): StoredActiveBrainTasks {
   try {

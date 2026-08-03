@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ConversationThread } from "../../types";
+import { upsertTurnByClientMessageId } from "../../stores/brainConversation";
 import {
   applyConversationEvent,
   appendOptimisticTurn,
@@ -56,6 +57,26 @@ function frame(
 }
 
 describe("conversation Turn projection", () => {
+  it("upserts a server Turn through the optimistic client identity", () => {
+    const result = upsertTurnByClientMessageId(
+      thread,
+      81,
+      "client-1",
+      (current) => ({
+        ...current!,
+        id: 101,
+        status: "running",
+      }),
+    );
+
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0]).toMatchObject({
+      id: 101,
+      client_message_id: "client-1",
+      status: "running",
+    });
+  });
+
   it("adds one optimistic Turn and reuses it for the same client message", () => {
     const first = appendOptimisticTurn(thread, "client-2", "Plan next week");
     const repeated = appendOptimisticTurn(first, "client-2", "Plan next week");
