@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { getMe } from "./api/auth";
@@ -7,40 +7,25 @@ import { APP_ROUTES, type AppPage } from "./appRoutes";
 import { AppShell } from "./components/AppShell";
 import { AdminRoute, ProtectedRoute } from "./components/RouteGuards";
 import { OperationalState } from "./components/ui";
-import Accounts from "./pages/Accounts";
-import AccountDataCenter from "./pages/AccountDataCenter";
-import Advertising from "./pages/Advertising";
-import Approvals from "./pages/Approvals";
-import BrainHome from "./pages/BrainHome";
-import Config from "./pages/Config";
-import Cost from "./pages/Cost";
-import CustomerService from "./pages/CustomerService";
-import ExpertTeam from "./pages/ExpertTeam";
-import Knowledge from "./pages/Knowledge";
-import Login from "./pages/Login";
-import ModelInfrastructure from "./pages/ModelInfrastructure";
-import PipelineBoard from "./pages/PipelineBoard";
-import ReviewDashboard from "./pages/ReviewDashboard";
-import Risks from "./pages/Risks";
-import Users from "./pages/Users";
 import { useAuth } from "./stores/auth";
 
-const pageElements: Record<AppPage, JSX.Element> = {
-  brain: <BrainHome />,
-  agents: <ExpertTeam />,
-  tasks: <PipelineBoard />,
-  approvals: <Approvals />,
-  "customer-service": <CustomerService />,
-  advertising: <Advertising />,
-  review: <ReviewDashboard />,
-  cost: <Cost />,
-  risks: <Risks />,
-  accounts: <Accounts />,
-  "account-data": <AccountDataCenter />,
-  knowledge: <Knowledge />,
-  config: <Config />,
-  models: <ModelInfrastructure />,
-  users: <Users />,
+const Login = lazy(() => import("./pages/Login"));
+const pageComponents: Record<AppPage, React.LazyExoticComponent<React.ComponentType>> = {
+  brain: lazy(() => import("./pages/BrainHome")),
+  agents: lazy(() => import("./pages/ExpertTeam")),
+  tasks: lazy(() => import("./pages/PipelineBoard")),
+  approvals: lazy(() => import("./pages/Approvals")),
+  "customer-service": lazy(() => import("./pages/CustomerService")),
+  advertising: lazy(() => import("./pages/Advertising")),
+  review: lazy(() => import("./pages/ReviewDashboard")),
+  cost: lazy(() => import("./pages/Cost")),
+  risks: lazy(() => import("./pages/Risks")),
+  accounts: lazy(() => import("./pages/Accounts")),
+  "account-data": lazy(() => import("./pages/AccountDataCenter")),
+  knowledge: lazy(() => import("./pages/Knowledge")),
+  config: lazy(() => import("./pages/Config")),
+  models: lazy(() => import("./pages/ModelInfrastructure")),
+  users: lazy(() => import("./pages/Users")),
 };
 
 export default function App() {
@@ -102,25 +87,41 @@ export default function App() {
   }
 
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route element={<ProtectedRoute />}>
-        <Route element={<AppShell />}>
-          {APP_ROUTES.filter((route) => !route.adminOnly).map((route) =>
-            route.index ? (
-              <Route key="index" index element={pageElements[route.page]} />
-            ) : (
-              <Route key={route.path} path={route.path} element={pageElements[route.page]} />
-            ),
-          )}
-          <Route element={<AdminRoute />}>
-            {APP_ROUTES.filter((route) => route.adminOnly).map((route) => (
-              <Route key={route.path} path={route.path} element={pageElements[route.page]} />
-            ))}
+    <Suspense fallback={<RouteLoadingState />}>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppShell />}>
+            {APP_ROUTES.filter((route) => !route.adminOnly).map((route) => {
+              const Page = pageComponents[route.page];
+              return route.index ? (
+                <Route key="index" index element={<Page />} />
+              ) : (
+                <Route key={route.path} path={route.path} element={<Page />} />
+              );
+            })}
+            <Route element={<AdminRoute />}>
+              {APP_ROUTES.filter((route) => route.adminOnly).map((route) => {
+                const Page = pageComponents[route.page];
+                return <Route key={route.path} path={route.path} element={<Page />} />;
+              })}
+            </Route>
           </Route>
         </Route>
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
+  );
+}
+
+function RouteLoadingState() {
+  return (
+    <div className="tz-bootstrap-state">
+      <OperationalState
+        kind="loading"
+        title="正在打开页面"
+        description="正在载入当前功能。"
+      />
+    </div>
   );
 }

@@ -10,11 +10,21 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          "vendor-react": ["react", "react-dom", "react-router-dom"],
-          "vendor-antd": ["antd", "@ant-design/icons"],
-          "vendor-charts": ["echarts", "echarts-for-react"],
-          "vendor-data": ["axios", "@tanstack/react-query", "zustand", "dayjs"],
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/node_modules\/(?:\.pnpm\/)?(?:react|react-dom|react-router|react-router-dom)@?/.test(id)) {
+            return "vendor-react";
+          }
+          if (id.includes("echarts") || id.includes("zrender")) return "vendor-charts";
+          if (
+            id.includes("axios")
+            || id.includes("@tanstack")
+            || id.includes("zustand")
+            || id.includes("dayjs")
+          ) {
+            return "vendor-data";
+          }
+          return undefined;
         },
       },
     },
