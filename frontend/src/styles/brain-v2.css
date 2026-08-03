@@ -239,6 +239,12 @@
   gap: 3px;
 }
 
+.tz-artifact-center__unclassified {
+  margin: 0;
+  color: var(--tz-muted);
+  font-size: 12px;
+}
+
 .tz-artifact-center__error {
   padding: 12px;
   border-left: 3px solid var(--tz-error);

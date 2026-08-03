@@ -58,6 +58,25 @@ _STATUS_TO_ARTIFACT: dict[DeliverableStatus, ArtifactStatus] = {
 _ARTIFACT_TO_STATUS = {value: key for key, value in _STATUS_TO_ARTIFACT.items()}
 _ACCOUNT_INSPECTION_ARTIFACT_TYPE = "account_inspection_report"
 _DELIVERABLE_ARTIFACT_TYPES = {item.value: item for item in DeliverableType}
+_BUSINESS_ARTIFACT_DATABASE_TYPES: dict[str, frozenset[DeliverableType]] = {
+    "account_inspection_report": frozenset({DeliverableType.REVIEW_REPORT}),
+    "account_positioning": frozenset({DeliverableType.POSITIONING_STRATEGY}),
+    "positioning_strategy": frozenset({DeliverableType.POSITIONING_STRATEGY}),
+    "topic_plan": frozenset({DeliverableType.TOPIC_PLAN}),
+    "video_script": frozenset({DeliverableType.VIDEO_SCRIPT}),
+    "visual_brief": frozenset({DeliverableType.ART_PROMPT}),
+    "art_prompt": frozenset({DeliverableType.ART_PROMPT}),
+    "video_asset": frozenset({DeliverableType.VIDEO_ASSET}),
+    "edited_video": frozenset({DeliverableType.EDITED_VIDEO}),
+    "content_calendar": frozenset({DeliverableType.PUBLISH_CALENDAR}),
+    "publish_calendar": frozenset({DeliverableType.PUBLISH_CALENDAR}),
+    "platform_publish_receipt": frozenset({DeliverableType.PUBLISH_CALENDAR}),
+    "review_report": frozenset({DeliverableType.REVIEW_REPORT}),
+    "engagement_review": frozenset({DeliverableType.REVIEW_REPORT}),
+    "ad_plan": frozenset({DeliverableType.AD_PLAN}),
+    "cs_record": frozenset({DeliverableType.CS_RECORD}),
+    "operation_execution_plan": frozenset({DeliverableType.REVIEW_REPORT}),
+}
 _ACCOUNT_INSPECTION_FIELDS = {
     "data_sufficiency",
     "missing_data",
@@ -177,12 +196,26 @@ def _normalize_artifact_type(
     if artifact_type is None:
         return None
     value = artifact_type.value if isinstance(artifact_type, DeliverableType) else artifact_type
-    if value == _ACCOUNT_INSPECTION_ARTIFACT_TYPE or value in _DELIVERABLE_ARTIFACT_TYPES:
+    if value in _BUSINESS_ARTIFACT_DATABASE_TYPES:
         return value
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="Unsupported artifact type",
     )
+
+
+def _normalize_artifact_types(
+    artifact_type: str | DeliverableType | None,
+    artifact_types: Collection[str] | None,
+) -> frozenset[str] | None:
+    values: list[str | DeliverableType] = []
+    if artifact_type is not None:
+        values.append(artifact_type)
+    if artifact_types is not None:
+        values.extend(artifact_types)
+    if not values:
+        return None
+    return frozenset(_normalize_artifact_type(value) for value in values)
 
 
 async def _business_artifact_type(
@@ -202,6 +235,7 @@ async def list_artifacts(
     *,
     account_id: int,
     artifact_type: str | DeliverableType | None,
+    artifact_types: Collection[str] | None,
     artifact_status: ArtifactStatus | None,
     page: int,
     page_size: int,
@@ -209,14 +243,12 @@ async def list_artifacts(
     """List only artifacts whose ContentItem is explicitly bound to the selected account."""
     account = await require_account_access(session, user, account_id)
     filters = [ContentItem.account_id == account_id]
-    requested_artifact_type = _normalize_artifact_type(artifact_type)
-    if requested_artifact_type is not None:
-        database_type = (
-            DeliverableType.REVIEW_REPORT
-            if requested_artifact_type == _ACCOUNT_INSPECTION_ARTIFACT_TYPE
-            else _DELIVERABLE_ARTIFACT_TYPES[requested_artifact_type]
+    requested_artifact_types = _normalize_artifact_types(artifact_type, artifact_types)
+    if requested_artifact_types is not None:
+        database_types = set().union(
+            *(_BUSINESS_ARTIFACT_DATABASE_TYPES[item] for item in requested_artifact_types)
         )
-        filters.append(Deliverable.type == database_type)
+        filters.append(Deliverable.type.in_(database_types))
     if artifact_status is not None:
         filters.append(Deliverable.status == _ARTIFACT_TO_STATUS[artifact_status])
 
@@ -241,7 +273,7 @@ async def list_artifacts(
         )
         if provenance is not None:
             projected_type = await _business_artifact_type(session, deliverable)
-            if requested_artifact_type is None or projected_type == requested_artifact_type:
+            if requested_artifact_types is None or projected_type in requested_artifact_types:
                 valid.append((deliverable, content, provenance))
 
     total = len(valid)

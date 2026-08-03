@@ -197,13 +197,30 @@ describe("BrainHome V3 conversation projection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     const conversation = await screen.findByRole("tab", { name: "对话" });
     expect(conversation).toHaveAttribute("aria-selected", "true");
+    expect(conversation).toHaveAttribute("aria-controls", "brain-conversation-panel");
     const plans = screen.getByRole("tab", { name: "方案与内容" });
     fireEvent.click(plans);
     await waitFor(() => expect(screen.getByRole("tab", { name: "方案与内容" })).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByRole("tabpanel", { name: "方案与内容" })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "方案与内容" }), { key: "ArrowLeft" });
+    await waitFor(() => expect(screen.getByRole("tab", { name: "对话" })).toHaveAttribute("aria-selected", "true"));
     fireEvent.click(screen.getByRole("button", { name: "抖音数据" }));
     expect(await screen.findByTestId("location")).toHaveTextContent("/accounts/3/data");
     fireEvent.click(screen.getByRole("button", { name: "待处理" }));
     expect(await screen.findByTestId("location")).toHaveTextContent("/approvals");
+  });
+
+  it("keeps a preloaded next-account plans cache while removing the prior account cache", async () => {
+    const view = renderBrainHome();
+    await screen.findByRole("heading", { name: "今天，想推进什么？" });
+    view.queryClient.setQueryData(["account-artifacts", 3], "account-a");
+    view.queryClient.setQueryData(["account-artifacts", 4], "account-b");
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+
+    await waitFor(() => expect(view.queryClient.getQueryData(["account-artifacts", 3])).toBeUndefined());
+    expect(view.queryClient.getQueryData(["account-artifacts", 4])).toBe("account-b");
   });
 
   it("shows confirmation feedback from an artifact action and retains the safe failure feedback", async () => {
@@ -318,7 +335,7 @@ describe("BrainHome V3 conversation projection", () => {
     ]));
     renderBrainHome();
 
-    const conversation = await screen.findByRole("region", { name: "运营大脑对话流" });
+    const conversation = await screen.findByRole("tabpanel", { name: "对话" });
     const scrollTo = vi.fn();
     Object.defineProperties(conversation, {
       clientHeight: { configurable: true, value: 400 },

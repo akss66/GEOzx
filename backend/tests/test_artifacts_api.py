@@ -510,6 +510,53 @@ async def test_artifact_queries_and_actions_are_isolated_by_account(client, sess
 
 
 @pytest.mark.asyncio
+async def test_artifact_types_filter_is_validated_before_pagination(client, session, admin):
+    seeded = await _seed_artifact(session, admin, account_name="多类型分页账号")
+    topic = Deliverable(
+        content_item_id=seeded[2].id,
+        thread_id=seeded[3].id,
+        turn_id=seeded[4].id,
+        run_id=seeded[6].id,
+        skill_run_id=seeded[7].id,
+        agent_code="02-content-director",
+        type=DeliverableType.TOPIC_PLAN,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"theme": "厨房收纳", "topics": ["抽屉整理"], "period": "本周"},
+    )
+    later_review = Deliverable(
+        content_item_id=seeded[2].id,
+        thread_id=seeded[3].id,
+        turn_id=seeded[4].id,
+        run_id=seeded[6].id,
+        skill_run_id=seeded[7].id,
+        agent_code="06-operator",
+        type=DeliverableType.REVIEW_REPORT,
+        version=2,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload=_review_payload(summary="排在选题之后的复盘"),
+    )
+    session.add_all([topic, later_review])
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts?account_id={seeded[1].id}&artifact_types=topic_plan&page=1&page_size=1",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pagination"] == {"page": 1, "page_size": 1, "total": 1, "pages": 1}
+    assert [row["id"] for row in response.json()["data"]] == [topic.id]
+
+    invalid = await client.get(
+        f"/artifacts?account_id={seeded[1].id}&artifact_types=topic_plan&artifact_types=unknown_type",
+        headers=_auth(token),
+    )
+    assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_member_cannot_enumerate_view_or_change_another_account_artifact(
     client, session, admin, member
 ):

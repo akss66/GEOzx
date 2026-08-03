@@ -66,7 +66,7 @@ describe("ArtifactCenter", () => {
   it("uses business and status filters, filters the loaded page by creation time, and paginates", async () => {
     vi.mocked(listArtifacts).mockImplementation(async (input) => {
       if (input.page === 2) return page([artifact(3)], 2, 2);
-      return page([artifact(1, 3, "2026-07-27T08:00:00Z"), artifact(2)], 1, 2);
+      return page([artifact(1, 3, "2026-07-27T08:00:00Z"), { ...artifact(2), artifact_type: "review_report" }], 1, 2);
     });
     renderCenter(3);
     await screen.findByText("账号诊断");
@@ -175,8 +175,39 @@ describe("ArtifactCenter", () => {
     expect(screen.getByRole("heading", { name: "拍摄稿" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "发布安排" })).toBeInTheDocument();
     expect(screen.getAllByText((_, element) => element?.tagName === "SPAN" && element.textContent?.includes("V1") === true)).not.toHaveLength(0);
+    expect(screen.getAllByText(/创建于/)).not.toHaveLength(0);
+    expect(screen.queryByText(/更新于/)).not.toBeInTheDocument();
     expect(screen.getByText("数据周期：2026-07-01 至 2026-07-21")).toBeInTheDocument();
     expect(screen.getByText("下一步：确认两个内容支柱后排期")).toBeInTheDocument();
     expect(screen.getByLabelText("业务类型")).toBeInTheDocument();
+  });
+
+  it("requests every business type before pagination and does not invent a next action", async () => {
+    vi.mocked(listArtifacts).mockImplementation(async (input) => (input as { artifactTypes?: string[] }).artifactTypes?.includes("topic_plan")
+      ? page([{ ...artifact(3), artifact_type: "topic_plan" }])
+      : page([]));
+    renderCenter(3);
+
+    fireEvent.change(await screen.findByLabelText("业务类型"), { target: { value: "topics" } });
+
+    await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith({
+      accountId: 3,
+      artifactTypes: ["topic_plan"],
+      status: undefined,
+      page: 1,
+      pageSize: 20,
+    }));
+    expect(await screen.findByText("选题清单")).toBeInTheDocument();
+    expect(screen.getByText("下一步：未提供")).toBeInTheDocument();
+  });
+
+  it("keeps unknown artifact types out of the five business groups", async () => {
+    vi.mocked(listArtifacts).mockResolvedValue(page([
+      { ...artifact(9), artifact_type: "future_business_type" },
+    ]));
+    renderCenter(3);
+
+    expect(await screen.findByText("有 1 项新类型内容待归类")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "诊断与复盘" })).not.toHaveTextContent("账号运营分析");
   });
 });

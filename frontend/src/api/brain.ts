@@ -92,6 +92,7 @@ export async function listComposerSkills(
 export async function listArtifacts(input: {
   accountId: number;
   artifactType?: string;
+  artifactTypes?: string[];
   status?: ArtifactStatus;
   page?: number;
   pageSize?: number;
@@ -100,6 +101,7 @@ export async function listArtifacts(input: {
     params: {
       account_id: input.accountId,
       artifact_type: input.artifactType,
+      ...(input.artifactTypes ? { artifact_types: input.artifactTypes } : {}),
       status: input.status,
       page: input.page ?? 1,
       page_size: input.pageSize ?? 20,

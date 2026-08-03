@@ -6,7 +6,7 @@ import {
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App as AntApp, Button, Tag } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -216,8 +216,8 @@ export default function BrainHome() {
 
   useEffect(() => {
     const nextAccountId = effectiveAccountId;
-    const accountChanged = previousAccountIdRef.current != null
-      && previousAccountIdRef.current !== nextAccountId;
+    const previousAccountId = previousAccountIdRef.current;
+    const accountChanged = previousAccountId != null && previousAccountId !== nextAccountId;
     previousAccountIdRef.current = nextAccountId;
     const nextThreadId = effectiveAccountId != null
       ? getActiveConversationThreadId(effectiveAccountId)
@@ -228,7 +228,7 @@ export default function BrainHome() {
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     if (accountChanged) setGoal("");
-    if (accountChanged) qc.removeQueries({ queryKey: ["account-artifacts"] });
+    if (accountChanged) qc.removeQueries({ queryKey: ["account-artifacts", previousAccountId] });
     setDraftAttachments([]);
     setSelectedArtifact(null);
     setSourceReturnTarget(null);
@@ -1074,7 +1074,10 @@ export default function BrainHome() {
             <section
               ref={conversationRef}
               className="dy-brain-conversation"
-              aria-label="运营大脑对话流"
+              id={workspaceMode === "conversation" ? "brain-conversation-panel" : "brain-plans-panel"}
+              role="tabpanel"
+              aria-labelledby={workspaceMode === "conversation" ? "brain-conversation-tab" : "brain-plans-tab"}
+              aria-label={workspaceMode === "conversation" ? "对话" : "方案与内容"}
               onScroll={handleConversationScroll}
             >
               {workspaceMode === "results" ? (
@@ -1279,13 +1282,16 @@ function ContextStrip({
         )}
       </div>
       <div className="dy-brain-context-actions">
-        <nav className="tz-brain-mode-switch" role="tablist" aria-label="运营工作区">
+        <div className="tz-brain-mode-switch" role="tablist" aria-label="运营工作区">
           <Button
             type={workspaceMode === "conversation" ? "primary" : "text"}
             size="small"
             role="tab"
+            id="brain-conversation-tab"
             aria-label="对话"
             aria-selected={workspaceMode === "conversation"}
+            aria-controls="brain-conversation-panel"
+            onKeyDown={(event) => handleWorkspaceTabKey(event, workspaceMode, onWorkspaceModeChange)}
             onClick={() => onWorkspaceModeChange("conversation")}
           >
             对话
@@ -1294,12 +1300,17 @@ function ContextStrip({
             type={workspaceMode === "results" ? "primary" : "text"}
             size="small"
             role="tab"
+            id="brain-plans-tab"
             aria-label="方案与内容"
             aria-selected={workspaceMode === "results"}
+            aria-controls="brain-plans-panel"
+            onKeyDown={(event) => handleWorkspaceTabKey(event, workspaceMode, onWorkspaceModeChange)}
             onClick={() => onWorkspaceModeChange("results")}
           >
             方案与内容
           </Button>
+        </div>
+        <nav aria-label="运营相关导航">
           <Button
             size="small"
             disabled={!account}
@@ -1319,6 +1330,20 @@ function ContextStrip({
       </div>
     </section>
   );
+}
+
+function handleWorkspaceTabKey(
+  event: KeyboardEvent<HTMLElement>,
+  mode: "conversation" | "results",
+  onChange: (mode: "conversation" | "results") => void,
+) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const nextMode = mode === "conversation" ? "results" : "conversation";
+  onChange(nextMode);
+  window.requestAnimationFrame(() => document.getElementById(
+    nextMode === "conversation" ? "brain-conversation-tab" : "brain-plans-tab",
+  )?.focus());
 }
 
 function ConversationEmpty({

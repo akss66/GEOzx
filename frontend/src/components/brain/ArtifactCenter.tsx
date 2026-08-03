@@ -34,7 +34,7 @@ const BUSINESS_GROUPS: Array<{ key: BusinessGroup; label: string; artifactTypes:
   {
     key: "diagnosis",
     label: "诊断与复盘",
-    artifactTypes: ["account_inspection_report", "review_report", "engagement_review"],
+    artifactTypes: ["account_inspection_report", "review_report", "engagement_review", "cs_record"],
   },
   {
     key: "benchmark",
@@ -82,9 +82,10 @@ export function ArtifactCenter({
   }, [accountId]);
 
   const query = useQuery({
-    queryKey: ["account-artifacts", accountId, filters.status, page],
+    queryKey: ["account-artifacts", accountId, groupTypes(filters.businessGroup), filters.status, page],
     queryFn: () => listArtifacts({
       accountId: accountId!,
+      ...(groupTypes(filters.businessGroup) ? { artifactTypes: groupTypes(filters.businessGroup) } : {}),
       status: filters.status || undefined,
       page,
       pageSize: 20,
@@ -96,14 +97,17 @@ export function ArtifactCenter({
     [accountId, query.data?.data],
   );
   const visibleArtifacts = useMemo(
-    () => accountArtifacts.filter((artifact) => isInDateRange(artifact.created_at, filters))
-      .filter((artifact) => !filters.businessGroup || groupFor(artifact) === filters.businessGroup),
+    () => accountArtifacts.filter((artifact) => isInDateRange(artifact.created_at, filters)),
     [accountArtifacts, filters],
   );
   const groupedArtifacts = useMemo(() => BUSINESS_GROUPS.map((group) => ({
     ...group,
     artifacts: visibleArtifacts.filter((artifact) => groupFor(artifact) === group.key),
   })), [visibleArtifacts]);
+  const unclassifiedArtifacts = useMemo(
+    () => visibleArtifacts.filter((artifact) => groupFor(artifact) == null),
+    [visibleArtifacts],
+  );
   const updateFilter = <Key extends keyof Filters>(key: Key, value: Filters[Key]) => {
     setPage(1);
     setFilters((current) => ({ ...current, [key]: value }));
@@ -170,7 +174,7 @@ export function ArtifactCenter({
               <article key={artifact.id} className="tz-artifact-center__row">
                 <div>
                   <strong>{presentDeliverable(artifact).typeLabel}</strong>
-                  <span>V{artifact.version} · {statusLabel(artifact.status)} · 更新于 {formatUpdatedAt(artifact.created_at)}</span>
+                  <span>V{artifact.version} · {statusLabel(artifact.status)} · 创建于 {formatCreatedAt(artifact.created_at)}</span>
                   {dataPeriod(artifact) ? <span>数据周期：{dataPeriod(artifact)}</span> : null}
                   <span>下一步：{nextStep(artifact)}</span>
                 </div>
@@ -180,6 +184,11 @@ export function ArtifactCenter({
           </section>
         ))}
       </div>
+      {unclassifiedArtifacts.length > 0 ? (
+        <p className="tz-artifact-center__unclassified" role="status">
+          有 {unclassifiedArtifacts.length} 项新类型内容待归类
+        </p>
+      ) : null}
       {query.data && query.data.pagination.pages > 1 ? (
         <footer className="tz-artifact-center__pagination">
           <Button disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>上一页</Button>
@@ -191,8 +200,12 @@ export function ArtifactCenter({
   );
 }
 
-function groupFor(artifact: Artifact): BusinessGroup {
-  return BUSINESS_GROUPS.find((group) => group.artifactTypes.includes(artifact.artifact_type))?.key ?? "diagnosis";
+function groupFor(artifact: Artifact): BusinessGroup | null {
+  return BUSINESS_GROUPS.find((group) => group.artifactTypes.includes(artifact.artifact_type))?.key ?? null;
+}
+
+function groupTypes(group: BusinessGroup | "") {
+  return group ? BUSINESS_GROUPS.find((item) => item.key === group)?.artifactTypes : undefined;
 }
 
 function statusLabel(value: ArtifactStatus) {
@@ -211,7 +224,7 @@ function dataPeriod(artifact: Artifact) {
 
 function nextStep(artifact: Artifact) {
   return textSection(artifact, ["next_step", "next_action", "next_actions", "action_items"])
-    ?? "在对话中确认下一项运营安排。";
+    ?? "未提供";
 }
 
 function textSection(artifact: Artifact, keys: string[]) {
@@ -224,7 +237,7 @@ function textSection(artifact: Artifact, keys: string[]) {
   return null;
 }
 
-function formatUpdatedAt(value: string) {
+function formatCreatedAt(value: string) {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("zh-CN");
 }

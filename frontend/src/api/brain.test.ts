@@ -290,6 +290,27 @@ describe("brain api", () => {
     });
   });
 
+  it("encodes multi-value business artifact filters for server-side pagination", async () => {
+    const artifacts = { data: [], pagination: { page: 1, page_size: 20, total: 0, pages: 0 } };
+    apiGet.mockResolvedValueOnce({ data: artifacts });
+
+    await expect(listArtifacts({
+      accountId: 3,
+      artifactTypes: ["topic_plan", "video_script"],
+    })).resolves.toEqual(artifacts);
+
+    expect(apiGet).toHaveBeenCalledWith("/artifacts", {
+      params: {
+        account_id: 3,
+        artifact_type: undefined,
+        artifact_types: ["topic_plan", "video_script"],
+        status: undefined,
+        page: 1,
+        page_size: 20,
+      },
+    });
+  });
+
   it("retrieves and acts on the exact persisted Artifact identity", async () => {
     const artifact = { id: 5001, account_id: 3, status: "ready_for_review" };
     apiGet.mockResolvedValueOnce({ data: artifact });
