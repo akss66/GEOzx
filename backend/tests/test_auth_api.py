@@ -38,11 +38,13 @@ async def test_me_without_token_401(client, admin):
 
 
 @pytest.mark.asyncio
-async def test_admin_can_list_users(client, admin):
+async def test_admin_can_list_users(client, admin, member):
     token = (await _login(client, "admin@test.com", "admin-pw-123")).json()["access_token"]
     resp = await client.get("/users", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
-    assert any(u["email"] == "admin@test.com" for u in resp.json())
+    roster = {user["email"]: user for user in resp.json()}
+    assert roster["admin@test.com"]["access_anomaly"] is False
+    assert roster["user@test.com"]["access_anomaly"] is True
 
 
 @pytest.mark.asyncio

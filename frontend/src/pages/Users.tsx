@@ -6,7 +6,7 @@ import {
   SearchOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Input, Modal, Skeleton, Tabs } from "antd";
 import { useEffect, useMemo, useState } from "react";
 
@@ -92,23 +92,6 @@ export default function Users() {
 
   const users = useMemo(() => usersQuery.data ?? [], [usersQuery.data]);
 
-  const detailQueries = useQueries({
-    queries: users.map((user) => ({
-      queryKey: ["user-detail", user.id],
-      queryFn: () => getUserDetail(user.id),
-      enabled: usersQuery.isSuccess,
-      retry: false,
-    })),
-  });
-
-  const detailStateByUserId = useMemo(() => {
-    const mapping = new Map<number, (typeof detailQueries)[number]>();
-    users.forEach((user, index) => {
-      mapping.set(user.id, detailQueries[index]);
-    });
-    return mapping;
-  }, [detailQueries, users]);
-
   const catalogQuery = useQuery({
     queryKey: ["user-access-catalog"],
     queryFn: getUserAccessCatalog,
@@ -153,17 +136,16 @@ export default function Users() {
   const filteredUsers = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return users.filter((user) => {
-      const detail = detailStateByUserId.get(user.id)?.data;
       const matchesKeyword = !keyword
         || `${user.display_name} ${user.email}`.toLowerCase().includes(keyword);
       const matchesStatus = statusFilter === "all"
         || (statusFilter === "active" ? user.is_active : !user.is_active);
       const matchesRole = roleFilter === "all" || user.role === roleFilter;
       const matchesAnomaly = anomalyFilter === "all"
-        || (detail ? hasAccessAnomaly(detail) : false);
+        || user.access_anomaly;
       return matchesKeyword && matchesStatus && matchesRole && matchesAnomaly;
     });
-  }, [anomalyFilter, detailStateByUserId, roleFilter, search, statusFilter, users]);
+  }, [anomalyFilter, roleFilter, search, statusFilter, users]);
 
   const resolvedSelectedUserId = useMemo(() => {
     if (!filteredUsers.length) return null;
@@ -180,13 +162,17 @@ export default function Users() {
     }
   }, [resolvedSelectedUserId, selectedUserId, usersQuery.isLoading]);
 
-  const selectedUser = users.find((user) => user.id === resolvedSelectedUserId) ?? null;
-  const selectedDetailQuery = resolvedSelectedUserId != null
-    ? detailStateByUserId.get(resolvedSelectedUserId) ?? null
-    : null;
-  const selectedDetail = (selectedDetailQuery?.data as UserDetail | undefined) ?? null;
+  const selectedDetailQuery = useQuery({
+    queryKey: ["user-detail", resolvedSelectedUserId],
+    queryFn: () => getUserDetail(resolvedSelectedUserId as number),
+    enabled: resolvedSelectedUserId != null,
+    retry: false,
+  });
 
-  const selectedDetailError = selectedDetailQuery?.isError
+  const selectedUser = users.find((user) => user.id === resolvedSelectedUserId) ?? null;
+  const selectedDetail = (selectedDetailQuery.data as UserDetail | undefined) ?? null;
+
+  const selectedDetailError = selectedDetailQuery.isError
     ? presentApiError(selectedDetailQuery.error, "成员详情暂时不可用。")
     : null;
   const inspectorLoading = usersQuery.isLoading
@@ -200,20 +186,16 @@ export default function Users() {
     ? presentApiError(secondaryStatusQuery.error, "二级密码状态暂时不可用。").message
     : null;
 
-  const loadedDetails = detailQueries
-    .map((query) => query.data as UserDetail | undefined)
-    .filter((detail): detail is UserDetail => Boolean(detail));
-
   const summaryMetrics = useMemo(() => {
-    const unassignedCount = loadedDetails.filter((detail) => hasAccessAnomaly(detail)).length;
+    const unassignedCount = users.filter((user) => user.access_anomaly).length;
     return [
       { label: "成员总数", value: users.length },
       { label: "启用中", value: users.filter((user) => user.is_active).length },
       { label: "管理员", value: users.filter((user) => user.role === "admin").length },
-      { label: "未分配资源", value: unassignedCount, help: "按已加载成员详情统计" },
+      { label: "未分配资源", value: unassignedCount, help: "按名册授权摘要统计" },
       { label: "安全锁定", value: "—", help: "当前接口未提供成员级锁定统计" },
     ];
-  }, [loadedDetails, users]);
+  }, [users]);
 
   const selectedMetrics = useMemo(() => {
     if (!selectedDetail || !catalogQuery.data) return [];
@@ -335,7 +317,10 @@ export default function Users() {
   async function handleSaveAccess(input: Parameters<typeof updateUserAccess>[1]) {
     if (!selectedUserId) return;
     await accessMutation.mutateAsync({ userId: selectedUserId, input });
-    await queryClient.invalidateQueries({ queryKey: ["user-detail", selectedUserId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["user-detail", selectedUserId] }),
+      queryClient.invalidateQueries({ queryKey: ["users"] }),
+    ]);
   }
 
   async function handleSetSecondaryPassword(input: { current_password: string; secondary_password: string }) {
@@ -481,7 +466,6 @@ export default function Users() {
               <p className="tz-user-empty-copy">没有符合条件的成员</p>
             ) : null}
             {filteredUsers.map((user) => {
-              const detail = detailStateByUserId.get(user.id)?.data as UserDetail | undefined;
               return (
                 <button
                   key={user.id}
@@ -499,7 +483,7 @@ export default function Users() {
                   <span className="tz-member-row-meta">
                     <small>{user.role === "admin" ? "管理员" : "成员"}</small>
                     <span className={`tz-member-status-dot${user.is_active ? " is-active" : " is-inactive"}`} />
-                    {detail && hasAccessAnomaly(detail) ? (
+                    {user.access_anomaly ? (
                       <span className="tz-member-anomaly">
                         <AlertOutlined />
                         未分配

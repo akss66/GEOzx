@@ -24,6 +24,7 @@ import { useAuth } from "../stores/auth";
 import type {
   SecondaryPasswordStatus,
   User,
+  UserRosterItem,
   UserAccessCatalog,
   UserDeletionPreview,
   UserDetail,
@@ -100,7 +101,7 @@ const accessCatalog: UserAccessCatalog = {
   ],
 };
 
-let roster: User[] = [];
+let roster: UserRosterItem[] = [];
 let detailMap: Record<number, UserDetail> = {};
 let secondaryStatus: SecondaryPasswordStatus;
 let previewCounter = 0;
@@ -110,7 +111,11 @@ function clone<T>(value: T): T {
 }
 
 function resetFixtures() {
-  roster = [clone(adminUser), clone(operatorUser), clone(dormantUser)];
+  roster = [
+    { ...clone(adminUser), access_anomaly: false },
+    { ...clone(operatorUser), access_anomaly: false },
+    { ...clone(dormantUser), access_anomaly: true },
+  ];
   detailMap = {
     1: {
       ...clone(adminUser),
@@ -168,12 +173,13 @@ function resetFixtures() {
 function configureAuthMocks() {
   vi.mocked(listUsers).mockImplementation(async () => clone(roster));
   vi.mocked(createUser).mockImplementation(async (input) => {
-    const nextUser: User = {
+    const nextUser: UserRosterItem = {
       id: roster.length + 10,
       email: input.email,
       display_name: input.display_name,
       role: input.role,
       is_active: true,
+      access_anomaly: input.role !== "admin",
     };
     roster = [...roster, nextUser];
     detailMap[nextUser.id] = {
@@ -342,6 +348,19 @@ describe("Users", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "操作记录" }));
     expect(await screen.findByText("成员级操作记录暂不可用")).toBeInTheDocument();
+  });
+
+  it("loads detail only for the selected member", async () => {
+    renderPage();
+
+    await screen.findByDisplayValue("系统管理员");
+    expect(getUserDetail).toHaveBeenCalledTimes(1);
+    expect(getUserDetail).toHaveBeenLastCalledWith(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /运营同事/ }));
+    await screen.findByDisplayValue("运营同事");
+    expect(getUserDetail).toHaveBeenCalledTimes(2);
+    expect(getUserDetail).toHaveBeenLastCalledWith(2);
   });
 
   it("renders an honest unavailable state when the legacy catalog omits accounts", async () => {
@@ -567,7 +586,7 @@ describe("Users", () => {
       screen.getByRole("button", { name: /停用成员/ }),
     ).toHaveAttribute("aria-pressed", "true"));
     fireEvent.click(screen.getByRole("tab", { name: "资源权限" }));
-    fireEvent.click(screen.getByLabelText("仅指定账号"));
+    fireEvent.click(await screen.findByLabelText("仅指定账号"));
     expect(await screen.findByText("无账号可见")).toBeInTheDocument();
   });
 
@@ -611,7 +630,7 @@ describe("Users", () => {
     fireEvent.click(await screen.findByRole("button", { name: /运营同事/ }));
     fireEvent.click(screen.getByRole("tab", { name: "安全与登录" }));
 
-    expect(screen.getByLabelText("新的登录密码")).toHaveAttribute(
+    expect(await screen.findByLabelText("新的登录密码")).toHaveAttribute(
       "autocomplete",
       "new-password",
     );
@@ -789,7 +808,7 @@ describe("Users", () => {
     await waitFor(() => expect(
       screen.getByRole("button", { name: /停用成员/ }),
     ).toHaveAttribute("aria-pressed", "true"));
-    expect(screen.getByLabelText("新的登录密码")).toHaveValue("");
+    expect(await screen.findByLabelText("新的登录密码")).toHaveValue("");
     expect(screen.queryByText("不可逆影响预览")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("执行人二级密码")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "获取删除预览" })).toBeInTheDocument();
