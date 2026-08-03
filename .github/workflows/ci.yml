@@ -115,6 +115,8 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+      - name: Enforce frontend performance budget
+        run: pnpm perf:check
 
   main-agent-v3-playwright:
     runs-on: ubuntu-latest

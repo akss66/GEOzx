@@ -24,6 +24,13 @@ describe("theme tokens", () => {
     expect(buildTheme().algorithm).toBeUndefined();
   });
 
+  it("ships Geist without bundling the full Chinese variable font", () => {
+    const entrypoint = readFileSync(new URL("../main.tsx", import.meta.url), "utf8");
+
+    expect(entrypoint).toContain('@fontsource-variable/geist/wght.css');
+    expect(entrypoint).not.toContain("@fontsource-variable/noto-sans-sc/wght.css");
+  });
+
   it("keeps one accessible light-theme token source", () => {
     const foundation = readFileSync(
       new URL("../styles/foundation.css", import.meta.url),

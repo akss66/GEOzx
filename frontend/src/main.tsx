@@ -7,7 +7,6 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import "@fontsource-variable/geist/wght.css";
-import "@fontsource-variable/noto-sans-sc/wght.css";
 
 import App from "./App";
 import { queryClient } from "./queryClient";

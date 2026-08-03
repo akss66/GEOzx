@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "perf:check": "node scripts/check-build-performance.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest run",
