@@ -6,15 +6,17 @@ import { listArtifacts } from "../../api/brain";
 import type { Artifact, ArtifactStatus } from "../../types";
 import { presentDeliverable } from "./deliverablePresentation";
 
+type BusinessGroup = "diagnosis" | "benchmark" | "topics" | "shooting" | "publishing";
+
 type Filters = {
-  artifactType: string;
+  businessGroup: BusinessGroup | "";
   status: ArtifactStatus | "";
   createdFrom: string;
   createdTo: string;
 };
 
 const INITIAL_FILTERS: Filters = {
-  artifactType: "",
+  businessGroup: "",
   status: "",
   createdFrom: "",
   createdTo: "",
@@ -28,18 +30,34 @@ const STATUS_OPTIONS: Array<{ value: ArtifactStatus; label: string }> = [
   { value: "superseded", label: "已完成" },
 ];
 
-const ARTIFACT_TYPE_OPTIONS = [
-  { value: "account_inspection_report", label: "账号体检报告" },
-  { value: "positioning_strategy", label: "账号定位策略" },
-  { value: "topic_plan", label: "选题规划" },
-  { value: "publish_calendar", label: "发布日历" },
-  { value: "video_script", label: "拍摄与发布稿" },
-  { value: "art_prompt", label: "美术提示词" },
-  { value: "video_asset", label: "视频素材" },
-  { value: "edited_video", label: "剪辑成片" },
-  { value: "review_report", label: "复盘报告" },
-  { value: "ad_plan", label: "投放计划" },
-  { value: "cs_record", label: "客服记录" },
+const BUSINESS_GROUPS: Array<{ key: BusinessGroup; label: string; artifactTypes: string[] }> = [
+  {
+    key: "diagnosis",
+    label: "诊断与复盘",
+    artifactTypes: ["account_inspection_report", "review_report", "engagement_review"],
+  },
+  {
+    key: "benchmark",
+    label: "对标分析",
+    artifactTypes: ["positioning_strategy", "account_positioning"],
+  },
+  { key: "topics", label: "选题", artifactTypes: ["topic_plan"] },
+  {
+    key: "shooting",
+    label: "拍摄稿",
+    artifactTypes: ["video_script", "visual_brief", "art_prompt", "video_asset", "edited_video"],
+  },
+  {
+    key: "publishing",
+    label: "发布安排",
+    artifactTypes: [
+      "publish_calendar",
+      "content_calendar",
+      "platform_publish_receipt",
+      "operation_execution_plan",
+      "ad_plan",
+    ],
+  },
 ];
 
 export function ArtifactCenter({
@@ -64,18 +82,9 @@ export function ArtifactCenter({
   }, [accountId]);
 
   const query = useQuery({
-    queryKey: [
-      "account-artifacts",
-      accountId,
-      filters.artifactType,
-      filters.status,
-      filters.createdFrom,
-      filters.createdTo,
-      page,
-    ],
+    queryKey: ["account-artifacts", accountId, filters.status, page],
     queryFn: () => listArtifacts({
       accountId: accountId!,
-      artifactType: filters.artifactType || undefined,
       status: filters.status || undefined,
       page,
       pageSize: 20,
@@ -87,33 +96,43 @@ export function ArtifactCenter({
     [accountId, query.data?.data],
   );
   const visibleArtifacts = useMemo(
-    () => accountArtifacts.filter((artifact) => isInDateRange(artifact.created_at, filters)),
+    () => accountArtifacts.filter((artifact) => isInDateRange(artifact.created_at, filters))
+      .filter((artifact) => !filters.businessGroup || groupFor(artifact) === filters.businessGroup),
     [accountArtifacts, filters],
   );
+  const groupedArtifacts = useMemo(() => BUSINESS_GROUPS.map((group) => ({
+    ...group,
+    artifacts: visibleArtifacts.filter((artifact) => groupFor(artifact) === group.key),
+  })), [visibleArtifacts]);
   const updateFilter = <Key extends keyof Filters>(key: Key, value: Filters[Key]) => {
     setPage(1);
     setFilters((current) => ({ ...current, [key]: value }));
   };
 
   if (accountId == null) {
-    return <section className="tz-artifact-center" aria-label="运营内容中心">请先选择账号，再查看该账号的运营内容。</section>;
+    return <section className="tz-artifact-center" aria-label="方案与内容">请先选择账号，再查看该账号的方案与内容。</section>;
   }
 
   return (
-    <section className="tz-artifact-center" aria-label="运营内容中心">
+    <section className="tz-artifact-center" aria-label="方案与内容">
       <header className="tz-artifact-center__header">
         <div>
           <span>当前账号</span>
-          <h2>运营内容中心</h2>
+          <h2>方案与内容</h2>
         </div>
         <small>{filters.createdFrom || filters.createdTo ? "仅筛当前页" : `第 ${page} 页`}</small>
       </header>
-      <div className="tz-artifact-center__filters" aria-label="运营内容筛选">
+      <div className="tz-artifact-center__filters" aria-label="方案与内容筛选">
         <label>
-          内容类型
-          <select value={filters.artifactType} onChange={(event) => updateFilter("artifactType", event.target.value)}>
-            <option value="">全部类型</option>
-            {ARTIFACT_TYPE_OPTIONS.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+          业务类型
+          <select
+            value={filters.businessGroup}
+            onChange={(event) => updateFilter("businessGroup", event.target.value as Filters["businessGroup"])}
+          >
+            <option value="">全部业务</option>
+            {BUSINESS_GROUPS.map((group) => (
+              <option key={group.key} value={group.key}>{group.label}</option>
+            ))}
           </select>
         </label>
         <label>
@@ -133,42 +152,47 @@ export function ArtifactCenter({
         </label>
       </div>
 
-      {query.isPending ? <p role="status">正在加载运营内容…</p> : null}
+      {query.isPending ? <p role="status">正在加载方案与内容…</p> : null}
       {query.isError ? (
         <div className="tz-artifact-center__error" role="alert">
-          <p>运营内容暂时无法加载，请重试。</p>
-          <Button onClick={() => void query.refetch()} aria-label="重试加载运营内容">重新加载</Button>
+          <p>方案与内容暂时无法加载，请重试。</p>
+          <Button onClick={() => void query.refetch()} aria-label="重新加载方案与内容">重新加载</Button>
         </div>
       ) : null}
       {!query.isPending && !query.isError && visibleArtifacts.length === 0 ? (
-        <p className="tz-artifact-center__empty">当前账号下没有符合筛选条件的运营内容。</p>
+        <p className="tz-artifact-center__empty">当前账号下没有符合筛选条件的方案与内容。</p>
       ) : null}
       <div className="tz-artifact-center__list">
-        {visibleArtifacts.map((artifact) => (
-          <article key={artifact.id} className="tz-artifact-center__row">
-            <div>
-              <strong>{presentDeliverable(artifact).typeLabel}</strong>
-              <span>V{artifact.version} · {statusLabel(artifact.status)}</span>
-            </div>
-            <Button onClick={() => onSelect(artifact)} aria-label={`打开运营内容：${presentDeliverable(artifact).typeLabel}`}>查看</Button>
-          </article>
+        {groupedArtifacts.map((group) => (
+          <section key={group.key} className="tz-artifact-center__group" aria-label={group.label}>
+            <h3>{group.label}</h3>
+            {group.artifacts.length === 0 ? <p>暂无内容</p> : group.artifacts.map((artifact) => (
+              <article key={artifact.id} className="tz-artifact-center__row">
+                <div>
+                  <strong>{presentDeliverable(artifact).typeLabel}</strong>
+                  <span>V{artifact.version} · {statusLabel(artifact.status)} · 更新于 {formatUpdatedAt(artifact.created_at)}</span>
+                  {dataPeriod(artifact) ? <span>数据周期：{dataPeriod(artifact)}</span> : null}
+                  <span>下一步：{nextStep(artifact)}</span>
+                </div>
+                <Button onClick={() => onSelect(artifact)} aria-label={`查看方案与内容：${presentDeliverable(artifact).typeLabel}`}>查看</Button>
+              </article>
+            ))}
+          </section>
         ))}
       </div>
       {query.data && query.data.pagination.pages > 1 ? (
         <footer className="tz-artifact-center__pagination">
           <Button disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>上一页</Button>
           <span>第 {page} / {query.data.pagination.pages} 页</span>
-          <Button
-            disabled={page >= query.data.pagination.pages}
-            onClick={() => setPage((current) => current + 1)}
-            aria-label="下一页"
-          >
-            下一页
-          </Button>
+          <Button disabled={page >= query.data.pagination.pages} onClick={() => setPage((current) => current + 1)} aria-label="下一页">下一页</Button>
         </footer>
       ) : null}
     </section>
   );
+}
+
+function groupFor(artifact: Artifact): BusinessGroup {
+  return BUSINESS_GROUPS.find((group) => group.artifactTypes.includes(artifact.artifact_type))?.key ?? "diagnosis";
 }
 
 function statusLabel(value: ArtifactStatus) {
@@ -179,4 +203,28 @@ function isInDateRange(createdAt: string, filters: Filters) {
   const day = createdAt.slice(0, 10);
   return (!filters.createdFrom || day >= filters.createdFrom)
     && (!filters.createdTo || day <= filters.createdTo);
+}
+
+function dataPeriod(artifact: Artifact) {
+  return textSection(artifact, ["data_period", "period", "date_range"]);
+}
+
+function nextStep(artifact: Artifact) {
+  return textSection(artifact, ["next_step", "next_action", "next_actions", "action_items"])
+    ?? "在对话中确认下一项运营安排。";
+}
+
+function textSection(artifact: Artifact, keys: string[]) {
+  const content = artifact.sections.find((section) => keys.includes(section.key))?.content;
+  if (typeof content === "string" && content.trim()) return content.trim();
+  if (Array.isArray(content)) {
+    const first = content.find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return first?.trim();
+  }
+  return null;
+}
+
+function formatUpdatedAt(value: string) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("zh-CN");
 }

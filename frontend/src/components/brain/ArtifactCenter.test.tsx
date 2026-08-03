@@ -35,20 +35,6 @@ const page = (data: Artifact[], current = 1, pages = 1): ArtifactPage => ({
   pagination: { page: current, page_size: 20, total: data.length, pages },
 });
 
-const ARTIFACT_TYPE_CASES = [
-  ["账号体检报告", "account_inspection_report"],
-  ["账号定位策略", "positioning_strategy"],
-  ["选题规划", "topic_plan"],
-  ["发布日历", "publish_calendar"],
-  ["拍摄与发布稿", "video_script"],
-  ["美术提示词", "art_prompt"],
-  ["视频素材", "video_asset"],
-  ["剪辑成片", "edited_video"],
-  ["复盘报告", "review_report"],
-  ["投放计划", "ad_plan"],
-  ["客服记录", "cs_record"],
-] as const;
-
 function renderCenter(accountId: number | null, onSelect = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
@@ -71,13 +57,13 @@ describe("ArtifactCenter", () => {
     vi.mocked(listArtifacts).mockResolvedValue(page([artifact(1), artifact(99, 4)]));
     const { onSelect } = renderCenter(3);
 
-    expect(await screen.findByRole("button", { name: "打开运营内容：账号诊断" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "查看方案与内容：账号诊断" })).toBeInTheDocument();
     expect(screen.queryByText("脚本生成中")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "打开运营内容：账号诊断" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看方案与内容：账号诊断" }));
     expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1, account_id: 3 }));
   });
 
-  it("uses server type and status filters, filters the loaded page by creation time, and paginates", async () => {
+  it("uses business and status filters, filters the loaded page by creation time, and paginates", async () => {
     vi.mocked(listArtifacts).mockImplementation(async (input) => {
       if (input.page === 2) return page([artifact(3)], 2, 2);
       return page([artifact(1, 3, "2026-07-27T08:00:00Z"), artifact(2)], 1, 2);
@@ -85,28 +71,15 @@ describe("ArtifactCenter", () => {
     renderCenter(3);
     await screen.findByText("账号诊断");
 
-    const typeSelect = screen.getByLabelText("内容类型");
-    expect(Array.from((typeSelect as HTMLSelectElement).options).map((option) => option.value))
-      .toEqual(["", ...ARTIFACT_TYPE_CASES.map(([, code]) => code)]);
-    for (const [label, code] of ARTIFACT_TYPE_CASES) {
-      expect(screen.getByRole("option", { name: label })).toHaveValue(code);
-      fireEvent.change(typeSelect, { target: { value: code } });
-      await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith({
-        accountId: 3,
-        artifactType: code,
-        status: undefined,
-        page: 1,
-        pageSize: 20,
-      }));
-    }
-
-    fireEvent.change(typeSelect, { target: { value: "topic_plan" } });
-    await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
-      accountId: 3, artifactType: "topic_plan", status: undefined, page: 1,
-    })));
+    const typeSelect = screen.getByLabelText("业务类型");
+    expect(Array.from((typeSelect as HTMLSelectElement).options).map((option) => option.text))
+      .toEqual(["全部业务", "诊断与复盘", "对标分析", "选题", "拍摄稿", "发布安排"]);
+    fireEvent.change(typeSelect, { target: { value: "topics" } });
+    expect(screen.queryByText("账号诊断")).not.toBeInTheDocument();
+    fireEvent.change(typeSelect, { target: { value: "" } });
     fireEvent.change(screen.getByLabelText("状态"), { target: { value: "accepted" } });
     await waitFor(() => expect(listArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({
-      accountId: 3, artifactType: "topic_plan", status: "accepted", page: 1,
+      accountId: 3, status: "accepted", page: 1,
     })));
     fireEvent.change(screen.getByLabelText("创建时间（起）"), { target: { value: "2026-07-28" } });
     expect(screen.queryByText("账号诊断")).not.toBeInTheDocument();
@@ -125,10 +98,10 @@ describe("ArtifactCenter", () => {
       .mockResolvedValueOnce(page([artifact(4, 4)]));
     const { onSelect, rerender } = renderCenter(3);
 
-    expect(await screen.findByText("运营内容暂时无法加载，请重试。")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "重试加载运营内容" }));
+    expect(await screen.findByText("方案与内容暂时无法加载，请重试。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新加载方案与内容" }));
     expect(await screen.findByText("账号诊断")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "打开运营内容：账号诊断" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看方案与内容：账号诊断" }));
 
     rerender(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -155,7 +128,7 @@ describe("ArtifactCenter", () => {
         <ArtifactCenter key="account-3" accountId={3} onSelect={onSelect} />
       </QueryClientProvider>,
     );
-    fireEvent.change(screen.getByLabelText("内容类型"), { target: { value: "topic_plan" } });
+    fireEvent.change(screen.getByLabelText("业务类型"), { target: { value: "topics" } });
 
     rerender(
       <QueryClientProvider client={client}>
@@ -164,7 +137,6 @@ describe("ArtifactCenter", () => {
     );
     await waitFor(() => expect(listArtifacts).toHaveBeenCalledWith({
       accountId: 4,
-      artifactType: undefined,
       status: undefined,
       page: 1,
       pageSize: 20,
@@ -172,8 +144,39 @@ describe("ArtifactCenter", () => {
     expect(await screen.findByText("账号诊断")).toBeInTheDocument();
 
     await act(async () => resolveAccountA?.(page([artifact(1)])));
-    fireEvent.click(screen.getByRole("button", { name: "打开运营内容：账号诊断" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看方案与内容：账号诊断" }));
     expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ id: 4, account_id: 4 }));
-    expect(screen.getByLabelText("内容类型")).toHaveValue("");
+    expect(screen.getByLabelText("业务类型")).toHaveValue("");
+  });
+
+  it("organizes plans and content into fixed business groups with reliable context", async () => {
+    vi.mocked(listArtifacts).mockResolvedValue(page([
+      {
+        ...artifact(1),
+        artifact_type: "account_inspection_report",
+        sections: [
+          { key: "data_period", title: "数据周期", content: "2026-07-01 至 2026-07-21" },
+          { key: "next_step", title: "下一步", content: "确认两个内容支柱后排期" },
+        ],
+      },
+      { ...artifact(2), artifact_type: "positioning_strategy" },
+      { ...artifact(3), artifact_type: "topic_plan" },
+      { ...artifact(4), artifact_type: "video_script" },
+      { ...artifact(5), artifact_type: "publish_calendar" },
+    ]));
+
+    renderCenter(3);
+
+    expect(await screen.findByText("下一步：确认两个内容支柱后排期")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "方案与内容" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "诊断与复盘" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "对标分析" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "选题" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "拍摄稿" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "发布安排" })).toBeInTheDocument();
+    expect(screen.getAllByText((_, element) => element?.tagName === "SPAN" && element.textContent?.includes("V1") === true)).not.toHaveLength(0);
+    expect(screen.getByText("数据周期：2026-07-01 至 2026-07-21")).toBeInTheDocument();
+    expect(screen.getByText("下一步：确认两个内容支柱后排期")).toBeInTheDocument();
+    expect(screen.getByLabelText("业务类型")).toBeInTheDocument();
   });
 });

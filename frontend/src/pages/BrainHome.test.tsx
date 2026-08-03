@@ -5,7 +5,7 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App as AntApp } from "antd";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -175,7 +175,7 @@ describe("BrainHome V3 conversation projection", () => {
   });
   afterEach(cleanup);
 
-  it("keeps history and result-center entry points on the empty account workspace", async () => {
+  it("keeps history and plans-and-content entry points on the empty account workspace", async () => {
     renderBrainHome();
 
     expect(await screen.findByRole("heading", { name: "今天，想推进什么？" }))
@@ -184,8 +184,26 @@ describe("BrainHome V3 conversation projection", () => {
     expect(await screen.findByText("账号运营周会")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    fireEvent.click(screen.getByRole("button", { name: "运营内容视图" }));
-    expect(await screen.findByRole("region", { name: "运营内容中心" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    expect(await screen.findByRole("region", { name: "方案与内容" })).toBeInTheDocument();
+  });
+
+  it("exposes four real top-level workspace entries and navigates to account data and pending approvals", async () => {
+    renderBrainHome();
+
+    await screen.findByRole("heading", { name: "今天，想推进什么？" });
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    await screen.findByText("账号运营周会");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    const conversation = await screen.findByRole("tab", { name: "对话" });
+    expect(conversation).toHaveAttribute("aria-selected", "true");
+    const plans = screen.getByRole("tab", { name: "方案与内容" });
+    fireEvent.click(plans);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "方案与内容" })).toHaveAttribute("aria-selected", "true"));
+    fireEvent.click(screen.getByRole("button", { name: "抖音数据" }));
+    expect(await screen.findByTestId("location")).toHaveTextContent("/accounts/3/data");
+    fireEvent.click(screen.getByRole("button", { name: "待处理" }));
+    expect(await screen.findByTestId("location")).toHaveTextContent("/approvals");
   });
 
   it("shows confirmation feedback from an artifact action and retains the safe failure feedback", async () => {
@@ -242,8 +260,8 @@ describe("BrainHome V3 conversation projection", () => {
     await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(source.id));
 
     mocks.workspace.accountId = 4;
-    fireEvent.click(screen.getByRole("button", { name: "运营内容视图" }));
-    fireEvent.click(screen.getByRole("button", { name: "对话视图" }));
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
     await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
 
     await act(async () => request.resolve({ ...source, status: "accepted" }));
@@ -576,8 +594,8 @@ describe("BrainHome V3 conversation projection", () => {
     const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
 
     mocks.workspace.accountId = 4;
-    fireEvent.click(screen.getByRole("button", { name: "运营内容视图" }));
-    fireEvent.click(screen.getByRole("button", { name: "对话视图" }));
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
     await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
 
     const setQueryData = vi.spyOn(view.queryClient, "setQueryData");
@@ -1026,11 +1044,17 @@ function renderBrainHome() {
       <MemoryRouter>
         <AntApp>
           <BrainHome />
+          <LocationProbe />
         </AntApp>
       </MemoryRouter>
     </QueryClientProvider>,
     ),
   };
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname}</output>;
 }
 
 function thread(

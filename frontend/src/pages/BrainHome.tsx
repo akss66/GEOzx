@@ -228,11 +228,12 @@ export default function BrainHome() {
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     if (accountChanged) setGoal("");
+    if (accountChanged) qc.removeQueries({ queryKey: ["account-artifacts"] });
     setDraftAttachments([]);
     setSelectedArtifact(null);
     setSourceReturnTarget(null);
     setSourceReturnError(null);
-  }, [effectiveAccountId]);
+  }, [effectiveAccountId, qc]);
 
   const conversationQuery = useQuery({
     queryKey: ["brain-conversation", activeConversationThreadId],
@@ -1095,7 +1096,7 @@ export default function BrainHome() {
                   && selectedArtifact.account_id === effectiveAccount?.id ? (
                     <section
                       className="tz-artifact-center__detail"
-                      aria-label="运营内容详情"
+                      aria-label="方案与内容详情"
                     >
                       <ArtifactCard
                         artifact={selectedArtifact}
@@ -1266,6 +1267,7 @@ function ContextStrip({
   workspaceMode: "conversation" | "results";
   onWorkspaceModeChange: (mode: "conversation" | "results") => void;
 }) {
+  const navigate = useNavigate();
   return (
     <section className="dy-brain-context-strip">
       <div>
@@ -1277,24 +1279,37 @@ function ContextStrip({
         )}
       </div>
       <div className="dy-brain-context-actions">
-        <div className="tz-brain-mode-switch" aria-label="Brain workspace mode">
+        <nav className="tz-brain-mode-switch" role="tablist" aria-label="运营工作区">
           <Button
             type={workspaceMode === "conversation" ? "primary" : "text"}
             size="small"
+            role="tab"
+            aria-label="对话"
+            aria-selected={workspaceMode === "conversation"}
             onClick={() => onWorkspaceModeChange("conversation")}
-            aria-label="对话视图"
           >
             对话
           </Button>
           <Button
             type={workspaceMode === "results" ? "primary" : "text"}
             size="small"
+            role="tab"
+            aria-label="方案与内容"
+            aria-selected={workspaceMode === "results"}
             onClick={() => onWorkspaceModeChange("results")}
-            aria-label="运营内容视图"
           >
-            运营内容
+            方案与内容
           </Button>
-        </div>
+          <Button
+            size="small"
+            disabled={!account}
+            onClick={() => account && navigate(`/accounts/${account.id}/data`)}
+          >
+            抖音数据
+          </Button>
+          <Button size="small" onClick={() => navigate("/approvals")}>待处理</Button>
+        </nav>
+        {!account ? <small>请先选择账号后查看抖音数据</small> : null}
         <Tag style={{ marginInlineEnd: 0 }}>抖音</Tag>
         {account ? (
           <Tag style={{ marginInlineEnd: 0 }}>
