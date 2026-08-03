@@ -447,6 +447,60 @@ describe("BrainHome V3 conversation projection", () => {
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
   });
 
+  it("drops a delayed new-thread creation after the user selects another Thread", async () => {
+    const created = deferred<ConversationThread>();
+    vi.mocked(createConversation).mockReturnValue(created.promise);
+    vi.mocked(getConversation).mockImplementation(async (threadId) =>
+      thread(threadId, threadId === 81
+        ? [persistedTurn(501, "history-client", "历史请求", "历史回复")]
+        : []),
+    );
+    const view = renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "旧创建请求不能拉回会话" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(createConversation).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    expect(await screen.findByText("历史回复")).toBeInTheDocument();
+    const setQueryData = vi.spyOn(view.queryClient, "setQueryData");
+    const setCalls = setQueryData.mock.calls.length;
+
+    await act(async () => created.resolve(thread(82, [])));
+
+    expect(sendConversationTurn).not.toHaveBeenCalled();
+    expect(setQueryData).toHaveBeenCalledTimes(setCalls);
+    expect(screen.getByText("历史回复")).toBeInTheDocument();
+    expect(screen.getByLabelText("运营大脑消息")).toHaveValue("");
+  });
+
+  it("drops a delayed saved-thread load after the user selects another Thread", async () => {
+    saveThread(3, 82);
+    vi.mocked(getConversation).mockImplementation(async (threadId) => thread(threadId, []));
+    const view = renderBrainHome();
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith(82));
+    const loaded = deferred<ConversationThread>();
+    vi.mocked(getConversation).mockReturnValueOnce(loaded.promise);
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "旧加载请求不能拉回会话" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    const setQueryData = vi.spyOn(view.queryClient, "setQueryData");
+    const setCalls = setQueryData.mock.calls.length;
+
+    await act(async () => loaded.resolve(thread(82, [])));
+
+    expect(sendConversationTurn).not.toHaveBeenCalled();
+    expect(setQueryData).toHaveBeenCalledTimes(setCalls);
+    expect(screen.getByLabelText("运营大脑消息")).toHaveValue("");
+  });
+
   it("binds the HTTP Turn to the optimistic client identity without a duplicate user message", async () => {
     const request = deferred<TurnSubmission>();
     vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
@@ -742,6 +796,80 @@ describe("BrainHome V3 conversation projection", () => {
     fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
     fireEvent.click(await screen.findByRole("button", { name: "刚才的会话" }));
     await waitFor(() => expect(screen.queryByText("失败后不能成为幽灵消息")).not.toBeInTheDocument());
+  });
+
+  it("does not let repeated current-thread failures leave optimistic Turns behind", async () => {
+    saveThread(3, 82);
+    vi.mocked(sendConversationTurn).mockRejectedValue(new Error("network"));
+    renderBrainHome();
+    const composer = await screen.findByLabelText("运营大脑消息");
+
+    fireEvent.change(composer, { target: { value: "第一次失败" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(composer).toHaveValue("第一次失败"));
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+
+    fireEvent.change(composer, { target: { value: "第二次失败" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(composer).toHaveValue("第二次失败"));
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+  });
+
+  it("does not remove a fresh retry when an old off-scope failure is reconciled", async () => {
+    const first = deferred<TurnSubmission>();
+    const retry = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(retry.promise);
+    vi.mocked(getConversation).mockImplementation(async (threadId) =>
+      thread(threadId, threadId === 81
+        ? [persistedTurn(501, "history-client", "历史请求", "历史回复")]
+        : []),
+    );
+    vi.mocked(listConversations).mockResolvedValue([
+      {
+        id: 81,
+        account_id: 3,
+        title: "账号运营周会",
+        turn_count: 1,
+        last_message: "历史回复",
+        created_at: "2026-07-28T00:00:00Z",
+        updated_at: "2026-07-28T00:02:00Z",
+      },
+      {
+        id: 82,
+        account_id: 3,
+        title: "刚才的会话",
+        turn_count: 0,
+        last_message: "",
+        created_at: "2026-07-28T00:00:00Z",
+        updated_at: "2026-07-28T00:02:00Z",
+      },
+    ]);
+    renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "旧失败请求" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await screen.findByText("旧失败请求");
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    await act(async () => first.reject(new Error("network")));
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "刚才的会话" }));
+    await waitFor(() => expect(screen.queryByText("旧失败请求")).not.toBeInTheDocument());
+    const composer = screen.getByLabelText("运营大脑消息");
+    fireEvent.change(composer, { target: { value: "新的重试请求" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    expect(await screen.findByText("新的重试请求")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "刚才的会话" }));
+    expect(await screen.findByText("新的重试请求")).toBeInTheDocument();
   });
 
   it("replaces an incomplete live overlay with the durable Thread after reconnect", async () => {

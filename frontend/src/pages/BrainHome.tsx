@@ -72,9 +72,16 @@ interface PendingTurn {
 interface ConversationRequest {
   accountId: number;
   initialThreadId: number | null;
+  scopeEpoch: number;
   threadId: number | null;
   clientMessageId: string;
   content: string;
+}
+
+interface ConversationScopeToken {
+  accountId: number;
+  initialThreadId: number | null;
+  epoch: number;
 }
 
 interface SourceReturnTarget {
@@ -103,8 +110,9 @@ export default function BrainHome() {
   const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
   const pendingClientMessageId = useRef<string | null>(null);
   const conversationRequestsRef = useRef(new Map<string, ConversationRequest>());
-  const failedOptimisticTurnIdsRef = useRef(new Map<number, Set<string>>());
+  const failedOptimisticTurnIdsRef = useRef(new Map<string, Set<string>>());
   const activeConversationThreadIdRef = useRef<number | null>(null);
+  const conversationScopeEpochRef = useRef(0);
   const previousAccountIdRef = useRef<number | null>(null);
   const launcherRequestInFlight = useRef(false);
   const effectiveAccountIdRef = useRef<number | null>(null);
@@ -114,6 +122,18 @@ export default function BrainHome() {
   const location = useLocation();
   const navigate = useNavigate();
   activeConversationThreadIdRef.current = activeConversationThreadId;
+
+  const matchesConversationScope = useCallback((
+    token: ConversationScopeToken,
+    threadId = token.initialThreadId,
+  ) => (
+    effectiveAccountIdRef.current === token.accountId
+    && activeConversationThreadIdRef.current === threadId
+    && conversationScopeEpochRef.current === token.epoch
+  ), []);
+
+  const failedOptimisticScopeKey = useCallback((accountId: number, threadId: number) =>
+    `${accountId}:${threadId}`, []);
 
   useEffect(() => {
     const state = location.state as { agentDraft?: string } | null;
@@ -199,9 +219,12 @@ export default function BrainHome() {
     const accountChanged = previousAccountIdRef.current != null
       && previousAccountIdRef.current !== nextAccountId;
     previousAccountIdRef.current = nextAccountId;
-    setActiveConversationThreadId(
-      effectiveAccountId != null ? getActiveConversationThreadId(effectiveAccountId) : null,
-    );
+    const nextThreadId = effectiveAccountId != null
+      ? getActiveConversationThreadId(effectiveAccountId)
+      : null;
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = nextThreadId;
+    setActiveConversationThreadId(nextThreadId);
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     if (accountChanged) setGoal("");
@@ -241,6 +264,8 @@ export default function BrainHome() {
       return;
     }
     clearActiveConversationThreadId(effectiveAccount.id);
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = null;
     setActiveConversationThreadId(null);
     setPendingTurn(null);
     pendingClientMessageId.current = null;
@@ -343,15 +368,16 @@ export default function BrainHome() {
     },
     onError: (error, variables) => {
       const request = conversationRequestsRef.current.get(variables.clientMessageId);
-      const failed = failedOptimisticTurnIdsRef.current.get(variables.threadId) ?? new Set<string>();
-      failed.add(variables.clientMessageId);
-      failedOptimisticTurnIdsRef.current.set(variables.threadId, failed);
       if (!isCurrentConversationRequest({
         activeAccountId: effectiveAccountIdRef.current,
         activeThreadId: activeConversationThreadIdRef.current,
         accountId: variables.accountId,
         threadId: variables.threadId,
       })) {
+        const scopeKey = failedOptimisticScopeKey(variables.accountId, variables.threadId);
+        const failed = failedOptimisticTurnIdsRef.current.get(scopeKey) ?? new Set<string>();
+        failed.add(variables.clientMessageId);
+        failedOptimisticTurnIdsRef.current.set(scopeKey, failed);
         conversationRequestsRef.current.delete(variables.clientMessageId);
         return;
       }
@@ -501,34 +527,37 @@ export default function BrainHome() {
     || launcherPending
     || activeTurn != null;
 
-  const ensureAccountThread = useCallback(async (account: Account) => {
+  const ensureAccountThread = useCallback(async (
+    account: Account,
+    scopeToken?: ConversationScopeToken,
+  ) => {
+    const matchesScope = (threadId = scopeToken?.initialThreadId) =>
+      scopeToken == null
+        ? effectiveAccountIdRef.current === account.id
+        : matchesConversationScope(scopeToken, threadId);
+    if (!matchesScope()) return null;
     const savedThreadId =
       activeConversationThreadId ?? getActiveConversationThreadId(account.id);
     const thread = savedThreadId == null
       ? await createConversation({ account_id: account.id })
-      : await qc.ensureQueryData({
-          queryKey: ["brain-conversation", savedThreadId],
-          queryFn: async () => {
-            const incoming = await getConversation(savedThreadId);
-            return reconcileConversationThread(
-              qc.getQueryData<ConversationThread>(["brain-conversation", savedThreadId]),
-              incoming,
-            );
-          },
-        });
+      : await getConversation(savedThreadId);
     if (
       thread.account_id !== account.id
-      || effectiveAccountIdRef.current !== account.id
+      || !matchesScope()
     ) {
       return null;
     }
+    if (!matchesScope()) return null;
     qc.setQueryData<ConversationThread>(["brain-conversation", thread.id], (current) =>
       reconcileConversationThread(current, thread)
     );
+    if (!matchesScope()) return null;
     persistActiveConversationThreadId(account.id, thread.id);
+    if (!matchesScope()) return null;
+    activeConversationThreadIdRef.current = thread.id;
     setActiveConversationThreadId(thread.id);
     return thread;
-  }, [activeConversationThreadId, qc]);
+  }, [activeConversationThreadId, matchesConversationScope, qc]);
 
   const submitTurn = useCallback(async ({
     content,
@@ -544,6 +573,7 @@ export default function BrainHome() {
     const request: ConversationRequest = {
       accountId: account.id,
       initialThreadId: activeConversationThreadIdRef.current,
+      scopeEpoch: conversationScopeEpochRef.current,
       threadId: null,
       clientMessageId: createClientMessageId(),
       content,
@@ -551,12 +581,19 @@ export default function BrainHome() {
     conversationRequestsRef.current.set(request.clientMessageId, request);
     let thread: ConversationThread | null = null;
     try {
-      thread = await ensureAccountThread(account);
+      thread = await ensureAccountThread(account, {
+        accountId: request.accountId,
+        initialThreadId: request.initialThreadId,
+        epoch: request.scopeEpoch,
+      });
     } catch (error) {
       conversationRequestsRef.current.delete(request.clientMessageId);
       if (
-        effectiveAccountIdRef.current === request.accountId
-        && activeConversationThreadIdRef.current === request.initialThreadId
+        matchesConversationScope({
+          accountId: request.accountId,
+          initialThreadId: request.initialThreadId,
+          epoch: request.scopeEpoch,
+        })
       ) {
         setGoal((current) => current || request.content);
       }
@@ -565,14 +602,25 @@ export default function BrainHome() {
     if (!thread) {
       conversationRequestsRef.current.delete(request.clientMessageId);
       if (
-        effectiveAccountIdRef.current === request.accountId
-        && activeConversationThreadIdRef.current === request.initialThreadId
+        matchesConversationScope({
+          accountId: request.accountId,
+          initialThreadId: request.initialThreadId,
+          epoch: request.scopeEpoch,
+        })
       ) {
         setGoal((current) => current || request.content);
       }
       return;
     }
     request.threadId = thread.id;
+    if (!matchesConversationScope({
+      accountId: request.accountId,
+      initialThreadId: request.initialThreadId,
+      epoch: request.scopeEpoch,
+    }, thread.id)) {
+      conversationRequestsRef.current.delete(request.clientMessageId);
+      return;
+    }
     followLatestMessage.current = true;
     setShowJumpToLatest(false);
     pendingClientMessageId.current = request.clientMessageId;
@@ -593,7 +641,7 @@ export default function BrainHome() {
         .map((item) => item.id as number),
       accountId: account.id,
     });
-  }, [conversationTurnMutation, draftAttachments, effectiveAccount, ensureAccountThread, qc]);
+  }, [conversationTurnMutation, draftAttachments, effectiveAccount, ensureAccountThread, matchesConversationScope, qc]);
 
   const requestAccountSelection = useCallback(() => {
     const selector = document.querySelector<HTMLButtonElement>('[aria-label="当前账号"]');
@@ -770,6 +818,8 @@ export default function BrainHome() {
       clearActiveBrainTaskId(effectiveAccount.id);
       clearActiveConversationThreadId(effectiveAccount.id);
     }
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = null;
     setActiveConversationThreadId(null);
     setPendingTurn(null);
     pendingClientMessageId.current = null;
@@ -784,7 +834,8 @@ export default function BrainHome() {
 
   const selectConversation = (threadId: number) => {
     if (!effectiveAccount) return;
-    const failedOptimisticIds = failedOptimisticTurnIdsRef.current.get(threadId);
+    const failedScopeKey = failedOptimisticScopeKey(effectiveAccount.id, threadId);
+    const failedOptimisticIds = failedOptimisticTurnIdsRef.current.get(failedScopeKey);
     if (failedOptimisticIds?.size) {
       qc.setQueryData<ConversationThread>(["brain-conversation", threadId], (current) =>
         current
@@ -794,10 +845,12 @@ export default function BrainHome() {
             )
           : current
       );
-      failedOptimisticTurnIdsRef.current.delete(threadId);
+      failedOptimisticTurnIdsRef.current.delete(failedScopeKey);
     }
     clearActiveBrainTaskId(effectiveAccount.id);
     persistActiveConversationThreadId(effectiveAccount.id, threadId);
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = threadId;
     setActiveConversationThreadId(threadId);
     setDraftAttachments([]);
     setPendingTurn(null);
@@ -810,6 +863,8 @@ export default function BrainHome() {
   const handleConversationDeleted = (threadId: number) => {
     if (threadId !== activeConversationThreadId || !effectiveAccount) return;
     clearActiveConversationThreadId(effectiveAccount.id);
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = null;
     setActiveConversationThreadId(null);
     setDraftAttachments([]);
     setPendingTurn(null);
@@ -841,6 +896,8 @@ export default function BrainHome() {
     };
     setSourceReturnError(null);
     persistActiveConversationThreadId(effectiveAccount.id, target.threadId);
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = target.threadId;
     setActiveConversationThreadId(target.threadId);
     if (retry) {
       void qc.fetchQuery({
