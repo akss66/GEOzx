@@ -72,26 +72,58 @@ export function mergeConversationTurn(
   if (index < 0) return { ...thread, turns: [...thread.turns, incoming] };
 
   const current = thread.turns[index];
-  const preserveRuntimeOverlay = current.stream_state != null
+  const incomingIsTerminal = isTerminalConversationTurnStatus(incoming.status);
+  const preserveRuntimeOverlay = !incomingIsTerminal && (
+    current.stream_state != null
     || (
       current.id != null
       && current.status !== "queued"
       && ["claimed", "waiting_predecessor", "queued"].includes(incoming.status)
-    );
+    )
+  );
   const replacement = preserveRuntimeOverlay
     ? {
         ...incoming,
-        assistant_response: current.assistant_response,
+        client_message_id: incoming.client_message_id ?? current.client_message_id,
+        assistant_response: current.assistant_response ?? incoming.assistant_response,
         status: current.status,
         stream_state: current.stream_state,
       }
-    : incoming;
+    : incomingIsTerminal
+      ? {
+          ...incoming,
+          client_message_id: incoming.client_message_id ?? current.client_message_id,
+          assistant_response: incoming.assistant_response ?? current.assistant_response,
+        }
+      : incoming;
   return {
     ...thread,
     turns: thread.turns.map((turn, turnIndex) =>
       turnIndex === index ? replacement : turn
     ),
   };
+}
+
+export function reconcileConversationThread(
+  current: ConversationThread | undefined,
+  incoming: ConversationThread,
+): ConversationThread {
+  if (!current || current.id !== incoming.id) return incoming;
+  const merged = incoming.turns.reduce(
+    (thread, turn) => mergeConversationTurn(thread, turn),
+    current,
+  );
+  return { ...incoming, turns: merged.turns };
+}
+
+export function removeOptimisticTurn(
+  thread: ConversationThread,
+  clientMessageId: string,
+): ConversationThread {
+  const turns = thread.turns.filter((turn) =>
+    !(turn.id == null && turn.client_message_id === clientMessageId)
+  );
+  return turns.length === thread.turns.length ? thread : { ...thread, turns };
 }
 
 export function applyConversationEvent(
@@ -175,6 +207,10 @@ function eventStatus(type: string, payload: Record<string, unknown>) {
   if (type === "brain.runtime.failed") return "failed";
   if (type === "brain.runtime.generation_stopped") return "stopped";
   return null;
+}
+
+function isTerminalConversationTurnStatus(status: string) {
+  return ["completed", "failed", "blocked", "stopped", "cancelled", "dead_letter"].includes(status);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

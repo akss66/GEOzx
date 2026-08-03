@@ -7,6 +7,7 @@ import {
   appendOptimisticTurn,
   isActiveConversationTurnStatus,
   mergeConversationTurn,
+  reconcileConversationThread,
   turnDomainKey,
   turnReactKey,
 } from "./conversationTurnProjection";
@@ -127,6 +128,48 @@ describe("conversation Turn projection", () => {
         lastSequence: 3,
         terminal: true,
       },
+    });
+  });
+
+  it("reconciles a stale GET without discarding the newer streamed overlay", () => {
+    const streamed = applyConversationEvent(
+      thread,
+      frame("brain.runtime.message_delta", 7, { delta: "newer streamed token" }),
+    );
+    const reconciled = reconcileConversationThread(streamed, {
+      ...thread,
+      turns: [{ ...thread.turns[0], id: 101, status: "running" }],
+    });
+
+    expect(reconciled.turns[0]).toMatchObject({
+      id: 101,
+      client_message_id: "client-1",
+      assistant_response: "newer streamed token",
+      stream_state: { lastSequence: 7 },
+    });
+  });
+
+  it("lets a durable terminal snapshot win while retaining the stable client identity", () => {
+    const streamed = applyConversationEvent(
+      thread,
+      frame("brain.runtime.message_delta", 7, { delta: "partial" }),
+    );
+    const reconciled = reconcileConversationThread(streamed, {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        id: 101,
+        client_message_id: null,
+        status: "completed",
+        assistant_response: "durable final",
+      }],
+    });
+
+    expect(reconciled.turns[0]).toMatchObject({
+      id: 101,
+      client_message_id: "client-1",
+      status: "completed",
+      assistant_response: "durable final",
     });
   });
 

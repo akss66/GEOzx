@@ -17,6 +17,7 @@ import {
   getConversation,
   listBrainTasks,
   listComposerSkills,
+  listConversations,
   reviseArtifact,
   sendConversationTurn,
   stopBrainGeneration,
@@ -434,6 +435,18 @@ describe("BrainHome V3 conversation projection", () => {
     expect(screen.queryAllByRole("article")).toHaveLength(0);
   });
 
+  it("restores the input when creating the first conversation fails in the current scope", async () => {
+    vi.mocked(createConversation).mockRejectedValueOnce(new Error("network"));
+
+    renderBrainHome();
+    const composer = await screen.findByLabelText("运营大脑消息");
+    fireEvent.change(composer, { target: { value: "首次建会话失败仍要保留" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+
+    await waitFor(() => expect(composer).toHaveValue("首次建会话失败仍要保留"));
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+
   it("binds the HTTP Turn to the optimistic client identity without a duplicate user message", async () => {
     const request = deferred<TurnSubmission>();
     vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
@@ -462,6 +475,108 @@ describe("BrainHome V3 conversation projection", () => {
     expect(screen.getAllByRole("article")).toHaveLength(1);
     expect(screen.getByRole("article")).toBe(optimisticArticle);
     expect(optimisticArticle).toHaveAttribute("data-turn-id", "301");
+  });
+
+  it("does not write cache or invalidate when a delayed success belongs to another active Thread", async () => {
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+    vi.mocked(getConversation).mockImplementation(async (threadId) =>
+      thread(threadId, threadId === 81 ? [persistedTurn(501, "history-client", "历史请求", "历史回复")] : []),
+    );
+
+    const view = renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "延迟成功不应写旧缓存" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalled());
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    expect(await screen.findByText("历史回复")).toBeInTheDocument();
+
+    const setQueryData = vi.spyOn(view.queryClient, "setQueryData");
+    const invalidateQueries = vi.spyOn(view.queryClient, "invalidateQueries");
+    const setCalls = setQueryData.mock.calls.length;
+    const invalidateCalls = invalidateQueries.mock.calls.length;
+    await act(async () => request.resolve(submission(
+      persistedTurn(301, clientMessageId, "延迟成功不应写旧缓存", "旧线程成功"),
+    )));
+
+    expect(setQueryData).toHaveBeenCalledTimes(setCalls);
+    expect(invalidateQueries).toHaveBeenCalledTimes(invalidateCalls);
+    expect(screen.queryByText("旧线程成功")).not.toBeInTheDocument();
+  });
+
+  it("does not write cache or invalidate when a delayed success belongs to another account", async () => {
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+
+    const view = renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "旧账号响应不能污染新账号" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalled());
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("button", { name: "运营内容视图" }));
+    fireEvent.click(screen.getByRole("button", { name: "对话视图" }));
+    await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
+
+    const setQueryData = vi.spyOn(view.queryClient, "setQueryData");
+    const invalidateQueries = vi.spyOn(view.queryClient, "invalidateQueries");
+    const setCalls = setQueryData.mock.calls.length;
+    const invalidateCalls = invalidateQueries.mock.calls.length;
+    await act(async () => request.resolve(submission(
+      persistedTurn(301, clientMessageId, "旧账号响应不能污染新账号", "旧账号成功"),
+    )));
+
+    expect(setQueryData).toHaveBeenCalledTimes(setCalls);
+    expect(invalidateQueries).toHaveBeenCalledTimes(invalidateCalls);
+    expect(screen.queryByText("旧账号成功")).not.toBeInTheDocument();
+  });
+
+  it("preserves streamed text when a delayed stale conversation response reconciles", async () => {
+    const stale = deferred<ConversationThread>();
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+    vi.mocked(getConversation).mockImplementation(async (threadId) => {
+      if (threadId === 82) return stale.promise;
+      return thread(threadId, []);
+    });
+
+    const view = renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "流式文本不能被陈旧读取覆盖" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalled());
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+    const serverTurn = persistedTurn(401, clientMessageId, "流式文本不能被陈旧读取覆盖", null, "queued");
+    await act(async () => request.resolve(submission(serverTurn)));
+    void view.queryClient.invalidateQueries({ queryKey: ["brain-conversation", 82] });
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith(82));
+
+    act(() => {
+      mocks.event.handler?.({
+        id: 96,
+        type: "brain.runtime.message_start",
+        payload: runtimePayload(82, 401, clientMessageId, 0),
+      });
+      mocks.event.handler?.({
+        id: 97,
+        type: "brain.runtime.message_delta",
+        payload: { ...runtimePayload(82, 401, clientMessageId, 1), delta: "先到的 token" },
+      });
+    });
+    expect(await screen.findByText("先到的 token")).toBeInTheDocument();
+
+    await act(async () => stale.resolve(thread(82, [serverTurn])));
+
+    expect(await screen.findByText("先到的 token")).toBeInTheDocument();
   });
 
   it("projects SSE deltas into that same Turn and ignores another Thread", async () => {
@@ -583,6 +698,50 @@ describe("BrainHome V3 conversation projection", () => {
 
     await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
     expect(screen.queryByText("不应回填到新会话")).not.toBeInTheDocument();
+  });
+
+  it("removes a failed optimistic Turn before returning to its Thread", async () => {
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+    vi.mocked(listConversations).mockResolvedValue([
+      {
+        id: 81,
+        account_id: 3,
+        title: "账号运营周会",
+        turn_count: 1,
+        last_message: "历史回复",
+        created_at: "2026-07-28T00:00:00Z",
+        updated_at: "2026-07-28T00:02:00Z",
+      },
+      {
+        id: 82,
+        account_id: 3,
+        title: "刚才的会话",
+        turn_count: 1,
+        last_message: "待发送",
+        created_at: "2026-07-28T00:00:00Z",
+        updated_at: "2026-07-28T00:02:00Z",
+      },
+    ]);
+    vi.mocked(getConversation).mockImplementation(async (threadId) =>
+      thread(threadId, threadId === 81 ? [persistedTurn(501, "history-client", "历史请求", "历史回复")] : []),
+    );
+
+    renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "失败后不能成为幽灵消息" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await screen.findByText("失败后不能成为幽灵消息");
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
+    await screen.findByText("历史回复");
+    await act(async () => request.reject(new Error("network")));
+
+    fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "刚才的会话" }));
+    await waitFor(() => expect(screen.queryByText("失败后不能成为幽灵消息")).not.toBeInTheDocument());
   });
 
   it("replaces an incomplete live overlay with the durable Thread after reconnect", async () => {
@@ -732,7 +891,9 @@ function renderBrainHome() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  return {
+    queryClient,
+    ...render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <AntApp>
@@ -740,7 +901,8 @@ function renderBrainHome() {
         </AntApp>
       </MemoryRouter>
     </QueryClientProvider>,
-  );
+    ),
+  };
 }
 
 function thread(

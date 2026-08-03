@@ -38,6 +38,8 @@ import {
   appendOptimisticTurn,
   isActiveConversationTurnStatus,
   mergeConversationTurn,
+  reconcileConversationThread,
+  removeOptimisticTurn,
 } from "../components/brain/conversationTurnProjection";
 import { OperationalState } from "../components/ui";
 import { useEventStream, type DyEvent } from "../hooks/useEventStream";
@@ -67,9 +69,12 @@ interface PendingTurn {
   taskId: number | null;
 }
 
-interface ConversationRequestTarget {
+interface ConversationRequest {
   accountId: number;
-  threadId: number;
+  initialThreadId: number | null;
+  threadId: number | null;
+  clientMessageId: string;
+  content: string;
 }
 
 interface SourceReturnTarget {
@@ -97,7 +102,8 @@ export default function BrainHome() {
   const [sourceReturnTarget, setSourceReturnTarget] = useState<SourceReturnTarget | null>(null);
   const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
   const pendingClientMessageId = useRef<string | null>(null);
-  const conversationRequestTargetRef = useRef<ConversationRequestTarget | null>(null);
+  const conversationRequestsRef = useRef(new Map<string, ConversationRequest>());
+  const failedOptimisticTurnIdsRef = useRef(new Map<number, Set<string>>());
   const activeConversationThreadIdRef = useRef<number | null>(null);
   const previousAccountIdRef = useRef<number | null>(null);
   const launcherRequestInFlight = useRef(false);
@@ -207,7 +213,13 @@ export default function BrainHome() {
 
   const conversationQuery = useQuery({
     queryKey: ["brain-conversation", activeConversationThreadId],
-    queryFn: () => getConversation(activeConversationThreadId!),
+    queryFn: async () => {
+      const incoming = await getConversation(activeConversationThreadId!);
+      return reconcileConversationThread(
+        qc.getQueryData<ConversationThread>(["brain-conversation", activeConversationThreadId!]),
+        incoming,
+      );
+    },
     enabled: activeConversationThreadId != null,
     // createConversation seeds this exact cache before activating the Thread.
     // Refetching on that first mount can replace a just-added optimistic Turn
@@ -284,6 +296,15 @@ export default function BrainHome() {
           },
     ),
     onSuccess: (submission, variables) => {
+      if (!isCurrentConversationRequest({
+        activeAccountId: effectiveAccountIdRef.current,
+        activeThreadId: activeConversationThreadIdRef.current,
+        accountId: variables.accountId,
+        threadId: variables.threadId,
+      })) {
+        conversationRequestsRef.current.delete(variables.clientMessageId);
+        return;
+      }
       qc.setQueryData<ConversationThread>(
         ["brain-conversation", variables.threadId],
         (current) => {
@@ -304,15 +325,7 @@ export default function BrainHome() {
           );
         },
       );
-      void qc.invalidateQueries({
-        queryKey: ["brain-conversation", variables.threadId],
-      });
-      if (!isCurrentConversationRequest({
-        activeAccountId: effectiveAccountIdRef.current,
-        activeThreadId: activeConversationThreadIdRef.current,
-        accountId: variables.accountId,
-        threadId: variables.threadId,
-      })) return;
+      conversationRequestsRef.current.delete(variables.clientMessageId);
       setDraftAttachments([]);
       if (isTerminalConversationRunStatus(submission.run.status)) {
         setPendingTurn(null);
@@ -329,23 +342,32 @@ export default function BrainHome() {
       pendingClientMessageId.current = clientMessageId;
     },
     onError: (error, variables) => {
+      const request = conversationRequestsRef.current.get(variables.clientMessageId);
+      const failed = failedOptimisticTurnIdsRef.current.get(variables.threadId) ?? new Set<string>();
+      failed.add(variables.clientMessageId);
+      failedOptimisticTurnIdsRef.current.set(variables.threadId, failed);
       if (!isCurrentConversationRequest({
         activeAccountId: effectiveAccountIdRef.current,
         activeThreadId: activeConversationThreadIdRef.current,
         accountId: variables.accountId,
         threadId: variables.threadId,
-      })) return;
+      })) {
+        conversationRequestsRef.current.delete(variables.clientMessageId);
+        return;
+      }
+      qc.setQueryData<ConversationThread>(
+        ["brain-conversation", variables.threadId],
+        (current) => current ? removeOptimisticTurn(current, variables.clientMessageId) : current,
+      );
+      conversationRequestsRef.current.delete(variables.clientMessageId);
       setPendingTurn((current) => {
         if (current?.clientMessageId === variables.clientMessageId) {
-          setGoal((value) => value || current.content);
+          setGoal((value) => value || request?.content || current.content);
           return null;
         }
         return current;
       });
       pendingClientMessageId.current = null;
-      void qc.invalidateQueries({
-        queryKey: ["brain-conversation", variables.threadId],
-      });
       message.error(presentApiError(error, "消息发送失败，请稍后重试。").message);
     },
   });
@@ -486,7 +508,13 @@ export default function BrainHome() {
       ? await createConversation({ account_id: account.id })
       : await qc.ensureQueryData({
           queryKey: ["brain-conversation", savedThreadId],
-          queryFn: () => getConversation(savedThreadId),
+          queryFn: async () => {
+            const incoming = await getConversation(savedThreadId);
+            return reconcileConversationThread(
+              qc.getQueryData<ConversationThread>(["brain-conversation", savedThreadId]),
+              incoming,
+            );
+          },
         });
     if (
       thread.account_id !== account.id
@@ -494,7 +522,9 @@ export default function BrainHome() {
     ) {
       return null;
     }
-    qc.setQueryData(["brain-conversation", thread.id], thread);
+    qc.setQueryData<ConversationThread>(["brain-conversation", thread.id], (current) =>
+      reconcileConversationThread(current, thread)
+    );
     persistActiveConversationThreadId(account.id, thread.id);
     setActiveConversationThreadId(thread.id);
     return thread;
@@ -511,27 +541,52 @@ export default function BrainHome() {
   }) => {
     const account = effectiveAccount;
     if (!account) return;
-    const clientMessageId = createClientMessageId();
-    const thread = await ensureAccountThread(account);
-    if (!thread) return;
-    conversationRequestTargetRef.current = {
+    const request: ConversationRequest = {
       accountId: account.id,
-      threadId: thread.id,
+      initialThreadId: activeConversationThreadIdRef.current,
+      threadId: null,
+      clientMessageId: createClientMessageId(),
+      content,
     };
+    conversationRequestsRef.current.set(request.clientMessageId, request);
+    let thread: ConversationThread | null = null;
+    try {
+      thread = await ensureAccountThread(account);
+    } catch (error) {
+      conversationRequestsRef.current.delete(request.clientMessageId);
+      if (
+        effectiveAccountIdRef.current === request.accountId
+        && activeConversationThreadIdRef.current === request.initialThreadId
+      ) {
+        setGoal((current) => current || request.content);
+      }
+      throw error;
+    }
+    if (!thread) {
+      conversationRequestsRef.current.delete(request.clientMessageId);
+      if (
+        effectiveAccountIdRef.current === request.accountId
+        && activeConversationThreadIdRef.current === request.initialThreadId
+      ) {
+        setGoal((current) => current || request.content);
+      }
+      return;
+    }
+    request.threadId = thread.id;
     followLatestMessage.current = true;
     setShowJumpToLatest(false);
-    pendingClientMessageId.current = clientMessageId;
+    pendingClientMessageId.current = request.clientMessageId;
     qc.setQueryData<ConversationThread>(
       ["brain-conversation", thread.id],
       (current) => current
-        ? appendOptimisticTurn(current, clientMessageId, content)
+        ? appendOptimisticTurn(current, request.clientMessageId, content)
         : current,
     );
-    setPendingTurn({ clientMessageId, content, taskId: null });
+    setPendingTurn({ clientMessageId: request.clientMessageId, content, taskId: null });
     await conversationTurnMutation.mutateAsync({
       threadId: thread.id,
       content,
-      clientMessageId,
+      clientMessageId: request.clientMessageId,
       requestedSkillCode,
       attachmentIds: attachmentIds ?? draftAttachments
         .filter((item) => item.status === "ready" && item.id != null)
@@ -662,13 +717,7 @@ export default function BrainHome() {
     try {
       await submitTurn({ content, requestedSkillCode: null });
     } catch {
-      const requestTarget = conversationRequestTargetRef.current;
-      if (!requestTarget || !isCurrentConversationRequest({
-        activeAccountId: effectiveAccountIdRef.current,
-        activeThreadId: activeConversationThreadIdRef.current,
-        ...requestTarget,
-      })) return;
-      setGoal((current) => current || content);
+      // submitTurn restores the captured goal only if its original scope remains active.
     } finally {
       launcherRequestInFlight.current = false;
       setLauncherPending(false);
@@ -735,6 +784,18 @@ export default function BrainHome() {
 
   const selectConversation = (threadId: number) => {
     if (!effectiveAccount) return;
+    const failedOptimisticIds = failedOptimisticTurnIdsRef.current.get(threadId);
+    if (failedOptimisticIds?.size) {
+      qc.setQueryData<ConversationThread>(["brain-conversation", threadId], (current) =>
+        current
+          ? [...failedOptimisticIds].reduce(
+              (thread, clientMessageId) => removeOptimisticTurn(thread, clientMessageId),
+              current,
+            )
+          : current
+      );
+      failedOptimisticTurnIdsRef.current.delete(threadId);
+    }
     clearActiveBrainTaskId(effectiveAccount.id);
     persistActiveConversationThreadId(effectiveAccount.id, threadId);
     setActiveConversationThreadId(threadId);
@@ -784,7 +845,13 @@ export default function BrainHome() {
     if (retry) {
       void qc.fetchQuery({
         queryKey: ["brain-conversation", target.threadId],
-        queryFn: () => getConversation(target.threadId),
+        queryFn: async () => {
+          const incoming = await getConversation(target.threadId);
+          return reconcileConversationThread(
+            qc.getQueryData<ConversationThread>(["brain-conversation", target.threadId]),
+            incoming,
+          );
+        },
       }).then(() => setSourceReturnTarget(target)).catch(() => {
         setSourceReturnError("来源对话暂时无法加载，请在运营内容中心重试。");
       });
