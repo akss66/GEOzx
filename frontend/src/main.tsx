@@ -29,12 +29,14 @@ import "./styles/cost-workspace.css";
 import "./styles/user-workspace.css";
 import "./styles/high-fidelity-system.css";
 
+const APP_THEME = buildTheme();
+
 function Root() {
   return (
-    <ConfigProvider locale={zhCN} theme={buildTheme()}>
+    <ConfigProvider locale={zhCN} theme={APP_THEME}>
       <AntApp>
         <QueryClientProvider client={queryClient}>
-          <BrowserRouter>
+          <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <App />
           </BrowserRouter>
         </QueryClientProvider>

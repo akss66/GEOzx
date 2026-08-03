@@ -1042,16 +1042,23 @@
   line-height: 1.6;
 }
 
-.tz-work-turn__process summary,
-.tz-work-turn__process details summary {
+.tz-work-turn__process > button,
+.tz-work-turn__technical-log > button {
+  display: inline-flex;
   width: fit-content;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--tz-ink);
   cursor: pointer;
   font-weight: 600;
+  font: inherit;
+  text-align: left;
 }
 
-.tz-work-turn__process summary:focus-visible,
-.tz-work-turn__process details summary:focus-visible,
+.tz-work-turn__process > button:focus-visible,
+.tz-work-turn__technical-log > button:focus-visible,
 .tz-artifact-card__evidence-detail summary:focus-visible {
   border-radius: 4px;
   outline: 2px solid color-mix(in srgb, var(--tz-brand-red) 52%, transparent);
@@ -1077,12 +1084,12 @@
   gap: 3px;
 }
 
-.tz-work-turn__process details {
+.tz-work-turn__technical-log {
   padding-top: 9px;
   border-top: 1px solid var(--tz-line-subtle);
 }
 
-.tz-work-turn__process details ul {
+.tz-work-turn__technical-log ul {
   margin-top: 8px;
 }
 

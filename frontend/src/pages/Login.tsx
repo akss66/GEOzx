@@ -32,10 +32,6 @@ export default function Login() {
     }
   };
 
-  const clearFieldError = (name: keyof LoginForm) => {
-    form.setFields([{ name, errors: [] }]);
-  };
-
   return (
     <main
       className="dy-login-shell dy-login-quiet"
@@ -89,7 +85,7 @@ export default function Login() {
             layout="vertical"
             onFinish={onFinish}
             requiredMark={false}
-            validateTrigger="onSubmit"
+            validateTrigger="onChange"
             style={{ marginTop: 36 }}
           >
             <Form.Item
@@ -102,7 +98,6 @@ export default function Login() {
                 autoComplete="email"
                 className="dy-login-control-input"
                 size="large"
-                onChange={() => clearFieldError("email")}
                 style={{ borderRadius: 16, height: 48 }}
               />
             </Form.Item>
@@ -116,7 +111,6 @@ export default function Login() {
                 autoComplete="current-password"
                 className="dy-login-control-input"
                 size="large"
-                onChange={() => clearFieldError("password")}
                 style={{ borderRadius: 16, height: 48 }}
               />
             </Form.Item>

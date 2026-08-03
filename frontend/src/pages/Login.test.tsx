@@ -3,7 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { App as AntApp } from "antd";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -53,5 +53,22 @@ describe("Login", () => {
     expect(screen.queryByText("其他方式登录")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /通过微信登录|通过QQ登录/ }))
       .not.toBeInTheDocument();
+  });
+
+  it("clears a required-field error through normal change validation", async () => {
+    render(
+      <MemoryRouter>
+        <AntApp>
+          <Login />
+        </AntApp>
+      </MemoryRouter>,
+    );
+
+    const email = screen.getByLabelText("邮箱");
+    fireEvent.submit(email.closest("form") as HTMLFormElement);
+    await expect(screen.findByText("邮箱不能为空")).resolves.toBeInTheDocument();
+
+    fireEvent.change(email, { target: { value: "operator@example.test" } });
+    await waitFor(() => expect(screen.queryByText("邮箱不能为空")).not.toBeInTheDocument());
   });
 });

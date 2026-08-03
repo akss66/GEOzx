@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 
 export function ProcessDisclosure({
   experts,
@@ -11,16 +11,21 @@ export function ProcessDisclosure({
 }) {
   const [processOpen, setProcessOpen] = useState(false);
   const [technicalOpen, setTechnicalOpen] = useState(false);
+  const processContentId = useId();
+  const technicalContentId = useId();
 
   return (
-    <details
-      className="tz-work-turn__process"
-      open={processOpen}
-      onToggle={(event) => setProcessOpen(event.currentTarget.open)}
-    >
-      <summary>查看过程</summary>
+    <section className="tz-work-turn__process" aria-label="执行过程">
+      <button
+        type="button"
+        aria-expanded={processOpen}
+        aria-controls={processContentId}
+        onClick={() => setProcessOpen((open) => !open)}
+      >
+        查看过程
+      </button>
       {processOpen ? (
-        <div>
+        <div id={processContentId}>
           {experts.length > 0 ? (
             <section aria-label="调用专家摘要">
               <h3>调用专家</h3>
@@ -39,16 +44,20 @@ export function ProcessDisclosure({
             <p>暂无额外专家或业务依据。</p>
           ) : null}
           {technicalLog.length > 0 ? (
-            <details
-              open={technicalOpen}
-              onToggle={(event) => setTechnicalOpen(event.currentTarget.open)}
-            >
-              <summary>技术日志</summary>
-              {technicalOpen ? <ul>{technicalLog.map((item) => <li key={item}>{item}</li>)}</ul> : null}
-            </details>
+            <section className="tz-work-turn__technical-log">
+              <button
+                type="button"
+                aria-expanded={technicalOpen}
+                aria-controls={technicalContentId}
+                onClick={() => setTechnicalOpen((open) => !open)}
+              >
+                技术日志
+              </button>
+              {technicalOpen ? <ul id={technicalContentId}>{technicalLog.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+            </section>
           ) : null}
         </div>
       ) : null}
-    </details>
+    </section>
   );
 }

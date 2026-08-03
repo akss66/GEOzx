@@ -2,16 +2,11 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { WorkTurnViewModel } from "../../types";
 import { WorkTurnCard } from "./WorkTurnCard";
-
-function openNativeDisclosure(details: HTMLDetailsElement) {
-  details.open = true;
-  fireEvent(details, new Event("toggle", { bubbles: true }));
-}
 
 const workingTurn: WorkTurnViewModel = {
   key: "org:1:thread:81:message:turn-103",
@@ -67,12 +62,12 @@ describe("WorkTurnCard", () => {
     );
 
     expect(screen.queryByText("Tool #8001 · account.data_context")).not.toBeInTheDocument();
-    openNativeDisclosure(screen.getByText("查看过程").closest("details") as HTMLDetailsElement);
+    fireEvent.click(screen.getByRole("button", { name: "查看过程" }));
     expect(screen.getByText(/账号定位专家/)).toBeVisible();
     expect(screen.getByText("已核验 2 条业务依据")).toBeVisible();
     expect(screen.queryByText("Tool #8001 · account.data_context")).not.toBeInTheDocument();
 
-    openNativeDisclosure(screen.getByText("技术日志").closest("details") as HTMLDetailsElement);
+    fireEvent.click(screen.getByRole("button", { name: "技术日志" }));
     expect(screen.getByText("Tool #8001 · account.data_context")).toBeVisible();
     expect(screen.getByText("内部消息：103")).toBeVisible();
   });
@@ -86,19 +81,18 @@ describe("WorkTurnCard", () => {
       />,
     );
 
-    const process = screen.getByText("查看过程").closest("details");
-    expect(process).not.toHaveAttribute("open");
+    const process = screen.getByRole("button", { name: "查看过程" });
+    expect(process).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("技术日志")).not.toBeInTheDocument();
 
-    openNativeDisclosure(process as HTMLDetailsElement);
-    expect(process).toHaveAttribute("open");
-    const technical = screen.getByText("技术日志").closest("details");
-    expect(process).toContainElement(technical);
-    expect(technical).not.toHaveAttribute("open");
+    fireEvent.click(process);
+    expect(process).toHaveAttribute("aria-expanded", "true");
+    const technical = screen.getByRole("button", { name: "技术日志" });
+    expect(technical).toHaveAttribute("aria-expanded", "false");
 
-    openNativeDisclosure(technical as HTMLDetailsElement);
-    expect(technical).toHaveAttribute("open");
-    expect(within(technical as HTMLElement).getByText("Tool #8001 · account.data_context")).toBeVisible();
+    fireEvent.click(technical);
+    expect(technical).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Tool #8001 · account.data_context")).toBeVisible();
   });
 
   it("keeps progressive disclosures keyboard-focusable with observable expanded state", () => {
@@ -110,22 +104,22 @@ describe("WorkTurnCard", () => {
       />,
     );
 
-    const processToggle = screen.getByText("查看过程");
-    expect(processToggle.tagName).toBe("SUMMARY");
+    const processToggle = screen.getByRole("button", { name: "查看过程" });
     processToggle.focus();
     expect(processToggle).toHaveFocus();
-    expect(processToggle.closest("details")).not.toHaveAttribute("open");
+    expect(processToggle).toHaveAttribute("aria-expanded", "false");
 
-    openNativeDisclosure(processToggle.closest("details") as HTMLDetailsElement);
-    expect(processToggle.closest("details")).toHaveAttribute("open");
+    fireEvent.keyDown(processToggle, { key: "Enter" });
+    fireEvent.click(processToggle);
+    expect(processToggle).toHaveAttribute("aria-expanded", "true");
 
-    const technicalToggle = screen.getByText("技术日志");
-    expect(technicalToggle.tagName).toBe("SUMMARY");
+    const technicalToggle = screen.getByRole("button", { name: "技术日志" });
     technicalToggle.focus();
     expect(technicalToggle).toHaveFocus();
-    expect(technicalToggle.closest("details")).not.toHaveAttribute("open");
+    expect(technicalToggle).toHaveAttribute("aria-expanded", "false");
 
-    openNativeDisclosure(technicalToggle.closest("details") as HTMLDetailsElement);
-    expect(technicalToggle.closest("details")).toHaveAttribute("open");
+    fireEvent.keyDown(technicalToggle, { key: " " });
+    fireEvent.click(technicalToggle);
+    expect(technicalToggle).toHaveAttribute("aria-expanded", "true");
   });
 });

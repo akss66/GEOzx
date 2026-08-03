@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type CDPSession, type Page, type Route } from "@playwright/test";
 
 const user = {
   id: 1,
@@ -50,10 +50,7 @@ const artifact = {
 };
 
 test("work turn remains readable, actionable, and responsive with local mocked data", async ({ page }, testInfo) => {
-  const consoleErrors: string[] = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
-  });
+  const consoleDiagnostics = await captureConsoleDiagnostics(page);
 
   await mockWorkTurnApi(page);
   await login(page);
@@ -78,18 +75,24 @@ test("work turn remains readable, actionable, and responsive with local mocked d
   await expect(turn.locator(".tz-work-turn__operator")).toHaveCSS("border-width", "0px");
   await expect(turn.locator(".tz-work-turn__progress")).toHaveCSS("border-top-width", "1px");
 
-  const processToggle = turn.getByText("查看过程");
-  expect(await processToggle.evaluate((element) => element.tagName)).toBe("SUMMARY");
+  const processToggle = turn.getByRole("button", { name: "查看过程" });
+  await expect(processToggle).toHaveAttribute("aria-expanded", "false");
+  const processContentId = await processToggle.getAttribute("aria-controls");
+  expect(processContentId).toBeTruthy();
   await processToggle.focus();
   await expect(processToggle).toBeFocused();
-  await processToggle.click();
-  await expect(processToggle.locator("xpath=..")).toHaveAttribute("open", "");
-  const technicalToggle = turn.getByText("技术日志");
-  expect(await technicalToggle.evaluate((element) => element.tagName)).toBe("SUMMARY");
+  await processToggle.press("Enter");
+  await expect(processToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(turn.locator(`[id="${processContentId}"]`)).toBeVisible();
+  const technicalToggle = turn.getByRole("button", { name: "技术日志" });
+  await expect(technicalToggle).toHaveAttribute("aria-expanded", "false");
+  const technicalContentId = await technicalToggle.getAttribute("aria-controls");
+  expect(technicalContentId).toBeTruthy();
   await technicalToggle.focus();
   await expect(technicalToggle).toBeFocused();
-  await technicalToggle.click();
-  await expect(technicalToggle.locator("xpath=..")).toHaveAttribute("open", "");
+  await technicalToggle.press("Space");
+  await expect(technicalToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(turn.locator(`[id="${technicalContentId}"]`)).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("work-turn-desktop.png"), fullPage: true });
 
   await page.getByRole("tab", { name: "方案与内容" }).click();
@@ -109,8 +112,37 @@ test("work turn remains readable, actionable, and responsive with local mocked d
   );
   expect(hasOverflow).toBe(false);
   await page.screenshot({ path: testInfo.outputPath("work-turn-mobile.png"), fullPage: true });
-  expect(consoleErrors.filter((message) => !message.includes("There may be circular references"))).toEqual([]);
+  expect(consoleDiagnostics.warnings).toEqual([]);
+  expect(consoleDiagnostics.errors).toEqual([]);
 });
+
+async function captureConsoleDiagnostics(page: Page) {
+  const diagnostics: { warnings: Array<Record<string, unknown>>; errors: Array<Record<string, unknown>> } = {
+    warnings: [],
+    errors: [],
+  };
+  const session: CDPSession = await page.context().newCDPSession(page);
+  await session.send("Runtime.enable");
+  session.on("Runtime.consoleAPICalled", (event) => {
+    if (event.type !== "warning" && event.type !== "error") return;
+    diagnostics[event.type === "warning" ? "warnings" : "errors"].push({
+      type: event.type,
+      args: event.args.map((argument) => ({
+        type: argument.type,
+        value: argument.value,
+        description: argument.description,
+      })),
+      location: event.stackTrace?.callFrames[0],
+      stack: event.stackTrace?.callFrames.map((frame) => ({
+        functionName: frame.functionName,
+        url: frame.url,
+        lineNumber: frame.lineNumber,
+        columnNumber: frame.columnNumber,
+      })),
+    });
+  });
+  return diagnostics;
+}
 
 async function login(page: Page) {
   await page.goto("/login");
