@@ -342,7 +342,6 @@ async def _execute_composite_skill(
     execution_owner: str | None = None,
     resume_skill_run: SkillRun | None = None,
 ) -> TurnExecutionResult:
-    del capability_request  # Task 2 wires this validated request into the Skill input model.
     account_id = thread.account_id
     project_id = thread.project_id
     execution_kwargs: dict[str, Any] = {
@@ -351,7 +350,7 @@ async def _execute_composite_skill(
         "turn": turn,
         "run": run,
         "skill_code": decision.skill_code or "",
-        "days": 30,
+        "capability_request": capability_request,
     }
     if execution_owner is not None:
         execution_kwargs["lease_owner"] = execution_owner

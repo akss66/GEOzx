@@ -25,8 +25,13 @@ from app.models.enums import (
     Platform,
     UserRole,
 )
-from app.orchestrator.skill_runtime import SkillRuntime, run_bounded_stage
+from app.orchestrator.skill_runtime import (
+    SkillRecoveryConflict,
+    SkillRuntime,
+    run_bounded_stage,
+)
 from app.orchestrator.tool_executor import DurableToolExecutor
+from app.schemas.capability_request import CapabilityRequest
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
@@ -69,6 +74,30 @@ async def _scope(session, admin, *, key: str, message: str):
     session.add(run)
     await session.commit()
     return account, thread, turn, run
+
+
+def _capability_request(
+    *,
+    admin,
+    account,
+    thread,
+    turn,
+    run,
+    skill_code: str,
+    structured_input: dict,
+) -> CapabilityRequest:
+    return CapabilityRequest(
+        org_id=admin.org_id,
+        user_id=admin.id,
+        account_id=account.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        message=turn.user_input,
+        requested_skill_code=skill_code,
+        execution_preference="FORMAL_TASK",
+        structured_input=structured_input,
+    )
 
 
 class _Tools:
@@ -287,3 +316,122 @@ async def test_operating_skill_executes_bounded_experts_and_persists_artifact(
     assert await session.scalar(select(func.count(BrainTask.id))) == 1
     assert await session.scalar(select(func.count(SkillRun.id))) == 1
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_topic_skill_honors_structured_days_and_topic_count(session, admin) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="typed-topic-input",
+        message="规划未来14天的10个选题",
+    )
+    runtime = SkillRuntime(tool_executor=_Tools(), harness=_Harness())
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="topic_planning",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="topic_planning",
+            structured_input={"days": 14, "topic_count": 10},
+        ),
+    )
+
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.run_id == run.id))
+    assert skill_run is not None
+    assert skill_run.input_snapshot == {
+        "account_id": account.id,
+        "days": 14,
+        "topic_count": 10,
+    }
+    assert result.report["period"] == "未来 14 天"
+    assert len(result.report["topics"]) == 10
+
+
+@pytest.mark.asyncio
+async def test_script_skill_prefers_explicit_duration_over_expert_default(session, admin) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="typed-script-input",
+        message="生成一个30秒脚本",
+    )
+    runtime = SkillRuntime(tool_executor=_Tools(), harness=_Harness())
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="script_generation",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="script_generation",
+            structured_input={"duration_seconds": 30},
+        ),
+    )
+
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.run_id == run.id))
+    assert skill_run is not None
+    assert skill_run.input_snapshot == {
+        "account_id": account.id,
+        "duration_seconds": 30,
+    }
+    assert result.report["duration_seconds"] == 30
+
+
+@pytest.mark.asyncio
+async def test_skill_recovery_rejects_changed_structured_input(session, admin) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="typed-recovery-conflict",
+        message="规划未来14天的10个选题",
+    )
+    runtime = SkillRuntime(tool_executor=_Tools(), harness=_Harness())
+    original_request = _capability_request(
+        admin=admin,
+        account=account,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="topic_planning",
+        structured_input={"days": 14, "topic_count": 10},
+    )
+    await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="topic_planning",
+        capability_request=original_request,
+    )
+
+    changed_request = original_request.model_copy(
+        update={"structured_input": {"days": 7, "topic_count": 10}}
+    )
+    with pytest.raises(SkillRecoveryConflict, match="SKILL_RECOVERY_INPUT_CONFLICT"):
+        await runtime.execute(
+            session,
+            user=admin,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="topic_planning",
+            capability_request=changed_request,
+        )

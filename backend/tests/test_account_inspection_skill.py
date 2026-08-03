@@ -905,11 +905,11 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
         *,
         user,
         thread,
-        turn,
-        run,
-        skill_code,
-        days,
-    ):
+            turn,
+            run,
+            skill_code,
+            capability_request,
+        ):
         content = ContentItem(
             account_id=thread.account_id,
             created_by_id=user.id,
@@ -932,11 +932,11 @@ async def test_explicit_and_natural_language_requests_use_same_skill_executor(
         account_id = thread.account_id
         task_id = task.id
         calls.append(
-            {
-                "skill_code": skill_code,
-                "days": days,
-                "account_id": account_id,
-            }
+                {
+                    "skill_code": skill_code,
+                    "days": capability_request.structured_input.get("days", 30),
+                    "account_id": account_id,
+                }
         )
         # The durable Skill runtime commits several ledgers. Reproduce the
         # production state where request-scoped ORM objects are expired before

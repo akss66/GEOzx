@@ -64,6 +64,7 @@ from app.orchestrator.skills.operating_tasks import (
 from app.orchestrator.skills.registry import skill_registry
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
+from app.schemas.capability_request import CapabilityRequest
 from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 from app.services.runtime_deliverables import write_runtime_deliverable
@@ -108,6 +109,21 @@ def skill_input_hash(snapshot: dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _validated_skill_input(
+    *,
+    definition: SkillDefinition,
+    structured_input: dict[str, Any],
+    fallback_days: int | None,
+) -> Any:
+    allowed_fields = definition.input_model.model_fields
+    input_payload = {
+        key: value for key, value in structured_input.items() if key in allowed_fields
+    }
+    if fallback_days is not None and "days" in allowed_fields and "days" not in input_payload:
+        input_payload["days"] = fallback_days
+    return definition.input_model.model_validate(input_payload)
 
 
 @dataclass(frozen=True)
@@ -184,11 +200,20 @@ class SkillRuntime:
         turn: ConversationTurn,
         run: AgentRun,
         skill_code: str,
+        capability_request: CapabilityRequest | None = None,
         days: int = 30,
         lease_owner: str | None = None,
         resume_skill_run: SkillRun | None = None,
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
+        if capability_request is not None:
+            self._require_capability_request_scope(
+                user=user,
+                thread=thread,
+                turn=turn,
+                run=run,
+                capability_request=capability_request,
+            )
         run_id = run.id
         persisted_candidates = (
             []
@@ -220,9 +245,26 @@ class SkillRuntime:
                 if key in definition.input_model.model_fields
             }
             frozen_input = definition.input_model.model_validate(model_input)
+            if capability_request is not None:
+                requested_input = _validated_skill_input(
+                    definition=definition,
+                    structured_input=capability_request.structured_input,
+                    fallback_days=None,
+                )
+                requested_snapshot = {
+                    "account_id": thread.account_id,
+                    **requested_input.model_dump(mode="json"),
+                }
+                if requested_snapshot != frozen_snapshot:
+                    raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
         else:
-            input_payload = {"days": days} if "days" in definition.input_model.model_fields else {}
-            frozen_input = definition.input_model.model_validate(input_payload)
+            frozen_input = _validated_skill_input(
+                definition=definition,
+                structured_input=(
+                    capability_request.structured_input if capability_request is not None else {}
+                ),
+                fallback_days=(None if capability_request is not None else days),
+            )
             frozen_snapshot = {
                 "account_id": thread.account_id,
                 **frozen_input.model_dump(mode="json"),
@@ -1590,6 +1632,26 @@ class SkillRuntime:
             raise PermissionError("Skill execution ownership does not match")
 
     @staticmethod
+    def _require_capability_request_scope(
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        capability_request: CapabilityRequest,
+    ) -> None:
+        if (
+            capability_request.org_id != user.org_id
+            or capability_request.user_id != user.id
+            or capability_request.account_id != thread.account_id
+            or capability_request.thread_id != thread.id
+            or capability_request.turn_id != turn.id
+            or capability_request.run_id != run.id
+            or capability_request.message != turn.user_input
+        ):
+            raise PermissionError("CapabilityRequest scope does not match Skill execution")
+
+    @staticmethod
     def _require_tool_scope(result: dict[str, Any], account_id: int) -> None:
         if result.get("account_id") != account_id:
             raise _ToolScopeMismatch("tool result account scope does not match")
@@ -1649,7 +1711,7 @@ def _build_operating_report(
             hook=str(latest.get("hook") or "先说结论：这件事最容易踩的坑在这里。"),
             scenes=scenes,
             duration_seconds=int(
-                latest.get("duration_seconds") or frozen_input.get("duration_seconds") or 60
+                frozen_input.get("duration_seconds") or latest.get("duration_seconds") or 60
             ),
             bgm_suggestion=latest.get("bgm_suggestion"),
             participating_experts=participants,
