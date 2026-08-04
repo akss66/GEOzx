@@ -414,6 +414,11 @@ export default function BrainHome() {
     onEvent: projectDurableTurnEvent,
     onRecover: recoverConversationProjection,
   });
+  const invalidatePendingWork = useCallback(() => {
+    const accountId = effectiveAccountIdRef.current;
+    if (accountId == null) return;
+    void qc.invalidateQueries({ queryKey: pendingWorkQueryKey(accountId) });
+  }, [qc]);
   useEventStream(useCallback((event: DyEvent) => {
     if (![
       "pending_work.updated",
@@ -422,8 +427,8 @@ export default function BrainHome() {
     const payload = asRuntimePayload(event.payload);
     const accountId = effectiveAccountIdRef.current;
     if (accountId == null || Number(payload?.account_id) !== accountId) return;
-    void qc.invalidateQueries({ queryKey: pendingWorkQueryKey(accountId) });
-  }, [qc]));
+    invalidatePendingWork();
+  }, [invalidatePendingWork]), { onReconnect: invalidatePendingWork });
   const accountReady = Boolean(
     effectiveAccount
     && (

@@ -19,6 +19,7 @@ from app.models import (
     BrainTask,
     ConversationThread,
     ConversationTurn,
+    Event,
     SkillRun,
     ToolExecutionAttempt,
     TurnInterrupt,
@@ -182,7 +183,15 @@ async def request_interrupt(
                 "INTERRUPT_SEMANTIC_CONFLICT",
                 "This interrupt key is already bound to another request.",
             )
-        return InterruptRequestResult(interrupt=same_semantic)
+        pending_intent = await _record_pending_work_change(
+            session,
+            interrupt=same_semantic,
+            change="requested",
+        )
+        return InterruptRequestResult(
+            interrupt=same_semantic,
+            publish_intents=(pending_intent,),
+        )
     if any(row.status == "pending" for row in existing_rows):
         raise _conflict(
             "INTERRUPT_ALREADY_PENDING",
@@ -235,9 +244,14 @@ async def request_interrupt(
         _interrupt_event_payload(interrupt),
         f"interrupt:{interrupt.id}:requested",
     )
+    pending_intent = await _record_pending_work_change(
+        session,
+        interrupt=interrupt,
+        change="requested",
+    )
     return InterruptRequestResult(
         interrupt=interrupt,
-        publish_intents=closure.publish_intents,
+        publish_intents=(*closure.publish_intents, pending_intent),
     )
 
 
@@ -320,6 +334,11 @@ async def resolve_interrupt(
             run = await session.get(AgentRun, interrupt.run_id)
             if run is None:
                 raise _not_found()
+            pending_intent = await _record_pending_work_change(
+                session,
+                interrupt=interrupt,
+                change="resolved",
+            )
             return InterruptResolutionResult(
                 interrupt=interrupt,
                 run=run,
@@ -328,6 +347,7 @@ async def resolve_interrupt(
                     if run.status == "queued"
                     else None
                 ),
+                publish_intents=(pending_intent,),
                 replay_runtime_events=run.status != "queued",
             )
         raise _conflict(
@@ -369,6 +389,11 @@ async def resolve_interrupt(
         "turn.interrupt_resolved",
         _interrupt_event_payload(interrupt),
         f"interrupt:{interrupt.id}:resolved",
+    )
+    pending_intent = await _record_pending_work_change(
+        session,
+        interrupt=interrupt,
+        change="resolved",
     )
     if (
         interrupt.kind == "approval"
@@ -442,7 +467,7 @@ async def resolve_interrupt(
         interrupt=interrupt,
         run=run,
         dispatch_intent=dispatch_intent,
-        publish_intents=finish_publish_intents,
+        publish_intents=(*finish_publish_intents, pending_intent),
     )
 
 
@@ -485,6 +510,7 @@ async def request_stop(
         )
     )
     now = datetime.now(UTC)
+    pending_work_intents: list[RuntimePublishIntent] = []
     for interrupt in interrupts:
         if interrupt.status == "pending":
             interrupt.status = "cancelled"
@@ -495,6 +521,13 @@ async def request_stop(
                 "turn.interrupt_cancelled",
                 _interrupt_event_payload(interrupt),
                 f"interrupt:{interrupt.id}:cancelled",
+            )
+            pending_work_intents.append(
+                await _record_pending_work_change(
+                    session,
+                    interrupt=interrupt,
+                    change="cancelled",
+                )
             )
     for skill_id in (
         discovered.root_skill_run_id,
@@ -536,7 +569,40 @@ async def request_stop(
         thread_id=discovered.thread.id,
         turn_id=discovered.turn.id,
         client_message_id=discovered.run.client_message_id,
-        publish_intents=closure.publish_intents,
+        publish_intents=(*closure.publish_intents, *pending_work_intents),
+    )
+
+
+async def _record_pending_work_change(
+    session: AsyncSession,
+    *,
+    interrupt: TurnInterrupt,
+    change: str,
+) -> RuntimePublishIntent:
+    """Persist one account-only invalidation envelope for the global listener."""
+
+    raw_key = (
+        f"pending-work-interrupt-v1:{interrupt.org_id}:{interrupt.account_id}:"
+        f"{interrupt.id}:{change}"
+    )
+    idempotency_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    event = await session.scalar(
+        select(Event).where(Event.idempotency_key == idempotency_key)
+    )
+    if event is None:
+        event = Event(
+            type="pending_work.updated",
+            org_id=interrupt.org_id,
+            account_id=interrupt.account_id,
+            payload={"account_id": interrupt.account_id},
+            idempotency_key=idempotency_key,
+        )
+        session.add(event)
+        await session.flush([event])
+    return RuntimePublishIntent(
+        event_id=event.id,
+        event_type=event.type,
+        turn_id=None,
     )
 
 

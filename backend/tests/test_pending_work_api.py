@@ -216,6 +216,43 @@ async def test_pending_work_rejects_an_account_outside_the_users_workspace(
 
 
 @pytest.mark.asyncio
+async def test_pending_work_projects_data_actions_only_to_workspace_operators(
+    client, session, admin, member
+) -> None:
+    project, account, *_ = await _seed_pending_sources(
+        session,
+        admin,
+        account_name="pending-data-role-boundary",
+    )
+    membership = ProjectMembership(
+        project_id=project.id,
+        user_id=member.id,
+        role=WorkspaceRole.OPERATOR,
+    )
+    session.add(membership)
+    await session.commit()
+
+    async def data_count(role: WorkspaceRole) -> int:
+        membership.role = role
+        await session.commit()
+        response = await client.get(
+            f"/accounts/{account.id}/pending-work",
+            headers=_headers(member),
+        )
+        assert response.status_code == 200, response.text
+        return next(
+            group["count"]
+            for group in response.json()["groups"]
+            if group["kind"] == "account_data"
+        )
+
+    assert await data_count(WorkspaceRole.OPERATOR) == 1
+    assert await data_count(WorkspaceRole.LEAD) == 1
+    assert await data_count(WorkspaceRole.EDITOR) == 0
+    assert await data_count(WorkspaceRole.REVIEWER) == 0
+
+
+@pytest.mark.asyncio
 async def test_pending_work_completion_is_ownership_safe_idempotent_and_disappears(
     client, session, admin, member
 ) -> None:

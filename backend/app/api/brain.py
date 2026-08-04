@@ -1016,6 +1016,7 @@ async def stop_brain_generation(
             )
             await session.commit()
             await publish_runtime_state_intents(session, stopped.publish_intents)
+            await session.commit()  # close the post-commit read transaction before dispatch
             try:
                 await abort_agent_runtime(run.id)
             except Exception:  # noqa: BLE001 - terminal DB state remains authoritative
@@ -1782,6 +1783,7 @@ async def approve_tool_call(
         )
         if resolved.replay_runtime_events:
             await replay_runtime_state_events(session, run_id=scoped_run.id)
+        await session.commit()  # close the post-commit read transaction before dispatch
         if resolved.dispatch_intent is not None:
             try:
                 await enqueue_agent_runtime(run_id=resolved.dispatch_intent.run_id)

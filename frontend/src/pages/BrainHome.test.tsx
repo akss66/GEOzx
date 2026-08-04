@@ -86,6 +86,7 @@ const mocks = vi.hoisted(() => {
       type: string;
       payload?: unknown;
     }) => void) | null,
+    onReconnect: null as (() => void) | null,
   };
   return { account, secondaryAccount, workspace, event, turnEvents, accountEvents };
 });
@@ -161,8 +162,12 @@ vi.mock("../api/pendingWork", async (importOriginal) => {
 });
 
 vi.mock("../hooks/useEventStream", () => ({
-  useEventStream: vi.fn((onEvent) => {
+  useEventStream: vi.fn((
+    onEvent,
+    options?: { onReconnect?: () => void },
+  ) => {
     mocks.accountEvents.handler = onEvent;
+    mocks.accountEvents.onReconnect = options?.onReconnect ?? null;
     return { connected: true, connectionState: "connected", last: null };
   }),
   useConversationRuntimeStream: vi.fn(({ onEvent }) => {
@@ -201,6 +206,7 @@ describe("BrainHome V3 conversation projection", () => {
     mocks.turnEvents.handler = null;
     mocks.turnEvents.onRecover = null;
     mocks.accountEvents.handler = null;
+    mocks.accountEvents.onReconnect = null;
     vi.mocked(listComposerSkills).mockResolvedValue([]);
     vi.mocked(getAccountPendingWork).mockImplementation(async (accountId) => ({
       account_id: accountId,
@@ -321,7 +327,7 @@ describe("BrainHome V3 conversation projection", () => {
     expect(sourceTurn).toHaveAttribute("data-turn-id", "501");
   });
 
-  it("refreshes only the selected account pending-work query from durable events", async () => {
+  it("refreshes pending work for an account interrupt outside the current Thread", async () => {
     const view = renderBrainHome();
     fireEvent.click(await screen.findByRole("tab", { name: "待处理" }));
     await screen.findByText("当前没有需要你处理的事项");
@@ -339,6 +345,17 @@ describe("BrainHome V3 conversation projection", () => {
       payload: { account_id: 4 },
     }));
     expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the selected account pending work after the global stream reconnects", async () => {
+    const view = renderBrainHome();
+    fireEvent.click(await screen.findByRole("tab", { name: "待处理" }));
+    await screen.findByText("当前没有需要你处理的事项");
+    const invalidate = vi.spyOn(view.queryClient, "invalidateQueries");
+
+    act(() => mocks.accountEvents.onReconnect?.());
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["account-pending-work", 3] });
   });
 
   it("changes the pending-work query key with the selected account", async () => {

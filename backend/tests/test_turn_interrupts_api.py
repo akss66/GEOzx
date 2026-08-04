@@ -31,7 +31,7 @@ from app.models.enums import (
     DeliverableType,
     Platform,
 )
-from app.services.turn_interrupts import request_interrupt, resolve_interrupt
+from app.services.turn_interrupts import request_interrupt, request_stop, resolve_interrupt
 
 
 @pytest.fixture(autouse=True)
@@ -352,6 +352,25 @@ async def test_request_clarification_interrupt_pauses_original_run(session, admi
     assert await session.scalar(
         select(func.count(AgentRun.id)).where(AgentRun.turn_id == turn.id)
     ) == 1
+    account_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.type == "pending_work.updated",
+                Event.account_id == account.id,
+            )
+        )
+    )
+    assert len(account_events) == 1
+    assert account_events[0].thread_id is None
+    assert account_events[0].turn_id is None
+    assert account_events[0].run_id is None
+    assert account_events[0].payload == {"account_id": account.id}
+    assert any(
+        intent.event_id == account_events[0].id
+        and intent.event_type == "pending_work.updated"
+        and intent.turn_id is None
+        for intent in result.publish_intents
+    )
 
 
 @pytest.mark.asyncio
@@ -429,14 +448,26 @@ async def test_resolve_requeues_original_run_without_claim_and_enqueues_after_co
     )
     await session.commit()
     enqueued: list[int] = []
+    published: list[tuple[str, dict[str, object]]] = []
 
     async def capture_enqueue(*, run_id: int) -> bool:
         assert session.in_transaction() is False
         enqueued.append(run_id)
         return True
 
+    async def capture_publish(
+        event_type: str,
+        payload: dict[str, object],
+        **_kwargs: object,
+    ) -> None:
+        published.append((event_type, payload))
+
     monkeypatch.setattr(
         "app.api.turn_interrupts.enqueue_agent_runtime", capture_enqueue
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event",
+        capture_publish,
     )
     response = await client.post(
         f"/turn-interrupts/{requested.interrupt.id}/resolve",
@@ -451,6 +482,11 @@ async def test_resolve_requeues_original_run_without_claim_and_enqueues_after_co
     assert response.json()["run_id"] == run.id
     assert response.json()["dispatch_deferred"] is False
     assert enqueued == [run.id]
+    assert [
+        payload
+        for event_type, payload in published
+        if event_type == "pending_work.updated"
+    ] == [{"account_id": requested.interrupt.account_id}]
     await session.refresh(run)
     assert run.status == "queued"
     assert run.phase == "queued"
@@ -458,6 +494,76 @@ async def test_resolve_requeues_original_run_without_claim_and_enqueues_after_co
     assert await session.scalar(
         select(func.count(AgentRun.id)).where(AgentRun.turn_id == run.turn_id)
     ) == 1
+    account_events = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.type == "pending_work.updated",
+                Event.account_id == requested.interrupt.account_id,
+            )
+            .order_by(Event.id)
+        )
+    )
+    assert len(account_events) == 2
+    assert all(
+        event.payload == {"account_id": requested.interrupt.account_id}
+        for event in account_events
+    )
+    assert all(
+        event.thread_id is None and event.turn_id is None
+        for event in account_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_interrupt_records_account_scoped_pending_work_event(
+    session, admin
+) -> None:
+    account, _thread, _turn, run, *_ = await _runtime_context(
+        session,
+        admin,
+        key="pending-cancel-event",
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="clarification",
+        semantic_key="pending-cancel-event",
+        public_message="Waiting for account-scoped operator input.",
+        response_schema={"type": "object"},
+    )
+    await session.commit()
+
+    stopped = await request_stop(
+        session,
+        user=admin,
+        run_id=run.id,
+        reason="Cancel the waiting work.",
+    )
+    await session.commit()
+
+    await session.refresh(requested.interrupt)
+    assert requested.interrupt.status == "cancelled"
+    account_events = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.type == "pending_work.updated",
+                Event.account_id == account.id,
+            )
+            .order_by(Event.id)
+        )
+    )
+    assert len(account_events) == 2
+    assert all(event.payload == {"account_id": account.id} for event in account_events)
+    assert all(event.thread_id is None and event.turn_id is None for event in account_events)
+    assert any(
+        intent.event_id == account_events[-1].id
+        and intent.event_type == "pending_work.updated"
+        and intent.turn_id is None
+        for intent in stopped.publish_intents
+    )
 
 
 @pytest.mark.asyncio

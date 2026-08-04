@@ -20,6 +20,7 @@ from app.models import (
     TurnInterrupt,
     User,
 )
+from app.models.enums import UserRole, WorkspaceRole
 from app.schemas.pending_work import (
     AccountDataTarget,
     ConversationTurnTarget,
@@ -49,6 +50,7 @@ _DATA_STATUS_LABELS = {
     "stale": "需要更新",
     "failed": "导入失败",
 }
+_DATA_OPERATE_ROLES = frozenset({WorkspaceRole.LEAD, WorkspaceRole.OPERATOR})
 
 
 @dataclass(frozen=True)
@@ -223,7 +225,11 @@ async def list_pending_work(
         if isinstance(row, dict)
         and row.get("status") in {"not_imported", "stale", "failed"}
     ]
-    if incomplete:
+    if incomplete and await _can_operate_account_data(
+        session,
+        user=user,
+        account_id=account_id,
+    ):
         descriptions = [
             f"{_DATA_DOMAIN_LABELS.get(str(row.get('data_domain')), '账号数据')}"
             f"{_DATA_STATUS_LABELS.get(str(row.get('status')), '需要处理')}"
@@ -253,6 +259,30 @@ async def list_pending_work(
             for kind, label in _GROUPS
         ],
     )
+
+
+async def _can_operate_account_data(
+    session: AsyncSession,
+    *,
+    user: User,
+    account_id: int,
+) -> bool:
+    """Reuse the account workspace guard without hiding other readable work."""
+
+    if user.role == UserRole.ADMIN:
+        return True
+    try:
+        await require_account_access(
+            session,
+            user,
+            account_id,
+            roles=_DATA_OPERATE_ROLES,
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return False
+        raise
+    return True
 
 
 async def complete_shoot_task(
