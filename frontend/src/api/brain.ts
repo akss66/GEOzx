@@ -132,6 +132,20 @@ export async function getArtifact(artifactId: number): Promise<Artifact> {
   return data;
 }
 
+export async function executeDeliverableAction(input: {
+  artifactId: number;
+  actionCode: import("../types").DeliverableActionCode;
+  idempotencyKey: string;
+  input?: Record<string, unknown>;
+}): Promise<import("../types").DeliverableActionExecution> {
+  const { data } = await api.post<import("../types").DeliverableActionExecution>(
+    `/artifacts/${input.artifactId}/actions/${input.actionCode}`,
+    input.input ?? {},
+    { headers: { "Idempotency-Key": input.idempotencyKey } },
+  );
+  return data;
+}
+
 export async function acceptArtifact(artifactId: number): Promise<Artifact> {
   const { data } = await api.post<Artifact>("/artifact-acceptances", { artifact_id: artifactId });
   return data;

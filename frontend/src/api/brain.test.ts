@@ -9,6 +9,7 @@ import {
   createConversation,
   deleteConversation,
   draftBrainTask,
+  executeDeliverableAction,
   getConversation,
   getArtifact,
   getBrainTaskRuntime,
@@ -379,6 +380,33 @@ describe("brain api", () => {
       payload: { core_conclusion: "补充选题" },
       note: "请补充下周选题。",
     });
+  });
+
+  it("executes a typed deliverable action with an explicit idempotency key", async () => {
+    const execution = {
+      execution_id: 901,
+      artifact_id: 5001,
+      artifact_version: 1,
+      action_code: "create_shoot_task",
+      status: "succeeded",
+      resource: { type: "shoot_task", id: 77 },
+      result: { message: "拍摄任务已创建" },
+      replayed: false,
+    };
+    apiPost.mockResolvedValueOnce({ data: execution });
+
+    await expect(executeDeliverableAction({
+      artifactId: 5001,
+      actionCode: "create_shoot_task",
+      idempotencyKey: "artifact-action-test-key",
+      input: { confirmed: true, note: "补拍三个镜头" },
+    })).resolves.toEqual(execution);
+
+    expect(apiPost).toHaveBeenCalledWith(
+      "/artifacts/5001/actions/create_shoot_task",
+      { confirmed: true, note: "补拍三个镜头" },
+      { headers: { "Idempotency-Key": "artifact-action-test-key" } },
+    );
   });
 
   it("isolates active conversation Threads by account without replacing legacy tasks", () => {

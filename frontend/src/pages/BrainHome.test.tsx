@@ -9,16 +9,15 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  acceptArtifact,
   approveToolCall,
   createConversation,
+  executeDeliverableAction,
   getArtifact,
   getBrainTaskRuntime,
   getConversation,
   listBrainTasks,
   listComposerSkills,
   listConversations,
-  reviseArtifact,
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
@@ -32,6 +31,7 @@ import type {
   ConversationAgentRun,
   ConversationThread,
   ConversationTurn,
+  DeliverableActionExecution,
   Platform,
   PublicSkill,
   TurnSubmission,
@@ -91,10 +91,12 @@ vi.mock("../api/shell", () => ({
 }));
 
 vi.mock("../api/brain", () => ({
-  acceptArtifact: vi.fn(async (artifactId: number) => artifactId),
   approveToolCall: vi.fn(async () => undefined),
   createConversation: vi.fn(),
   deleteConversation: vi.fn(async () => undefined),
+  executeDeliverableAction: vi.fn(async () => {
+    throw new Error("No deliverable action expected in this page-level suite");
+  }),
   getArtifact: vi.fn(async () => {
     throw new Error("No Artifact expected in this page-level suite");
   }),
@@ -115,9 +117,6 @@ vi.mock("../api/brain", () => ({
     created_at: "2026-07-28T00:00:00Z",
     updated_at: "2026-07-28T00:02:00Z",
   }]),
-  reviseArtifact: vi.fn(async () => {
-    throw new Error("No revision expected in this page-level suite");
-  }),
   sendConversationTurn: vi.fn(),
   stopBrainGeneration: vi.fn(async () => ({
     client_message_id: "stopped",
@@ -236,7 +235,7 @@ describe("BrainHome V3 conversation projection", () => {
     expect(view.queryClient.getQueryData(["account-artifacts", 4])).toBe("account-b");
   });
 
-  it("shows confirmation feedback from an artifact action and retains the safe failure feedback", async () => {
+  it("executes the server-advertised next action and retains safe failure feedback", async () => {
     const source = presentationArtifact();
     const turn = {
       ...persistedTurn(501, "artifact-client", "检查账号", "已完成账号诊断"),
@@ -252,22 +251,34 @@ describe("BrainHome V3 conversation projection", () => {
     saveThread(3, 81);
     vi.mocked(getConversation).mockResolvedValue(thread(81, [turn]));
     vi.mocked(getArtifact).mockResolvedValue(source);
-    vi.mocked(acceptArtifact).mockResolvedValue({ ...source, status: "accepted" });
+    vi.mocked(executeDeliverableAction).mockResolvedValue(actionExecution(source, {
+      actionCode: "generate_next_iteration",
+      status: "queued",
+      resource: { type: "conversation_turn", id: 777 },
+    }));
 
     renderBrainHome();
 
-    fireEvent.click(await screen.findByRole("button", { name: "确认当前内容" }));
-    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(source.id));
-    expect(await screen.findByText("当前运营内容已确认")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "生成下一轮优化方案" }));
+    await waitFor(() => expect(executeDeliverableAction).toHaveBeenCalledWith(expect.objectContaining({
+      artifactId: source.id,
+      actionCode: "generate_next_iteration",
+      idempotencyKey: expect.stringContaining(`artifact-${source.id}-generate_next_iteration-`),
+      input: {},
+    })));
+    expect(await screen.findByText("生成下一轮优化方案已进入执行队列")).toBeInTheDocument();
 
-    vi.mocked(acceptArtifact).mockRejectedValueOnce(new Error("network down"));
-    fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
+    vi.mocked(executeDeliverableAction).mockRejectedValueOnce(new Error("network down"));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: /生成下一轮优化方案/ }),
+    ).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: /生成下一轮优化方案/ }));
     expect(await screen.findByText("网络连接中断，请检查连接后重试。")).toBeInTheDocument();
   });
 
-  it("silently discards a delayed confirmation from the previous account", async () => {
+  it("silently discards a delayed artifact action from the previous account", async () => {
     const source = presentationArtifact();
-    const request = deferred<Artifact>();
+    const request = deferred<DeliverableActionExecution>();
     const turn = {
       ...persistedTurn(501, "artifact-client", "检查账号", "已完成账号诊断"),
       projections: [{
@@ -282,22 +293,26 @@ describe("BrainHome V3 conversation projection", () => {
     saveThread(3, 81);
     vi.mocked(getConversation).mockResolvedValue(thread(81, [turn]));
     vi.mocked(getArtifact).mockResolvedValue(source);
-    vi.mocked(acceptArtifact).mockReturnValue(request.promise);
+    vi.mocked(executeDeliverableAction).mockReturnValue(request.promise);
 
     renderBrainHome();
 
-    fireEvent.click(await screen.findByRole("button", { name: "确认并准备下一步建议" }));
-    await waitFor(() => expect(acceptArtifact).toHaveBeenCalledWith(source.id));
+    fireEvent.click(await screen.findByRole("button", { name: "生成下一轮优化方案" }));
+    await waitFor(() => expect(executeDeliverableAction).toHaveBeenCalled());
 
     mocks.workspace.accountId = 4;
     fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
     fireEvent.click(screen.getByRole("tab", { name: "对话" }));
     await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
 
-    await act(async () => request.resolve({ ...source, status: "accepted" }));
+    await act(async () => request.resolve(actionExecution(source, {
+      actionCode: "generate_next_iteration",
+      status: "queued",
+      resource: { type: "conversation_turn", id: 778 },
+    })));
 
     expect(screen.getByLabelText("运营大脑消息")).toHaveValue("");
-    expect(screen.queryByText("已确认，已准备下一步运营建议")).not.toBeInTheDocument();
+    expect(screen.queryByText("生成下一轮优化方案已进入执行队列")).not.toBeInTheDocument();
   });
 
   it("keeps a video artifact presentation format when requesting a revision", async () => {
@@ -319,12 +334,19 @@ describe("BrainHome V3 conversation projection", () => {
     };
     saveThread(3, 81);
     vi.mocked(getConversation).mockResolvedValue(thread(81, [turn]));
-    vi.mocked(getArtifact).mockResolvedValue(source);
-    vi.mocked(reviseArtifact).mockResolvedValue({
+    const revision = {
       ...source,
       id: 5002,
       version: 2,
-    });
+    };
+    vi.mocked(getArtifact)
+      .mockResolvedValueOnce(source)
+      .mockResolvedValueOnce(revision);
+    vi.mocked(executeDeliverableAction).mockResolvedValue(actionExecution(source, {
+      actionCode: "request_revision",
+      status: "succeeded",
+      resource: { type: "artifact", id: revision.id },
+    }));
 
     renderBrainHome();
 
@@ -334,10 +356,13 @@ describe("BrainHome V3 conversation projection", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
 
-    await waitFor(() => expect(reviseArtifact).toHaveBeenCalledWith(expect.objectContaining({
+    await waitFor(() => expect(executeDeliverableAction).toHaveBeenCalledWith(expect.objectContaining({
       artifactId: source.id,
-      payload: expect.objectContaining({ presentation_format: "product_video" }),
-      note: "补充产品卖点镜头",
+      actionCode: "request_revision",
+      input: expect.objectContaining({
+        payload: expect.objectContaining({ presentation_format: "product_video" }),
+        note: "补充产品卖点镜头",
+      }),
     })));
   });
 
@@ -1508,6 +1533,26 @@ function presentationArtifact(): Artifact {
     evidence_refs: [],
     quality: null,
     created_at: "2026-07-28T00:00:00Z",
+  };
+}
+
+function actionExecution(
+  artifact: Artifact,
+  overrides: {
+    actionCode: DeliverableActionExecution["action_code"];
+    status: DeliverableActionExecution["status"];
+    resource: DeliverableActionExecution["resource"];
+  },
+): DeliverableActionExecution {
+  return {
+    execution_id: 901,
+    artifact_id: artifact.id,
+    artifact_version: artifact.version,
+    action_code: overrides.actionCode,
+    status: overrides.status,
+    resource: overrides.resource,
+    result: {},
+    replayed: false,
   };
 }
 

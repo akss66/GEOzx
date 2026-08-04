@@ -10,12 +10,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
-  acceptArtifact,
   approveToolCall,
   createConversation,
+  executeDeliverableAction,
+  getArtifact,
   getConversation,
   listComposerSkills,
-  reviseArtifact,
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
@@ -659,26 +659,45 @@ export default function BrainHome() {
     ),
   });
 
-  const formalArtifactAcceptMutation = useMutation({
-    mutationFn: (input: {
+  const deliverableActionMutation = useMutation({
+    mutationFn: async (input: {
       sourceArtifact: Artifact;
-      createNextStep: boolean;
+      action: Extract<ArtifactAction, { type: "execute" }>["action"];
+      actionInput: Record<string, unknown>;
       accountId: number;
-    }) =>
-      acceptArtifact(input.sourceArtifact.id),
-    onSuccess: (accepted, input) => {
+      idempotencyKey: string;
+    }) => {
+      const execution = await executeDeliverableAction({
+        artifactId: input.sourceArtifact.id,
+        actionCode: input.action.code,
+        idempotencyKey: input.idempotencyKey,
+        input: input.actionInput,
+      });
+      const revisedArtifact = execution.resource?.type === "artifact"
+        ? await getArtifact(execution.resource.id)
+        : null;
+      return { execution, revisedArtifact };
+    },
+    onSuccess: ({ execution, revisedArtifact }, input) => {
       if (effectiveAccountIdRef.current !== input.accountId) return;
-      if (!matchesArtifactResponse(accepted, input.sourceArtifact, "accept")) {
-        message.error("运营内容返回校验失败，请重试。");
-        return;
+      if (revisedArtifact != null) {
+        if (!matchesArtifactResponse(revisedArtifact, input.sourceArtifact, "revision")) {
+          message.error("修改版本返回校验失败，请刷新后重试。");
+          return;
+        }
+        setArtifactRevisionChains((current) =>
+          appendArtifactRevision(current, input.sourceArtifact, revisedArtifact)
+        );
+        setArtifactSourceOverrides((current) =>
+          supersedeRootArtifact(current, input.sourceArtifact)
+        );
+        setSelectedArtifact((current) =>
+          current?.id === input.sourceArtifact.id
+          && current.account_id === input.sourceArtifact.account_id
+            ? revisedArtifact
+            : current
+        );
       }
-      setArtifactRevisionChains((current) => updateExistingArtifactChain(current, accepted));
-      setSelectedArtifact((current) =>
-        current?.id === input.sourceArtifact.id
-        && current.account_id === input.sourceArtifact.account_id
-          ? accepted
-          : current
-      );
       setArtifactRefreshKey((value) => value + 1);
       void qc.invalidateQueries({
         queryKey: ["account-artifacts", input.sourceArtifact.account_id],
@@ -688,58 +707,11 @@ export default function BrainHome() {
           queryKey: ["brain-conversation", activeConversationThreadId],
         });
       }
-      if (input.createNextStep) setGoal(nextStepGoal(accepted));
-      message.success(input.createNextStep ? "已确认，已准备下一步运营建议" : "当前运营内容已确认");
+      message.success(actionSuccessCopy(input.action.label, execution.status));
     },
     onError: (error, input) => {
       if (effectiveAccountIdRef.current !== input.accountId) return;
-      message.error(presentApiError(error, "确认当前运营内容失败，请稍后重试。").message);
-    },
-  });
-
-  const formalArtifactRevisionMutation = useMutation({
-    mutationFn: (input: {
-      sourceArtifact: Artifact;
-      payload: Record<string, unknown>;
-      note: string;
-      accountId: number;
-    }) => reviseArtifact({
-      artifactId: input.sourceArtifact.id,
-      payload: input.payload,
-      note: input.note,
-    }),
-    onSuccess: (revision, input) => {
-      if (effectiveAccountIdRef.current !== input.accountId) return;
-      if (!matchesArtifactResponse(revision, input.sourceArtifact, "revision")) {
-        message.error("修订运营内容校验失败，请重试。");
-        return;
-      }
-      setArtifactRevisionChains((current) =>
-        appendArtifactRevision(current, input.sourceArtifact, revision)
-      );
-      setArtifactSourceOverrides((current) =>
-        supersedeRootArtifact(current, input.sourceArtifact)
-      );
-      setSelectedArtifact((current) =>
-        current?.id === input.sourceArtifact.id
-        && current.account_id === input.sourceArtifact.account_id
-          ? revision
-          : current
-      );
-      setArtifactRefreshKey((value) => value + 1);
-      void qc.invalidateQueries({
-        queryKey: ["account-artifacts", input.sourceArtifact.account_id],
-      });
-      if (activeConversationThreadId != null) {
-        void qc.invalidateQueries({
-          queryKey: ["brain-conversation", activeConversationThreadId],
-        });
-      }
-      message.success("修改请求已提交，正在生成新版本");
-    },
-    onError: (error, input) => {
-      if (effectiveAccountIdRef.current !== input.accountId) return;
-      message.error(presentApiError(error, "修改请求提交失败，请稍后重试。").message);
+      message.error(presentApiError(error, `${input.action.label}失败，请稍后重试。`).message);
     },
   });
 
@@ -1332,16 +1304,18 @@ export default function BrainHome() {
                     >
                       <ArtifactCard
                         artifact={selectedArtifact}
-                        revisionPending={
-                          formalArtifactRevisionMutation.isPending
-                          && formalArtifactRevisionMutation.variables?.sourceArtifact.id
+                        actionPending={
+                          deliverableActionMutation.isPending
+                          && deliverableActionMutation.variables?.sourceArtifact.id
                             === selectedArtifact.id
                         }
-                        onAction={(action) => handleArtifactAction(
-                          action,
-                          formalArtifactAcceptMutation.mutate,
-                          formalArtifactRevisionMutation.mutate,
-                        )}
+                        revisionPending={
+                          deliverableActionMutation.isPending
+                          && deliverableActionMutation.variables?.action.code === "request_revision"
+                          && deliverableActionMutation.variables?.sourceArtifact.id
+                            === selectedArtifact.id
+                        }
+                        onAction={(action) => handleArtifactAction(action, deliverableActionMutation.mutate)}
                       />
                       {selectedArtifact.thread_id != null
                       && selectedArtifact.turn_id != null ? (
@@ -1372,8 +1346,14 @@ export default function BrainHome() {
                     revisionArtifacts={artifactRevisionChains}
                     sourceArtifactOverrides={artifactSourceOverrides}
                     revisingArtifactId={
-                      formalArtifactRevisionMutation.isPending
-                        ? formalArtifactRevisionMutation.variables?.sourceArtifact.id ?? null
+                      deliverableActionMutation.isPending
+                      && deliverableActionMutation.variables?.action.code === "request_revision"
+                        ? deliverableActionMutation.variables?.sourceArtifact.id ?? null
+                        : null
+                    }
+                    actionPendingArtifactId={
+                      deliverableActionMutation.isPending
+                        ? deliverableActionMutation.variables?.sourceArtifact.id ?? null
                         : null
                     }
                     approvingToolCallId={
@@ -1390,11 +1370,7 @@ export default function BrainHome() {
                         comment,
                       })
                     }
-                    onArtifactAction={(action) => handleArtifactAction(
-                      action,
-                      formalArtifactAcceptMutation.mutate,
-                      formalArtifactRevisionMutation.mutate,
-                    )}
+                    onArtifactAction={(action) => handleArtifactAction(action, deliverableActionMutation.mutate)}
                   />
                   {!isGenerating && !pendingPermission ? (
                     <Button
@@ -1604,69 +1580,41 @@ function ConversationEmpty({
 
 function handleArtifactAction(
   action: ArtifactAction,
-  accept: (input: {
+  execute: (input: {
     sourceArtifact: Artifact;
-    createNextStep: boolean;
+    action: Extract<ArtifactAction, { type: "execute" }>["action"];
+    actionInput: Record<string, unknown>;
     accountId: number;
-  }) => void,
-  revise: (input: {
-    sourceArtifact: Artifact;
-    payload: Record<string, unknown>;
-    note: string;
-    accountId: number;
+    idempotencyKey: string;
   }) => void,
 ) {
-  if (action.type === "accept") {
-    accept({
+  if (action.type === "execute") {
+    execute({
       sourceArtifact: action.artifact,
-      createNextStep: false,
+      action: action.action,
+      actionInput: action.input,
       accountId: action.artifact.account_id,
+      idempotencyKey: action.idempotencyKey,
     });
-  } else if (action.type === "accept_and_continue") {
-    accept({
-      sourceArtifact: action.artifact,
-      createNextStep: true,
-      accountId: action.artifact.account_id,
-    });
-  } else if (action.type === "request_revision") {
-    revise({
-      sourceArtifact: action.artifact,
-      payload: buildArtifactRevisionPayload(action.artifact),
-      note: action.note,
-      accountId: action.artifact.account_id,
-    });
+  } else if (action.type === "export") {
+    downloadArtifact(action.artifact);
   }
 }
 
 function matchesArtifactResponse(
   returned: Artifact,
   source: Artifact,
-  operation: "accept" | "revision",
+    operation: "revision",
 ) {
   const sameScope =
     returned.account_id === source.account_id
     && returned.thread_id === source.thread_id
     && returned.turn_id === source.turn_id
     && returned.artifact_type === source.artifact_type;
-  return sameScope && (
-    operation === "accept"
-      ? returned.id === source.id && returned.version === source.version
-      : returned.id !== source.id && returned.version === source.version + 1
-  );
-}
-
-function updateExistingArtifactChain(
-  chains: Record<number, Artifact[]>,
-  accepted: Artifact,
-) {
-  for (const [sourceId, chain] of Object.entries(chains)) {
-    const versionIndex = chain.findIndex((artifact) => artifact.id === accepted.id);
-    if (versionIndex < 0) continue;
-    const nextChain = [...chain];
-    nextChain[versionIndex] = accepted;
-    return { ...chains, [sourceId]: nextChain };
-  }
-  return chains;
+  return sameScope
+    && operation === "revision"
+    && returned.id !== source.id
+    && returned.version === source.version + 1;
 }
 
 function appendArtifactRevision(
@@ -1705,21 +1653,23 @@ function supersedeRootArtifact(
     : overrides;
 }
 
-function buildArtifactRevisionPayload(artifact: Artifact): Record<string, unknown> {
-  return {
-    title: artifact.title,
-    summary: artifact.summary,
-    ...(artifact.presentation_format
-      ? { presentation_format: artifact.presentation_format }
-      : {}),
-    ...Object.fromEntries(
-      artifact.sections.map((section) => [section.key, section.content]),
-    ),
-  };
+function actionSuccessCopy(label: string, status: string) {
+  return status === "queued" ? `${label}已进入执行队列` : `${label}已完成`;
 }
 
-function nextStepGoal(artifact: Artifact) {
-  return `已确认${presentDeliverable(artifact).typeLabel}（编号 #${artifact.id}）。请生成下一步运营建议。`;
+function downloadArtifact(artifact: Artifact) {
+  const payload = JSON.stringify({
+    title: artifact.title,
+    version: artifact.version,
+    summary: artifact.summary,
+    sections: artifact.sections,
+  }, null, 2);
+  const url = URL.createObjectURL(new Blob([payload], { type: "application/json;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${presentDeliverable(artifact).typeLabel}-V${artifact.version}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function asRuntimePayload(payload: DyEvent["payload"]) {

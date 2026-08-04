@@ -158,7 +158,7 @@ describe("ArtifactCard", () => {
     expect(screen.queryByText("field_observation #1")).not.toBeInTheDocument();
   });
 
-  it("uses concrete operations labels and requires a concrete revision note", () => {
+  it("renders only server-advertised business actions and requires a concrete revision note", () => {
     const onAction = vi.fn();
     const artifactWithDetails = {
       ...reviewArtifact,
@@ -170,10 +170,12 @@ describe("ArtifactCard", () => {
     fireEvent.click(viewButton);
     expect(viewButton).not.toBeInTheDocument();
     expect(document.getElementById("artifact-details-5001-1")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "确认当前内容" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认并准备下一步建议" }));
+    fireEvent.click(screen.getByRole("button", { name: "生成下一轮优化方案" }));
     fireEvent.click(screen.getByRole("button", { name: "提出修改" }));
     expect(screen.getByRole("region", { name: "修改运营内容" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "修改核心结论" }), {
+      target: { value: "聚焦本地获客内容。" },
+    });
     expect(screen.getByRole("button", { name: "提交修改" })).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "修改说明" }), {
       target: { value: "请补充三个可执行选题。" },
@@ -181,16 +183,72 @@ describe("ArtifactCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交修改" }));
 
     expect(onAction).toHaveBeenCalledWith({ type: "view_full_report", artifact: artifactWithDetails });
-    expect(onAction).toHaveBeenCalledWith({ type: "accept", artifact: artifactWithDetails });
-    expect(onAction).toHaveBeenCalledWith({ type: "accept_and_continue", artifact: artifactWithDetails });
-    expect(onAction).toHaveBeenCalledWith({
-      type: "request_revision",
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
+      type: "execute",
       artifact: artifactWithDetails,
-      note: "请补充三个可执行选题。",
-    });
+      action: artifactWithDetails.next_actions[1],
+      input: expect.objectContaining({
+        note: "请补充三个可执行选题。",
+        payload: expect.objectContaining({ core_conclusion: "聚焦本地获客内容。" }),
+      }),
+      idempotencyKey: expect.any(String),
+    }));
+    const revisionCall = onAction.mock.calls
+      .map(([value]) => value)
+      .find((value) => value.type === "execute" && value.action.code === "request_revision");
+    expect(revisionCall.input.payload).not.toHaveProperty("acceptance_checklist");
+    expect(revisionCall.input.payload).not.toHaveProperty("raw_tool_logs");
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
+      type: "execute",
+      artifact: artifactWithDetails,
+      action: artifactWithDetails.next_actions[0],
+      input: {},
+      idempotencyKey: expect.any(String),
+    }));
+    expect(screen.queryByRole("button", { name: "确认当前内容" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认并准备下一步建议" })).not.toBeInTheDocument();
     expect(screen.queryByText(/采用成果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/正式成果/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("修改成果")).not.toBeInTheDocument();
+  });
+
+  it("confirms side effects and collects schedule details before executing", async () => {
+    const onAction = vi.fn();
+    const operationalArtifact: Artifact = {
+      ...reviewArtifact,
+      artifact_type: "content_calendar",
+      next_actions: [
+        { code: "create_shoot_task", label: "创建拍摄任务", requires_confirmation: true },
+        { code: "add_to_schedule", label: "加入内容排期", requires_confirmation: true },
+      ],
+    };
+    render(<ArtifactCard artifact={operationalArtifact} onAction={onAction} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "创建拍摄任务" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认执行" }));
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
+      type: "execute",
+      artifact: operationalArtifact,
+      action: operationalArtifact.next_actions[0],
+      input: { confirmed: true },
+      idempotencyKey: expect.any(String),
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "加入内容排期" }));
+    expect(screen.getByRole("region", { name: "设置内容排期" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认排期" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("计划发布时间"), {
+      target: { value: "2026-08-10T09:30" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认排期" }));
+    const confirmScheduleButtons = await screen.findAllByRole("button", { name: "确认排期" });
+    fireEvent.click(confirmScheduleButtons.at(-1)!);
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
+      type: "execute",
+      artifact: operationalArtifact,
+      action: operationalArtifact.next_actions[1],
+      input: expect.objectContaining({ confirmed: true, timezone: expect.any(String) }),
+    }));
   });
 
   it("only offers the one-way detail action when extra business details exist", () => {

@@ -617,6 +617,20 @@ export interface DeliverableAction {
   requires_confirmation: boolean;
 }
 
+export interface DeliverableActionExecution {
+  execution_id: number;
+  artifact_id: number;
+  artifact_version: number;
+  action_code: DeliverableActionCode;
+  status: "succeeded" | "queued" | "pending_confirmation" | "failed";
+  resource: {
+    type: "shoot_task" | "schedule_entry" | "conversation_turn" | "artifact";
+    id: number;
+  } | null;
+  result: Record<string, unknown>;
+  replayed: boolean;
+}
+
 export interface Artifact {
   id: number;
   account_id: number;

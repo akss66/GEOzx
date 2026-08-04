@@ -21,6 +21,7 @@ export function TurnStream({
   onApprove,
   onArtifactAction,
   revisingArtifactId = null,
+  actionPendingArtifactId = null,
   artifactRefreshKey = 0,
   revisionArtifacts = {},
   sourceArtifactOverrides = {},
@@ -32,6 +33,7 @@ export function TurnStream({
   onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId?: number | null;
+  actionPendingArtifactId?: number | null;
   artifactRefreshKey?: number;
   revisionArtifacts?: Record<number, Artifact[]>;
   sourceArtifactOverrides?: Record<number, Artifact>;
@@ -56,6 +58,7 @@ export function TurnStream({
               thread,
               onArtifactAction,
               revisingArtifactId,
+              actionPendingArtifactId,
               artifactRefreshKey,
               revisionArtifacts,
               sourceArtifactOverrides,
@@ -79,6 +82,7 @@ function renderDeliverables({
   thread,
   onArtifactAction,
   revisingArtifactId,
+  actionPendingArtifactId,
   artifactRefreshKey,
   revisionArtifacts,
   sourceArtifactOverrides,
@@ -87,6 +91,7 @@ function renderDeliverables({
   thread: ConversationThread;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
+  actionPendingArtifactId: number | null;
   artifactRefreshKey: number;
   revisionArtifacts: Record<number, Artifact[]>;
   sourceArtifactOverrides: Record<number, Artifact>;
@@ -109,6 +114,7 @@ function renderDeliverables({
         sourceTurnId={sourceTurnId}
         onAction={onArtifactAction}
         revisingArtifactId={revisingArtifactId}
+        actionPendingArtifactId={actionPendingArtifactId}
         revisionArtifacts={revisionArtifacts[projection.artifact_id]}
         sourceArtifactOverride={sourceArtifactOverrides[projection.artifact_id]}
         refreshKey={artifactRefreshKey}

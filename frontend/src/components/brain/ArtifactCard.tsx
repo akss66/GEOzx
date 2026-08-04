@@ -1,15 +1,20 @@
 /* eslint-disable react-refresh/only-export-components -- artifact copy helper is shared with business-facing views */
-import { Button, Input, Tag } from "antd";
-import { useMemo, useState } from "react";
+import { Button, Input, Popconfirm, Tag } from "antd";
+import { useMemo, useRef, useState } from "react";
 
-import type { Artifact, ArtifactSection } from "../../types";
+import type { Artifact, ArtifactSection, DeliverableAction } from "../../types";
 import { presentDeliverable } from "./deliverablePresentation";
 
 export type ArtifactAction =
   | { type: "view_full_report"; artifact: Artifact }
-  | { type: "accept"; artifact: Artifact }
-  | { type: "accept_and_continue"; artifact: Artifact }
-  | { type: "request_revision"; artifact: Artifact; note: string };
+  | {
+      type: "execute";
+      artifact: Artifact;
+      action: DeliverableAction;
+      input: Record<string, unknown>;
+      idempotencyKey: string;
+    }
+  | { type: "export"; artifact: Artifact };
 
 const INTERNAL = /(?:acceptance|checklist|debug|kernel|policy|prompt|trace|raw|tool[ _-]?log|credential|stack)/i;
 const BANNED_BUSINESS_COPY = /脚本生成中|正式成果|采用成果|成果/g;
@@ -63,17 +68,23 @@ export function ArtifactCard({
   artifact,
   onAction,
   revisionPending = false,
+  actionPending = false,
 }: {
   artifact: Artifact;
   onAction: (action: ArtifactAction) => void;
   revisionPending?: boolean;
+  actionPending?: boolean;
 }) {
+  const actionKeys = useRef(new Map<string, string>());
   const [fullReportOpen, setFullReportOpen] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [technicalEvidenceOpen, setTechnicalEvidenceOpen] = useState(false);
   const [evidencePage, setEvidencePage] = useState(1);
   const [editingRevision, setEditingRevision] = useState(false);
   const [revisionNote, setRevisionNote] = useState("");
+  const [revisionDrafts, setRevisionDrafts] = useState<Record<string, string>>({});
+  const [editingSchedule, setEditingSchedule] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState("");
   const sections = useMemo(() => artifact.sections.filter(isBusinessSection), [artifact.sections]);
   const primarySections = sections.filter((section) => PRIMARY_KEYS.includes(section.key));
   const remainingSections = sections.filter((section) => !PRIMARY_KEYS.includes(section.key));
@@ -86,11 +97,22 @@ export function ArtifactCard({
     (evidencePage - 1) * evidencePageSize,
     evidencePage * evidencePageSize,
   );
-  const canAct = ["draft", "ready_for_review"].includes(artifact.status);
   const revisionInProgress = revisionPending || artifact.status === "revision_requested";
   const presentation = presentDeliverable(artifact);
   const summary = businessText(artifact.summary, "当前运营内容已完成安全核验。");
-  const editAction = presentation.secondaryActions.find((action) => action.kind === "edit");
+  const revisionAction = artifact.next_actions.find((action) => action.code === "request_revision");
+  const scheduleAction = artifact.next_actions.find((action) => action.code === "add_to_schedule");
+  const directActions = artifact.next_actions.filter((action) => ![
+    "request_revision",
+    "add_to_schedule",
+  ].includes(action.code));
+  const executeAction = (action: DeliverableAction, input: Record<string, unknown>) => {
+    const fingerprint = `${artifact.id}:${artifact.version}:${action.code}:${JSON.stringify(input)}`;
+    const idempotencyKey = actionKeys.current.get(fingerprint)
+      ?? `artifact-${artifact.id}-${action.code}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+    actionKeys.current.set(fingerprint, idempotencyKey);
+    onAction({ type: "execute", artifact, action, input, idempotencyKey });
+  };
 
   return (
     <article className="tz-artifact-card" aria-label={`运营内容：${presentation.typeLabel} · V${artifact.version}`}>
@@ -136,17 +158,82 @@ export function ArtifactCard({
             {presentation.primaryAction.label}
           </Button>
         ) : null}
-        {canAct ? <>
-          <Button onClick={() => onAction({ type: "accept", artifact })}>确认当前内容</Button>
-          <Button onClick={() => onAction({ type: "accept_and_continue", artifact })}>
-            确认并准备下一步建议
+        {directActions.map((action) => action.code === "export" ? (
+          <Button key={action.code} onClick={() => onAction({ type: "export", artifact })}>
+            {action.label}
           </Button>
-          <Button onClick={() => setEditingRevision((open) => !open)}>{editAction?.label ?? "提出修改"}</Button>
-        </> : null}
+        ) : action.requires_confirmation ? (
+          <Popconfirm
+            key={action.code}
+            title={`确认${action.label}？`}
+            description="确认后系统会创建真实业务记录，并保留可追踪的执行结果。"
+            okText="确认执行"
+            cancelText="取消"
+            onConfirm={() => executeAction(action, { confirmed: true })}
+          >
+            <Button loading={actionPending} disabled={actionPending}>{action.label}</Button>
+          </Popconfirm>
+        ) : (
+          <Button key={action.code} loading={actionPending} disabled={actionPending} onClick={() => executeAction(action, {})}>
+            {action.label}
+          </Button>
+        ))}
+        {scheduleAction ? (
+          <Button disabled={actionPending} onClick={() => setEditingSchedule((open) => !open)}>{scheduleAction.label}</Button>
+        ) : null}
+        {revisionAction ? (
+          <Button disabled={actionPending} onClick={() => setEditingRevision((open) => {
+            if (!open) setRevisionDrafts(createRevisionDrafts(artifact));
+            return !open;
+          })}>{revisionAction.label}</Button>
+        ) : null}
       </div>
+
+      {editingSchedule && scheduleAction ? (
+        <section className="tz-artifact-card__revision" aria-label="设置内容排期">
+          <Input
+            type="datetime-local"
+            aria-label="计划发布时间"
+            value={scheduledAt}
+            onChange={(event) => setScheduledAt(event.target.value)}
+          />
+          <div>
+            <Button onClick={() => setEditingSchedule(false)}>取消</Button>
+            <Popconfirm
+              title="确认加入内容排期？"
+              description="系统将按你选择的时间创建一条真实排期记录。"
+              okText="确认排期"
+              cancelText="再检查一下"
+              disabled={!scheduledAt}
+              onConfirm={() => executeAction(scheduleAction, {
+                  confirmed: true,
+                  scheduled_at: new Date(scheduledAt).toISOString(),
+                  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
+                })}
+            >
+              <Button type="primary" loading={actionPending} disabled={!scheduledAt || actionPending}>确认排期</Button>
+            </Popconfirm>
+          </div>
+        </section>
+      ) : null}
 
       {editingRevision ? (
         <section className="tz-artifact-card__revision" aria-label="修改运营内容">
+          <p>直接修改下面的业务内容；保存后会生成一个新的可追踪版本。</p>
+          {sections.filter(isEditableRevisionSection).map((section) => (
+            <label key={section.key}>
+              <span>{BUSINESS_TITLES[section.key] ?? businessText(section.title, "业务内容")}</span>
+              <Input.TextArea
+                aria-label={`修改${BUSINESS_TITLES[section.key] ?? businessText(section.title, "业务内容")}`}
+                value={revisionDrafts[section.key] ?? ""}
+                autoSize={{ minRows: 2, maxRows: 8 }}
+                onChange={(event) => setRevisionDrafts((current) => ({
+                  ...current,
+                  [section.key]: event.target.value,
+                }))}
+              />
+            </label>
+          ))}
           <Input.TextArea
             aria-label="修改说明"
             value={revisionNote}
@@ -159,12 +246,12 @@ export function ArtifactCard({
             <Button onClick={() => setEditingRevision(false)}>取消</Button>
             <Button
               type="primary"
-              disabled={!revisionNote.trim()}
-              onClick={() => onAction({
-                type: "request_revision",
-                artifact,
-                note: revisionNote.trim(),
-              })}
+              loading={actionPending}
+              disabled={!revisionNote.trim() || actionPending}
+              onClick={() => revisionAction && executeAction(revisionAction, {
+                  note: revisionNote.trim(),
+                  payload: buildArtifactRevisionPayload(artifact, revisionDrafts),
+                })}
             >
               提交修改
             </Button>
@@ -221,6 +308,55 @@ export function ArtifactCard({
       </section>
     </article>
   );
+}
+
+function buildArtifactRevisionPayload(
+  artifact: Artifact,
+  drafts: Record<string, string>,
+): Record<string, unknown> {
+  return {
+    title: artifact.title,
+    summary: artifact.summary,
+    ...(artifact.presentation_format
+      ? { presentation_format: artifact.presentation_format }
+      : {}),
+    ...Object.fromEntries(artifact.sections.filter(isBusinessSection).map((section) => [
+      section.key,
+      parseRevisionDraft(section.content, drafts[section.key]),
+    ])),
+  };
+}
+
+function createRevisionDrafts(artifact: Artifact) {
+  return Object.fromEntries(artifact.sections.filter(isEditableRevisionSection).map((section) => [
+    section.key,
+    formatRevisionDraft(section.content),
+  ]));
+}
+
+function isEditableRevisionSection(section: ArtifactSection) {
+  return isBusinessSection(section) && !["participating_experts", "critic"].includes(section.key);
+}
+
+function formatRevisionDraft(value: ArtifactSection["content"]): string {
+  if (Array.isArray(value)) return value.map((item) => renderBusinessValue(item)).join("\n");
+  if (typeof value === "object" && value !== null) return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
+function parseRevisionDraft(original: ArtifactSection["content"], draft: string | undefined) {
+  if (draft == null) return original;
+  if (Array.isArray(original)) return draft.split("\n").map((item) => item.trim()).filter(Boolean);
+  if (typeof original === "number") return Number(draft);
+  if (typeof original === "boolean") return draft.trim().toLowerCase() === "true";
+  if (typeof original === "object" && original !== null) {
+    try {
+      return JSON.parse(draft) as Record<string, unknown>;
+    } catch {
+      return original;
+    }
+  }
+  return draft.trim();
 }
 
 function fallbackEvidenceSummary(evidence: Artifact["evidence_refs"]) {

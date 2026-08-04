@@ -14,6 +14,7 @@ export function TurnArtifact({
   refreshKey,
   onAction,
   revisingArtifactId,
+  actionPendingArtifactId,
   revisionArtifacts = [],
   sourceArtifactOverride,
   ...shared
@@ -26,6 +27,7 @@ export function TurnArtifact({
   refreshKey: number;
   onAction?: (action: ArtifactAction) => void;
   revisingArtifactId: number | null;
+  actionPendingArtifactId?: number | null;
   revisionArtifacts?: Artifact[];
   sourceArtifactOverride?: Artifact;
   className: string;
@@ -78,6 +80,7 @@ export function TurnArtifact({
             artifact={source}
             onAction={onAction ?? (() => {})}
             revisionPending={revisingArtifactId === source.id}
+            actionPending={actionPendingArtifactId === source.id}
           />
           {revisionChain?.map((revision, index) => (
             <section
@@ -92,6 +95,7 @@ export function TurnArtifact({
                 artifact={revision}
                 onAction={onAction ?? (() => {})}
                 revisionPending={revisingArtifactId === revision.id}
+                actionPending={actionPendingArtifactId === revision.id}
               />
             </section>
           ))}
