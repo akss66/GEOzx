@@ -593,6 +593,30 @@ export type ContentArtifactFormat =
   | "image_post"
   | "live_flow";
 
+export interface ArtifactPresentation {
+  type_label: string;
+  completion_label: string;
+  status_label: string;
+  detail_action_label: string;
+}
+
+export type DeliverableActionCode =
+  | "create_optimization_plan"
+  | "generate_production_briefs"
+  | "create_shoot_task"
+  | "add_to_schedule"
+  | "prepare_manual_publish"
+  | "record_publish_result"
+  | "generate_next_iteration"
+  | "request_revision"
+  | "export";
+
+export interface DeliverableAction {
+  code: DeliverableActionCode;
+  label: string;
+  requires_confirmation: boolean;
+}
+
 export interface Artifact {
   id: number;
   account_id: number;
@@ -603,6 +627,8 @@ export interface Artifact {
   task_id: number | null;
   artifact_type: KnownArtifactType | (string & {});
   presentation_format?: ContentArtifactFormat | null;
+  presentation: ArtifactPresentation;
+  next_actions: DeliverableAction[];
   title: string;
   version: number;
   status: ArtifactStatus;

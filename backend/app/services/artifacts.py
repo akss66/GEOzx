@@ -35,9 +35,12 @@ from app.schemas.artifacts import (
     ArtifactOut,
     ArtifactPageOut,
     ArtifactPagination,
+    ArtifactPresentationOut,
     ArtifactQuality,
     ArtifactSection,
     ArtifactStatus,
+    DeliverableActionCode,
+    DeliverableActionOut,
     EvidenceRef,
     ScriptPresentationFormat,
 )
@@ -57,6 +60,13 @@ _STATUS_TO_ARTIFACT: dict[DeliverableStatus, ArtifactStatus] = {
     DeliverableStatus.SUPERSEDED: "superseded",
 }
 _ARTIFACT_TO_STATUS = {value: key for key, value in _STATUS_TO_ARTIFACT.items()}
+_ARTIFACT_STATUS_LABELS: dict[ArtifactStatus, str] = {
+    "draft": "草稿",
+    "ready_for_review": "待确认",
+    "accepted": "已确认",
+    "revision_requested": "正在修改",
+    "superseded": "历史版本",
+}
 _ACCOUNT_INSPECTION_ARTIFACT_TYPE = "account_inspection_report"
 _DELIVERABLE_ARTIFACT_TYPES = {item.value: item for item in DeliverableType}
 _BUSINESS_ARTIFACT_DATABASE_TYPES: dict[str, frozenset[DeliverableType]] = {
@@ -147,6 +157,40 @@ _SECTION_TITLES.update(
 )
 _NON_SECTION_KEYS = {"title", "summary", "evidence_refs", "presentation_format"}
 _SCRIPT_PRESENTATION_FORMATS = {"spoken", "storyboard", "product_video", "image_post", "live_flow"}
+_SCRIPT_PRESENTATIONS: dict[ScriptPresentationFormat, tuple[str, str, str]] = {
+    "spoken": ("口播拍摄稿", "口播稿", "查看口播拍摄稿"),
+    "storyboard": ("分镜拍摄稿", "分镜拍摄稿", "查看分镜拍摄稿"),
+    "product_video": ("产品视频拍摄稿", "产品视频拍摄稿", "查看产品视频拍摄稿"),
+    "image_post": ("图文发布稿", "图文发布稿", "查看图文发布稿"),
+    "live_flow": ("直播流程与话术稿", "直播流程与话术稿", "查看直播流程与话术稿"),
+}
+_FIXED_PRESENTATIONS: dict[str, tuple[str, str, str]] = {
+    "account_inspection_report": ("账号诊断", "已完成当前账号运营诊断", "查看账号诊断"),
+    "account_positioning": ("账号定位方案", "已整理当前账号定位方向", "查看账号定位方案"),
+    "positioning_strategy": ("账号定位方案", "已整理当前账号定位方向", "查看账号定位方案"),
+    "visual_brief": ("视觉制作说明", "已整理画面与素材要求", "查看视觉制作说明"),
+    "art_prompt": ("视觉制作说明", "已整理画面与素材要求", "查看视觉制作说明"),
+    "video_asset": ("视频素材清单", "已整理可用视频素材", "查看视频素材清单"),
+    "edited_video": ("成片制作清单", "已整理剪辑与交付要求", "查看成片制作清单"),
+    "platform_publish_receipt": ("发布记录", "已记录本次发布结果", "查看发布记录"),
+    "review_report": ("运营复盘", "已完成本周期数据复盘", "查看运营复盘"),
+    "engagement_review": ("互动复盘", "已整理近期互动反馈", "查看互动复盘"),
+    "ad_plan": ("投放计划", "已整理投放目标与预算建议", "查看投放计划"),
+    "cs_record": ("用户互动记录", "已整理用户反馈与回复建议", "查看用户互动记录"),
+    "operation_execution_plan": ("本周运营执行计划", "已整理本周执行步骤", "查看运营执行计划"),
+}
+ActionSpec: TypeAlias = tuple[DeliverableActionCode, str, bool]
+_REQUEST_REVISION_ACTION: ActionSpec = ("request_revision", "提出修改", False)
+_EXPORT_ACTION: ActionSpec = ("export", "导出内容", False)
+_PRIMARY_ACTIONS: dict[str, ActionSpec] = {
+    "account_inspection_report": ("generate_next_iteration", "生成下一轮优化方案", False),
+    "review_report": ("generate_next_iteration", "生成下一轮优化方案", False),
+    "engagement_review": ("generate_next_iteration", "生成下一轮优化方案", False),
+    "operation_execution_plan": ("generate_next_iteration", "生成下一轮优化方案", False),
+}
+_ACTIONABLE_ARTIFACT_STATUSES: frozenset[ArtifactStatus] = frozenset(
+    {"ready_for_review", "accepted"}
+)
 _INTERNAL_KEY_MARKERS = {
     "acceptance",
     "checklist",
@@ -539,6 +583,8 @@ async def project_artifact(
         raw_payload,
         business_artifact_type=business_artifact_type,
     )
+    artifact_status = _STATUS_TO_ARTIFACT[deliverable.status]
+    presentation_format = _presentation_format(payload, business_artifact_type)
     quality_issues = _safe_issue_list(quality.issues or []) if quality is not None else []
     return ArtifactOut(
         id=deliverable.id,
@@ -549,10 +595,17 @@ async def project_artifact(
         skill_run_id=deliverable.skill_run_id,
         task_id=provenance.task_id,
         artifact_type=business_artifact_type,
-        presentation_format=_presentation_format(payload, business_artifact_type),
+        presentation_format=presentation_format,
+        presentation=_artifact_presentation(
+            business_artifact_type,
+            payload,
+            artifact_status=artifact_status,
+            presentation_format=presentation_format,
+        ),
+        next_actions=_artifact_next_actions(business_artifact_type, artifact_status),
         title=_artifact_title(payload, content),
         version=deliverable.version,
-        status=_STATUS_TO_ARTIFACT[deliverable.status],
+        status=artifact_status,
         summary=_artifact_summary(payload, content),
         sections=_artifact_sections(
             deliverable.type,
@@ -754,6 +807,69 @@ def _presentation_format(
         return None
     value = payload.get("presentation_format")
     return value if value in _SCRIPT_PRESENTATION_FORMATS else "storyboard"
+
+
+def _artifact_presentation(
+    artifact_type: str,
+    payload: dict[str, Any],
+    *,
+    artifact_status: ArtifactStatus,
+    presentation_format: ScriptPresentationFormat | None,
+) -> ArtifactPresentationOut:
+    if artifact_type == DeliverableType.VIDEO_SCRIPT.value:
+        script_format = presentation_format or "storyboard"
+        type_label, completion_noun, detail_action_label = _SCRIPT_PRESENTATIONS[
+            script_format
+        ]
+        completion_label = f"已生成 1 条可直接拍摄的{completion_noun}"
+    elif artifact_type == DeliverableType.TOPIC_PLAN.value:
+        count = _structured_list_count(payload, "topics")
+        type_label = "选题清单"
+        completion_label = f"已规划 {count} 个可执行选题"
+        detail_action_label = f"查看 {count} 个选题"
+    elif artifact_type in {"content_calendar", DeliverableType.PUBLISH_CALENDAR.value}:
+        count = _structured_list_count(payload, "items")
+        type_label = "内容排期表"
+        completion_label = f"已安排 {count} 条内容发布顺序"
+        detail_action_label = f"查看 {count} 条发布安排"
+    else:
+        type_label, completion_label, detail_action_label = _FIXED_PRESENTATIONS.get(
+            artifact_type,
+            ("运营报告", "已生成运营报告", "查看完整报告"),
+        )
+    return ArtifactPresentationOut(
+        type_label=type_label,
+        completion_label=completion_label,
+        status_label=_ARTIFACT_STATUS_LABELS[artifact_status],
+        detail_action_label=detail_action_label,
+    )
+
+
+def _structured_list_count(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    return len(value) if isinstance(value, list) else 0
+
+
+def _artifact_next_actions(
+    artifact_type: str,
+    artifact_status: ArtifactStatus,
+) -> list[DeliverableActionOut]:
+    if artifact_status not in _ACTIONABLE_ARTIFACT_STATUSES:
+        return []
+    primary = _PRIMARY_ACTIONS.get(artifact_type)
+    specs = (
+        (primary, _REQUEST_REVISION_ACTION, _EXPORT_ACTION)
+        if primary is not None
+        else (_REQUEST_REVISION_ACTION, _EXPORT_ACTION)
+    )
+    return [
+        DeliverableActionOut(
+            code=code,
+            label=label,
+            requires_confirmation=requires_confirmation,
+        )
+        for code, label, requires_confirmation in specs
+    ]
 
 
 def _safe_payload(

@@ -17,6 +17,21 @@ const reviewArtifact = {
   skill_run_id: 4001,
   task_id: 21,
   artifact_type: "account_inspection_report",
+  presentation: {
+    type_label: "账号诊断",
+    completion_label: "已完成当前账号运营诊断",
+    status_label: "待确认",
+    detail_action_label: "查看账号诊断",
+  },
+  next_actions: [
+    {
+      code: "generate_next_iteration",
+      label: "生成下一轮优化方案",
+      requires_confirmation: false,
+    },
+    { code: "request_revision", label: "提出修改", requires_confirmation: false },
+    { code: "export", label: "导出内容", requires_confirmation: false },
+  ],
   title: "账号体检报告",
   version: 1,
   status: "ready_for_review",

@@ -16,6 +16,16 @@ function artifact(
     skill_run_id: 1,
     task_id: 1,
     artifact_type,
+    presentation: {
+      type_label: "运营报告",
+      completion_label: "已生成运营报告",
+      status_label: "待确认",
+      detail_action_label: "查看完整报告",
+    },
+    next_actions: [
+      { code: "request_revision", label: "提出修改", requires_confirmation: false },
+      { code: "export", label: "导出内容", requires_confirmation: false },
+    ],
     title: "不应展示的服务端标题",
     version: 1,
     status: "ready_for_review",

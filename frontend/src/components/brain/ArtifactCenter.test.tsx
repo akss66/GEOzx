@@ -20,6 +20,16 @@ const artifact = (id: number, accountId = 3, createdAt = "2026-07-28T08:00:00Z")
   skill_run_id: 2,
   task_id: 3,
   artifact_type: id === 2 ? "weekly_review" : "account_inspection_report",
+  presentation: {
+    type_label: id === 2 ? "运营报告" : "账号诊断",
+    completion_label: id === 2 ? "已生成运营报告" : "已完成当前账号运营诊断",
+    status_label: id === 2 ? "已确认" : "待确认",
+    detail_action_label: id === 2 ? "查看完整报告" : "查看账号诊断",
+  },
+  next_actions: [
+    { code: "request_revision", label: "提出修改", requires_confirmation: false },
+    { code: "export", label: "导出内容", requires_confirmation: false },
+  ],
   title: "脚本生成中",
   version: 1,
   status: id === 2 ? "accepted" : "ready_for_review",

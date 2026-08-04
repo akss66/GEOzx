@@ -19,6 +19,30 @@ ScriptPresentationFormat = Literal[
     "image_post",
     "live_flow",
 ]
+DeliverableActionCode = Literal[
+    "create_optimization_plan",
+    "generate_production_briefs",
+    "create_shoot_task",
+    "add_to_schedule",
+    "prepare_manual_publish",
+    "record_publish_result",
+    "generate_next_iteration",
+    "request_revision",
+    "export",
+]
+
+
+class ArtifactPresentationOut(BaseModel):
+    type_label: str
+    completion_label: str
+    status_label: str
+    detail_action_label: str
+
+
+class DeliverableActionOut(BaseModel):
+    code: DeliverableActionCode
+    label: str
+    requires_confirmation: bool = False
 
 
 class ArtifactSection(BaseModel):
@@ -62,6 +86,8 @@ class ArtifactOut(BaseModel):
     task_id: int | None
     artifact_type: str
     presentation_format: ScriptPresentationFormat | None = None
+    presentation: ArtifactPresentationOut
+    next_actions: list[DeliverableActionOut]
     title: str
     version: int
     status: ArtifactStatus

@@ -353,14 +353,197 @@ async def test_video_script_artifact_projects_the_validated_presentation_format(
     )
     token = await _token(client, admin.email, "admin-pw-123")
 
+    detail = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(token),
+    )
+    listing = await client.get(
+        f"/artifacts?account_id={seeded[1].id}&artifact_type=video_script",
+        headers=_auth(token),
+    )
+
+    assert detail.status_code == 200
+    assert listing.status_code == 200
+    artifact = detail.json()
+    assert listing.json()["data"] == [artifact]
+    assert artifact["artifact_type"] == "video_script"
+    assert artifact["presentation_format"] == presentation_format
+    expected_type_labels = {
+        "spoken": "口播拍摄稿",
+        "storyboard": "分镜拍摄稿",
+        "product_video": "产品视频拍摄稿",
+        "image_post": "图文发布稿",
+        "live_flow": "直播流程与话术稿",
+    }
+    assert artifact["presentation"]["type_label"] == expected_type_labels[
+        presentation_format
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spoken_script_presentation_counts_one_artifact_not_its_scenes(
+    client, session, admin,
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="单条口播稿",
+        payload=_video_script_payload("spoken"),
+        skill_code="script_generation",
+        deliverable_type=DeliverableType.VIDEO_SCRIPT,
+    )
+    token = await _token(client, admin.email, "admin-pw-123")
+
     response = await client.get(
         f"/artifacts/{seeded[8].id}",
         headers=_auth(token),
     )
 
     assert response.status_code == 200
-    assert response.json()["artifact_type"] == "video_script"
-    assert response.json()["presentation_format"] == presentation_format
+    artifact = response.json()
+    assert artifact["presentation"] == {
+        "type_label": "口播拍摄稿",
+        "completion_label": "已生成 1 条可直接拍摄的口播稿",
+        "status_label": "待确认",
+        "detail_action_label": "查看口播拍摄稿",
+    }
+    assert artifact["next_actions"] == [
+        {
+            "code": "request_revision",
+            "label": "提出修改",
+            "requires_confirmation": False,
+        },
+        {
+            "code": "export",
+            "label": "导出内容",
+            "requires_confirmation": False,
+        },
+    ]
+    assert "create_shoot_task" not in {
+        action["code"] for action in artifact["next_actions"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deliverable_type", "payload", "expected_presentation", "forbidden_action"),
+    [
+        (
+            DeliverableType.TOPIC_PLAN,
+            {
+                "theme": "下周增长选题",
+                "topics": [{"title": f"选题 {index}"} for index in range(1, 6)],
+                "posting_notes": [],
+            },
+            {
+                "type_label": "选题清单",
+                "completion_label": "已规划 5 个可执行选题",
+                "status_label": "待确认",
+                "detail_action_label": "查看 5 个选题",
+            },
+            "generate_production_briefs",
+        ),
+        (
+            DeliverableType.PUBLISH_CALENDAR,
+            {
+                "period": "2026-08-10 至 2026-08-16",
+                "items": [{"date": f"2026-08-{day:02d}"} for day in range(10, 17)],
+                "operating_notes": [],
+            },
+            {
+                "type_label": "内容排期表",
+                "completion_label": "已安排 7 条内容发布顺序",
+                "status_label": "待确认",
+                "detail_action_label": "查看 7 条发布安排",
+            },
+            "add_to_schedule",
+        ),
+    ],
+)
+async def test_structured_deliverable_counts_drive_presentation_and_actions(
+    client,
+    session,
+    admin,
+    deliverable_type: DeliverableType,
+    payload: dict,
+    expected_presentation: dict,
+    forbidden_action: str,
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name=f"结构化数量-{deliverable_type.value}",
+        payload=payload,
+        skill_code="structured_projection",
+        deliverable_type=deliverable_type,
+    )
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    artifact = response.json()
+    assert artifact["presentation"] == expected_presentation
+    assert artifact["next_actions"] == [
+        {
+            "code": "request_revision",
+            "label": "提出修改",
+            "requires_confirmation": False,
+        },
+        {
+            "code": "export",
+            "label": "导出内容",
+            "requires_confirmation": False,
+        },
+    ]
+    assert forbidden_action not in {
+        action["code"] for action in artifact["next_actions"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_unknown_business_type_fails_closed_to_operations_report(
+    client, session, admin, monkeypatch,
+) -> None:
+    seeded = await _seed_artifact(session, admin, account_name="未来交付类型")
+
+    async def future_business_type(_session, _deliverable) -> str:
+        return "future_deliverable_type"
+
+    monkeypatch.setattr(
+        "app.services.artifacts._business_artifact_type",
+        future_business_type,
+    )
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    artifact = response.json()
+    assert artifact["presentation"] == {
+        "type_label": "运营报告",
+        "completion_label": "已生成运营报告",
+        "status_label": "待确认",
+        "detail_action_label": "查看完整报告",
+    }
+    assert artifact["next_actions"] == [
+        {
+            "code": "request_revision",
+            "label": "提出修改",
+            "requires_confirmation": False,
+        },
+        {
+            "code": "export",
+            "label": "导出内容",
+            "requires_confirmation": False,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -1129,14 +1312,16 @@ async def test_every_deliverable_status_maps_and_filters_to_business_status(clie
         status=DeliverableStatus.DRAFT,
     )
     statuses = [
-        (DeliverableStatus.DRAFT, "draft"),
-        (DeliverableStatus.PENDING_REVIEW, "ready_for_review"),
-        (DeliverableStatus.APPROVED, "accepted"),
-        (DeliverableStatus.REJECTED, "revision_requested"),
-        (DeliverableStatus.SUPERSEDED, "superseded"),
+        (DeliverableStatus.DRAFT, "draft", "草稿"),
+        (DeliverableStatus.PENDING_REVIEW, "ready_for_review", "待确认"),
+        (DeliverableStatus.APPROVED, "accepted", "已确认"),
+        (DeliverableStatus.REJECTED, "revision_requested", "正在修改"),
+        (DeliverableStatus.SUPERSEDED, "superseded", "历史版本"),
     ]
     artifacts = {DeliverableStatus.DRAFT: seeded[8]}
-    for version, (internal_status, _business_status) in enumerate(statuses[1:], start=2):
+    for version, (internal_status, _business_status, _status_label) in enumerate(
+        statuses[1:], start=2
+    ):
         row = Deliverable(
             content_item_id=seeded[2].id,
             thread_id=seeded[3].id,
@@ -1155,7 +1340,7 @@ async def test_every_deliverable_status_maps_and_filters_to_business_status(clie
     token = await _token(client, admin.email, "admin-pw-123")
     headers = _auth(token)
 
-    for internal_status, business_status in statuses:
+    for internal_status, business_status, status_label in statuses:
         response = await client.get(
             f"/artifacts?account_id={seeded[1].id}&status={business_status}",
             headers=headers,
@@ -1164,6 +1349,9 @@ async def test_every_deliverable_status_maps_and_filters_to_business_status(clie
         assert response.json()["pagination"]["total"] == 1
         assert response.json()["data"][0]["id"] == artifacts[internal_status].id
         assert response.json()["data"][0]["status"] == business_status
+        assert response.json()["data"][0]["presentation"]["status_label"] == status_label
+        if business_status in {"draft", "revision_requested", "superseded"}:
+            assert response.json()["data"][0]["next_actions"] == []
 
 
 @pytest.mark.asyncio
