@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.orchestrator.operation_quality import ArtifactQuality
 from app.schemas.skills import SkillDefinition
 
 
@@ -16,6 +18,21 @@ class ContentCalendarPlanningInput(BaseModel):
     days: int = Field(default=7, ge=1, le=90)
 
 
+class CalendarSlot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot_id: str = Field(min_length=1)
+    date: date
+    slot_type: Literal["publish", "review_buffer"]
+    title: str = Field(min_length=1)
+    owner: str = Field(min_length=1)
+    readiness: Literal["ready", "review", "buffer"]
+    topic_id: str | None = None
+    script_id: str | None = None
+    scheduled_at: datetime | None = None
+    timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+
+
 class ContentCalendarPlanningReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -24,6 +41,8 @@ class ContentCalendarPlanningReport(BaseModel):
     source_artifact_ids: list[int] = Field(min_length=1)
     days: int = Field(ge=1, le=90)
     items: list[dict[str, Any]] = Field(min_length=1)
+    slots: list[CalendarSlot] = Field(min_length=1)
+    quality: ArtifactQuality
     evidence_refs: list[dict[str, Any]] = Field(min_length=1)
     participating_experts: list[str] = Field(min_length=1)
 
@@ -50,4 +69,5 @@ __all__ = [
     "CONTENT_CALENDAR_PLANNING_SKILL",
     "ContentCalendarPlanningInput",
     "ContentCalendarPlanningReport",
+    "CalendarSlot",
 ]

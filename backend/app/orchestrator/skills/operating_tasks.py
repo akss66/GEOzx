@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.orchestrator.operation_quality import ArtifactQuality
 from app.schemas.artifacts import ScriptPresentationFormat
 from app.schemas.skills import SkillDefinition
 
@@ -19,6 +20,15 @@ class TopicPlanningInput(BaseModel):
     topic_count: int = Field(default=5, ge=1, le=20)
 
 
+class TopicPlanItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topic_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    angle: str = Field(min_length=1)
+    format: str = Field(min_length=1)
+
+
 class TopicPlanningReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -26,10 +36,25 @@ class TopicPlanningReport(BaseModel):
     account_id: int = Field(gt=0)
     period: str = Field(min_length=1)
     theme: str = Field(min_length=1)
-    topics: list[dict[str, Any]] = Field(min_length=1)
+    topics: list[TopicPlanItem] = Field(min_length=1)
     posting_notes: list[str] = Field(default_factory=list)
+    quality: ArtifactQuality
     evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
     participating_experts: list[str] = Field(default_factory=list)
+
+
+class FilmingScript(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    script_id: str = Field(min_length=1)
+    topic_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    hook: str = Field(min_length=1)
+    voiceover: str = Field(min_length=1)
+    shot_list: list[str] = Field(min_length=1)
+    duration_seconds: int = Field(gt=0)
+    cta: str = Field(min_length=1)
+    constraints_hit: list[str] = Field(default_factory=list)
 
 
 class ScriptGenerationInput(BaseModel):
@@ -50,6 +75,8 @@ class ScriptGenerationReport(BaseModel):
     duration_seconds: int = Field(gt=0)
     presentation_format: ScriptPresentationFormat = "storyboard"
     bgm_suggestion: str | None = None
+    scripts: list[FilmingScript] = Field(min_length=1)
+    quality: ArtifactQuality
     participating_experts: list[str] = Field(default_factory=list)
 
 
@@ -57,6 +84,37 @@ class PublishingPreparationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content_item_id: int | None = Field(default=None, gt=0)
+
+
+class OperationArtifactRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: int = Field(gt=0)
+    artifact_type: str = Field(min_length=1)
+    version: int = Field(gt=0)
+
+
+class PublicNextStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["start_filming", "confirm_manual_schedule"]
+    label: str = Field(min_length=1)
+
+
+class WeeklyOperationPackage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    source_artifacts: list[OperationArtifactRef] = Field(min_length=4)
+    evidence_refs: list[dict[str, Any]] = Field(min_length=1)
+    topics: list[TopicPlanItem] = Field(min_length=5, max_length=5)
+    scripts: list[FilmingScript] = Field(min_length=5, max_length=5)
+    visuals: list[dict[str, Any]] = Field(min_length=5, max_length=5)
+    calendar_slots: list[dict[str, Any]] = Field(min_length=7, max_length=7)
+    quality: dict[str, ArtifactQuality]
+    participating_experts: list[str] = Field(min_length=1)
+    manual_publish_checklist: list[str] = Field(min_length=1)
+    next_steps: list[PublicNextStep] = Field(min_length=1)
 
 
 class PublishingPreparationReport(BaseModel):
@@ -70,6 +128,7 @@ class PublishingPreparationReport(BaseModel):
     items: list[dict[str, Any]] = Field(min_length=1)
     operating_notes: list[str] = Field(default_factory=list)
     approval_required: bool = True
+    package: WeeklyOperationPackage | None = None
     participating_experts: list[str] = Field(default_factory=list)
 
 
@@ -171,10 +230,15 @@ __all__ = [
     "TOPIC_PLANNING_SKILL",
     "PerformanceReviewInput",
     "PerformanceReviewReport",
+    "PublicNextStep",
     "PublishingPreparationInput",
     "PublishingPreparationReport",
     "ScriptGenerationInput",
     "ScriptGenerationReport",
     "TopicPlanningInput",
+    "TopicPlanItem",
     "TopicPlanningReport",
+    "FilmingScript",
+    "OperationArtifactRef",
+    "WeeklyOperationPackage",
 ]

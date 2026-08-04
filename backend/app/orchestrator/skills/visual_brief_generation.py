@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.orchestrator.operation_quality import ArtifactQuality
 from app.schemas.skills import SkillDefinition
 
 
@@ -13,6 +14,19 @@ class VisualBriefGenerationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_artifact_ids: list[int] = Field(min_length=1, max_length=20)
+
+
+class VisualProductionItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    visual_id: str = Field(min_length=1)
+    script_id: str = Field(min_length=1)
+    topic_id: str = Field(min_length=1)
+    cover_copy: str = Field(min_length=1)
+    composition: str = Field(min_length=1)
+    shot_list: list[str] = Field(min_length=1)
+    asset_checklist: list[str] = Field(min_length=1)
+    platform_constraints: list[str] = Field(min_length=1)
 
 
 class VisualBriefGenerationReport(BaseModel):
@@ -26,6 +40,8 @@ class VisualBriefGenerationReport(BaseModel):
     shot_list: list[str] = Field(min_length=1)
     asset_checklist: list[str] = Field(min_length=1)
     platform_constraints: list[str] = Field(min_length=1)
+    visuals: list[VisualProductionItem] = Field(min_length=1)
+    quality: ArtifactQuality
     evidence_refs: list[dict[str, Any]] = Field(min_length=1)
     participating_experts: list[str] = Field(min_length=1)
 
@@ -52,4 +68,5 @@ __all__ = [
     "VISUAL_BRIEF_GENERATION_SKILL",
     "VisualBriefGenerationInput",
     "VisualBriefGenerationReport",
+    "VisualProductionItem",
 ]

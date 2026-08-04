@@ -53,6 +53,12 @@ from app.orchestrator.ai_coo_critic import (
 from app.orchestrator.brain_intelligence import brain_intelligence
 from app.orchestrator.checkpoint_graph_contracts import CheckpointGraphContract
 from app.orchestrator.composite_skill_runtime import composite_skill_runtime
+from app.orchestrator.operation_quality import (
+    evaluate_calendar_quality,
+    evaluate_script_quality,
+    evaluate_topic_quality,
+    evaluate_visual_quality,
+)
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_tool_plan import SkillToolPlanError, build_skill_tool_plan
@@ -62,18 +68,26 @@ from app.orchestrator.skills.account_inspection import (
     AccountInspectionReport,
 )
 from app.orchestrator.skills.account_positioning import AccountPositioningReport
-from app.orchestrator.skills.content_calendar_planning import ContentCalendarPlanningReport
+from app.orchestrator.skills.content_calendar_planning import (
+    CalendarSlot,
+    ContentCalendarPlanningReport,
+)
 from app.orchestrator.skills.content_publishing import ContentPublishingReceipt
 from app.orchestrator.skills.engagement_review import EngagementReviewReport
 from app.orchestrator.skills.operating_tasks import (
+    FilmingScript,
     PerformanceReviewReport,
     PublishingPreparationReport,
     ScriptGenerationReport,
+    TopicPlanItem,
     TopicPlanningReport,
 )
 from app.orchestrator.skills.operation_iteration import OperationIterationPlan
 from app.orchestrator.skills.registry import skill_registry
-from app.orchestrator.skills.visual_brief_generation import VisualBriefGenerationReport
+from app.orchestrator.skills.visual_brief_generation import (
+    VisualBriefGenerationReport,
+    VisualProductionItem,
+)
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
@@ -3237,15 +3251,27 @@ def _build_operating_report(
         )
 
     if definition.code == "visual_brief_generation":
-        report = VisualBriefGenerationReport(
-            account_id=account_id,
-            source_artifact_ids=[int(item) for item in frozen_input["source_artifact_ids"]],
+        visual = VisualProductionItem(
+            visual_id="visual-01",
+            script_id=str(latest.get("script_id") or "script-01"),
+            topic_id=str(latest.get("topic_id") or "topic-01"),
             cover_copy=str(latest.get("cover_copy") or user_input[:80]),
             composition=str(latest.get("composition") or "主体清晰，关键信息位于画面安全区"),
             shot_list=_string_list(latest.get("shot_list")) or ["开场", "主体", "结尾"],
             asset_checklist=_string_list(latest.get("asset_checklist")) or ["主体素材"],
             platform_constraints=_string_list(latest.get("platform_constraints"))
             or ["竖屏 9:16", "字幕保留安全区"],
+        )
+        report = VisualBriefGenerationReport(
+            account_id=account_id,
+            source_artifact_ids=[int(item) for item in frozen_input["source_artifact_ids"]],
+            cover_copy=visual.cover_copy,
+            composition=visual.composition,
+            shot_list=visual.shot_list,
+            asset_checklist=visual.asset_checklist,
+            platform_constraints=visual.platform_constraints,
+            visuals=[visual],
+            quality=evaluate_visual_quality([visual], expected_script_ids=[visual.script_id]),
             evidence_refs=evidence_refs,
             participating_experts=participants,
         )
@@ -3264,11 +3290,37 @@ def _build_operating_report(
                     "dependencies": list(frozen_input["source_artifact_ids"]),
                 }
             ]
+        today = datetime.now(UTC).date()
+        slots = [
+            CalendarSlot(
+                slot_id=f"slot-{index:02d}",
+                date=(
+                    str(item.get("date"))
+                    if str(item.get("date") or "") != "待确认"
+                    else (today + timedelta(days=index - 1)).isoformat()
+                ),
+                slot_type="publish",
+                title=str(item.get("title") or user_input[:120]),
+                owner=str(item.get("owner") or "运营"),
+                readiness=(
+                    "ready" if str(item.get("readiness")) == "ready" else "review"
+                ),
+                topic_id=str(item.get("topic_id") or f"topic-{index:02d}"),
+                script_id=str(item.get("script_id") or f"script-{index:02d}"),
+                scheduled_at=item.get("scheduled_at"),
+            )
+            for index, item in enumerate(items, start=1)
+        ]
         report = ContentCalendarPlanningReport(
             account_id=account_id,
             source_artifact_ids=[int(item) for item in frozen_input["source_artifact_ids"]],
             days=int(frozen_input.get("days") or 7),
             items=[dict(item) for item in items],
+            slots=slots,
+            quality=evaluate_calendar_quality(
+                slots,
+                expected_script_ids=[str(item.script_id) for item in slots],
+            ),
             evidence_refs=evidence_refs,
             participating_experts=participants,
         )
@@ -3283,16 +3335,34 @@ def _build_operating_report(
                 if len(scenes) == 1
                 else "结尾：总结价值并给出明确互动引导。"
             )
-        report = ScriptGenerationReport(
-            account_id=account_id,
+        duration_seconds = int(
+            frozen_input.get("duration_seconds") or latest.get("duration_seconds") or 60
+        )
+        script = FilmingScript(
+            script_id=str(latest.get("script_id") or "script-01"),
+            topic_id=str(latest.get("topic_id") or "topic-01"),
             title=str(latest.get("title") or user_input[:80]),
             hook=str(latest.get("hook") or "先说结论：这件事最容易踩的坑在这里。"),
+            voiceover=str(latest.get("voiceover") or "。".join(scenes)),
+            shot_list=_string_list(latest.get("shot_list")) or scenes,
+            duration_seconds=duration_seconds,
+            cta=str(latest.get("cta") or "留言说说你最关心的问题。"),
+            constraints_hit=_string_list(latest.get("constraints_hit")),
+        )
+        report = ScriptGenerationReport(
+            account_id=account_id,
+            title=script.title,
+            hook=script.hook,
             scenes=scenes,
-            duration_seconds=int(
-                frozen_input.get("duration_seconds") or latest.get("duration_seconds") or 60
-            ),
+            duration_seconds=duration_seconds,
             presentation_format=frozen_input.get("presentation_format", "storyboard"),
             bgm_suggestion=latest.get("bgm_suggestion"),
+            scripts=[script],
+            quality=evaluate_script_quality(
+                [script],
+                expected_topic_ids=[script.topic_id],
+                required_constraints={},
+            ),
             participating_experts=participants,
         )
         data = report.model_dump(mode="json")
@@ -3308,6 +3378,9 @@ def _build_operating_report(
                     "duration_seconds",
                     "presentation_format",
                     "bgm_suggestion",
+                    "scripts",
+                    "quality",
+                    "participating_experts",
                 )
             },
         )
@@ -3329,23 +3402,29 @@ def _build_operating_report(
             source = source_topics[index % len(source_topics)]
             if isinstance(source, dict):
                 item = dict(source)
+                item.setdefault("topic_id", f"topic-{index + 1:02d}")
                 item.setdefault("title", f"选题 {index + 1}")
+                item.setdefault("angle", str(latest.get("hook") or "结合账号受众给出具体价值"))
+                item.setdefault("format", "short_video")
             else:
                 item = {
+                    "topic_id": f"topic-{index + 1:02d}",
                     "title": str(source),
                     "angle": str(latest.get("hook") or "结合账号受众给出具体价值"),
                     "format": "short_video",
                 }
             topics.append(item)
+        parsed_topics = [TopicPlanItem.model_validate(item) for item in topics]
         report = TopicPlanningReport(
             account_id=account_id,
             period=f"未来 {int(frozen_input.get('days') or 7)} 天",
             theme=str(latest.get("theme") or latest.get("title") or user_input[:80]),
-            topics=topics,
+            topics=parsed_topics,
             posting_notes=[
                 str(item) for item in latest.get("posting_notes", []) if str(item).strip()
             ]
             or ["先小批量发布并根据完播、互动和咨询反馈调整后续选题。"],
+            quality=evaluate_topic_quality(parsed_topics, expected_count=topic_count),
             evidence_refs=evidence_refs,
             participating_experts=participants,
         )
@@ -3357,6 +3436,9 @@ def _build_operating_report(
                 "theme": data["theme"],
                 "topics": data["topics"],
                 "posting_notes": data["posting_notes"],
+                "quality": data["quality"],
+                "evidence_refs": data["evidence_refs"],
+                "participating_experts": data["participating_experts"],
             },
         )
 
