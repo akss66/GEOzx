@@ -725,9 +725,86 @@ async def test_unapproved_weekly_package_is_superseded_before_revision_runs(
         == 0
     )
 
+    auth_headers = _headers(admin)
+    thread_id = thread.id
+    source_turn_id = source_turn.id
+    source_run_id = source_run.id
+    source_task_id = source_task.id
+    source_root_id = source_root.id
+    source_package_id = source_package.id
+    source_final_call_id = source_final_call.id
+    old_interrupt_id = old_interrupt.id
+    source_output = deepcopy(source_root.output_snapshot)
+    source_root.output_snapshot = {
+        **source_output,
+        "report": {
+            **source_output["report"],
+            "child_skill_graph": [
+                node
+                for node in source_output["report"]["child_skill_graph"]
+                if node["skill_code"] != "publishing_preparation"
+            ],
+        },
+    }
+    await session.commit()
+    with pytest.raises(
+        RuntimeError,
+        match="REVISION_SOURCE_PENDING_STATE_CONFLICT",
+    ):
+        await client.post(
+            f"/brain/conversations/{thread_id}/turns",
+            headers=auth_headers,
+            json={
+                "client_message_id": "weekly-unapproved-malformed-steering",
+                "message": PRICE_STEERING,
+                "target_turn_id": source_turn_id,
+            },
+        )
+    await session.rollback()
+    assert (
+        await session.scalar(
+            select(func.count(RunRevision.id)).where(
+                RunRevision.source_run_id == source_run_id
+            )
+        )
+        == 0
+    )
+    assert (
+        await session.scalar(
+            select(func.count(AgentToolCall.id)).where(
+                AgentToolCall.thread_id == thread_id,
+                AgentToolCall.status == "waiting_approval",
+            )
+        )
+        == 1
+    )
+    thread = await session.get(ConversationThread, thread_id)
+    source_turn = await session.get(ConversationTurn, source_turn_id)
+    source_run = await session.get(AgentRun, source_run_id)
+    source_task = await session.get(BrainTask, source_task_id)
+    source_root = await session.get(SkillRun, source_root_id)
+    source_package = await session.get(Deliverable, source_package_id)
+    source_final_call = await session.get(AgentToolCall, source_final_call_id)
+    old_interrupt = await session.get(TurnInterrupt, old_interrupt_id)
+    assert all(
+        item is not None
+        for item in (
+            thread,
+            source_turn,
+            source_run,
+            source_task,
+            source_root,
+            source_package,
+            source_final_call,
+            old_interrupt,
+        )
+    )
+    source_root.output_snapshot = source_output
+    await session.commit()
+
     steered = await client.post(
-        f"/brain/conversations/{thread.id}/turns",
-        headers=_headers(admin),
+        f"/brain/conversations/{thread_id}/turns",
+        headers=auth_headers,
         json={
             "client_message_id": "weekly-unapproved-price-steering",
             "message": PRICE_STEERING,

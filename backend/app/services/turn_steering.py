@@ -518,7 +518,7 @@ async def _create_supplement_revision(
     )
     if not isinstance(revision, RunRevision):
         raise RuntimeError("NONEMPTY_SUPPLEMENT_REVISION_MISSING")
-    await _supersede_unapproved_operation_source(
+    source_superseded = await _supersede_unapproved_operation_source(
         session,
         thread=thread,
         source_run=source_run,
@@ -527,6 +527,8 @@ async def _create_supplement_revision(
         revision_id=revision.id,
         revision_run_id=revision_run.id,
     )
+    if source_run.status == "waiting_permission" and not source_superseded:
+        raise RuntimeError("REVISION_SOURCE_PENDING_STATE_CONFLICT")
     waiting = await queue_agent_run_behind_task_record(
         session,
         revision_run.id,
