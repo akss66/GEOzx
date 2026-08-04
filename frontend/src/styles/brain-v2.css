@@ -973,6 +973,30 @@
   font-weight: 500;
 }
 
+.tz-work-turn__steering-notice {
+  display: flex;
+  max-width: 72ch;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  border-left: 2px solid var(--tz-brand-red);
+  background: var(--tz-surface-soft);
+  color: var(--tz-ink-soft);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tz-work-turn__steering-notice strong {
+  flex: 0 0 auto;
+  color: var(--tz-ink);
+  font-weight: 650;
+}
+
+.tz-work-turn__steering-notice span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .tz-work-turn__activity,
 .tz-work-turn__response {
   max-width: 72ch;
@@ -1146,6 +1170,7 @@
   .tz-work-turn__user p,
   .tz-work-turn__activity,
   .tz-work-turn__response,
+  .tz-work-turn__steering-notice,
   .tz-work-turn__progress,
   .tz-work-turn__process,
   .tz-work-turn__deliverables,

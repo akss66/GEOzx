@@ -787,6 +787,8 @@ export interface ConversationTurn {
     skill_code: string | null;
   } | null;
   status: string;
+  target_turn_id?: number | null;
+  steering_mode?: ConversationTurnSteeringMode | null;
   turn_phase?: TurnPhase;
   route_ms?: number | null;
   first_token_ms?: number | null;
@@ -811,6 +813,24 @@ export interface ConversationTurnRuntimeStep {
   attempt?: number;
 }
 
+export type ConversationTurnSteeringMode =
+  | "supplement"
+  | "stop"
+  | "replace_goal"
+  | "independent_query";
+
+export type ConversationTurnSteeringNoticeLabel = Exclude<
+  ConversationTurnSteeringMode,
+  "independent_query"
+>;
+
+export interface ConversationTurnRuntimeSteeringNotice {
+  label: ConversationTurnSteeringNoticeLabel;
+  message?: string | null;
+  reason?: string | null;
+  source_turn_id?: number | null;
+}
+
 /** Ephemeral client projection of durable per-Turn events. Never persisted. */
 export interface ConversationTurnRuntimeOverlay {
   lastEventId: number;
@@ -818,6 +838,7 @@ export interface ConversationTurnRuntimeOverlay {
   steps: Record<string, ConversationTurnRuntimeStep>;
   deliverableIds: number[];
   terminalStatus?: string;
+  steering_notice?: ConversationTurnRuntimeSteeringNotice;
 }
 
 export type TurnPhase =
@@ -857,6 +878,12 @@ export interface WorkTurnViewModel {
   status: WorkTurnStatus;
   currentActivity: string | null;
   assistantText: string | null;
+  steeringNotice?: {
+    label: ConversationTurnSteeringNoticeLabel;
+    copy: string;
+    message?: string | null;
+    reason?: string | null;
+  } | null;
   steps: WorkTurnStep[];
   experts: Array<{ name: string; status: string }>;
   deliverableIds: number[];

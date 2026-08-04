@@ -1161,6 +1161,52 @@ describe("BrainHome V3 conversation projection", () => {
       .toMatchObject({ runtime_overlay: { steps: { read_data: { state: "done" } } } });
   });
 
+  it("replays a queued steering notice onto its target card without changing the answer", async () => {
+    const snapshot = deferred<ConversationThread>();
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockReturnValueOnce(snapshot.promise);
+    const view = renderBrainHome();
+    await screen.findByText("Loading conversation…");
+
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("turn.steered", 4, 4, 81, 501, {
+      message: "第一条不要讲价格",
+      reason: "用户补充了内容要求",
+      metadata: { category: "steering", label: "supplement", source_id: 502 },
+    })));
+    await act(async () => snapshot.resolve(thread(81, [
+      persistedTurn(501, "steering-client", "生成三条获客脚本", "正在处理原任务", "running"),
+    ])));
+
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0])
+      .toMatchObject({
+        status: "running",
+        assistant_response: "正在处理原任务",
+        runtime_overlay: {
+          steering_notice: { label: "supplement", source_turn_id: 502 },
+        },
+      });
+    expect(await screen.findByText("已补充要求")).toBeInTheDocument();
+    expect(screen.getByText("第一条不要讲价格")).toBeInTheDocument();
+    expect(screen.getAllByText("第一条不要讲价格")).toHaveLength(1);
+    expect(screen.getAllByTestId("work-turn")).toHaveLength(1);
+  });
+
+  it("ignores a steering event from another conversation scope", async () => {
+    const running = persistedTurn(501, "scope-steering", "生成三条获客脚本", null, "running");
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [running]));
+    const view = renderBrainHome();
+    await screen.findByText("生成三条获客脚本");
+
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("turn.steered", 5, 5, 999, 501, {
+      metadata: { category: "steering", label: "stop", source_id: 502 },
+    })));
+
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0].runtime_overlay)
+      .toBeUndefined();
+    expect(screen.queryByText("已请求停止")).not.toBeInTheDocument();
+  });
+
   it("recovers queued paused and deliverable events into one scoped approval and artifact snapshot", async () => {
     const initial = deferred<ConversationThread>();
     const recovered = deferred<ConversationThread>();

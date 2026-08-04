@@ -28,6 +28,7 @@ export function WorkTurnCard({
   businessActions?: ReactNode;
   sourceStatus?: string;
 }) {
+  const steeringDetail = view.steeringNotice?.message ?? view.steeringNotice?.reason;
   return (
     <article
       className="tz-work-turn"
@@ -51,6 +52,17 @@ export function WorkTurnCard({
           {view.status !== "working" ? <small>{STATUS_COPY[view.status]}</small> : null}
         </header>
 
+        {view.steeringNotice ? (
+          <div
+            className="tz-work-turn__steering-notice"
+            role="status"
+            aria-label="任务调整"
+            data-steering-label={view.steeringNotice.label}
+          >
+            <strong>{view.steeringNotice.copy}</strong>
+            {steeringDetail ? <span>{steeringDetail}</span> : null}
+          </div>
+        ) : null}
         {view.currentActivity ? (
           <p className="tz-work-turn__activity" role="status" aria-live="polite">{view.currentActivity}</p>
         ) : null}

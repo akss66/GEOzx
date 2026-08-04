@@ -4,6 +4,7 @@ import type {
   ConversationTurn,
   ConversationTurnEvent,
   ConversationTurnRuntimeOverlay,
+  ConversationTurnRuntimeSteeringNotice,
   TurnPhase,
 } from "../../types";
 import { reduceWorkTurnStreamFrame } from "./workTurnProjection";
@@ -184,8 +185,9 @@ export function applyConversationTurnEvent(
   ) return thread;
 
   const nextOverlay = reduceRuntimeOverlay(overlay, event);
-  const status = durableTurnStatus(event.type, event.payload);
-  const message = durableTurnMessage(event.type, event.payload);
+  const isSteering = event.type === "turn.steered";
+  const status = isSteering ? null : durableTurnStatus(event.type, event.payload);
+  const message = isSteering ? null : durableTurnMessage(event.type, event.payload);
   const next: ConversationTurn = {
     ...turn,
     runtime_overlay: nextOverlay,
@@ -241,11 +243,39 @@ function reduceRuntimeOverlay(
       next.deliverableIds = [...base.deliverableIds, deliverableId];
     }
   }
-  const terminalStatus = durableTurnStatus(event.type, payload);
+  const steeringNotice = durableSteeringNotice(event.type, payload);
+  if (steeringNotice != null) {
+    next.steering_notice = steeringNotice;
+  }
+  const terminalStatus = event.type === "turn.steered"
+    ? null
+    : durableTurnStatus(event.type, payload);
   if (terminalStatus && isTerminalConversationTurnStatus(terminalStatus)) {
     next.terminalStatus = terminalStatus;
   }
   return next;
+}
+
+function durableSteeringNotice(
+  type: string,
+  payload: Record<string, unknown>,
+): ConversationTurnRuntimeSteeringNotice | null {
+  if (type !== "turn.steered") return null;
+  const metadata = asRecord(payload.metadata);
+  if (stringValue(metadata?.category) !== "steering") return null;
+  const label = stringValue(metadata?.label);
+  if (label !== "supplement" && label !== "stop" && label !== "replace_goal") {
+    return null;
+  }
+  const message = stringValue(payload.message);
+  const reason = stringValue(payload.reason);
+  const sourceTurnId = positiveInteger(metadata?.source_id);
+  return {
+    label,
+    ...(message != null ? { message } : {}),
+    ...(reason != null ? { reason } : {}),
+    ...(sourceTurnId != null ? { source_turn_id: sourceTurnId } : {}),
+  };
 }
 
 function durableStepCode(payload: Record<string, unknown>) {

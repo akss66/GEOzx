@@ -52,6 +52,29 @@ describe("WorkTurnCard", () => {
     expect(screen.queryByText("正在咨询专家")).not.toBeInTheDocument();
   });
 
+  it("shows steering inside the existing work card without creating a bubble or thinking copy", () => {
+    render(
+      <WorkTurnCard
+        view={{
+          ...workingTurn,
+          steeringNotice: {
+            label: "supplement",
+            copy: "已补充要求",
+            message: "第一条不要讲价格",
+            reason: "不会优先展示的内部原因",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getAllByTestId("work-turn")).toHaveLength(1);
+    expect(screen.getByRole("status", { name: "任务调整" })).toHaveTextContent("已补充要求");
+    expect(screen.getByRole("status", { name: "任务调整" })).toHaveTextContent("第一条不要讲价格");
+    expect(screen.getAllByText("第一条不要讲价格")).toHaveLength(1);
+    expect(screen.queryByText("不会优先展示的内部原因")).not.toBeInTheDocument();
+    expect(screen.queryByText("思考中")).not.toBeInTheDocument();
+  });
+
   it("reveals business process before technical logs and does not render logs by default", () => {
     render(
       <WorkTurnCard

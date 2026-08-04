@@ -40,6 +40,55 @@ const executionSummary: Extract<TurnProjection, { type: "execution_summary" }> =
 };
 
 describe("projectWorkTurn", () => {
+  it.each([
+    ["supplement", "已补充要求"],
+    ["stop", "已请求停止"],
+    ["replace_goal", "已换目标"],
+  ] as const)("maps %s steering into a dedicated inline notice", (label, copy) => {
+    const model = projectWorkTurn(turn({
+      status: "running",
+      assistant_response: "原有回复不应被替换",
+      runtime_overlay: {
+        lastEventId: 9,
+        lastSequence: 9,
+        steps: {},
+        deliverableIds: [],
+        steering_notice: {
+          label,
+          reason: "用户在执行中调整了要求",
+        },
+      },
+    }));
+
+    expect(model.steeringNotice).toEqual({
+      label,
+      copy,
+      reason: "用户在执行中调整了要求",
+    });
+    expect(model.assistantText).toBe("原有回复不应被替换");
+  });
+
+  it("keeps a message-only steering explanation in the dedicated notice model", () => {
+    const model = projectWorkTurn(turn({
+      runtime_overlay: {
+        lastEventId: 10,
+        lastSequence: 10,
+        steps: {},
+        deliverableIds: [],
+        steering_notice: {
+          label: "supplement",
+          message: "第一条不要讲价格",
+        },
+      },
+    }));
+
+    expect(model.steeringNotice).toEqual({
+      label: "supplement",
+      copy: "已补充要求",
+      message: "第一条不要讲价格",
+    });
+  });
+
   it("projects history, optimistic, streaming, and completed Turns into one worker model", () => {
     const historyTurn = turn({
       projections: [{

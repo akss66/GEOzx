@@ -130,6 +130,73 @@ describe("conversation Turn projection", () => {
     });
   });
 
+  it("projects a valid steering notice without changing the target Turn lifecycle or answer", () => {
+    const persisted = {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        id: 101,
+        status: "running",
+        assistant_response: "正在形成账号复盘。",
+      }],
+    };
+    const steered = applyConversationTurnEvent(
+      persisted,
+      turnEvent("turn.steered", 6, 6, {
+        status: "completed",
+        message: "第一条不要讲价格",
+        reason: "用户补充了内容要求",
+        metadata: {
+          category: "steering",
+          label: "supplement",
+          source_id: 202,
+        },
+      }),
+    );
+    const duplicate = applyConversationTurnEvent(
+      steered,
+      turnEvent("turn.steered", 6, 6, {
+        metadata: { category: "steering", label: "replace_goal" },
+      }),
+    );
+
+    expect(steered.turns[0]).toMatchObject({
+      status: "running",
+      assistant_response: "正在形成账号复盘。",
+      runtime_overlay: {
+        lastEventId: 6,
+        lastSequence: 6,
+        steering_notice: {
+          label: "supplement",
+          message: "第一条不要讲价格",
+          reason: "用户补充了内容要求",
+          source_turn_id: 202,
+        },
+      },
+    });
+    expect(steered.turns[0].runtime_overlay).not.toHaveProperty("terminalStatus");
+    expect(duplicate).toBe(steered);
+  });
+
+  it("does not expose unsupported or non-steering metadata as a steering notice", () => {
+    const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
+    const unsupported = applyConversationTurnEvent(
+      persisted,
+      turnEvent("turn.steered", 7, 7, {
+        metadata: { category: "steering", label: "independent_query" },
+      }),
+    );
+    const wrongCategory = applyConversationTurnEvent(
+      persisted,
+      turnEvent("turn.steered", 8, 8, {
+        metadata: { category: "debug", label: "stop" },
+      }),
+    );
+
+    expect(unsupported.turns[0].runtime_overlay).not.toHaveProperty("steering_notice");
+    expect(wrongCategory.turns[0].runtime_overlay).not.toHaveProperty("steering_notice");
+  });
+
   it("keeps a waiting permission Turn interactive because it is not terminal", () => {
     const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
     const waiting = applyConversationTurnEvent(persisted, turnEvent("turn.received", 1, 1, {

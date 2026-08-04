@@ -50,6 +50,7 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
     status,
     currentActivity: projectCurrentActivity(status, turn.turn_phase, turn.status, steps),
     assistantText: turn.assistant_response ?? latestAnswer(projections),
+    steeringNotice: projectSteeringNotice(turn),
     steps,
     experts: projectExperts(projections),
     deliverableIds: [...new Set([
@@ -60,6 +61,23 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
       identity: "运营大脑",
       steps,
     },
+  };
+}
+
+const STEERING_NOTICE_COPY = {
+  supplement: "已补充要求",
+  stop: "已请求停止",
+  replace_goal: "已换目标",
+} as const;
+
+function projectSteeringNotice(turn: ConversationTurn): WorkTurnViewModel["steeringNotice"] {
+  const notice = turn.runtime_overlay?.steering_notice;
+  if (!notice) return null;
+  return {
+    label: notice.label,
+    copy: STEERING_NOTICE_COPY[notice.label],
+    ...(notice.message != null ? { message: notice.message } : {}),
+    ...(notice.reason != null ? { reason: notice.reason } : {}),
   };
 }
 
