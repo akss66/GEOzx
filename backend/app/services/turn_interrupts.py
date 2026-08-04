@@ -90,6 +90,7 @@ async def request_interrupt(
         skill_run_id=skill_run_id,
         source_type=source_type,
         source_id=source_id,
+        source_version=source_version,
     )
     runtime_lock = await lock_runtime_root_scope(
         session,
@@ -193,6 +194,7 @@ async def _discover_runtime(
     skill_run_id: int | None,
     source_type: str | None,
     source_id: int | None,
+    source_version: int | None,
 ) -> _DiscoveredRuntime:
     """Read every root/source identifier before acquiring the Run-first gate."""
 
@@ -266,7 +268,9 @@ async def _discover_runtime(
             raise _not_found()
         if invocation is not None and invocation.run_id != run.id:
             raise _not_found()
-    elif any(value is not None for value in (source_type, source_id)):
+    elif any(
+        value is not None for value in (source_type, source_id, source_version)
+    ):
         raise ValueError("only approval interrupts may bind a source object")
     if skill_run_id is not None and not any(row.id == skill_run_id for row in skills):
         raise _not_found()
@@ -315,4 +319,3 @@ def _request_identity(row: TurnInterrupt) -> tuple:
 
 
 __all__ = ["InterruptRequestResult", "request_interrupt"]
-

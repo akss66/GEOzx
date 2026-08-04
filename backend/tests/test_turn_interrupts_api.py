@@ -210,6 +210,30 @@ async def test_request_clarification_interrupt_pauses_original_run(session, admi
 
 
 @pytest.mark.asyncio
+async def test_non_approval_interrupt_rejects_source_version_only(session, admin) -> None:
+    _account, _thread, _turn, run, *_ = await _runtime_context(
+        session, admin, key="clarification-source-version"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="only approval interrupts may bind a source object",
+    ):
+        await request_interrupt(
+            session,
+            user=admin,
+            run_id=run.id,
+            kind="clarification",
+            semantic_key="missing-product-facts",
+            public_message="Please provide the missing product facts.",
+            response_schema={"type": "object"},
+            source_version=1,
+        )
+
+    assert await session.scalar(select(func.count(TurnInterrupt.id))) == 0
+
+
+@pytest.mark.asyncio
 async def test_request_approval_interrupt_uses_tool_as_source_only(session, admin) -> None:
     _account, _thread, turn, run, _task, skill, tool = await _runtime_context(
         session, admin, key="approval", with_approval=True
@@ -240,4 +264,3 @@ async def test_request_approval_interrupt_uses_tool_as_source_only(session, admi
     assert run.status == "waiting_permission"
     assert turn.status == "waiting_permission"
     assert tool.status == "waiting_approval"
-
