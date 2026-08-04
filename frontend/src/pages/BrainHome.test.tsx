@@ -73,7 +73,11 @@ const mocks = vi.hoisted(() => {
     }) => void) | null,
     options: null as { onReconnect?: () => void } | null,
   };
-  return { account, secondaryAccount, workspace, event };
+  const turnEvents = {
+    handler: null as ((event: import("../types").ConversationTurnEvent) => void) | null,
+    onRecover: null as (() => void) | null,
+  };
+  return { account, secondaryAccount, workspace, event, turnEvents };
 });
 
 vi.mock("../api/shell", () => ({
@@ -127,9 +131,16 @@ vi.mock("../api/attachments", () => ({
 }));
 
 vi.mock("../hooks/useEventStream", () => ({
-  useEventStream: vi.fn((handler, options) => {
-    mocks.event.handler = handler;
-    mocks.event.options = options;
+  useConversationRuntimeStream: vi.fn(({ onEvent }) => {
+    mocks.event.handler = onEvent;
+    return { connected: true, connectionState: "connected" };
+  }),
+}));
+
+vi.mock("../hooks/useConversationTurnEvents", () => ({
+  useConversationTurnEvents: vi.fn((options) => {
+    mocks.turnEvents.handler = options.onEvent;
+    mocks.turnEvents.onRecover = options.onRecover;
     return { connected: true, connectionState: "connected", last: null };
   }),
 }));
@@ -153,6 +164,8 @@ describe("BrainHome V3 conversation projection", () => {
     mocks.account.auth_status = "manual";
     mocks.event.handler = null;
     mocks.event.options = null;
+    mocks.turnEvents.handler = null;
+    mocks.turnEvents.onRecover = null;
     vi.mocked(listComposerSkills).mockResolvedValue([]);
     vi.mocked(createConversation).mockResolvedValue(thread(82, []));
     vi.mocked(getConversation).mockImplementation(async (threadId) => thread(threadId, []));
@@ -938,10 +951,125 @@ describe("BrainHome V3 conversation projection", () => {
       "服务端最终复盘",
     );
     vi.mocked(getConversation).mockResolvedValue(thread(81, [durable]));
-    await act(async () => mocks.event.options?.onReconnect?.());
+    await act(async () => mocks.turnEvents.onRecover?.());
 
     expect(await screen.findByText("服务端最终复盘")).toBeInTheDocument();
     expect(screen.queryByText("临时流式内容")).not.toBeInTheDocument();
+  });
+
+  it("projects durable Turn progress in place without invalidating the conversation per event", async () => {
+    const running = persistedTurn(501, "durable-client", "复盘", null, "running");
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [running]));
+    const view = renderBrainHome();
+    await screen.findByText("复盘");
+    const invalidateQueries = vi.spyOn(view.queryClient, "invalidateQueries");
+    const initialInvalidations = invalidateQueries.mock.calls.length;
+
+    act(() => {
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.received", 1, 1, 81, 501));
+      mocks.turnEvents.handler?.(durableTurnEvent("step.started", 2, 2, 81, 501, {
+        step: "read_data",
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("step.completed", 3, 3, 81, 501, {
+        step: "read_data",
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("deliverable.updated", 4, 4, 81, 501, {
+        deliverable_id: 88,
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.completed", 5, 5, 81, 501, {
+        status: "completed",
+      }));
+    });
+
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0])
+      .toMatchObject({
+        status: "completed",
+        runtime_overlay: {
+          deliverableIds: [88],
+          steps: { read_data: { state: "done" } },
+        },
+      });
+    expect(invalidateQueries).toHaveBeenCalledTimes(initialInvalidations);
+  });
+
+  it("coalesces concurrent durable sequence-gap recovery into one scoped conversation read", async () => {
+    const running = persistedTurn(501, "gap-client", "复盘", null, "running");
+    const recovery = deferred<ConversationThread>();
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockResolvedValueOnce(thread(81, [running]))
+      .mockReturnValueOnce(recovery.promise);
+    const view = renderBrainHome();
+    await screen.findByText("复盘");
+    const initialCalls = vi.mocked(getConversation).mock.calls.length;
+    const invalidateQueries = vi.spyOn(view.queryClient, "invalidateQueries");
+    const initialInvalidations = invalidateQueries.mock.calls.length;
+
+    act(() => {
+      mocks.turnEvents.onRecover?.();
+      mocks.turnEvents.onRecover?.();
+    });
+    expect(getConversation).toHaveBeenCalledTimes(initialCalls + 1);
+    await act(async () => recovery.resolve(thread(81, [{ ...running, status: "completed" }])));
+
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0].status)
+      .toBe("completed");
+    expect(invalidateQueries).toHaveBeenCalledTimes(initialInvalidations);
+  });
+
+  it("replays a durable event received before the initial conversation snapshot materializes", async () => {
+    const snapshot = deferred<ConversationThread>();
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockReturnValueOnce(snapshot.promise);
+    const view = renderBrainHome();
+    await screen.findByText("Loading conversation…");
+
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("step.completed", 1, 1, 81, 501, {
+      step: "read_data",
+    })));
+    await act(async () => snapshot.resolve(thread(81, [
+      persistedTurn(501, "snapshot-client", "复盘", null, "running"),
+    ])));
+
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0])
+      .toMatchObject({ runtime_overlay: { steps: { read_data: { state: "done" } } } });
+  });
+
+  it("replays a durable event received before an optimistic Turn binds its server id", async () => {
+    const request = deferred<TurnSubmission>();
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+    const view = renderBrainHome();
+    fireEvent.change(await screen.findByLabelText("运营大脑消息"), {
+      target: { value: "生成复盘" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalled());
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+
+    act(() => {
+      mocks.turnEvents.handler?.(durableTurnEvent("step.started", 1, 1, 82, 401, {
+        step: "read_data",
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("deliverable.updated", 2, 2, 82, 401, {
+        deliverable_id: 88,
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.completed", 3, 3, 82, 401, {
+        status: "completed",
+      }));
+    });
+    await act(async () => request.resolve(submission(
+      persistedTurn(401, clientMessageId, "生成复盘", null, "running"),
+    )));
+
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 82])?.turns[0])
+      .toMatchObject({
+        status: "completed",
+        runtime_overlay: {
+          deliverableIds: [88],
+          steps: { read_data: { state: "active" } },
+        },
+      });
   });
 
   it("keeps the stop action wired to the active optimistic Turn", async () => {
@@ -1232,6 +1360,27 @@ function runtimePayload(
     message_id: `${clientMessageId}:00-decision:1`,
     agent_code: "00-decision",
     stream_seq: sequence,
+  };
+}
+
+function durableTurnEvent(
+  type: string,
+  id: number,
+  sequence: number,
+  threadId: number,
+  turnId: number,
+  payload: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    sequence,
+    type,
+    payload,
+    thread_id: threadId,
+    turn_id: turnId,
+    run_id: 3,
+    skill_run_id: null,
+    created_at: "2026-08-04T00:00:00Z",
   };
 }
 

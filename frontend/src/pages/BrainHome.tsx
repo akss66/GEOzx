@@ -35,6 +35,7 @@ import { TurnStream } from "../components/brain/TurnStream";
 import { presentDeliverable } from "../components/brain/deliverablePresentation";
 import {
   applyConversationEvent,
+  applyConversationTurnEvent,
   appendOptimisticTurn,
   isActiveConversationTurnStatus,
   mergeConversationTurn,
@@ -42,7 +43,8 @@ import {
   removeOptimisticTurn,
 } from "../components/brain/conversationTurnProjection";
 import { OperationalState } from "../components/ui";
-import { useEventStream, type DyEvent } from "../hooks/useEventStream";
+import { useConversationTurnEvents } from "../hooks/useConversationTurnEvents";
+import { useConversationRuntimeStream, type DyEvent } from "../hooks/useEventStream";
 import {
   clearActiveBrainTaskId,
   clearActiveConversationThreadId,
@@ -61,6 +63,7 @@ import type {
   ConversationApproval,
   ConversationThread,
   ConversationTurn,
+  ConversationTurnEvent,
 } from "../types";
 
 interface PendingTurn {
@@ -90,6 +93,40 @@ interface SourceReturnTarget {
   turnId: number;
 }
 
+interface PendingDurableTurnEvent {
+  accountId: number;
+  threadId: number;
+  epoch: number;
+  event: ConversationTurnEvent;
+}
+
+function isQueuedDurableEventForScope(
+  pending: PendingDurableTurnEvent,
+  accountId: number,
+  threadId: number,
+  epoch: number,
+) {
+  return pending.accountId === accountId
+    && pending.threadId === threadId
+    && pending.epoch === epoch;
+}
+
+function replayPendingDurableTurnEvents(
+  snapshot: ConversationThread,
+  pending: PendingDurableTurnEvent[],
+) {
+  let projected = snapshot;
+  const replayedEventIds = new Set<number>();
+  const replayedEvents: ConversationTurnEvent[] = [];
+  for (const item of pending) {
+    if (!projected.turns.some((turn) => turn.id === item.event.turn_id)) continue;
+    projected = applyConversationTurnEvent(projected, item.event);
+    replayedEventIds.add(item.event.id);
+    replayedEvents.push(item.event);
+  }
+  return { projected, replayedEventIds, replayedEvents };
+}
+
 export default function BrainHome() {
   const { message } = AntApp.useApp();
   const qc = useQueryClient();
@@ -111,9 +148,11 @@ export default function BrainHome() {
   const pendingClientMessageId = useRef<string | null>(null);
   const conversationRequestsRef = useRef(new Map<string, ConversationRequest>());
   const failedOptimisticTurnIdsRef = useRef(new Map<string, Set<string>>());
+  const pendingDurableTurnEventsRef = useRef<PendingDurableTurnEvent[]>([]);
   const activeConversationThreadIdRef = useRef<number | null>(null);
   const conversationScopeEpochRef = useRef(0);
   const previousAccountIdRef = useRef<number | null>(null);
+  const recoveryInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const launcherRequestInFlight = useRef(false);
   const effectiveAccountIdRef = useRef<number | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
@@ -134,6 +173,48 @@ export default function BrainHome() {
 
   const failedOptimisticScopeKey = useCallback((accountId: number, threadId: number) =>
     `${accountId}:${threadId}`, []);
+
+  const applyDurableTurnEventEffects = useCallback((
+    events: ConversationTurnEvent[],
+    snapshot: ConversationThread,
+  ) => {
+    if (events.some((event) => event.type === "deliverable.updated")) {
+      setArtifactRefreshKey((value) => value + 1);
+    }
+    const pendingId = pendingClientMessageId.current;
+    const resolvesPendingTurn = events.some((event) =>
+      isTerminalConversationTurnEvent(event.type)
+      && snapshot.turns.some((turn) =>
+        turn.id === event.turn_id && (pendingId == null || turn.client_message_id === pendingId)
+      )
+    );
+    if (resolvesPendingTurn) {
+      setPendingTurn(null);
+      pendingClientMessageId.current = null;
+    }
+  }, []);
+
+  const replayQueuedDurableTurnEvents = useCallback((
+    snapshot: ConversationThread,
+    accountId: number,
+    threadId: number,
+    epoch: number,
+  ) => {
+    const pending = pendingDurableTurnEventsRef.current.filter((item) =>
+      isQueuedDurableEventForScope(item, accountId, threadId, epoch)
+    );
+    if (pending.length === 0) return snapshot;
+    const { projected, replayedEventIds, replayedEvents } = replayPendingDurableTurnEvents(snapshot, pending);
+    if (replayedEventIds.size === 0) return snapshot;
+    pendingDurableTurnEventsRef.current = pendingDurableTurnEventsRef.current.filter((item) =>
+      !(
+        isQueuedDurableEventForScope(item, accountId, threadId, epoch)
+        && replayedEventIds.has(item.event.id)
+      )
+    );
+    applyDurableTurnEventEffects(replayedEvents, projected);
+    return projected;
+  }, [applyDurableTurnEventEffects]);
 
   useEffect(() => {
     const state = location.state as { agentDraft?: string } | null;
@@ -157,55 +238,88 @@ export default function BrainHome() {
     queryFn: () => listComposerSkills(activeAccount?.platform ?? platform, activeAccount?.id),
   });
 
-  useEventStream((event) => {
-    if (!event.type.startsWith("brain.runtime.")) return;
-    const payload = asRuntimePayload(event.payload);
-    const eventThreadId = payload?.thread_id == null ? null : Number(payload.thread_id);
-    const eventClientMessageId = typeof payload?.client_message_id === "string"
-      ? payload.client_message_id
-      : null;
-    const currentThreadId = activeConversationThreadIdRef.current;
-    if (
-      currentThreadId != null
-      && eventThreadId === currentThreadId
-    ) {
-      qc.setQueryData<ConversationThread>(
-        ["brain-conversation", currentThreadId],
-        (current) => current ? applyConversationEvent(current, event) : current,
-      );
-    }
-    if (
-      eventThreadId === currentThreadId
-      && eventClientMessageId === pendingClientMessageId.current
-      && isTerminalConversationRuntimeEvent(event.type)
-    ) {
-      setPendingTurn((current) =>
-        current?.clientMessageId === eventClientMessageId ? null : current
-      );
-      pendingClientMessageId.current = null;
-    }
-    if (
-      eventThreadId === currentThreadId
-      && currentThreadId != null
-      && !isEphemeralConversationEvent(event.type)
-    ) {
-      void qc.invalidateQueries({
-        queryKey: ["brain-conversation", currentThreadId],
-      });
-    }
-  }, {
-    onReconnect: () => {
-      const currentThreadId = activeConversationThreadIdRef.current;
-      if (currentThreadId != null) {
-        void qc.invalidateQueries({
-          queryKey: ["brain-conversation", currentThreadId],
-        });
-      }
-    },
-  });
-
   const effectiveAccount = activeAccount;
   const effectiveAccountId = effectiveAccount?.id ?? null;
+
+  const projectTransientRuntimeEvent = useCallback((event: DyEvent) => {
+    const payload = asRuntimePayload(event.payload);
+    const currentThreadId = activeConversationThreadIdRef.current;
+    if (
+      currentThreadId == null
+      || payload?.thread_id == null
+      || Number(payload.thread_id) !== currentThreadId
+    ) return;
+    qc.setQueryData<ConversationThread>(
+      ["brain-conversation", currentThreadId],
+      (current) => current ? applyConversationEvent(current, event) : current,
+    );
+  }, [qc]);
+
+  const projectDurableTurnEvent = useCallback((event: ConversationTurnEvent) => {
+    const currentThreadId = activeConversationThreadIdRef.current;
+    const accountId = effectiveAccountIdRef.current;
+    if (currentThreadId == null || accountId == null || event.thread_id !== currentThreadId) return;
+    const epoch = conversationScopeEpochRef.current;
+    const current = qc.getQueryData<ConversationThread>(["brain-conversation", currentThreadId]);
+    if (
+      !current
+      || current.account_id !== accountId
+      || !current.turns.some((turn) => turn.id === event.turn_id)
+    ) {
+      const alreadyQueued = pendingDurableTurnEventsRef.current.some((pending) =>
+        isQueuedDurableEventForScope(pending, accountId, currentThreadId, epoch)
+        && pending.event.id === event.id
+      );
+      if (!alreadyQueued) {
+        pendingDurableTurnEventsRef.current.push({
+          accountId,
+          threadId: currentThreadId,
+          epoch,
+          event,
+        });
+      }
+      return;
+    }
+    const projected = applyConversationTurnEvent(current, event);
+    qc.setQueryData<ConversationThread>(["brain-conversation", currentThreadId], projected);
+    applyDurableTurnEventEffects([event], projected);
+  }, [applyDurableTurnEventEffects, qc]);
+
+  const recoverConversationProjection = useCallback(() => {
+    const accountId = effectiveAccountIdRef.current;
+    const threadId = activeConversationThreadIdRef.current;
+    const epoch = conversationScopeEpochRef.current;
+    if (accountId == null || threadId == null) return;
+    const key = `${accountId}:${threadId}:${epoch}`;
+    if (recoveryInFlightRef.current?.key === key) return;
+    const promise = getConversation(threadId).then((incoming) => {
+      if (
+        effectiveAccountIdRef.current !== accountId
+        || activeConversationThreadIdRef.current !== threadId
+        || conversationScopeEpochRef.current !== epoch
+        || incoming.account_id !== accountId
+      ) return;
+      qc.setQueryData<ConversationThread>(["brain-conversation", threadId], (current) => {
+        const reconciled = reconcileConversationThread(current, incoming);
+        return replayQueuedDurableTurnEvents(reconciled, accountId, threadId, epoch);
+      });
+    }).catch(() => undefined).finally(() => {
+      if (recoveryInFlightRef.current?.key === key) recoveryInFlightRef.current = null;
+    });
+    recoveryInFlightRef.current = { key, promise };
+  }, [qc, replayQueuedDurableTurnEvents]);
+
+  useConversationRuntimeStream({
+    accountId: effectiveAccountId,
+    threadId: activeConversationThreadId,
+    onEvent: projectTransientRuntimeEvent,
+  });
+  useConversationTurnEvents({
+    accountId: effectiveAccountId,
+    threadId: activeConversationThreadId,
+    onEvent: projectDurableTurnEvent,
+    onRecover: recoverConversationProjection,
+  });
   const accountReady = Boolean(
     effectiveAccount
     && (
@@ -239,10 +353,18 @@ export default function BrainHome() {
     queryKey: ["brain-conversation", activeConversationThreadId],
     queryFn: async () => {
       const incoming = await getConversation(activeConversationThreadId!);
-      return reconcileConversationThread(
+      const reconciled = reconcileConversationThread(
         qc.getQueryData<ConversationThread>(["brain-conversation", activeConversationThreadId!]),
         incoming,
       );
+      const accountId = effectiveAccountIdRef.current;
+      const epoch = conversationScopeEpochRef.current;
+      if (
+        accountId == null
+        || incoming.account_id !== accountId
+        || activeConversationThreadIdRef.current !== activeConversationThreadId
+      ) return reconciled;
+      return replayQueuedDurableTurnEvents(reconciled, accountId, activeConversationThreadId!, epoch);
     },
     enabled: activeConversationThreadId != null,
     // createConversation seeds this exact cache before activating the Thread.
@@ -251,6 +373,27 @@ export default function BrainHome() {
     refetchOnMount: false,
     staleTime: 10_000,
   });
+  useEffect(() => {
+    const accountId = effectiveAccountId;
+    const threadId = activeConversationThreadId;
+    const epoch = conversationScopeEpochRef.current;
+    pendingDurableTurnEventsRef.current = pendingDurableTurnEventsRef.current.filter((item) =>
+      accountId != null
+      && threadId != null
+      && isQueuedDurableEventForScope(item, accountId, threadId, epoch)
+    );
+  }, [activeConversationThreadId, effectiveAccountId]);
+  useEffect(() => {
+    const accountId = effectiveAccountId;
+    const threadId = activeConversationThreadId;
+    const epoch = conversationScopeEpochRef.current;
+    if (accountId == null || threadId == null) return;
+
+    const current = qc.getQueryData<ConversationThread>(["brain-conversation", threadId]);
+    if (!current || current.account_id !== accountId) return;
+    const projected = replayQueuedDurableTurnEvents(current, accountId, threadId, epoch);
+    if (projected !== current) qc.setQueryData<ConversationThread>(["brain-conversation", threadId], projected);
+  }, [activeConversationThreadId, conversationQuery.data, effectiveAccountId, qc, replayQueuedDurableTurnEvents]);
   useEffect(() => {
     const loaded = conversationQuery.data;
     if (
@@ -1499,27 +1642,13 @@ function asRuntimePayload(payload: DyEvent["payload"]) {
     : null;
 }
 
-function isEphemeralConversationEvent(type: string) {
+function isTerminalConversationTurnEvent(type: string) {
   return [
-    "brain.runtime.started",
-    "brain.runtime.intent_classified",
-    "brain.runtime.tool_started",
-    "brain.runtime.tool_completed",
-    "brain.runtime.subagent_started",
-    "brain.runtime.subagent_completed",
-    "brain.runtime.subagent_failed",
-    "brain.runtime.message_start",
-    "brain.runtime.message_delta",
-  ].includes(type);
-}
-
-function isTerminalConversationRuntimeEvent(type: string) {
-  return [
-    "brain.runtime.blocked",
-    "brain.runtime.completed",
-    "brain.runtime.failed",
-    "brain.runtime.generation_stopped",
-    "brain.runtime.turn_paused",
+    "turn.blocked",
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+    "turn.stopped",
   ].includes(type);
 }
 

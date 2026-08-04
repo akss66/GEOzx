@@ -40,7 +40,7 @@ const FAILED_STEP_STATUSES = new Set([
 
 export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
   const projections = projectionsForTurn(turn);
-  const steps = projectSteps(projections);
+  const steps = overlayRuntimeSteps(projectSteps(projections), turn);
   const status = projectStatus(turn.status, turn.turn_phase);
 
   return {
@@ -52,12 +52,41 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
     assistantText: turn.assistant_response ?? latestAnswer(projections),
     steps,
     experts: projectExperts(projections),
-    deliverableIds: projectDeliverableIds(projections),
+    deliverableIds: [...new Set([
+      ...projectDeliverableIds(projections),
+      ...(turn.runtime_overlay?.deliverableIds ?? []),
+    ])],
     assistant: {
       identity: "运营大脑",
       steps,
     },
   };
+}
+
+const RUNTIME_STEP_LABELS: Record<string, string> = {
+  read_data: "读取账号数据",
+  specialist_work: "专家分析",
+  quality_review: "质量审核",
+  prepare_deliverable: "整理交付内容",
+  publish_content: "执行发布",
+};
+
+function overlayRuntimeSteps(
+  persisted: WorkTurnStep[],
+  turn: ConversationTurn,
+): WorkTurnStep[] {
+  const overlay = turn.runtime_overlay;
+  if (!overlay) return persisted;
+  const byCode = new Map(persisted.map((step) => [step.code, step]));
+  for (const [code, runtime] of Object.entries(overlay.steps)) {
+    const previous = byCode.get(code);
+    byCode.set(code, {
+      ...(previous ?? { code, label: RUNTIME_STEP_LABELS[code] ?? "执行任务" }),
+      state: runtime.state,
+      ...(runtime.detail ? { detail: runtime.detail } : {}),
+    });
+  }
+  return [...byCode.values()];
 }
 
 export function reduceWorkTurnStreamFrame(

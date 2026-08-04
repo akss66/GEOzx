@@ -760,8 +760,24 @@ export interface ConversationTurn {
     lastSequence: number;
     terminal: boolean;
   };
+  runtime_overlay?: ConversationTurnRuntimeOverlay;
   created_at: string;
   updated_at: string;
+}
+
+export interface ConversationTurnRuntimeStep {
+  state: "done" | "active" | "waiting" | "failed";
+  detail?: string;
+  attempt?: number;
+}
+
+/** Ephemeral client projection of durable per-Turn events. Never persisted. */
+export interface ConversationTurnRuntimeOverlay {
+  lastEventId: number;
+  lastSequence: number;
+  steps: Record<string, ConversationTurnRuntimeStep>;
+  deliverableIds: number[];
+  terminalStatus?: string;
 }
 
 export type TurnPhase =

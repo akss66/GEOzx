@@ -123,6 +123,30 @@ describe("projectWorkTurn", () => {
     })).currentActivity).toBeNull();
   });
 
+  it("overlays durable runtime steps and deliverables without discarding persisted projections", () => {
+    const model = projectWorkTurn(turn({
+      status: "running",
+      projections: [executionSummary],
+      runtime_overlay: {
+        lastEventId: 9,
+        lastSequence: 9,
+        steps: {
+          read_data: { state: "done", detail: "Account data read", attempt: 1 },
+          unknown_internal_key: { state: "active", attempt: 7 },
+        },
+        deliverableIds: [99],
+      },
+    }));
+
+    expect(model.steps).toEqual(expect.arrayContaining([
+      { code: "read_data", label: "读取账号数据", state: "done", detail: "Account data read" },
+      { code: "unknown_internal_key", label: "执行任务", state: "active" },
+    ]));
+    expect(model.deliverableIds).toEqual([88, 99]);
+    expect(model.steps.find((step) => step.code === "unknown_internal_key")?.label)
+      .not.toContain("unknown_internal_key");
+  });
+
   it.each([
     ["blocked", "blocked"],
     ["cancelled", "cancelled"],

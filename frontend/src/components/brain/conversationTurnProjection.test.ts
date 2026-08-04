@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { ConversationThread } from "../../types";
+import type { ConversationThread, ConversationTurnEvent } from "../../types";
 import { upsertTurnByClientMessageId } from "../../stores/brainConversation";
 import {
   applyConversationEvent,
+  applyConversationTurnEvent,
   appendOptimisticTurn,
   isActiveConversationTurnStatus,
   mergeConversationTurn,
@@ -57,7 +58,119 @@ function frame(
   };
 }
 
+function turnEvent(
+  type: string,
+  id: number,
+  sequence: number,
+  payload: Record<string, unknown> = {},
+): ConversationTurnEvent {
+  return {
+    id,
+    sequence,
+    type,
+    payload,
+    thread_id: 81,
+    turn_id: 101,
+    run_id: 3,
+    skill_run_id: null,
+    created_at: "2026-08-04T00:00:00Z",
+  };
+}
+
 describe("conversation Turn projection", () => {
+  it("projects durable Turn events by top-level thread and Turn identity without client-message data", () => {
+    const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
+    const received = applyConversationTurnEvent(persisted, turnEvent("turn.received", 1, 1));
+    const started = applyConversationTurnEvent(received, turnEvent("step.started", 2, 2, {
+      step: "read_data",
+      title: "ignored internal title",
+      metadata: { attempt: 2 },
+    }));
+    const completed = applyConversationTurnEvent(started, turnEvent("step.completed", 3, 3, {
+      step: "read_data",
+      summary: "Account data read",
+    }));
+    const delivered = applyConversationTurnEvent(completed, turnEvent("deliverable.updated", 4, 4, {
+      deliverable_id: 88,
+    }));
+    const terminal = applyConversationTurnEvent(delivered, turnEvent("turn.completed", 5, 5, {
+      status: "completed",
+    }));
+
+    expect(terminal.turns[0]).toMatchObject({
+      status: "completed",
+      runtime_overlay: {
+        lastEventId: 5,
+        lastSequence: 5,
+        terminalStatus: "completed",
+        deliverableIds: [88],
+        steps: {
+          read_data: { state: "done", detail: "Account data read", attempt: 2 },
+        },
+      },
+    });
+  });
+
+  it("rejects duplicate and late durable events without rolling a failed step backward", () => {
+    const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
+    const failed = applyConversationTurnEvent(persisted, turnEvent("step.failed", 3, 3, {
+      step: "quality_review",
+      error_code: "review_failed",
+    }));
+    const duplicate = applyConversationTurnEvent(failed, turnEvent("step.failed", 3, 3, {
+      step: "quality_review",
+    }));
+    const lateCompleted = applyConversationTurnEvent(duplicate, turnEvent("step.completed", 2, 2, {
+      step: "quality_review",
+    }));
+
+    expect(lateCompleted).toBe(duplicate);
+    expect(lateCompleted.turns[0].runtime_overlay?.steps.quality_review).toMatchObject({
+      state: "failed",
+    });
+  });
+
+  it("keeps a waiting permission Turn interactive because it is not terminal", () => {
+    const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
+    const waiting = applyConversationTurnEvent(persisted, turnEvent("turn.received", 1, 1, {
+      status: "waiting_permission",
+    }));
+
+    expect(waiting.turns[0].status).toBe("waiting_permission");
+    expect(waiting.turns[0].runtime_overlay).not.toHaveProperty("terminalStatus");
+  });
+
+  it("keeps Turn status running while step and deliverable payloads carry their own status", () => {
+    const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
+    const stepped = applyConversationTurnEvent(persisted, turnEvent("step.completed", 1, 1, {
+      step: "quality_review",
+      status: "completed",
+    }));
+    const delivered = applyConversationTurnEvent(stepped, turnEvent("deliverable.updated", 2, 2, {
+      deliverable_id: 88,
+      status: "pending_review",
+    }));
+
+    expect(delivered.turns[0]).toMatchObject({
+      status: "running",
+      runtime_overlay: {
+        steps: { quality_review: { state: "done" } },
+        deliverableIds: [88],
+      },
+    });
+  });
+
+  it("ignores durable events from another top-level Thread or Turn", () => {
+    const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
+
+    expect(applyConversationTurnEvent(persisted, {
+      ...turnEvent("step.started", 1, 1, { step: "read_data" }), thread_id: 82,
+    })).toBe(persisted);
+    expect(applyConversationTurnEvent(persisted, {
+      ...turnEvent("step.started", 1, 1, { step: "read_data" }), turn_id: 102,
+    })).toBe(persisted);
+  });
+
   it("upserts a server Turn through the optimistic client identity", () => {
     const result = upsertTurnByClientMessageId(
       thread,
@@ -146,6 +259,22 @@ describe("conversation Turn projection", () => {
       client_message_id: "client-1",
       assistant_response: "newer streamed token",
       stream_state: { lastSequence: 7 },
+    });
+  });
+
+  it("reconciles a recovery snapshot without discarding a newer durable live overlay", () => {
+    const live = applyConversationTurnEvent(
+      { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] },
+      turnEvent("step.completed", 7, 7, { step: "read_data" }),
+    );
+    const reconciled = reconcileConversationThread(live, {
+      ...thread,
+      turns: [{ ...thread.turns[0], id: 101, status: "running" }],
+    });
+
+    expect(reconciled.turns[0].runtime_overlay).toMatchObject({
+      lastEventId: 7,
+      steps: { read_data: { state: "done" } },
     });
   });
 

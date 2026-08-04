@@ -1,5 +1,11 @@
 import type { DyEvent } from "../../hooks/useEventStream";
-import type { ConversationThread, ConversationTurn, TurnPhase } from "../../types";
+import type {
+  ConversationThread,
+  ConversationTurn,
+  ConversationTurnEvent,
+  ConversationTurnRuntimeOverlay,
+  TurnPhase,
+} from "../../types";
 import { reduceWorkTurnStreamFrame } from "./workTurnProjection";
 
 export type TurnIdentity = {
@@ -88,14 +94,19 @@ export function mergeConversationTurn(
         assistant_response: current.assistant_response ?? incoming.assistant_response,
         status: current.status,
         stream_state: current.stream_state,
+        runtime_overlay: current.runtime_overlay,
       }
     : incomingIsTerminal
       ? {
-          ...incoming,
-          client_message_id: incoming.client_message_id ?? current.client_message_id,
-          assistant_response: incoming.assistant_response ?? current.assistant_response,
-        }
-      : incoming;
+        ...incoming,
+        client_message_id: incoming.client_message_id ?? current.client_message_id,
+        assistant_response: incoming.assistant_response ?? current.assistant_response,
+        runtime_overlay: current.runtime_overlay,
+      }
+      : {
+        ...incoming,
+        runtime_overlay: current.runtime_overlay,
+      };
   return {
     ...thread,
     turns: thread.turns.map((turn, turnIndex) =>
@@ -152,6 +163,116 @@ export function applyConversationEvent(
   };
 }
 
+/**
+ * Project one durable, thread-scoped Turn event into the snapshot currently
+ * rendered by BrainHome. This reducer intentionally does not require an
+ * optimistic client_message_id: durable events are identified at the envelope.
+ */
+export function applyConversationTurnEvent(
+  thread: ConversationThread,
+  event: ConversationTurnEvent,
+): ConversationThread {
+  if (event.thread_id !== thread.id) return thread;
+  const turnIndex = thread.turns.findIndex((turn) => turn.id === event.turn_id);
+  if (turnIndex < 0) return thread;
+
+  const turn = thread.turns[turnIndex];
+  const overlay = turn.runtime_overlay;
+  if (
+    overlay != null
+    && (event.sequence <= overlay.lastSequence || event.id <= overlay.lastEventId)
+  ) return thread;
+
+  const nextOverlay = reduceRuntimeOverlay(overlay, event);
+  const status = durableTurnStatus(event.type, event.payload);
+  const next: ConversationTurn = {
+    ...turn,
+    runtime_overlay: nextOverlay,
+    ...(status ? { status } : {}),
+  };
+  return {
+    ...thread,
+    turns: thread.turns.map((candidate, index) => index === turnIndex ? next : candidate),
+  };
+}
+
+function reduceRuntimeOverlay(
+  current: ConversationTurnRuntimeOverlay | undefined,
+  event: ConversationTurnEvent,
+): ConversationTurnRuntimeOverlay {
+  const base: ConversationTurnRuntimeOverlay = current ?? {
+    lastEventId: 0,
+    lastSequence: 0,
+    steps: {},
+    deliverableIds: [],
+  };
+  const payload = event.payload;
+  const next: ConversationTurnRuntimeOverlay = {
+    ...base,
+    lastEventId: event.id,
+    lastSequence: event.sequence,
+  };
+  const stepCode = durableStepCode(payload);
+  if (stepCode != null) {
+    const state = event.type === "step.completed"
+      ? "done"
+      : event.type === "step.failed"
+        ? "failed"
+        : event.type === "step.started"
+          ? "active"
+          : null;
+    if (state != null) {
+      next.steps = {
+        ...base.steps,
+        [stepCode]: {
+          ...base.steps[stepCode],
+          state,
+          ...runtimeStepDetail(payload),
+          ...runtimeStepAttempt(payload),
+        },
+      };
+    }
+  }
+  if (event.type === "deliverable.updated") {
+    const deliverableId = positiveInteger(payload.deliverable_id);
+    if (deliverableId != null && !base.deliverableIds.includes(deliverableId)) {
+      next.deliverableIds = [...base.deliverableIds, deliverableId];
+    }
+  }
+  const terminalStatus = durableTurnStatus(event.type, payload);
+  if (terminalStatus && isTerminalConversationTurnStatus(terminalStatus)) {
+    next.terminalStatus = terminalStatus;
+  }
+  return next;
+}
+
+function durableStepCode(payload: Record<string, unknown>) {
+  for (const value of [payload.step, payload.step_key, payload.step_id]) {
+    const code = stringValue(value);
+    if (code != null) return code;
+  }
+  return null;
+}
+
+function runtimeStepDetail(payload: Record<string, unknown>) {
+  const detail = stringValue(payload.summary)
+    ?? stringValue(payload.message)
+    ?? stringValue(payload.reason)
+    ?? stringValue(payload.recovery_action);
+  return detail == null ? {} : { detail };
+}
+
+function runtimeStepAttempt(payload: Record<string, unknown>) {
+  const metadata = asRecord(payload.metadata);
+  const attempt = positiveInteger(metadata?.attempt);
+  return attempt == null ? {} : { attempt };
+}
+
+function durableTurnStatus(type: string, payload: Record<string, unknown>) {
+  if (!type.startsWith("turn.")) return null;
+  return eventStatus(type, payload);
+}
+
 function reduceTurnEvent(
   turn: ConversationTurn,
   event: DyEvent,
@@ -206,6 +327,11 @@ function eventStatus(type: string, payload: Record<string, unknown>) {
   if (type === "brain.runtime.completed") return "completed";
   if (type === "brain.runtime.failed") return "failed";
   if (type === "brain.runtime.generation_stopped") return "stopped";
+  if (type === "turn.completed") return "completed";
+  if (type === "turn.failed") return "failed";
+  if (type === "turn.blocked") return "blocked";
+  if (type === "turn.cancelled") return "cancelled";
+  if (type === "turn.stopped") return "stopped";
   return null;
 }
 
