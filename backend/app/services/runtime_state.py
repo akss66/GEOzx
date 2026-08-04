@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -174,6 +174,7 @@ async def close_runtime_state(
         )
 
         replaying_terminal = run.status in TERMINAL_STATUSES
+        previous_run_status = run.status
         previous_turn_status = turn.status if turn is not None else None
         terminal_state_mismatch = (
             replaying_terminal
@@ -286,31 +287,43 @@ async def close_runtime_state(
                     if event is not None
                 ),
             )
-            if (
-                effective_status in TERMINAL_STATUSES
-                and scope.org_id is not None
-                and scope.account_id is not None
-                and scope.thread_id is not None
-                and scope.turn_id is not None
-            ):
-                await append_turn_event(
-                    session,
-                    TurnEventScope(
-                        org_id=scope.org_id,
-                        account_id=scope.account_id,
-                        thread_id=scope.thread_id,
-                        turn_id=scope.turn_id,
-                        run_id=run.id,
-                        skill_run_id=(skill_run.id if skill_run is not None else None),
-                    ),
-                    _public_terminal_event_type(effective_status),
-                    {
-                        "status": effective_status,
-                        "message": effective_message,
-                        "error_code": effective_error,
-                    },
-                    "terminal",
+            if _has_public_turn_scope(scope):
+                turn_event_scope = TurnEventScope(
+                    org_id=scope.org_id,
+                    account_id=scope.account_id,
+                    thread_id=scope.thread_id,
+                    turn_id=scope.turn_id,
+                    run_id=run.id,
+                    skill_run_id=(skill_run.id if skill_run is not None else None),
                 )
+                if effective_status in PAUSED_STATUSES:
+                    await append_turn_event(
+                        session,
+                        turn_event_scope,
+                        "turn.paused",
+                        {
+                            "status": effective_status,
+                            "message": effective_message,
+                        },
+                        await _paused_turn_event_key(
+                            session=session,
+                            status=effective_status,
+                            scope=turn_event_scope,
+                            previous_run_status=previous_run_status,
+                        ),
+                    )
+                elif effective_status in TERMINAL_STATUSES:
+                    await append_turn_event(
+                        session,
+                        turn_event_scope,
+                        _public_terminal_event_type(effective_status),
+                        {
+                            "status": effective_status,
+                            "message": effective_message,
+                            "error_code": effective_error,
+                        },
+                        "terminal",
+                    )
         elif turn is None and effective_status in {
             "failed",
             "dead_letter",
@@ -355,6 +368,50 @@ def _public_terminal_event_type(status: str) -> str:
     if status == "stopped":
         return "turn.stopped"
     return "turn.blocked"
+
+
+def _has_public_turn_scope(scope: RuntimeStateScope) -> bool:
+    return all(
+        value is not None
+        for value in (scope.org_id, scope.account_id, scope.thread_id, scope.turn_id)
+    )
+
+
+async def _paused_turn_event_key(
+    *,
+    session: AsyncSession,
+    status: str,
+    scope: TurnEventScope,
+    previous_run_status: str,
+) -> str:
+    """Identify a pause transition, retaining replay idempotency after a resume.
+
+    ``close_runtime_state`` locks the AgentRun before calling this helper. A
+    replay sees the latest persisted pause while a real resume changes the
+    previous runtime status back to an active state, allocating the next
+    durable pause ordinal without a timestamp or random identifier.
+    """
+
+    predicates = (
+        Event.org_id == scope.org_id,
+        Event.account_id == scope.account_id,
+        Event.thread_id == scope.thread_id,
+        Event.turn_id == scope.turn_id,
+        Event.run_id == scope.run_id,
+        Event.type == "turn.paused",
+    )
+    previous_count = await session.scalar(select(func.count(Event.id)).where(*predicates)) or 0
+    latest = await session.scalar(
+        select(Event).where(*predicates).order_by(Event.sequence.desc(), Event.id.desc()).limit(1)
+    )
+    replaying_same_pause = (
+        previous_run_status in PAUSED_STATUSES
+        and latest is not None
+        and latest.skill_run_id == scope.skill_run_id
+        and (latest.payload or {}).get("status") == status
+    )
+    ordinal = previous_count if replaying_same_pause else previous_count + 1
+    return f"paused:{ordinal}"
 
 
 def runtime_status_family(status: str) -> str:

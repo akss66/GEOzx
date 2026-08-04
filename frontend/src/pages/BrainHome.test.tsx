@@ -1018,6 +1018,106 @@ describe("BrainHome V3 conversation projection", () => {
     expect(invalidateQueries).toHaveBeenCalledTimes(initialInvalidations);
   });
 
+  it("recovers a paused Turn exactly once from the scoped conversation snapshot", async () => {
+    const running = persistedTurn(501, "paused-client", "Prepare publishing", null, "running");
+    const approval = pendingApproval(901);
+    const recovered = {
+      ...persistedTurn(
+        501,
+        "paused-client",
+        "Prepare publishing",
+        "Please approve publishing before I continue.",
+        "waiting_permission",
+      ),
+      projections: [{ type: "approval" as const, turn_id: 501, approval }],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockResolvedValueOnce(thread(81, [running]))
+      .mockResolvedValueOnce(thread(81, [recovered]));
+    const view = renderBrainHome();
+    await screen.findByText("Prepare publishing");
+    const initialCalls = vi.mocked(getConversation).mock.calls.length;
+
+    act(() => {
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.paused", 2, 2, 81, 501, {
+        status: "waiting_permission",
+        message: "Please approve publishing before I continue.",
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.paused", 2, 2, 81, 501, {
+        status: "waiting_permission",
+        message: "Please approve publishing before I continue.",
+      }));
+    });
+
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(initialCalls + 1));
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0])
+      .toMatchObject({
+        status: "waiting_permission",
+        assistant_response: "Please approve publishing before I continue.",
+      });
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(initialCalls + 1));
+  });
+
+  it("recovers a missing deliverable projection once and does not refetch an existing card", async () => {
+    const running = persistedTurn(501, "deliverable-client", "Inspect account", null, "running");
+    const projection = {
+      type: "artifact" as const,
+      turn_id: 501,
+      artifact_id: 88,
+      artifact_type: "account_inspection_report",
+      skill_run_id: 4,
+      account_id: 3,
+    };
+    const recovered = { ...running, projections: [projection] };
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockResolvedValueOnce(thread(81, [running]))
+      .mockResolvedValueOnce(thread(81, [recovered]));
+    vi.mocked(getArtifact).mockResolvedValue({ ...presentationArtifact(), id: 88 });
+    const view = renderBrainHome();
+    await screen.findByText("Inspect account");
+    const initialCalls = vi.mocked(getConversation).mock.calls.length;
+
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("deliverable.updated", 2, 2, 81, 501, {
+      deliverable_id: 88,
+    })));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(initialCalls + 1));
+    expect(await screen.findByTestId("projection-artifact-88")).toBeInTheDocument();
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0].projections)
+      .toHaveLength(1);
+
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("deliverable.updated", 3, 3, 81, 501, {
+      deliverable_id: 88,
+    })));
+    expect(getConversation).toHaveBeenCalledTimes(initialCalls + 1);
+  });
+
+  it("discards an off-scope snapshot returned while recovering a queued durable pause", async () => {
+    const running = persistedTurn(501, "scope-client", "Inspect account", null, "running");
+    const foreign = persistedTurn(501, "foreign-client", "Foreign account", "Do not show", "completed");
+    const initial = deferred<ConversationThread>();
+    const recovery = deferred<ConversationThread>();
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(recovery.promise);
+    const view = renderBrainHome();
+    await screen.findByText("Loading conversation…");
+
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("turn.paused", 2, 2, 81, 501, {
+      status: "waiting_user",
+      message: "Please provide the missing goal.",
+    })));
+
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+    await act(async () => initial.resolve(thread(81, [running])));
+    await act(async () => recovery.resolve(thread(81, [foreign], 4)));
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81]))
+      .toMatchObject({ account_id: 3, turns: [{ user_input: "Inspect account" }] });
+    expect(screen.queryByText("Foreign account")).not.toBeInTheDocument();
+  });
+
   it("replays a durable event received before the initial conversation snapshot materializes", async () => {
     const snapshot = deferred<ConversationThread>();
     saveThread(3, 81);
@@ -1034,6 +1134,120 @@ describe("BrainHome V3 conversation projection", () => {
 
     expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81])?.turns[0])
       .toMatchObject({ runtime_overlay: { steps: { read_data: { state: "done" } } } });
+  });
+
+  it("recovers queued paused and deliverable events into one scoped approval and artifact snapshot", async () => {
+    const initial = deferred<ConversationThread>();
+    const recovered = deferred<ConversationThread>();
+    const approval = pendingApproval(901);
+    const source = { ...presentationArtifact(), id: 88 };
+    const snapshotTurn = persistedTurn(501, "queued-recovery", "Prepare publishing", null, "running");
+    const recoveredTurn = {
+      ...persistedTurn(
+        501,
+        "queued-recovery",
+        "Prepare publishing",
+        "Please approve publishing before I continue.",
+        "waiting_permission",
+      ),
+      projections: [
+        { type: "approval" as const, turn_id: 501, approval },
+        {
+          type: "artifact" as const,
+          turn_id: 501,
+          artifact_id: 88,
+          artifact_type: source.artifact_type,
+          skill_run_id: source.skill_run_id!,
+          account_id: 3,
+        },
+      ],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(recovered.promise);
+    vi.mocked(getArtifact).mockResolvedValue(source);
+
+    renderBrainHome();
+    await screen.findByText("Loading conversation…");
+    act(() => {
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.paused", 2, 2, 81, 501, {
+        status: "waiting_permission",
+        message: "Please approve publishing before I continue.",
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("deliverable.updated", 3, 3, 81, 501, {
+        deliverable_id: 88,
+      }));
+    });
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+
+    await act(async () => initial.resolve(thread(81, [snapshotTurn])));
+    await act(async () => recovered.resolve(thread(81, [recoveredTurn])));
+
+    expect(await screen.findByLabelText("Approval required")).toBeInTheDocument();
+    expect(await screen.findByTestId("projection-artifact-88")).toBeInTheDocument();
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+  });
+
+  it("uses one queued recovery follow-up only when the first snapshot still lacks its approval and artifact", async () => {
+    const initial = deferred<ConversationThread>();
+    const firstRecovery = deferred<ConversationThread>();
+    const followUp = deferred<ConversationThread>();
+    const approval = pendingApproval(901);
+    const source = { ...presentationArtifact(), id: 88 };
+    const snapshotTurn = persistedTurn(501, "queued-follow-up", "Prepare publishing", null, "running");
+    const incompleteRecoveryTurn = {
+      ...persistedTurn(
+        501,
+        "queued-follow-up",
+        "Prepare publishing",
+        "Please approve publishing before I continue.",
+        "waiting_permission",
+      ),
+      projections: [],
+    };
+    const completedRecoveryTurn = {
+      ...incompleteRecoveryTurn,
+      projections: [
+        { type: "approval" as const, turn_id: 501, approval },
+        {
+          type: "artifact" as const,
+          turn_id: 501,
+          artifact_id: 88,
+          artifact_type: source.artifact_type,
+          skill_run_id: source.skill_run_id!,
+          account_id: 3,
+        },
+      ],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(firstRecovery.promise)
+      .mockReturnValueOnce(followUp.promise);
+    vi.mocked(getArtifact).mockResolvedValue(source);
+
+    renderBrainHome();
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(1));
+    act(() => {
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.paused", 2, 2, 81, 501, {
+        status: "waiting_permission",
+        message: "Please approve publishing before I continue.",
+      }));
+      mocks.turnEvents.handler?.(durableTurnEvent("deliverable.updated", 3, 3, 81, 501, {
+        deliverable_id: 88,
+      }));
+    });
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(2));
+
+    await act(async () => initial.resolve(thread(81, [snapshotTurn])));
+    await act(async () => firstRecovery.resolve(thread(81, [incompleteRecoveryTurn])));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(3));
+
+    await act(async () => followUp.resolve(thread(81, [completedRecoveryTurn])));
+    expect(await screen.findByLabelText("Approval required")).toBeInTheDocument();
+    expect(await screen.findByTestId("projection-artifact-88")).toBeInTheDocument();
+    await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(3));
   });
 
   it("replays a durable event received before an optimistic Turn binds its server id", async () => {

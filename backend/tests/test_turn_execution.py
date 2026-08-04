@@ -946,12 +946,23 @@ async def test_close_runtime_state_pause_then_complete_delivers_both_messages_on
     )
     base_scope = {
         "run_id": run.id,
+        "org_id": admin.org_id,
+        "thread_id": turn.thread_id,
         "turn_id": turn.id,
         "skill_run_id": skill_run.id,
         "task_id": task.id,
         "account_id": account.id,
     }
 
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **base_scope,
+            result_payload={"status": "waiting_permission"},
+        ),
+        status="waiting_permission",
+        message="请先确认工具授权。",
+    )
     await close_runtime_state(
         session,
         scope=RuntimeStateScope(
@@ -993,8 +1004,77 @@ async def test_close_runtime_state_pause_then_complete_delivers_both_messages_on
         "请先确认工具授权。",
         "授权后任务已完成。",
     ]
+    paused_events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == turn.id, Event.type == "turn.paused")
+            .order_by(Event.id)
+        )
+    )
+    assert [event.payload for event in paused_events] == [{
+        "status": "waiting_permission",
+        "message": "请先确认工具授权。",
+    }]
     assert turn.status == "completed"
     assert turn.assistant_response == "授权后任务已完成。"
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_records_a_second_pause_after_resume_but_replays_each_pause_once(
+    session,
+    admin,
+) -> None:
+    account, _thread, turn, run, task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="state-distinct-pauses",
+    )
+    scope = RuntimeStateScope(
+        run_id=run.id,
+        org_id=admin.org_id,
+        thread_id=turn.thread_id,
+        turn_id=turn.id,
+        skill_run_id=skill_run.id,
+        task_id=task.id,
+        account_id=account.id,
+    )
+
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status="waiting_permission",
+        message="Approve the first action.",
+    )
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status="running",
+        message="Continuing after approval.",
+    )
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status="waiting_permission",
+        message="Approve the second action.",
+    )
+    await close_runtime_state(
+        session,
+        scope=scope,
+        status="waiting_permission",
+        message="Approve the second action.",
+    )
+
+    pauses = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == turn.id, Event.type == "turn.paused")
+            .order_by(Event.sequence.asc(), Event.id.asc())
+        )
+    )
+    assert [(event.sequence, event.payload["message"]) for event in pauses] == [
+        (1, "Approve the first action."),
+        (2, "Approve the second action."),
+    ]
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,7 @@ _TURN_METRIC_DIMENSIONS = {
 _PUBLIC_EVENT_TYPES = frozenset(
     {
         "turn.received",
+        "turn.paused",
         "turn.completed",
         "turn.failed",
         "turn.blocked",

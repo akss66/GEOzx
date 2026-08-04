@@ -124,6 +124,37 @@ async def test_idempotent_append_emits_safe_publish_and_duplicate_metrics(sessio
 
 
 @pytest.mark.asyncio
+async def test_paused_turn_events_are_not_dropped_by_bounded_metric_labels(session, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="dyflow.turn_metrics")
+    _account, _thread, _turn, scope = await _scope(session, "paused-metric")
+
+    first = await append_turn_event(
+        session,
+        scope,
+        "turn.paused",
+        {"status": "waiting_permission", "message": "Approve this action."},
+        "paused:1",
+    )
+    replay = await append_turn_event(
+        session,
+        scope,
+        "turn.paused",
+        {"status": "waiting_permission", "message": "Approve this action."},
+        "paused:1",
+    )
+
+    assert replay.id == first.id
+    assert [
+        record.metric_dimensions
+        for record in _metric_records(caplog, "turn_event_publish_ms")
+    ] == [{"event_type": "turn.paused", "outcome": "appended"}]
+    assert [
+        record.metric_dimensions
+        for record in _metric_records(caplog, "turn_event_duplicate_total")
+    ] == [{"event_type": "turn.paused", "transport": "durable"}]
+
+
+@pytest.mark.asyncio
 async def test_thread_scope_excludes_foreign_account_event_from_bounded_page(session) -> None:
     """Dropping account/thread predicates would expose another account's runtime."""
 

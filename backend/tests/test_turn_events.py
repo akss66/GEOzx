@@ -381,6 +381,7 @@ async def test_list_uses_complete_scope_order_after_id_and_bounded_limit(session
         "turn.blocked",
         "turn.cancelled",
         "turn.stopped",
+        "turn.paused",
         "step.started",
         "step.completed",
         "step.failed",
@@ -475,6 +476,39 @@ async def test_payload_uses_event_allowlist_and_recursively_removes_sensitive_fi
             "source_id": 7,
             "retryable": True,
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_paused_payload_has_a_minimal_public_allowlist(session) -> None:
+    scope, _ = await _create_scope(session, "paused-payload")
+
+    event = await append_turn_event(
+        session,
+        scope,
+        "turn.paused",
+        {
+            "status": "waiting_permission",
+            "message": "Approve before publishing.",
+            "turn_phase": "waiting_approval",
+            "reason": "permission_required",
+            "recovery_action": "approve_tool_call",
+            "metadata": {"source": "tool", "prompt": "must not leak"},
+            "client_message_id": "not-public-for-pause",
+            "summary": "not-public-for-pause",
+            "error_code": "not-public-for-pause",
+            "step": "not-public-for-pause",
+        },
+        "paused-minimal",
+    )
+
+    assert event.payload == {
+        "status": "waiting_permission",
+        "message": "Approve before publishing.",
+        "turn_phase": "waiting_approval",
+        "reason": "permission_required",
+        "recovery_action": "approve_tool_call",
+        "metadata": {"source": "tool"},
     }
 
 

@@ -185,10 +185,12 @@ export function applyConversationTurnEvent(
 
   const nextOverlay = reduceRuntimeOverlay(overlay, event);
   const status = durableTurnStatus(event.type, event.payload);
+  const message = durableTurnMessage(event.type, event.payload);
   const next: ConversationTurn = {
     ...turn,
     runtime_overlay: nextOverlay,
     ...(status ? { status } : {}),
+    ...(message ? { assistant_response: message } : {}),
   };
   return {
     ...thread,
@@ -271,6 +273,21 @@ function runtimeStepAttempt(payload: Record<string, unknown>) {
 function durableTurnStatus(type: string, payload: Record<string, unknown>) {
   if (!type.startsWith("turn.")) return null;
   return eventStatus(type, payload);
+}
+
+function durableTurnMessage(type: string, payload: Record<string, unknown>) {
+  if (type !== "turn.paused" && !isTerminalDurableTurnEvent(type)) return null;
+  return stringValue(payload.message);
+}
+
+function isTerminalDurableTurnEvent(type: string) {
+  return [
+    "turn.completed",
+    "turn.failed",
+    "turn.blocked",
+    "turn.cancelled",
+    "turn.stopped",
+  ].includes(type);
 }
 
 function reduceTurnEvent(

@@ -100,6 +100,11 @@ interface PendingDurableTurnEvent {
   event: ConversationTurnEvent;
 }
 
+interface ProjectionRecoveryRequirements {
+  events: ConversationTurnEvent[];
+  followUpUsed: boolean;
+}
+
 function isQueuedDurableEventForScope(
   pending: PendingDurableTurnEvent,
   accountId: number,
@@ -118,13 +123,19 @@ function replayPendingDurableTurnEvents(
   let projected = snapshot;
   const replayedEventIds = new Set<number>();
   const replayedEvents: ConversationTurnEvent[] = [];
+  const recoveryEvents: ConversationTurnEvent[] = [];
   for (const item of pending) {
     if (!projected.turns.some((turn) => turn.id === item.event.turn_id)) continue;
-    projected = applyConversationTurnEvent(projected, item.event);
+    const next = applyConversationTurnEvent(projected, item.event);
+    if (next === projected) continue;
+    if (needsConversationProjectionRecovery(projected, item.event)) {
+      recoveryEvents.push(item.event);
+    }
+    projected = next;
     replayedEventIds.add(item.event.id);
     replayedEvents.push(item.event);
   }
-  return { projected, replayedEventIds, replayedEvents };
+  return { projected, replayedEventIds, replayedEvents, recoveryEvents };
 }
 
 export default function BrainHome() {
@@ -153,6 +164,14 @@ export default function BrainHome() {
   const conversationScopeEpochRef = useRef(0);
   const previousAccountIdRef = useRef<number | null>(null);
   const recoveryInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const recoverConversationProjectionRef = useRef<() => void>(() => undefined);
+  const requestConversationProjectionRecoveryRef = useRef<(
+    accountId: number,
+    threadId: number,
+    epoch: number,
+    events: ConversationTurnEvent[],
+  ) => void>(() => undefined);
+  const projectionRecoveryRequirementsRef = useRef(new Map<string, ProjectionRecoveryRequirements>());
   const launcherRequestInFlight = useRef(false);
   const effectiveAccountIdRef = useRef<number | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
@@ -204,7 +223,12 @@ export default function BrainHome() {
       isQueuedDurableEventForScope(item, accountId, threadId, epoch)
     );
     if (pending.length === 0) return snapshot;
-    const { projected, replayedEventIds, replayedEvents } = replayPendingDurableTurnEvents(snapshot, pending);
+    const {
+      projected,
+      replayedEventIds,
+      replayedEvents,
+      recoveryEvents,
+    } = replayPendingDurableTurnEvents(snapshot, pending);
     if (replayedEventIds.size === 0) return snapshot;
     pendingDurableTurnEventsRef.current = pendingDurableTurnEventsRef.current.filter((item) =>
       !(
@@ -213,6 +237,9 @@ export default function BrainHome() {
       )
     );
     applyDurableTurnEventEffects(replayedEvents, projected);
+    if (recoveryEvents.length > 0) {
+      requestConversationProjectionRecoveryRef.current(accountId, threadId, epoch, recoveryEvents);
+    }
     return projected;
   }, [applyDurableTurnEventEffects]);
 
@@ -277,12 +304,19 @@ export default function BrainHome() {
           epoch,
           event,
         });
+        if (isProjectionRecoveryEvent(event)) {
+          requestConversationProjectionRecoveryRef.current(accountId, currentThreadId, epoch, [event]);
+        }
       }
       return;
     }
+    const shouldRecoverProjection = needsConversationProjectionRecovery(current, event);
     const projected = applyConversationTurnEvent(current, event);
     qc.setQueryData<ConversationThread>(["brain-conversation", currentThreadId], projected);
     applyDurableTurnEventEffects([event], projected);
+    if (projected !== current && shouldRecoverProjection) {
+      requestConversationProjectionRecoveryRef.current(accountId, currentThreadId, epoch, [event]);
+    }
   }, [applyDurableTurnEventEffects, qc]);
 
   const recoverConversationProjection = useCallback(() => {
@@ -292,6 +326,7 @@ export default function BrainHome() {
     if (accountId == null || threadId == null) return;
     const key = `${accountId}:${threadId}:${epoch}`;
     if (recoveryInFlightRef.current?.key === key) return;
+    let recoveredSnapshot: ConversationThread | null = null;
     const promise = getConversation(threadId).then((incoming) => {
       if (
         effectiveAccountIdRef.current !== accountId
@@ -301,13 +336,58 @@ export default function BrainHome() {
       ) return;
       qc.setQueryData<ConversationThread>(["brain-conversation", threadId], (current) => {
         const reconciled = reconcileConversationThread(current, incoming);
-        return replayQueuedDurableTurnEvents(reconciled, accountId, threadId, epoch);
+        const projected = replayQueuedDurableTurnEvents(reconciled, accountId, threadId, epoch);
+        recoveredSnapshot = projected;
+        return projected;
       });
     }).catch(() => undefined).finally(() => {
       if (recoveryInFlightRef.current?.key === key) recoveryInFlightRef.current = null;
+      const requirements = projectionRecoveryRequirementsRef.current.get(key);
+      if (!requirements || recoveredSnapshot == null) return;
+      const unmetRequirements = requirements.events.filter((event) =>
+        !isConversationProjectionRequirementSatisfied(recoveredSnapshot!, event)
+      );
+      if (unmetRequirements.length === 0) {
+        projectionRecoveryRequirementsRef.current.delete(key);
+      } else if (!requirements.followUpUsed) {
+        requirements.events = unmetRequirements;
+        requirements.followUpUsed = true;
+        if (
+          effectiveAccountIdRef.current === accountId
+          && activeConversationThreadIdRef.current === threadId
+          && conversationScopeEpochRef.current === epoch
+        ) {
+          recoverConversationProjectionRef.current();
+        }
+      }
     });
     recoveryInFlightRef.current = { key, promise };
   }, [qc, replayQueuedDurableTurnEvents]);
+  recoverConversationProjectionRef.current = recoverConversationProjection;
+  requestConversationProjectionRecoveryRef.current = (accountId, threadId, epoch, events) => {
+    if (
+      effectiveAccountIdRef.current !== accountId
+      || activeConversationThreadIdRef.current !== threadId
+      || conversationScopeEpochRef.current !== epoch
+    ) return;
+    const key = `${accountId}:${threadId}:${epoch}`;
+    const requirements = projectionRecoveryRequirementsRef.current.get(key) ?? {
+      events: [],
+      followUpUsed: false,
+    };
+    for (const event of events) {
+      if (
+        isProjectionRecoveryEvent(event)
+        && !requirements.events.some((candidate) => candidate.id === event.id)
+      ) {
+        requirements.events.push(event);
+      }
+    }
+    if (requirements.events.length === 0) return;
+    projectionRecoveryRequirementsRef.current.set(key, requirements);
+    if (recoveryInFlightRef.current?.key === key) return;
+    recoverConversationProjectionRef.current();
+  };
 
   useConversationRuntimeStream({
     accountId: effectiveAccountId,
@@ -382,6 +462,12 @@ export default function BrainHome() {
       && threadId != null
       && isQueuedDurableEventForScope(item, accountId, threadId, epoch)
     );
+    const activeScopeKey = accountId != null && threadId != null
+      ? `${accountId}:${threadId}:${epoch}`
+      : null;
+    for (const key of projectionRecoveryRequirementsRef.current.keys()) {
+      if (key !== activeScopeKey) projectionRecoveryRequirementsRef.current.delete(key);
+    }
   }, [activeConversationThreadId, effectiveAccountId]);
   useEffect(() => {
     const accountId = effectiveAccountId;
@@ -1650,6 +1736,55 @@ function isTerminalConversationTurnEvent(type: string) {
     "turn.cancelled",
     "turn.stopped",
   ].includes(type);
+}
+
+function durableDeliverableId(event: ConversationTurnEvent) {
+  const deliverableId = Number(event.payload.deliverable_id);
+  return Number.isInteger(deliverableId) && deliverableId > 0 ? deliverableId : null;
+}
+
+function isProjectionRecoveryEvent(event: ConversationTurnEvent) {
+  return event.type === "turn.paused"
+    || (event.type === "deliverable.updated" && durableDeliverableId(event) != null);
+}
+
+function needsConversationProjectionRecovery(
+  thread: ConversationThread,
+  event: ConversationTurnEvent,
+) {
+  if (event.type === "turn.paused") return true;
+  const deliverableId = durableDeliverableId(event);
+  if (event.type !== "deliverable.updated" || deliverableId == null) return false;
+  const turn = thread.turns.find((candidate) => candidate.id === event.turn_id);
+  return turn != null && !hasArtifactProjection(turn, deliverableId);
+}
+
+function isConversationProjectionRequirementSatisfied(
+  thread: ConversationThread,
+  event: ConversationTurnEvent,
+) {
+  const turn = thread.turns.find((candidate) => candidate.id === event.turn_id);
+  if (!turn) return false;
+  if (event.type === "turn.paused") {
+    const pausedStatus = typeof event.payload.status === "string"
+      ? event.payload.status
+      : turn.status;
+    if (turn.status !== pausedStatus) return false;
+    if (pausedStatus !== "waiting_permission") return true;
+    return turn.projections.some((projection) =>
+      projection.type === "approval" && projection.approval.status === "waiting_approval"
+    );
+  }
+  const deliverableId = durableDeliverableId(event);
+  return event.type !== "deliverable.updated"
+    || deliverableId == null
+    || hasArtifactProjection(turn, deliverableId);
+}
+
+function hasArtifactProjection(turn: ConversationTurn, deliverableId: number) {
+  return turn.projections.some((projection) =>
+    projection.type === "artifact" && projection.artifact_id === deliverableId
+  );
 }
 
 function isTerminalConversationRunStatus(status: string) {

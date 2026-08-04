@@ -140,6 +140,43 @@ describe("conversation Turn projection", () => {
     expect(waiting.turns[0].runtime_overlay).not.toHaveProperty("terminalStatus");
   });
 
+  it("recovers safe paused and terminal text from durable events without letting stale text win", () => {
+    const persisted = {
+      ...thread,
+      turns: [{ ...thread.turns[0], id: 101, status: "running" }],
+    };
+    const paused = applyConversationTurnEvent(
+      persisted,
+      turnEvent("turn.paused", 2, 2, {
+        status: "waiting_permission",
+        message: "Please approve publishing before I continue.",
+      }),
+    );
+    const completed = applyConversationTurnEvent(
+      paused,
+      turnEvent("turn.completed", 3, 3, {
+        status: "completed",
+        message: "Publishing preparation is complete.",
+      }),
+    );
+    const stale = applyConversationTurnEvent(
+      completed,
+      turnEvent("turn.failed", 2, 2, {
+        status: "failed",
+        message: "stale failure",
+      }),
+    );
+
+    expect(paused.turns[0]).toMatchObject({
+      status: "waiting_permission",
+      assistant_response: "Please approve publishing before I continue.",
+    });
+    expect(stale.turns[0]).toMatchObject({
+      status: "completed",
+      assistant_response: "Publishing preparation is complete.",
+    });
+  });
+
   it("keeps Turn status running while step and deliverable payloads carry their own status", () => {
     const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
     const stepped = applyConversationTurnEvent(persisted, turnEvent("step.completed", 1, 1, {

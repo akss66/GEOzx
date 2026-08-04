@@ -865,6 +865,19 @@ async def test_publishing_preparation_executes_declared_prepare_tool(session, ad
         )
         == 0
     )
+    paused_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == turn.id,
+                Event.type == "turn.paused",
+            )
+        )
+    )
+    assert len(paused_events) == 1
+    assert paused_events[0].payload == {
+        "status": "waiting_permission",
+        "message": paused_events[0].payload["message"],
+    }
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,16 @@ _TURN_FIELDS = frozenset(
         "metadata",
     }
 )
+_PAUSED_TURN_FIELDS = frozenset(
+    {
+        "status",
+        "message",
+        "turn_phase",
+        "reason",
+        "recovery_action",
+        "metadata",
+    }
+)
 _STEP_FIELDS = frozenset(
     {
         "step",
@@ -103,6 +113,7 @@ _PROGRESS_DETAIL_FIELDS = frozenset(
 
 PUBLIC_EVENT_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "turn.received": _TURN_FIELDS,
+    "turn.paused": _PAUSED_TURN_FIELDS,
     "turn.completed": _TURN_FIELDS,
     "turn.failed": _TURN_FIELDS,
     "turn.blocked": _TURN_FIELDS,
