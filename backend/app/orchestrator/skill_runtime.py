@@ -79,6 +79,7 @@ from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
 from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
+from app.services.composite_skill_runs import pause_composite_parent_for_artifacts
 from app.services.runtime_deliverables import write_runtime_deliverable
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
@@ -539,7 +540,11 @@ class SkillRuntime:
                     **frozen_snapshot,
                 },
                 input_hash=skill_input_hash(frozen_snapshot),
-                output_snapshot={},
+                output_snapshot=(
+                    {"composite_parent_skill_run_id": parent_skill_run_id}
+                    if parent_skill_run_id is not None
+                    else {}
+                ),
             )
             session.add(skill_run)
             now = utc_now()
@@ -1015,16 +1020,22 @@ class SkillRuntime:
                     if item.status == DeliverableStatus.APPROVED
                 }
                 if approved_ids != set(dependency_artifact_ids):
-                    node["status"] = "waiting_user"
-                    node["error_code"] = "DEPENDENCY_ARTIFACT_APPROVAL_REQUIRED"
-                    node["terminal_reason"] = "dependency_artifact_not_approved"
-                    parent_status = "waiting_user"
-                    interrupt = {
-                        "kind": "artifact_approval_required",
-                        "skill_code": skill_code,
-                        "source_artifact_ids": dependency_artifact_ids,
-                    }
-                    break
+                    should_pause = await pause_composite_parent_for_artifacts(
+                        session,
+                        parent_skill_run=skill_run,
+                        source_artifact_ids=dependency_artifact_ids,
+                    )
+                    if should_pause:
+                        node["status"] = "waiting_user"
+                        node["error_code"] = "DEPENDENCY_ARTIFACT_APPROVAL_REQUIRED"
+                        node["terminal_reason"] = "dependency_artifact_not_approved"
+                        parent_status = "waiting_user"
+                        interrupt = {
+                            "kind": "artifact_approval_required",
+                            "skill_code": skill_code,
+                            "source_artifact_ids": dependency_artifact_ids,
+                        }
+                        break
                 structured_input["source_artifact_ids"] = dependency_artifact_ids
                 if skill_code == "content_calendar_planning":
                     structured_input["days"] = int(frozen_input.get("cycle_days") or 7)
@@ -1055,6 +1066,36 @@ class SkillRuntime:
             node["status"] = child_result.status
             node["artifact_id"] = child_result.artifact_id
             node["error_code"] = child_result.error_code
+            if child_result.status == "needs_review":
+                artifact_ids = (
+                    [child_result.artifact_id]
+                    if child_result.artifact_id is not None
+                    else []
+                )
+                should_pause = await pause_composite_parent_for_artifacts(
+                    session,
+                    parent_skill_run=skill_run,
+                    source_artifact_ids=artifact_ids,
+                )
+                refreshed_child = await session.scalar(
+                    select(SkillRun)
+                    .where(SkillRun.id == child_result.skill_run_id)
+                    .execution_options(populate_existing=True)
+                )
+                if not should_pause and refreshed_child is not None:
+                    refreshed_result = self._existing_result(refreshed_child)
+                    if refreshed_result.status == "completed":
+                        node["status"] = "completed"
+                        node["error_code"] = None
+                        continue
+                parent_status = "waiting_user"
+                interrupt = {
+                    "kind": "child_skill_paused",
+                    "skill_code": skill_code,
+                    "child_skill_run_id": child_result.skill_run_id,
+                    "source_artifact_ids": artifact_ids,
+                }
+                break
             if child_result.status != "completed":
                 parent_status = child_result.status
                 interrupt = {
@@ -1084,28 +1125,30 @@ class SkillRuntime:
                 ),
             }
         OperationIterationPlan.model_validate(report)
-        deliverable = await session.scalar(
-            select(Deliverable).where(
-                Deliverable.skill_run_id == skill_run.id,
-                Deliverable.content_item_id == content.id,
-                Deliverable.agent_code == AgentCode.DECISION.value,
-                Deliverable.type == DeliverableType.PUBLISH_CALENDAR,
+        deliverable = None
+        if parent_status == "completed" and report["required_children_completed"]:
+            deliverable = await session.scalar(
+                select(Deliverable).where(
+                    Deliverable.skill_run_id == skill_run.id,
+                    Deliverable.content_item_id == content.id,
+                    Deliverable.agent_code == AgentCode.DECISION.value,
+                    Deliverable.type == DeliverableType.PUBLISH_CALENDAR,
+                )
             )
-        )
-        if deliverable is None:
-            deliverable = await write_runtime_deliverable(
-                session,
-                scope=scope,
-                content=content,
-                agent_code=AgentCode.DECISION.value,
-                deliverable_type=DeliverableType.PUBLISH_CALENDAR,
-                status=DeliverableStatus.PENDING_REVIEW,
-                payload=report,
-                note=(
-                    "business_artifact_type=operation_execution_plan; "
-                    "deterministic child Skill DAG"
-                ),
-            )
+            if deliverable is None:
+                deliverable = await write_runtime_deliverable(
+                    session,
+                    scope=scope,
+                    content=content,
+                    agent_code=AgentCode.DECISION.value,
+                    deliverable_type=DeliverableType.PUBLISH_CALENDAR,
+                    status=DeliverableStatus.PENDING_REVIEW,
+                    payload=report,
+                    note=(
+                        "business_artifact_type=operation_execution_plan; "
+                        "final required child graph"
+                    ),
+                )
         response = (
             "下一运营周期的全部专业成果已生成。"
             if parent_status == "completed"
@@ -1114,7 +1157,7 @@ class SkillRuntime:
         output = {
             "status": parent_status,
             "task_id": task.id,
-            "artifact_id": deliverable.id,
+            "artifact_id": deliverable.id if deliverable is not None else None,
             "artifact_type": "operation_execution_plan",
             "report": report,
             "response": response,
@@ -1172,8 +1215,8 @@ class SkillRuntime:
             **dict(child_skill_run.output_snapshot or {}),
             "composite_parent_skill_run_id": parent_skill_run.id,
         }
-        await session.commit()
-        return result
+        await session.flush()
+        return self._existing_result(child_skill_run)
 
     async def _execute_account_inspection(
         self,

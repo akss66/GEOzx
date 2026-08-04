@@ -370,12 +370,49 @@ async def test_running_revision_cancelled_error_hook_is_idempotent_and_never_com
         output_snapshot={},
     )
     session.add(child)
+    completed_child_output = {
+        "status": "completed",
+        "report": {"summary": "durable child fact"},
+        "composite_parent_skill_run_id": skill.id,
+    }
+    completed_child = SkillRun(
+        org_id=run.org_id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        idempotency_key="cancel-completed-child",
+        skill_code="script_generation",
+        skill_version=1,
+        status="completed",
+        input_snapshot={"account_id": revision.account_id},
+        output_snapshot=completed_child_output,
+    )
+    session.add(completed_child)
+    await session.flush()
+    completed_receipt = AgentToolCall(
+        org_id=run.org_id,
+        task_id=run.task_id,
+        skill_run_id=completed_child.id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        tool_code="durable-child-receipt",
+        tool_name="Durable child receipt",
+        idempotency_key="cancel-completed-child-receipt",
+        side_effect_level="read",
+        status="completed",
+        input_summary="safe",
+        output_summary="safe",
+    )
+    session.add(completed_receipt)
     await session.commit()
 
     await cancel_agent_run(session, run.id)
     await session.refresh(run)
     await session.refresh(skill)
     await session.refresh(child)
+    await session.refresh(completed_child)
+    await session.refresh(completed_receipt)
     await session.refresh(revision)
     first_finished_at = revision.finished_at
     assert (run.status, skill.status, child.status, revision.status) == (
@@ -385,6 +422,9 @@ async def test_running_revision_cancelled_error_hook_is_idempotent_and_never_com
         "cancelled",
     )
     assert first_finished_at is not None
+    assert completed_child.status == "completed"
+    assert completed_child.output_snapshot == completed_child_output
+    assert completed_receipt.status == "completed"
 
     await cancel_agent_run(session, run.id)
     await session.refresh(revision)

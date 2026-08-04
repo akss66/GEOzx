@@ -46,6 +46,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.deliverable import get_schema, validate_payload
 from app.services.composite_skill_runs import (
+    lock_composite_artifact_acceptance,
     resume_composite_parent_after_artifact_acceptance,
 )
 from app.services.deliverable_action_registry import SERVER_ACTIONS
@@ -542,6 +543,7 @@ async def accept_artifact(
         artifact_id,
         roles=ARTIFACT_ACTION_ROLES,
     )
+    selected = await lock_composite_artifact_acceptance(session, artifact=selected)
     latest_version = await _require_latest_artifact_version(session, selected)
     if selected.status == DeliverableStatus.SUPERSEDED or selected.version != latest_version:
         raise _artifact_version_conflict(

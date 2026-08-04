@@ -14,6 +14,7 @@ from app.core.events import record_runtime_event_once, runtime_event_idempotency
 from app.models import (
     AgentRun,
     BrainTask,
+    ContentItem,
     ConversationThread,
     ConversationTurn,
     Event,
@@ -113,6 +114,7 @@ async def close_runtime_state(
     status: str,
     message: str,
     error_code: str | None = None,
+    commit: bool = True,
 ) -> RuntimeStateClosure:
     """Lock, validate, and update all present runtime ledgers in one transaction."""
 
@@ -145,16 +147,6 @@ async def close_runtime_state(
                 if turn_id is not None
                 else None
             )
-            skill_run = (
-                await session.scalar(
-                    select(SkillRun)
-                    .where(SkillRun.id == scope.skill_run_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-                if scope.skill_run_id is not None
-                else None
-            )
             task = (
                 await session.scalar(
                     select(BrainTask)
@@ -163,6 +155,26 @@ async def close_runtime_state(
                     .execution_options(populate_existing=True)
                 )
                 if task_id is not None
+                else None
+            )
+            if scope.content_item_id is not None:
+                content_id = await session.scalar(
+                    select(ContentItem.id)
+                    .where(ContentItem.id == scope.content_item_id)
+                    .with_for_update()
+                )
+                if content_id is None:
+                    raise ValueError(
+                        f"ContentItem not found: {scope.content_item_id}"
+                    )
+            skill_run = (
+                await session.scalar(
+                    select(SkillRun)
+                    .where(SkillRun.id == scope.skill_run_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if scope.skill_run_id is not None
                 else None
             )
 
@@ -181,8 +193,21 @@ async def close_runtime_state(
             skill_run.status = nested_status
             skill_run.error_code = error_code
             if scope.skill_output_snapshot is not None:
-                skill_run.output_snapshot = scope.skill_output_snapshot
-            await session.commit()
+                parent_id = dict(skill_run.output_snapshot or {}).get(
+                    "composite_parent_skill_run_id"
+                )
+                skill_run.output_snapshot = {
+                    **scope.skill_output_snapshot,
+                    **(
+                        {"composite_parent_skill_run_id": parent_id}
+                        if type(parent_id) is int
+                        else {}
+                    ),
+                }
+            if commit:
+                await session.commit()
+            else:
+                await session.flush()
             return RuntimeStateClosure(
                 status=nested_status,
                 turn=turn,
@@ -251,7 +276,12 @@ async def close_runtime_state(
                     skill_run.output_snapshot = scope.skill_output_snapshot
 
         if task is not None and not (preserve_terminal_skill and family == "active"):
-            task.status = brain_task_status(effective_status)
+            task.status = (
+                BrainTaskStatus.PENDING_CONFIRMATION
+                if effective_status == "stopped"
+                and effective_error == "TOOL_RESULT_AMBIGUOUS"
+                else brain_task_status(effective_status)
+            )
             task.current_focus = effective_message[:500]
             if task.status == BrainTaskStatus.COMPLETED:
                 task.progress = 100
@@ -357,16 +387,21 @@ async def close_runtime_state(
                 error_code=effective_error,
             )
 
-        await session.commit()
+        if commit:
+            await session.commit()
+        else:
+            await session.flush()
     except Exception:
-        await session.rollback()
+        if commit:
+            await session.rollback()
         raise
 
-    await _publish_delivery_events(
-        broadcasts,
-        message=effective_message,
-        response_streamed=scope.response_streamed,
-    )
+    if commit:
+        await _publish_delivery_events(
+            broadcasts,
+            message=effective_message,
+            response_streamed=scope.response_streamed,
+        )
     return RuntimeStateClosure(
         status=effective_status,
         turn=turn,

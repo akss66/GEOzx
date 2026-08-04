@@ -1,7 +1,9 @@
 """Runtime worker terminal-failure behavior."""
 
+import inspect
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from arq import Retry
@@ -35,6 +37,85 @@ from app.schemas.conversation import (
 )
 from app.services.agent_runs import claim_agent_run, mark_agent_run_queued
 from app.worker import execute_agent_run, recover_agent_runs
+
+
+def _composite_row(
+    row_id: int,
+    *,
+    code: str,
+    status: str = "running",
+    parent_id: int | None = None,
+    run_id: int = 7,
+    task_id: int = 8,
+    thread_id: int = 9,
+    turn_id: int = 10,
+    org_id: int = 11,
+):
+    return SimpleNamespace(
+        id=row_id,
+        skill_code=code,
+        status=status,
+        run_id=run_id,
+        task_id=task_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        org_id=org_id,
+        output_snapshot=(
+            {"composite_parent_skill_run_id": parent_id}
+            if parent_id is not None
+            else {}
+        ),
+    )
+
+
+def test_composite_recovery_tree_selects_one_root_for_one_active_branch() -> None:
+    from app.services.composite_skill_runs import resolve_composite_recovery_root
+
+    root = _composite_row(1, code="operation_iteration")
+    completed = _composite_row(
+        2, code="topic_planning", status="completed", parent_id=root.id
+    )
+    active = _composite_row(3, code="script_generation", parent_id=root.id)
+
+    assert resolve_composite_recovery_root([root, completed, active]) is root
+
+
+def test_composite_transition_helpers_never_own_commit_or_rollback() -> None:
+    import app.services.composite_skill_runs as composite_skill_runs
+
+    source = inspect.getsource(composite_skill_runs)
+    assert ".commit(" not in source
+    assert ".rollback(" not in source
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            _composite_row(1, code="operation_iteration", parent_id=2),
+            _composite_row(2, code="topic_planning", parent_id=1),
+        ],
+        [
+            _composite_row(1, code="operation_iteration"),
+            _composite_row(2, code="topic_planning", parent_id=1, run_id=99),
+        ],
+        [
+            _composite_row(1, code="operation_iteration"),
+            _composite_row(2, code="performance_review"),
+        ],
+        [
+            _composite_row(1, code="operation_iteration"),
+            _composite_row(2, code="topic_planning", parent_id=1),
+            _composite_row(3, code="script_generation", parent_id=1),
+        ],
+    ],
+    ids=["cycle", "wrong-lineage", "disjoint-roots", "multiple-active-branches"],
+)
+def test_composite_recovery_tree_rejects_invalid_or_ambiguous_graph(rows) -> None:
+    from app.services.composite_skill_runs import resolve_composite_recovery_root
+
+    with pytest.raises(ValueError, match="COMPOSITE_RECOVERY_GRAPH_INVALID"):
+        resolve_composite_recovery_root(rows)
 
 
 @pytest.mark.asyncio

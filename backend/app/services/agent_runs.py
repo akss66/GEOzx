@@ -373,11 +373,14 @@ async def acquire_agent_run(
 
     now = utc_now()
     if run.cancel_requested_at is not None:
+        active_root_id = await _active_root_skill_run_id(session, run.id)
         await cancel_revision_for_run(session, revision_run_id=run.id)
         await _cancel_active_skill_run_records(session, run.id)
         await close_runtime_state(
             session,
-            scope=await _runtime_state_scope(session, run),
+            scope=await _runtime_state_scope(
+                session, run, preferred_skill_run_id=active_root_id
+            ),
             status="cancelled",
             message="本轮执行已取消。",
             error_code="RUN_CANCELLED",
@@ -549,11 +552,14 @@ async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
     run = await session.get(AgentRun, run_id)
     if run is None:
         return
+    active_root_id = await _active_root_skill_run_id(session, run.id)
     await cancel_revision_for_run(session, revision_run_id=run.id)
     await _cancel_active_skill_run_records(session, run.id)
     await close_runtime_state(
         session,
-        scope=await _runtime_state_scope(session, run),
+        scope=await _runtime_state_scope(
+            session, run, preferred_skill_run_id=active_root_id
+        ),
         status="cancelled",
         message="本轮执行已取消。",
         error_code="RUN_CANCELLED",
@@ -579,6 +585,25 @@ async def _cancel_active_skill_run_records(session: AsyncSession, run_id: int) -
             "error_code": "RUN_CANCELLED",
         }
     await session.flush()
+
+
+async def _active_root_skill_run_id(session: AsyncSession, run_id: int) -> int | None:
+    active = list(
+        await session.scalars(
+            select(SkillRun)
+            .where(
+                SkillRun.run_id == run_id,
+                SkillRun.status.not_in(
+                    {"completed", "blocked", "failed", "cancelled", "stopped"}
+                ),
+            )
+            .order_by(SkillRun.id)
+        )
+    )
+    if not active:
+        return None
+    root = next((item for item in active if item.skill_code == "operation_iteration"), None)
+    return (root or active[0]).id
 
 
 def _is_future(value: datetime | None, now: datetime) -> bool:
@@ -639,10 +664,16 @@ async def _runtime_state_scope(
     *,
     result_payload: dict | None = None,
     error_detail: str | None = None,
+    preferred_skill_run_id: int | None = None,
 ) -> RuntimeStateScope:
-    skill_run_id = await session.scalar(
-        select(SkillRun.id).where(SkillRun.run_id == run.id).order_by(SkillRun.id.desc()).limit(1)
-    )
+    skill_run_id = preferred_skill_run_id
+    if skill_run_id is None:
+        skill_run_id = await session.scalar(
+            select(SkillRun.id)
+            .where(SkillRun.run_id == run.id)
+            .order_by(SkillRun.id.desc())
+            .limit(1)
+        )
     thread = (
         await session.get(ConversationThread, run.thread_id)
         if run.thread_id is not None

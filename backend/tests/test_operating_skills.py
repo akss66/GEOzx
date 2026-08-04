@@ -1,12 +1,15 @@
 """Execution contracts for the first account-operations Skill loop."""
 
 import asyncio
+from copy import deepcopy
 from time import monotonic
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import (
     Account,
@@ -624,6 +627,7 @@ async def test_content_publishing_persists_only_its_real_publish_stage(
 async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
     session,
     admin,
+    monkeypatch,
 ) -> None:
     from tests.test_operation_iteration_skill import _artifact
 
@@ -645,14 +649,9 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
 
     class ObservedRuntime(SkillRuntime):
         def __init__(self) -> None:
-            class PassingCritic:
-                async def review(self, **_kwargs):
-                    return SimpleNamespace(passed=True, score=95)
-
             super().__init__(
                 tool_executor=tools,
                 harness=harness,
-                critic=PassingCritic(),
             )
             self.child_requests: list[CapabilityRequest] = []
 
@@ -850,6 +849,15 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         "durable_tool": 3,
     }
 
+    # Simulate a crash after child commits but before the parent snapshot commits.
+    stale_parent_output = deepcopy(parent_run.output_snapshot)
+    stale_graph = stale_parent_output["report"]["child_skill_graph"]
+    for stale_node in stale_graph[:2]:
+        stale_node["status"] = "pending"
+        stale_node["artifact_id"] = None
+    parent_run.output_snapshot = stale_parent_output
+    await session.commit()
+
     await accept_artifact(session, admin, artifact_id=script_node["artifact_id"])
     await session.refresh(run)
     await session.refresh(parent_run)
@@ -891,14 +899,15 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
     }
     visual_node = resumed_nodes["visual_brief_generation"]
     assert resumed.status == "waiting_user"
-    assert visual_node["status"] == "completed"
+    assert visual_node["status"] == "needs_review"
     assert visual_node["input"] == {}
-    assert resumed_nodes["content_calendar_planning"]["status"] == "waiting_user"
-    assert resumed.report["interrupt"] == {
-        "kind": "artifact_approval_required",
-        "skill_code": "content_calendar_planning",
-        "source_artifact_ids": [visual_node["artifact_id"]],
-    }
+    assert resumed_nodes["content_calendar_planning"]["status"] == "pending"
+    assert resumed.report["interrupt"]["kind"] == "child_skill_paused"
+    assert resumed.report["interrupt"]["skill_code"] == "visual_brief_generation"
+    assert isinstance(resumed.report["interrupt"]["child_skill_run_id"], int)
+    assert resumed.report["interrupt"]["source_artifact_ids"] == [
+        visual_node["artifact_id"]
+    ]
     assert runtime.child_requests[-1].requested_skill_code == "visual_brief_generation"
     assert runtime.child_requests[-1].structured_input == {
         "source_artifact_ids": [script_node["artifact_id"]]
@@ -918,7 +927,15 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         "durable_tool": 4,
     }
 
+    visual_child_id = resumed.report["interrupt"]["child_skill_run_id"]
     await accept_artifact(session, admin, artifact_id=visual_node["artifact_id"])
+    visual_child = await session.get(SkillRun, visual_child_id)
+    assert visual_child is not None and visual_child.status == "completed"
+    external_after_visual_accept = await external_counts()
+    await accept_artifact(session, admin, artifact_id=visual_node["artifact_id"])
+    await session.refresh(visual_child)
+    assert visual_child.id == visual_child_id and visual_child.status == "completed"
+    assert await external_counts() == external_after_visual_accept
     await session.refresh(run)
     await session.refresh(parent_run)
     claimed = await acquire_agent_run(
@@ -957,14 +974,70 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         for node in calendar_result.report["child_skill_graph"]
     }
     calendar_node = calendar_nodes["content_calendar_planning"]
-    assert calendar_result.status == "waiting_permission"
-    assert calendar_node["status"] == "completed"
-    assert runtime.child_requests[-2].requested_skill_code == "content_calendar_planning"
-    assert runtime.child_requests[-2].structured_input == {
+    assert calendar_result.status == "waiting_user"
+    assert calendar_node["status"] == "needs_review"
+    assert runtime.child_requests[-1].requested_skill_code == "content_calendar_planning"
+    assert runtime.child_requests[-1].structured_input == {
         "source_artifact_ids": [visual_node["artifact_id"]],
         "days": 7,
     }
     publishing_node = calendar_nodes["publishing_preparation"]
+    assert publishing_node["status"] == "pending"
+    assert calendar_result.report["interrupt"]["kind"] == "child_skill_paused"
+    assert calendar_result.report["interrupt"]["skill_code"] == (
+        "content_calendar_planning"
+    )
+    assert isinstance(calendar_result.report["interrupt"]["child_skill_run_id"], int)
+    assert calendar_result.report["interrupt"]["source_artifact_ids"] == [
+        calendar_node["artifact_id"]
+    ]
+    assert await external_counts() == {
+        "provider": 5,
+        "tool": 5,
+        "expert": 5,
+        "durable_tool": 5,
+    }
+
+    await accept_artifact(session, admin, artifact_id=calendar_node["artifact_id"])
+    await session.refresh(run)
+    await session.refresh(parent_run)
+    claimed = await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="operation-test-worker",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+    publishing_result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=claimed,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=claimed,
+            skill_code="operation_iteration",
+            structured_input={
+                "confirmed_review_artifact_id": review.id,
+                "cycle_days": 7,
+                "topic_count": 4,
+                "script_duration_seconds": 30,
+            },
+        ),
+        lease_owner="operation-test-worker",
+        resume_skill_run=parent_run,
+    )
+    publishing_nodes = {
+        node["skill_code"]: node
+        for node in publishing_result.report["child_skill_graph"]
+    }
+    publishing_node = publishing_nodes["publishing_preparation"]
+    assert publishing_result.status == "waiting_permission"
     assert publishing_node["status"] == "waiting_permission"
     assert runtime.child_requests[-1].requested_skill_code == "publishing_preparation"
     assert runtime.child_requests[-1].structured_input == {
@@ -991,6 +1064,8 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
     )
     assert approval_call is not None
     approval_call.status = "success"
+    approval_commit_spy = AsyncMock(wraps=session.commit)
+    monkeypatch.setattr(session, "commit", approval_commit_spy)
     handled = await finalize_skill_finish_approval(
         session,
         tool_call=approval_call,
@@ -999,6 +1074,9 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         comment="approved",
     )
     assert handled is True
+    approval_commit_spy.assert_not_awaited()
+    await session.commit()
+    assert approval_commit_spy.await_count == 1
     await session.refresh(run)
     await session.refresh(parent_run)
     await session.refresh(publishing_child)
@@ -1014,8 +1092,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
             )
         )
     )
-    assert len(plan_deliverables) == 1
-    assert plan_deliverables[0].payload["required_children_completed"] is False
+    assert plan_deliverables == []
     assert parent_run.output_snapshot["report"]["child_skill_graph"][-1]["status"] == (
         "waiting_permission"
     )
@@ -1092,8 +1169,94 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
             )
         )
     )
-    assert [item.id for item in final_plan_deliverables] == [plan_deliverables[0].id]
-    assert final_plan_deliverables[0].payload == plan_deliverables[0].payload
+    assert len(final_plan_deliverables) == 1
+    assert final_plan_deliverables[0].payload["required_children_completed"] is True
+    assert all(
+        node["status"] == "completed"
+        for node in final_plan_deliverables[0].payload["child_skill_graph"]
+        if node["required"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_composite_accept_before_pause_recheck_never_loses_wakeup(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    from app.services.composite_skill_runs import (
+        pause_composite_parent_for_artifacts,
+    )
+    from tests.test_operation_iteration_skill import _artifact
+
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="composite-accept-before-pause",
+        message="根据复盘安排下周运营",
+    )
+    review = await _artifact(
+        session,
+        admin,
+        account,
+        kind=DeliverableType.REVIEW_REPORT,
+        status=DeliverableStatus.APPROVED,
+    )
+    result = await SkillRuntime(tool_executor=_Tools(), harness=_Harness()).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={"confirmed_review_artifact_id": review.id},
+        ),
+    )
+    parent = await session.get(SkillRun, result.skill_run_id)
+    task = await session.get(BrainTask, result.task_id)
+    script_node = next(
+        node
+        for node in result.report["child_skill_graph"]
+        if node["skill_code"] == "script_generation"
+    )
+    assert parent is not None and task is not None
+    parent.status = "running"
+    run.status = "running"
+    turn.status = "running"
+    task.status = BrainTaskStatus.RUNNING
+    await session.commit()
+
+    maker = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with maker() as approval_session:
+        concurrent_admin = await approval_session.get(type(admin), admin.id)
+        assert concurrent_admin is not None
+        await accept_artifact(
+            approval_session,
+            concurrent_admin,
+            artifact_id=script_node["artifact_id"],
+        )
+
+    await session.refresh(parent)
+    await session.refresh(run)
+    commit_spy = AsyncMock(wraps=session.commit)
+    monkeypatch.setattr(session, "commit", commit_spy)
+    paused = await pause_composite_parent_for_artifacts(
+        session,
+        parent_skill_run=parent,
+        source_artifact_ids=[script_node["artifact_id"]],
+    )
+
+    assert paused is False
+    assert parent.status == "running"
+    assert run.status == "running"
+    commit_spy.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1313,6 +1476,7 @@ async def test_publishing_finish_approval_converges_typed_skill_without_legacy_r
     approved,
     expected_runtime_status,
     expected_deliverable_status,
+    monkeypatch,
 ) -> None:
     account, thread, turn, run = await _scope(
         session,
@@ -1347,6 +1511,23 @@ async def test_publishing_finish_approval_converges_typed_skill_without_legacy_r
     )
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
+    import app.api.brain as brain_api
+
+    original_scope_lock = brain_api.lock_composite_finish_approval
+    approval_scope_checked = False
+
+    async def tracked_scope_lock(*args, **kwargs):
+        nonlocal approval_scope_checked
+        result = await original_scope_lock(*args, **kwargs)
+        approval_scope_checked = True
+        return result
+
+    def reject_prelock_autoflush(*_args, **_kwargs) -> None:
+        assert approval_scope_checked, "approval rows autoflushed before scope lock"
+
+    monkeypatch.setattr(brain_api, "lock_composite_finish_approval", tracked_scope_lock)
+    event.listen(session.sync_session, "before_flush", reject_prelock_autoflush)
+
     response = await client.post(
         f"/brain/tool-calls/{call.id}/approve",
         headers=headers,
@@ -1354,6 +1535,7 @@ async def test_publishing_finish_approval_converges_typed_skill_without_legacy_r
     )
 
     assert response.status_code == 200
+    assert approval_scope_checked
     await session.refresh(run)
     await session.refresh(turn)
     skill_run = await session.get(SkillRun, result.skill_run_id)

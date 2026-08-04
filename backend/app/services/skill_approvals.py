@@ -146,6 +146,7 @@ async def finalize_skill_finish_approval(
         status=next_status,
         message=response,
         error_code=None if approved else "SKILL_APPROVAL_REJECTED",
+        commit=not nested_child,
     )
     if nested_child and approved:
         await session.refresh(skill_run)

@@ -116,6 +116,7 @@ from app.services.agent_runs import (
     utc_now,
 )
 from app.services.ai_coo_learning import ai_coo_learning_service
+from app.services.composite_skill_runs import lock_composite_finish_approval
 from app.services.publishing import sync_publish_jobs_after_approval
 from app.services.skill_approvals import (
     SkillApprovalConflict,
@@ -1678,6 +1679,7 @@ async def approve_tool_call(
             detail="该工具调用已经完成审批",
         )
 
+    tool_call = await lock_composite_finish_approval(session, tool_call=tool_call)
     decision = {
         "approved": body.approved,
         "comment": body.comment or "",

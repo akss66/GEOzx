@@ -1,5 +1,76 @@
 # Task 4C Implementer Report
 
+## Review fix round 3 (latest)
+
+### Outcome
+
+- **G1, legal human loop:** production `SkillRuntime()` without a passing critic now pauses visual and calendar children as `needs_review`. Artifact acceptance completes the exact persisted child, wakes the exact persisted `operation_iteration` parent, and repeated acceptance is inert. Publishing still uses its typed `before_finish` approval owner.
+- **G2, durable recovery:** worker recovery validates a single composite tree (one `operation_iteration` root, same run/task/thread/turn/org lineage, no cycle, missing parent, disjoint root, or multiple active branch) and resumes the parent. A committed child is reused even when the parent snapshot is stale; provider/tool/expert receipts are not replayed.
+- **G3, one lock protocol:** pause and artifact acceptance share `AgentRun -> ConversationTurn -> BrainTask -> ContentItem -> parent SkillRun -> child SkillRuns by id -> Deliverables by id`. Both decisions re-read locked rows. Composite helpers are transaction-neutral; `close_runtime_state(commit=False)` gives the API/runtime caller explicit ownership while preserving the default for legacy callers.
+- **G4, cancellation:** cancellation mutates only active parent/child SkillRuns plus the root AgentRun/RunRevision. Completed children and completed tool receipts remain immutable, and duplicate cancellation retains the first terminal timestamp/event set.
+- **G5, truthful plan:** paused execution produces no parent operation-plan Deliverable. Exactly one parent plan is written only after all required child nodes are `completed`.
+- The shared closure keeps ambiguous external writes at `BrainTaskStatus.PENDING_CONFIRMATION` for the existing `stopped + TOOL_RESULT_AMBIGUOUS` contract.
+
+### Focused and expanded evidence
+
+Focused composite/recovery/cancel matrix:
+
+```text
+8 passed in 2.17s
+```
+
+Additional lifecycle, hidden-commit, and SQLite lost-wakeup gates:
+
+```text
+3 passed, 1 PostgreSQL gate skipped in 1.70s
+```
+
+Expanded SQLite-backed regression across operating Skills, worker recovery, turn cancellation, artifact acceptance, and brain approval:
+
+```text
+199 passed in 98.8s
+```
+
+The lifecycle gate also forces the parent snapshot's first two completed nodes back to `pending`, modeling a crash after child commit and before parent snapshot commit. Recovery reuses the same child SkillRuns and keeps the durable external-call counts unchanged.
+
+### Real PostgreSQL 16 concurrency evidence
+
+Exact nodeids:
+
+```text
+backend/tests/test_composite_skill_runs_postgres.py::test_postgres_accept_pause_interleavings_never_lose_wakeup[pause_first]
+backend/tests/test_composite_skill_runs_postgres.py::test_postgres_accept_pause_interleavings_never_lose_wakeup[accept_first]
+2 passed in 1.53s
+
+backend/tests/test_migrations.py::test_revision_terminal_deliverable_streams_postgres_concurrent_writers
+backend/tests/test_migrations.py::test_revision_terminal_deliverable_streams_postgres_reference_matrix_and_atomic_downgrade
+2 passed, 6 warnings in 3.69s
+```
+
+The pause-first case proves the acceptance transaction blocks behind the shared parent scope and then performs one wake (`parent=running`, `run=queued`). The accept-first case proves the locked approval recheck declines the stale pause (`parent=running`, `run=running`). Both use independent `AsyncSession`s and a ten-second deadlock timeout.
+
+The first local attempt ran `metadata.create_all` before Alembic and therefore left the explicitly named temporary database without an Alembic version. Only `geozx_task4c_r3.public` was reset; all four gates above were then rerun fresh and passed. Root deleted the temporary PostgreSQL container afterward.
+
+### Transaction ownership and static verification
+
+- Runtime spies prove pause performs zero commits; nested finish approval plus parent resume performs zero hidden commits and the simulated outer caller performs exactly one.
+- The finish-approval API resolves composite IDs read-only, disables autoflush during discovery, then locks the full scope plus ToolCall before any decision/audit/publish mutation. A SQLAlchemy `before_flush` spy proves no pre-lock flush for both approved and rejected ordinary approvals; both remain compatible.
+- A source-level guard covers every function in `composite_skill_runs.py` and rejects any `.commit()` or `.rollback()` call, including reject and resume helpers.
+- `Ruff`: all changed production/test files passed.
+- `git diff --check`: passed.
+- Targeted mypy with imports skipped passed for the new/reworked transaction and recovery modules: `composite_skill_runs.py`, `agent_runs.py`, `skill_approvals.py`, and `worker.py`.
+- The broader mypy invocation still reports legacy typing debt in imported modules (55 diagnostics before narrowing the two new resolver diagnostics); the two round-3 resolver diagnostics were fixed. No Task 5/6 files were changed.
+
+Fresh post-review approval/worker/cancel regression:
+
+```text
+123 passed in 42.27s
+```
+
+Round 3 is committed separately from rounds 1 and 2.
+
+---
+
 ## Review fix round 2 (latest, supersedes round-1 C-1 / I-2 / I-3 / I-4 conclusions)
 
 ### Outcome

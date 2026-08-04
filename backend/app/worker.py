@@ -54,6 +54,7 @@ from app.services.agent_runs import (
     promote_next_waiting_agent_run,
     release_agent_run_failure,
 )
+from app.services.composite_skill_runs import resolve_composite_recovery_root
 from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
 
 log = logging.getLogger("dyflow.worker")
@@ -325,18 +326,10 @@ async def _execute_v2_conversation_run(
             )
         )
     )
-    recoverable_skills = [
-        item
-        for item in persisted_skills
-        if item.status in {"running", "retry_wait", "waiting_permission"}
-    ]
-    if len(recoverable_skills) > 1:
-        raise RuntimeError("SKILL_RECOVERY_AMBIGUOUS")
-    recoverable_skill = (
-        recoverable_skills[0]
-        if recoverable_skills
-        else (persisted_skills[0] if len(persisted_skills) == 1 else None)
-    )
+    try:
+        recoverable_skill = resolve_composite_recovery_root(persisted_skills)
+    except ValueError as exc:
+        raise RuntimeError("SKILL_RECOVERY_AMBIGUOUS") from exc
     if recoverable_skill is not None and (
         recoverable_skill.thread_id != thread.id
         or recoverable_skill.turn_id != turn.id
