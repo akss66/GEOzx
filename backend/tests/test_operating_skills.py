@@ -3,13 +3,14 @@
 import asyncio
 import json
 from copy import deepcopy
+from datetime import datetime, timedelta
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import event, func, select
+from sqlalchemy import delete, event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import (
@@ -50,7 +51,10 @@ from app.schemas.capability_request import CapabilityRequest
 from app.services.agent_runs import acquire_agent_run
 from app.services.artifacts import accept_artifact
 from app.services.runtime_deliverables import write_runtime_deliverable
-from app.services.skill_approvals import finalize_skill_finish_approval
+from app.services.skill_approvals import (
+    SkillApprovalConflict,
+    finalize_skill_finish_approval,
+)
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
@@ -522,6 +526,47 @@ async def test_weekly_operation_builds_one_typed_package_without_intermediate_ap
         tool_call=approvals[0],
     )
     approval_lock.tool_call.status = "success"
+    publish_slots = [
+        slot
+        for slot in final.payload["package"]["calendar_slots"]
+        if slot["slot_type"] == "publish"
+    ]
+    session.add_all(
+        [
+            ContentScheduleEntry(
+                org_id=task.org_id,
+                account_id=account.id,
+                content_item_id=final.content_item_id,
+                source_artifact_id=final.id,
+                source_artifact_version=final.version,
+                created_by_id=task.created_by_id,
+                scheduled_at=datetime.fromisoformat(slot["scheduled_at"])
+                + timedelta(minutes=5),
+                timezone=slot["timezone"],
+                status="planned",
+            )
+            for slot in publish_slots
+        ]
+    )
+    await session.flush()
+    with pytest.raises(
+        SkillApprovalConflict,
+        match="SKILL_APPROVAL_SCHEDULE_CONFLICT",
+    ):
+        await finalize_skill_finish_approval(
+            session,
+            tool_call=approval_lock.tool_call,
+            task=task,
+            approved=True,
+            comment="拒绝错配重放",
+            prelocked=approval_lock.runtime_lock,
+        )
+    await session.execute(
+        delete(ContentScheduleEntry).where(
+            ContentScheduleEntry.source_artifact_id == final.id,
+            ContentScheduleEntry.source_artifact_version == final.version,
+        )
+    )
     finalized = await finalize_skill_finish_approval(
         session,
         tool_call=approval_lock.tool_call,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -39,6 +41,30 @@ from app.services.runtime_state import (
 
 class SkillApprovalConflict(RuntimeError):
     """Persisted Skill approval provenance cannot be safely reconciled."""
+
+
+def _schedule_signature(
+    *,
+    scheduled_at: datetime,
+    timezone: str,
+    content_item_id: int,
+    created_by_id: int,
+) -> tuple[str, str, int, int]:
+    try:
+        zone = ZoneInfo(timezone)
+    except (KeyError, ValueError) as exc:
+        raise SkillApprovalConflict("SKILL_APPROVAL_SCHEDULE_CONFLICT") from exc
+    localized = (
+        scheduled_at.replace(tzinfo=zone)
+        if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None
+        else scheduled_at
+    )
+    return (
+        localized.astimezone(UTC).isoformat(timespec="microseconds"),
+        timezone,
+        content_item_id,
+        created_by_id,
+    )
 
 
 @dataclass(frozen=True)
@@ -258,9 +284,32 @@ async def _create_manual_schedule_entries_for_package(
             .order_by(ContentScheduleEntry.id)
         )
     )
-    if existing:
-        if len(existing) != 5:
+    expected_signatures = sorted(
+        _schedule_signature(
+            scheduled_at=slot.scheduled_at,
+            timezone=slot.timezone,
+            content_item_id=deliverable.content_item_id,
+            created_by_id=task.created_by_id,
+        )
+        for slot in publish_slots
+        if slot.scheduled_at is not None
+    )
+
+    def require_exact_schedule(rows: list[ContentScheduleEntry]) -> None:
+        actual_signatures = sorted(
+            _schedule_signature(
+                scheduled_at=item.scheduled_at,
+                timezone=item.timezone,
+                content_item_id=item.content_item_id,
+                created_by_id=item.created_by_id,
+            )
+            for item in rows
+        )
+        if len(rows) != 5 or actual_signatures != expected_signatures:
             raise SkillApprovalConflict("SKILL_APPROVAL_SCHEDULE_CONFLICT")
+
+    if existing:
+        require_exact_schedule(existing)
         rows = existing
 
     else:
@@ -297,6 +346,7 @@ async def _create_manual_schedule_entries_for_package(
             )
             if len(concurrent) != 5:
                 raise SkillApprovalConflict("SKILL_APPROVAL_SCHEDULE_CONFLICT") from exc
+            require_exact_schedule(concurrent)
             rows = concurrent
 
     raw_key = (
