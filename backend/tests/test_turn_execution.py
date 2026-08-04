@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import BaseModel
 from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -42,7 +43,9 @@ from app.orchestrator.brain_runtime import runtime_graph
 from app.orchestrator.checkpoint_graph_contracts import require_checkpoint_graph_contract
 from app.orchestrator.skill_runtime import SkillRuntime, skill_input_hash
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
+from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.attachment import AttachmentContext
+from app.schemas.brain import RuntimeToolCall
 from app.schemas.conversation import (
     CreateConversationTurnRequest,
     TurnExecutionMode,
@@ -78,6 +81,7 @@ from app.services.runtime_state import (
 )
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
+from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
 async def _turn_context(session, admin, *, key: str):
@@ -4272,6 +4276,7 @@ async def test_formal_task_forces_non_clarify_route_into_task(session, admin, mo
         turn,
         run,
         _request("formal-task", execution_preference="FORMAL_TASK"),
+        execution_owner="operation-worker",
     )
 
     assert result.mode is TurnExecutionMode.TASK
@@ -4361,7 +4366,14 @@ async def test_strategy_task_creates_exactly_one_task_and_uses_routed_runtime(
     monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
     monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     request = _request("task-1")
-    first = await execute_conversation_turn(session, admin, turn, run, request)
+    first = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        request,
+        execution_owner="operation-worker",
+    )
     repeated = await execute_conversation_turn(session, admin, turn, run, request)
 
     assert first.task_id is not None
@@ -4369,6 +4381,123 @@ async def test_strategy_task_creates_exactly_one_task_and_uses_routed_runtime(
     assert run.task_id == first.task_id
     assert started == [(first.task_id, run.id)]
     assert await session.scalar(select(func.count(BrainTask.id))) == 1
+
+
+class _OperationWriteParams(BaseModel):
+    value: str
+
+
+@pytest.mark.asyncio
+async def test_operation_route_propagates_owner_into_real_account_write(
+    session, admin, monkeypatch
+) -> None:
+    account, _thread, turn, run = await _turn_context(
+        session, admin, key="operation-owner-write"
+    )
+    owner = "operation-write-worker"
+    run.status = "running"
+    run.phase = "running"
+    run.lease_owner = owner
+    run.leased_until = datetime.now(UTC) + timedelta(minutes=5)
+    await session.commit()
+    calls = 0
+
+    async def classify(*_args, **_kwargs):
+        return _decision(TurnExecutionMode.TASK)
+
+    async def handler(
+        params: _OperationWriteParams,
+        _context: ToolExecutionContext,
+    ) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"value": params.value}
+
+    executor = DurableToolExecutor(
+        ToolAdapter(
+            [
+                ToolSpec(
+                    name="provider.operation_upsert",
+                    handler=handler,
+                    params_model=_OperationWriteParams,
+                    side_effect_level="idempotent_write",
+                )
+            ]
+        ),
+        _allow_test_account_lane_fallback=True,
+    )
+
+    async def start_routed(_session, task, **kwargs):
+        outcome = await executor.execute(
+            task=task,
+            user=admin,
+            request=RuntimeToolCall(
+                tool_code="provider.operation_upsert",
+                arguments={"value": "persisted"},
+                purpose="persist operation output",
+                idempotency_key="operation-owner-write",
+            ),
+            account_id=account.id,
+            run_id=kwargs["agent_run_id"],
+            execution_owner=kwargs["execution_owner"],
+        )
+        assert outcome.status == "success"
+        task.status = BrainTaskStatus.COMPLETED
+        task.progress = 100
+        await _session.commit()
+        return task
+
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("operation-owner-write"),
+        execution_owner=owner,
+    )
+
+    assert result.status == "completed"
+    assert calls == 1
+    tool_call = await session.scalar(
+        select(AgentToolCall).where(
+            AgentToolCall.idempotency_key == "operation-owner-write"
+        )
+    )
+    assert tool_call is not None
+    assert tool_call.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_operation_route_without_formal_owner_is_blocked_before_runtime(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="operation-owner-required"
+    )
+
+    async def classify(*_args, **_kwargs):
+        return _decision(TurnExecutionMode.TASK)
+
+    async def should_not_start(*_args, **_kwargs):
+        raise AssertionError("an unleased operation must not enter the runtime")
+
+    monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
+    monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", should_not_start)
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request("operation-owner-required"),
+    )
+
+    assert result.status == "blocked"
+    assert result.error_code == "EXECUTION_OWNER_REQUIRED"
+    assert result.task_id is None
 
 
 @pytest.mark.asyncio
@@ -4389,7 +4518,14 @@ async def test_operation_start_failure_closes_task_run_and_turn_without_replay(
     monkeypatch.setattr("app.services.turn_execution.brain_intelligence.classify_turn", classify)
     monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     request = _request("task-failure")
-    first = await execute_conversation_turn(session, admin, turn, run, request)
+    first = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        request,
+        execution_owner="operation-worker",
+    )
     repeated = await execute_conversation_turn(session, admin, turn, run, request)
     task = await session.get(BrainTask, first.task_id)
 
@@ -4429,6 +4565,7 @@ async def test_operation_retryable_infrastructure_failure_bubbles_to_the_worker(
             turn,
             run,
             _request("task-retryable"),
+            execution_owner="operation-worker",
         )
 
     assert caught.value.status_code == 503
@@ -4479,7 +4616,14 @@ async def test_operation_runtime_state_is_persisted_without_reexecution(
     monkeypatch.setattr("app.services.turn_execution.runtime_graph.start_routed", start_routed)
     monkeypatch.setattr("app.services.turn_execution.runtime_status", status)
     request = _request(key)
-    first = await execute_conversation_turn(session, admin, turn, run, request)
+    first = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        request,
+        execution_owner="operation-worker",
+    )
     repeated = await execute_conversation_turn(session, admin, turn, run, request)
     task = await session.get(BrainTask, first.task_id)
 

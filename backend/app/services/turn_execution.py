@@ -727,6 +727,7 @@ async def _execute_conversation_turn(
         turn=turn,
         run=run,
         decision=decision,
+        execution_owner=execution_owner,
     )
 
 
@@ -1437,7 +1438,22 @@ async def _execute_operation_task(
     turn: ConversationTurn,
     run: AgentRun,
     decision: TurnRouteDecision,
+    execution_owner: str | None,
 ) -> TurnExecutionResult:
+    if not execution_owner or not execution_owner.strip():
+        return await _deliver_task_free(
+            session,
+            turn=turn,
+            run=run,
+            account_id=thread.account_id,
+            decision=decision,
+            response=(
+                "This operation must be executed by a formally leased worker. "
+                "Please retry the operation."
+            ),
+            status="blocked",
+            error_code="EXECUTION_OWNER_REQUIRED",
+        )
     task = await session.get(BrainTask, run.task_id) if run.task_id else None
     if task is None:
         content = ContentItem(
@@ -1509,6 +1525,7 @@ async def _execute_operation_task(
             client_message_id=run.client_message_id,
             agent_run_id=run.id,
             agent_run_attempt=run.attempt,
+            execution_owner=execution_owner,
         )
         task_state = await runtime_status(session, task)
     except Exception as exc:  # noqa: BLE001 - persist only a safe operation failure
@@ -1800,12 +1817,12 @@ def _format_account_data_summary(data: dict[str, Any]) -> str:
         for raw in metrics.values():
             if not isinstance(raw, dict):
                 continue
-            source_label = {
+            metric_source_label = {
                 "platform_export": "平台导出",
                 "derived": "系统计算",
             }.get(str(raw.get("source") or ""))
-            if source_label and source_label not in source_names:
-                source_names.append(source_label)
+            if metric_source_label and metric_source_label not in source_names:
+                source_names.append(metric_source_label)
 
     lines = [f"数据周期：{period_text}"]
     lines.append(f"数据来源：{'；'.join(source_names)}" if source_names else "数据来源：缺失")

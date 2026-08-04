@@ -190,7 +190,8 @@ class _Tools:
                         execution_phase="prepare",
                     ),
                 ]
-            )
+            ),
+            _allow_test_account_lane_fallback=True,
         )
 
     async def execute(self, **kwargs):

@@ -21,7 +21,7 @@ from app.models import (
 )
 
 _TOKEN_SEAL = object()
-_ADVISORY_NAMESPACE = 0x47454F5A
+RUNTIME_RUN_GATE_NAMESPACE = 0x47454F5A
 
 
 class RuntimeLockConflict(ValueError):
@@ -187,13 +187,18 @@ def _pending_object_ids(session: AsyncSession) -> frozenset[int]:
     return frozenset(id(row) for row in session.new)
 
 
-async def _advisory_run_gate(session: AsyncSession, run_ids: tuple[int, ...]) -> None:
+async def acquire_runtime_run_gate(
+    session: AsyncSession,
+    run_ids: tuple[int, ...],
+) -> None:
+    """Acquire the authoritative PostgreSQL Run-root advisory gates."""
+
     bind = session.get_bind()
     if bind.dialect.name != "postgresql":
         return
     for run_id in run_ids:
         await session.scalar(
-            select(func.pg_advisory_xact_lock(_ADVISORY_NAMESPACE, run_id))
+            select(func.pg_advisory_xact_lock(RUNTIME_RUN_GATE_NAMESPACE, run_id))
         )
 
 
@@ -209,7 +214,7 @@ async def lock_runtime_run_headers(
     expected_task_ids = tuple(sorted(set(expected_task_ids)))
     if not run_ids:
         return ()
-    await _advisory_run_gate(session, run_ids)
+    await acquire_runtime_run_gate(session, run_ids)
     runs = tuple(await _lock_rows(session, AgentRun, run_ids))
     turn_ids = tuple(sorted({run.turn_id for run in runs if run.turn_id is not None}))
     task_ids = tuple(
@@ -512,7 +517,7 @@ async def lock_runtime_root_scope(
     invocation_ids = tuple(sorted(set(invocation_ids)))
     tool_call_ids = tuple(sorted(set(tool_call_ids)))
     attempt_ids = tuple(sorted(set(attempt_ids)))
-    await _advisory_run_gate(session, (run_id,))
+    await acquire_runtime_run_gate(session, (run_id,))
     run = await session.scalar(
         select(AgentRun)
         .where(AgentRun.id == run_id)

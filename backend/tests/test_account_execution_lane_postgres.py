@@ -8,15 +8,18 @@ from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import Account, AgentRun, BrainTask, Org, User
+from app.models import Account, AgentRun, BrainTask, Org, ToolExecutionAttempt, User
 from app.models.enums import BrainTaskStatus, BrainTaskType, Platform, UserRole
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
-from app.services.account_execution_lane import account_execution_lane
+from app.services.account_execution_lane import (
+    account_execution_lane,
+    account_execution_lock_key,
+)
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
@@ -31,16 +34,25 @@ def _postgres_url() -> str:
 
 
 async def _wait_for_account_advisory_wait(
-    sessions, *, deadline_seconds: float = 10
+    sessions,
+    *,
+    lock_key: int,
+    deadline_seconds: float = 10,
 ) -> None:
+    unsigned_key = lock_key & ((1 << 64) - 1)
+    class_id = unsigned_key >> 32
+    object_id = unsigned_key & 0xFFFFFFFF
     deadline = monotonic() + deadline_seconds
     async with sessions() as monitor:
         while monotonic() < deadline:
             waiting = await monitor.scalar(
                 text(
                     "SELECT EXISTS (SELECT 1 FROM pg_locks "
-                    "WHERE locktype = 'advisory' AND NOT granted)"
-                )
+                    "WHERE locktype = 'advisory' AND NOT granted "
+                    "AND classid::bigint = :class_id "
+                    "AND objid::bigint = :object_id AND objsubid = 1)"
+                ),
+                {"class_id": class_id, "object_id": object_id},
             )
             if waiting:
                 return
@@ -73,21 +85,25 @@ async def _scope(sessions, *, suffix: str):
             type=BrainTaskType.CONTENT_CREATION,
             status=BrainTaskStatus.RUNNING,
         )
-        run = AgentRun(
-            org_id=org.id,
-            requested_by_id=admin.id,
-            task_id=None,
-            client_message_id=f"account-lane:{suffix}",
-            status="running",
-            phase="running",
-            lease_owner="pg-worker",
-            leased_until=datetime.now(UTC) + timedelta(minutes=5),
-        )
-        setup.add_all([account, task, run])
+        runs = [
+            AgentRun(
+                org_id=org.id,
+                requested_by_id=admin.id,
+                task_id=None,
+                client_message_id=f"account-lane:{suffix}:{number}",
+                status="running",
+                phase="running",
+                lease_owner=f"pg-worker-{number}",
+                leased_until=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            for number in (1, 2)
+        ]
+        setup.add_all([account, task, *runs])
         await setup.flush()
-        run.task_id = task.id
+        for run in runs:
+            run.task_id = task.id
         await setup.commit()
-        return admin.id, account.id, task.id, run.id
+        return admin.id, account.id, task.id, tuple(run.id for run in runs)
 
 
 @pytest.mark.skipif(
@@ -110,7 +126,9 @@ def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate()
         try:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
-            user_id, account_id, task_id, run_id = await _scope(sessions, suffix=suffix)
+            user_id, account_id, task_id, run_ids = await _scope(
+                sessions, suffix=suffix
+            )
             adapter_entered = asyncio.Event()
             release_adapter = asyncio.Event()
             calls = 0
@@ -144,7 +162,7 @@ def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate()
                 idempotency_key=f"account-upsert:{suffix}",
             )
 
-            async def execute_once():
+            async def execute_once(run_id: int, owner: str):
                 async with sessions() as execution:
                     user = await execution.get(User, user_id)
                     task = await execution.get(BrainTask, task_id)
@@ -155,13 +173,20 @@ def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate()
                         request=request,
                         account_id=account_id,
                         run_id=run_id,
-                        execution_owner="pg-worker",
+                        execution_owner=owner,
                     )
 
-            first = asyncio.create_task(execute_once())
+            first = asyncio.create_task(execute_once(run_ids[0], "pg-worker-1"))
             await asyncio.wait_for(adapter_entered.wait(), timeout=5)
-            second = asyncio.create_task(execute_once())
-            await _wait_for_account_advisory_wait(sessions)
+            second = asyncio.create_task(execute_once(run_ids[1], "pg-worker-2"))
+            async with sessions() as lookup:
+                account = await lookup.get(Account, account_id)
+                assert account is not None
+                lock_key = account_execution_lock_key(account.org_id, account.id)
+            await _wait_for_account_advisory_wait(
+                sessions,
+                lock_key=lock_key,
+            )
             assert second.done() is False
             release_adapter.set()
             first_outcome, second_outcome = await asyncio.wait_for(
@@ -170,6 +195,21 @@ def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate()
             assert first_outcome.status == second_outcome.status == "success"
             assert first_outcome.tool_call.id == second_outcome.tool_call.id
             assert calls == 1
+            async with sessions() as verify:
+                attempts = list(
+                    await verify.scalars(
+                        select(ToolExecutionAttempt).where(
+                            ToolExecutionAttempt.tool_call_id
+                            == first_outcome.tool_call.id
+                        )
+                    )
+                )
+                assert attempts
+                assert all(
+                    attempt.status in {"success", "failed", "ambiguous"}
+                    and attempt.finished_at is not None
+                    for attempt in attempts
+                )
         finally:
             await engine.dispose()
 
@@ -189,10 +229,10 @@ def test_postgres_different_accounts_and_reads_bypass_an_occupied_lane() -> None
         try:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
-            _, first_account, _, first_run = await _scope(
+            _, first_account, _, first_runs = await _scope(
                 sessions, suffix=first_suffix
             )
-            _, second_account, _, second_run = await _scope(
+            _, second_account, _, second_runs = await _scope(
                 sessions, suffix=second_suffix
             )
             release = asyncio.Event()
@@ -203,8 +243,8 @@ def test_postgres_different_accounts_and_reads_bypass_an_occupied_lane() -> None
                 async with account_execution_lane(
                     first_account,
                     "idempotent_write",
-                    run_id=first_run,
-                    execution_owner="pg-worker",
+                    run_id=first_runs[0],
+                    execution_owner="pg-worker-1",
                     _session_factory=sessions,
                 ):
                     first_entered.set()
@@ -215,8 +255,8 @@ def test_postgres_different_accounts_and_reads_bypass_an_occupied_lane() -> None
                 async with account_execution_lane(
                     second_account,
                     "non_idempotent_write",
-                    run_id=second_run,
-                    execution_owner="pg-worker",
+                    run_id=second_runs[0],
+                    execution_owner="pg-worker-1",
                     _session_factory=sessions,
                 ):
                     second_entered.set()

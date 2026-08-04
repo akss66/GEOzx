@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.models import Account, AgentRun
 from app.models.enums import BrainTaskStatus, Platform
 from app.services.account_execution_lane import (
+    AccountExecutionLaneConflict,
     AccountExecutionLeaseLost,
     account_execution_lane,
 )
@@ -67,6 +68,7 @@ async def test_same_account_writes_never_overlap(session, admin) -> None:
             run_id=first_run.id,
             execution_owner="worker-a",
             _session_factory=sessions,
+            _allow_test_fallback=True,
         ):
             first_entered.set()
             await release_first.wait()
@@ -79,6 +81,7 @@ async def test_same_account_writes_never_overlap(session, admin) -> None:
             run_id=second_run.id,
             execution_owner="worker-b",
             _session_factory=sessions,
+            _allow_test_fallback=True,
         ):
             second_entered.set()
 
@@ -113,6 +116,7 @@ async def test_different_account_writes_overlap(session, admin) -> None:
             run_id=run_id,
             execution_owner=owner,
             _session_factory=sessions,
+            _allow_test_fallback=True,
         ):
             entered += 1
             if entered == 2:
@@ -140,6 +144,7 @@ async def test_read_bypasses_an_occupied_write_lane(session, admin) -> None:
         run_id=run.id,
         execution_owner="worker-a",
         _session_factory=sessions,
+        _allow_test_fallback=True,
     ):
         async with account_execution_lane(
             account.id,
@@ -147,6 +152,7 @@ async def test_read_bypasses_an_occupied_write_lane(session, admin) -> None:
             run_id=None,
             execution_owner=None,
             _session_factory=sessions,
+            _allow_test_fallback=True,
         ) as guard:
             assert guard is None
 
@@ -163,6 +169,7 @@ async def test_read_does_not_open_a_guard_session() -> None:
         run_id=None,
         execution_owner=None,
         _session_factory=FailIfOpened(),
+        _allow_test_fallback=True,
     ) as guard:
         assert guard is None
 
@@ -180,8 +187,26 @@ async def test_old_worker_fails_closed_after_lease_owner_changes(session, admin)
             run_id=run.id,
             execution_owner="worker-old",
             _session_factory=_sessions(session),
+            _allow_test_fallback=True,
         ):
             raise AssertionError("stale worker must never enter the account lane")
+
+
+@pytest.mark.asyncio
+async def test_non_postgres_write_requires_explicit_test_fallback(session, admin) -> None:
+    account, run = await _active_run(
+        session, admin, account_name="production-fail-closed", owner="worker-a"
+    )
+
+    with pytest.raises(AccountExecutionLaneConflict, match="requires PostgreSQL"):
+        async with account_execution_lane(
+            account.id,
+            "idempotent_write",
+            run_id=run.id,
+            execution_owner="worker-a",
+            _session_factory=_sessions(session),
+        ):
+            raise AssertionError("non-PostgreSQL production writes must not run")
 
 
 def test_only_ambiguous_stop_projects_pending_confirmation() -> None:

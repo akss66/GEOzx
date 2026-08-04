@@ -21,10 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session
 from app.models import Account, AgentRun
+from app.services.runtime_locking import acquire_runtime_run_gate
 
 _WRITE_KINDS = frozenset({"idempotent_write", "non_idempotent_write"})
 _SQLITE_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
-_RUN_GATE_NAMESPACE = 0x47454F5A
 
 
 class AccountExecutionLaneConflict(RuntimeError):
@@ -53,6 +53,7 @@ async def account_execution_lane(
     run_id: int | None,
     execution_owner: str | None,
     _session_factory: Any = None,
+    _allow_test_fallback: bool = False,
 ) -> AsyncIterator[AccountExecutionGuard | None]:
     """Acquire the production account lane around one real adapter dispatch.
 
@@ -95,6 +96,10 @@ async def account_execution_lane(
 
     started = monotonic()
     if dialect != "postgresql":
+        if not _allow_test_fallback:
+            raise AccountExecutionLaneConflict(
+                "account write execution requires PostgreSQL"
+            )
         lock = _SQLITE_LOCKS.setdefault((org_id, account_id), asyncio.Lock())
         async with lock:
             async with session_factory() as validation_session:
@@ -117,9 +122,7 @@ async def account_execution_lane(
             # The production global lock order is Run gate first, account lane
             # second.  The advisory Run gate blocks takeover/cancellation while
             # still allowing the heartbeat's AgentRun row update to proceed.
-            await guard_session.scalar(
-                select(func.pg_advisory_xact_lock(_RUN_GATE_NAMESPACE, run_id))
-            )
+            await acquire_runtime_run_gate(guard_session, (run_id,))
             await _validated_scope(
                 guard_session,
                 account_id=account_id,
@@ -127,7 +130,11 @@ async def account_execution_lane(
                 execution_owner=execution_owner,
             )
             await guard_session.scalar(
-                select(func.pg_advisory_xact_lock(_account_lock_key(org_id, account_id)))
+                select(
+                    func.pg_advisory_xact_lock(
+                        account_execution_lock_key(org_id, account_id)
+                    )
+                )
             )
             # A queued waiter can spend time behind another account write.  It
             # must revalidate ownership after it reaches the front of the lane.
@@ -183,7 +190,7 @@ def _is_future(value: datetime | None) -> bool:
     return value > datetime.now(UTC)
 
 
-def _account_lock_key(org_id: int, account_id: int) -> int:
+def account_execution_lock_key(org_id: int, account_id: int) -> int:
     """Map the tenant/account tuple deterministically to signed PostgreSQL bigint."""
 
     digest = hashlib.blake2b(
@@ -198,5 +205,6 @@ __all__ = [
     "AccountExecutionGuard",
     "AccountExecutionLaneConflict",
     "AccountExecutionLeaseLost",
+    "account_execution_lock_key",
     "account_execution_lane",
 ]

@@ -26,6 +26,10 @@ class EchoParams(BaseModel):
     message: str
 
 
+def _executor(adapter: ToolAdapter) -> DurableToolExecutor:
+    return DurableToolExecutor(adapter, _allow_test_account_lane_fallback=True)
+
+
 async def _task(session, admin) -> BrainTask:
     task = BrainTask(
         org_id=admin.org_id,
@@ -93,7 +97,7 @@ async def test_tool_execution_is_durable_and_idempotent(session, admin) -> None:
         purpose="verify runtime",
         idempotency_key="round-1-echo",
     )
-    executor = DurableToolExecutor(adapter)
+    executor = _executor(adapter)
 
     first = await executor.execute(task=task, user=admin, request=request)
     second = await executor.execute(task=task, user=admin, request=request)
@@ -132,7 +136,7 @@ async def test_controlled_tool_creates_permission_before_execution(session, admi
         purpose="prepare publish package",
         idempotency_key="publish-package-1",
     )
-    executor = DurableToolExecutor(adapter)
+    executor = _executor(adapter)
 
     pending = await executor.execute(task=task, user=admin, request=request)
     assert pending.status == "waiting_approval"
@@ -190,7 +194,7 @@ async def test_idempotent_write_retries_with_one_server_provider_key(
         purpose="upsert provider record",
         idempotency_key="logical-upsert-1",
     )
-    executor = DurableToolExecutor(adapter)
+    executor = _executor(adapter)
     execution = await _write_context(session, admin, task)
 
     with pytest.raises(ToolTimeoutError):
@@ -248,7 +252,7 @@ async def test_non_idempotent_timeout_is_ambiguous_and_never_replayed(
         purpose="publish once",
         idempotency_key="logical-publish-1",
     )
-    executor = DurableToolExecutor(adapter)
+    executor = _executor(adapter)
     execution = await _write_context(session, admin, task)
 
     first = await executor.execute(task=task, user=admin, request=request, **execution)
@@ -284,7 +288,7 @@ async def test_non_idempotent_local_commit_failure_is_ambiguous(
         calls += 1
         return {"published": True}
 
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(
@@ -356,7 +360,7 @@ async def test_non_idempotent_reentrant_dispatch_uses_one_tool_call(
         nested_statuses.append(nested.status)
         return {"published": True}
 
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(
@@ -385,7 +389,7 @@ async def test_write_fails_closed_without_account_run_and_owner(session, admin) 
     async def handler(_params: EchoParams, _context: ToolExecutionContext) -> dict:
         raise AssertionError("an unscoped write must not reach the adapter")
 
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(
@@ -407,6 +411,47 @@ async def test_write_fails_closed_without_account_run_and_owner(session, admin) 
 
     with pytest.raises(AccountExecutionLaneConflict):
         await executor.execute(task=task, user=admin, request=request)
+
+
+@pytest.mark.asyncio
+async def test_executor_non_postgres_write_fails_without_explicit_test_injection(
+    session, admin
+) -> None:
+    calls = 0
+
+    async def handler(_params: EchoParams, _context: ToolExecutionContext) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"unexpected": True}
+
+    adapter = ToolAdapter(
+        [
+            ToolSpec(
+                name="provider.upsert",
+                handler=handler,
+                params_model=EchoParams,
+                side_effect_level="idempotent_write",
+            )
+        ]
+    )
+    task = await _task(session, admin)
+    execution = await _write_context(session, admin, task)
+    request = RuntimeToolCall(
+        tool_code="provider.upsert",
+        arguments={"message": "unsafe backend"},
+        purpose="reject non-PostgreSQL production writes",
+        idempotency_key="non-postgres-production-write",
+    )
+
+    with pytest.raises(AccountExecutionLaneConflict, match="requires PostgreSQL"):
+        await DurableToolExecutor(adapter).execute(
+            task=task,
+            user=admin,
+            request=request,
+            **execution,
+        )
+
+    assert calls == 0
 
 
 @pytest.mark.asyncio
@@ -454,7 +499,7 @@ async def test_planned_attempt_is_taken_over_and_dispatched_once(session, admin)
         )
     )
     await session.commit()
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(
@@ -529,7 +574,7 @@ async def test_dispatched_attempt_recovers_as_ambiguous_without_redispatch(
     )
     session.add(attempt)
     await session.commit()
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(
@@ -577,7 +622,7 @@ async def test_success_receipt_replays_without_redispatch(session, admin) -> Non
         purpose="persist one successful write",
         idempotency_key="successful-write-replay",
     )
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(
@@ -604,6 +649,92 @@ async def test_success_receipt_replays_without_redispatch(session, admin) -> Non
 
 
 @pytest.mark.asyncio
+async def test_terminal_replay_closes_all_unused_planned_attempts(session, admin) -> None:
+    calls = 0
+
+    async def handler(_params: EchoParams, _context: ToolExecutionContext) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"unexpected": True}
+
+    task = await _task(session, admin)
+    execution = await _write_context(session, admin, task, owner="replay-worker")
+    request = RuntimeToolCall(
+        tool_code="provider.upsert",
+        arguments={"message": "already complete"},
+        purpose="replay a completed write",
+        idempotency_key="terminal-replay-closes-plans",
+    )
+    row = AgentToolCall(
+        org_id=task.org_id,
+        task_id=task.id,
+        tool_code=request.tool_code,
+        tool_name="Provider Upsert",
+        idempotency_key=request.idempotency_key,
+        provider_idempotency_key="provider-terminal-key",
+        side_effect_level="idempotent_write",
+        status="success",
+        permission_mode="auto",
+        input_summary=request.purpose,
+        output_summary='{"echo":"already complete"}',
+        meta={
+            "arguments": request.arguments,
+            "purpose": request.purpose,
+            "scope": {},
+            "result": {"echo": "already complete"},
+        },
+        finished_at=datetime.now(UTC),
+    )
+    session.add(row)
+    await session.flush()
+    session.add_all(
+        [
+            ToolExecutionAttempt(
+                tool_call_id=row.id,
+                attempt_no=number,
+                status="planned",
+                provider_idempotency_key=row.provider_idempotency_key,
+                meta={"logical_key": request.idempotency_key},
+            )
+            for number in (1, 2)
+        ]
+    )
+    await session.commit()
+    executor = _executor(
+        ToolAdapter(
+            [
+                ToolSpec(
+                    name=request.tool_code,
+                    handler=handler,
+                    params_model=EchoParams,
+                    side_effect_level="idempotent_write",
+                )
+            ]
+        )
+    )
+
+    replay = await executor.execute(
+        task=task,
+        user=admin,
+        request=request,
+        **execution,
+    )
+
+    attempts = list(
+        await session.scalars(
+            select(ToolExecutionAttempt)
+            .where(ToolExecutionAttempt.tool_call_id == row.id)
+            .order_by(ToolExecutionAttempt.attempt_no)
+        )
+    )
+    assert replay.status == "success"
+    assert calls == 0
+    assert [attempt.status for attempt in attempts] == ["failed", "failed"]
+    assert {attempt.error for attempt in attempts} == {"TOOL_ATTEMPT_SUPERSEDED"}
+    assert all(attempt.finished_at is not None for attempt in attempts)
+
+
+@pytest.mark.asyncio
 async def test_lease_owner_change_rejects_old_worker_before_dispatch(session, admin) -> None:
     calls = 0
 
@@ -624,7 +755,7 @@ async def test_lease_owner_change_rejects_old_worker_before_dispatch(session, ad
         purpose="reject stale worker",
         idempotency_key="stale-worker-write",
     )
-    executor = DurableToolExecutor(
+    executor = _executor(
         ToolAdapter(
             [
                 ToolSpec(

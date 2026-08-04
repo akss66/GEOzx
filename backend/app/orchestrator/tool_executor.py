@@ -53,8 +53,14 @@ _ACTIVE_TOOL_CALLS: ContextVar[frozenset[int]] = ContextVar(
 class DurableToolExecutor:
     """Persist intent before execution and reuse completed results on retry."""
 
-    def __init__(self, adapter: ToolAdapter) -> None:
+    def __init__(
+        self,
+        adapter: ToolAdapter,
+        *,
+        _allow_test_account_lane_fallback: bool = False,
+    ) -> None:
         self._adapter = adapter
+        self._allow_test_account_lane_fallback = _allow_test_account_lane_fallback
 
     async def execute(
         self,
@@ -158,6 +164,13 @@ class DurableToolExecutor:
             if replay is not None and not (
                 spec.side_effect_level != "read" and replay.status == "running"
             ):
+                if spec.side_effect_level != "read" and replay.status in {
+                    "success",
+                    "failed",
+                    "ambiguous",
+                }:
+                    await _close_unused_planned_attempts(session, row=row)
+                    await session.commit()
                 return replay
         else:
             row = AgentToolCall(
@@ -222,6 +235,13 @@ class DurableToolExecutor:
                 if replay is not None and not (
                     spec.side_effect_level != "read" and replay.status == "running"
                 ):
+                    if spec.side_effect_level != "read" and replay.status in {
+                        "success",
+                        "failed",
+                        "ambiguous",
+                    }:
+                        await _close_unused_planned_attempts(session, row=row)
+                        await session.commit()
                     return replay
 
         if row.status == "running" and row.id in _ACTIVE_TOOL_CALLS.get():
@@ -282,21 +302,26 @@ class DurableToolExecutor:
             run_id=run_id,
             execution_owner=execution_owner,
             _session_factory=session_factory,
+            _allow_test_fallback=self._allow_test_account_lane_fallback,
         ) as lane:
-            row = await session.scalar(
+            row_id = row.id
+            attempt_id = attempt.id
+            locked_row = await session.scalar(
                 select(AgentToolCall)
-                .where(AgentToolCall.id == row.id)
+                .where(AgentToolCall.id == row_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-            attempt = await session.scalar(
+            locked_attempt = await session.scalar(
                 select(ToolExecutionAttempt)
-                .where(ToolExecutionAttempt.id == attempt.id)
+                .where(ToolExecutionAttempt.id == attempt_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-            if row is None or attempt is None:
+            if locked_row is None or locked_attempt is None:
                 raise RuntimeError("durable tool execution receipt is unavailable")
+            row = locked_row
+            attempt = locked_attempt
             if lane is not None and lane.wait_ms > 0:
                 _append_execution_observation(
                     row,
@@ -315,6 +340,7 @@ class DurableToolExecutor:
                 approved=approved,
             )
             if replay is not None and replay.status != "running":
+                await _close_unused_planned_attempts(session, row=row)
                 await session.commit()
                 return replay
             dispatched = await session.scalar(
@@ -473,10 +499,12 @@ class DurableToolExecutor:
             await session.rollback()
             if not non_idempotent:
                 raise
-            row = await session.get(AgentToolCall, row_id)
-            attempt = await session.get(ToolExecutionAttempt, attempt_id)
-            if row is None or attempt is None:
+            recovered_row = await session.get(AgentToolCall, row_id)
+            recovered_attempt = await session.get(ToolExecutionAttempt, attempt_id)
+            if recovered_row is None or recovered_attempt is None:
                 raise
+            row = recovered_row
+            attempt = recovered_attempt
             row.status = "ambiguous"
             row.error = "LocalCommitFailed"
             row.finished_at = datetime.now(UTC)
@@ -622,6 +650,30 @@ async def _converge_ambiguous(
     await session.commit()
     await session.refresh(row)
     return ToolExecutionOutcome("ambiguous", row, None)
+
+
+async def _close_unused_planned_attempts(
+    session: AsyncSession,
+    *,
+    row: AgentToolCall,
+) -> None:
+    """Make every unused pre-dispatch receipt terminal on durable replay."""
+
+    now = datetime.now(UTC)
+    unused_plans = list(
+        await session.scalars(
+            select(ToolExecutionAttempt)
+            .where(
+                ToolExecutionAttempt.tool_call_id == row.id,
+                ToolExecutionAttempt.status == "planned",
+            )
+            .with_for_update()
+        )
+    )
+    for unused in unused_plans:
+        unused.status = "failed"
+        unused.error = "TOOL_ATTEMPT_SUPERSEDED"
+        unused.finished_at = now
 
 
 def _append_execution_observation(
