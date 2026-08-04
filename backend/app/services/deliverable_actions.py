@@ -246,6 +246,7 @@ async def _create_shoot_task(context: ActionContext) -> ActionResult:
 
 async def _add_to_schedule(context: ActionContext) -> ActionResult:
     body = AddToScheduleActionRequest.model_validate(context.body)
+    reused = False
     resource = ContentScheduleEntry(
         org_id=context.user.org_id,
         account_id=context.content.account_id,
@@ -257,13 +258,32 @@ async def _add_to_schedule(context: ActionContext) -> ActionResult:
         timezone=body.timezone,
         status="planned",
     )
-    context.session.add(resource)
-    await context.session.flush()
+    try:
+        async with context.session.begin_nested():
+            context.session.add(resource)
+            await context.session.flush()
+    except IntegrityError:
+        existing = await context.session.scalar(
+            select(ContentScheduleEntry).where(
+                ContentScheduleEntry.org_id == context.user.org_id,
+                ContentScheduleEntry.account_id == context.content.account_id,
+                ContentScheduleEntry.source_artifact_id == context.artifact.id,
+                ContentScheduleEntry.source_artifact_version == context.artifact.version,
+                ContentScheduleEntry.scheduled_at == body.scheduled_at,
+            )
+        )
+        if existing is None:
+            raise _business_conflict(
+                "schedule_slot_conflict",
+                "该排期时间已被占用，请刷新后重试",
+            ) from None
+        resource = existing
+        reused = True
     return ActionResult(
         status="succeeded",
         resource_type="schedule_entry",
         resource_id=resource.id,
-        result_payload={"message": "内容排期已创建"},
+        result_payload={"message": "内容排期已存在" if reused else "内容排期已创建"},
     )
 
 

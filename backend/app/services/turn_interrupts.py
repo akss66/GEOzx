@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workspace_access import require_account_access
@@ -249,6 +249,7 @@ async def request_interrupt(
         interrupt=interrupt,
         change="requested",
     )
+    await session.refresh(interrupt)
     return InterruptRequestResult(
         interrupt=interrupt,
         publish_intents=(*closure.publish_intents, pending_intent),
@@ -366,6 +367,56 @@ async def resolve_interrupt(
         )
 
     now = datetime.now(UTC)
+    claimed = await session.execute(
+        update(TurnInterrupt)
+        .where(
+            TurnInterrupt.id == interrupt.id,
+            TurnInterrupt.status == "pending",
+            TurnInterrupt.version == expected_version,
+        )
+        .values(
+            status="resolved",
+            resolution_payload=canonical_resolution,
+            resolution_hash=resolution_hash,
+            resolution_idempotency_key=idempotency_key,
+            resolved_by_id=user.id,
+            resolved_at=now,
+            version=expected_version + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        await session.refresh(interrupt)
+        if (
+            interrupt.status == "resolved"
+            and interrupt.resolution_idempotency_key == idempotency_key
+            and interrupt.resolution_hash == resolution_hash
+            and dict(interrupt.resolution_payload or {}) == canonical_resolution
+        ):
+            run = await session.get(AgentRun, interrupt.run_id)
+            if run is None:
+                raise _not_found()
+            pending_intent = await _record_pending_work_change(
+                session,
+                interrupt=interrupt,
+                change="resolved",
+            )
+            return InterruptResolutionResult(
+                interrupt=interrupt,
+                run=run,
+                dispatch_intent=(
+                    InterruptDispatchIntent(run_id=run.id)
+                    if run.status == "queued"
+                    else None
+                ),
+                publish_intents=(pending_intent,),
+                replay_runtime_events=run.status != "queued",
+            )
+        raise _conflict(
+            "INTERRUPT_ALREADY_RESOLVED",
+            "This interrupt was resolved with another decision.",
+        )
+    await session.refresh(interrupt)
     finish_publish_intents: tuple[RuntimePublishIntent, ...] = ()
     approval_handled = False
     if interrupt.kind == "approval":
@@ -376,13 +427,6 @@ async def resolve_interrupt(
             user=user,
             now=now,
         )
-    interrupt.status = "resolved"
-    interrupt.resolution_payload = canonical_resolution
-    interrupt.resolution_hash = resolution_hash
-    interrupt.resolution_idempotency_key = idempotency_key
-    interrupt.resolved_by_id = user.id
-    interrupt.resolved_at = now
-    interrupt.version += 1
     await append_turn_event(
         session,
         _interrupt_event_scope(discovered, interrupt),

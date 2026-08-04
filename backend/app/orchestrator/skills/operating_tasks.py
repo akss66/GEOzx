@@ -156,6 +156,37 @@ class WeeklyOperationPackage(BaseModel):
             )
         ):
             raise ValueError("weekly operation package quality must pass")
+        topic_ids = [item.topic_id for item in self.topics]
+        if (
+            len(set(topic_ids)) != 5
+            or any(
+                not (item.topic_id and item.title and item.angle and item.format)
+                for item in self.topics
+            )
+        ):
+            raise ValueError("weekly operation topics must be complete and unique")
+        script_ids = [item.script_id for item in self.scripts]
+        script_topics = [item.topic_id for item in self.scripts]
+        if (
+            len(set(script_ids)) != 5
+            or len(set(script_topics)) != 5
+            or set(script_topics) != set(topic_ids)
+            or any(
+                not (
+                    item.script_id
+                    and item.topic_id
+                    and item.title
+                    and item.hook
+                    and item.voiceover
+                    and item.shot_list
+                    and item.cta
+                )
+                for item in self.scripts
+            )
+        ):
+            raise ValueError("weekly operation scripts must be complete and mapped")
+        script_topics_by_id = {item.script_id: item.topic_id for item in self.scripts}
+        visual_ids = [item.visual_id for item in self.visuals]
         if any(
             not (
                 item.script_id
@@ -167,8 +198,57 @@ class WeeklyOperationPackage(BaseModel):
                 and item.platform_constraints
             )
             for item in self.visuals
+        ) or (
+            len(set(visual_ids)) != 5
+            or {item.script_id for item in self.visuals} != set(script_ids)
+            or any(
+                script_topics_by_id.get(item.script_id) != item.topic_id
+                for item in self.visuals
+            )
         ):
             raise ValueError("weekly operation visuals must be complete")
+        publish_slots = [
+            item for item in self.calendar_slots if item.slot_type == "publish"
+        ]
+        buffer_slots = [
+            item for item in self.calendar_slots if item.slot_type == "review_buffer"
+        ]
+        slot_ids = [item.slot_id for item in self.calendar_slots]
+        slot_dates = [item.date for item in self.calendar_slots]
+        if (
+            len(publish_slots) != 5
+            or len(buffer_slots) != 2
+            or len(set(slot_ids)) != 7
+            or len(set(slot_dates)) != 7
+            or any(
+                (slot_dates[index] - slot_dates[index - 1]).days != 1
+                for index in range(1, len(slot_dates))
+            )
+            or {item.script_id for item in publish_slots} != set(script_ids)
+            or any(
+                item.scheduled_at is None
+                or item.readiness != "ready"
+                or item.topic_id != script_topics_by_id.get(item.script_id or "")
+                for item in publish_slots
+            )
+            or any(
+                item.script_id is not None
+                or item.topic_id is not None
+                or item.scheduled_at is not None
+                or item.readiness != "buffer"
+                for item in buffer_slots
+            )
+        ):
+            raise ValueError("weekly operation calendar must map five publish slots")
+        if {
+            item.code for item in self.next_steps
+        } != {"start_filming", "confirm_manual_schedule"} or len(self.next_steps) != 2:
+            raise ValueError("weekly operation next steps must expose both public actions")
+        if any(
+            not item.strip()
+            for item in (*self.manual_publish_checklist, *self.participating_experts)
+        ):
+            raise ValueError("weekly operation checklist and experts must be non-empty")
         return self
 
 

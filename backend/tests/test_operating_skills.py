@@ -19,6 +19,7 @@ from app.models import (
     AgentToolCall,
     BrainTask,
     ContentItem,
+    ContentScheduleEntry,
     ConversationThread,
     ConversationTurn,
     Deliverable,
@@ -288,7 +289,10 @@ class _Harness:
                 "title": "玻璃贴膜避坑指南",
                 "hook": "贴膜前先看这三个坑。",
                 "scenes": ["常见误区", "真实案例", "选择建议"],
+                "voiceover": "先讲常见误区，再看真实案例，最后给出选择建议。",
+                "shot_list": ["常见误区", "真实案例", "选择建议"],
                 "duration_seconds": 60,
+                "cta": "评论区说说你的选择。",
                 "bgm_suggestion": "轻节奏",
             }
             if code is AgentCode.CONTENT_DIRECTOR
@@ -508,6 +512,209 @@ async def test_weekly_operation_builds_one_typed_package_without_intermediate_ap
     assert publishing_run is not None
     assert approvals[0].skill_run_id == publishing_run.id
     assert not any(call.tool_code == "platform.content_publish" for call in tools.calls)
+
+    from app.services.composite_skill_runs import lock_composite_finish_approval
+
+    task = await session.get(BrainTask, result.task_id)
+    assert task is not None
+    approval_lock = await lock_composite_finish_approval(
+        session,
+        tool_call=approvals[0],
+    )
+    approval_lock.tool_call.status = "success"
+    finalized = await finalize_skill_finish_approval(
+        session,
+        tool_call=approval_lock.tool_call,
+        task=task,
+        approved=True,
+        comment="确认安排",
+        prelocked=approval_lock.runtime_lock,
+    )
+    assert finalized.handled is True
+    assert any(
+        intent.event_type == "pending_work.updated" and intent.turn_id is None
+        for intent in finalized.publish_intents
+    )
+    await session.commit()
+    rows = list(
+        await session.scalars(
+            select(ContentScheduleEntry)
+            .where(ContentScheduleEntry.source_artifact_id == final.id)
+            .order_by(ContentScheduleEntry.scheduled_at)
+        )
+    )
+    assert len(rows) == 5
+    assert {item.source_artifact_id for item in rows} == {final.id}
+    assert {item.source_artifact_version for item in rows} == {final.version}
+    await session.refresh(final)
+    assert final.status is DeliverableStatus.APPROVED
+    await session.refresh(publishing_run)
+    assert publishing_run.output_snapshot["approval"]["schedule_entry_ids"] == [
+        item.id for item in rows
+    ]
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.type == "pending_work.updated",
+                Event.content_item_id == final.content_item_id,
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_weekly_approval_requests_create_exactly_five_schedule_rows(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="weekly-concurrent-approval",
+        message="结合最近数据和对标内容，规划并制作下周抖音内容",
+    )
+    tools = _Tools()
+    result = await SkillRuntime(
+        tool_executor=tools,
+        harness=_Harness(),
+        critic=_AcceptingCritic(),
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={"cycle_days": 7, "topic_count": 5},
+        ),
+    )
+    publishing_run = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "publishing_preparation",
+        )
+    )
+    assert result.status == "waiting_permission"
+    assert publishing_run is not None
+    call = await session.scalar(
+        select(AgentToolCall).where(
+            AgentToolCall.skill_run_id == publishing_run.id,
+            AgentToolCall.status == "waiting_approval",
+        )
+    )
+    assert call is not None
+    artifact_id = call.meta["artifact_id"]
+    login = await client.post(
+        "/auth/login",
+        json={"email": "admin@test.com", "password": "admin-pw-123"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    from app.db import get_session
+    from app.main import app
+    from app.services.composite_skill_runs import lock_composite_finish_approval
+    from app.services.turn_interrupts import request_interrupt
+
+    preapproval_lock = await lock_composite_finish_approval(session, tool_call=call)
+    await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="approval",
+        semantic_key=f"tool-approval:{call.id}",
+        public_message=f"Confirm {call.tool_name}.",
+        action_label="Confirm action",
+        response_schema={
+            "type": "object",
+            "required": ["approved"],
+            "properties": {"approved": {"type": "boolean"}},
+        },
+        skill_run_id=publishing_run.id,
+        source_type="tool_call",
+        source_id=call.id,
+        source_version=1,
+        prelocked=preapproval_lock.runtime_lock,
+    )
+    await session.commit()
+    maker = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async def independent_session():
+        async with maker() as request_session:
+            yield request_session
+
+    original_override = app.dependency_overrides[get_session]
+    app.dependency_overrides[get_session] = independent_session
+    published: list[tuple[str, dict[str, object]]] = []
+
+    async def capture_publish(
+        event_type: str,
+        payload: dict[str, object],
+        **_kwargs: object,
+    ) -> None:
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event",
+        capture_publish,
+    )
+    try:
+        requests = [
+            client.post(
+                f"/brain/tool-calls/{call.id}/approve",
+                headers=headers,
+                json={"approved": True, "comment": "确认安排"},
+            ),
+            client.post(
+                f"/brain/tool-calls/{call.id}/approve",
+                headers=headers,
+                json={"approved": True, "comment": "确认安排"},
+            ),
+        ]
+        if session.bind.dialect.name == "sqlite":
+            # The test fixture uses one StaticPool connection, which cannot run
+            # independent SAVEPOINT stacks concurrently. Each request still
+            # receives an independent Session; PostgreSQL runs the true gather.
+            responses = [await request for request in requests]
+        else:
+            responses = await asyncio.gather(*requests)
+    finally:
+        app.dependency_overrides[get_session] = original_override
+
+    assert sorted(item.status_code for item in responses) == [200, 200]
+    assert any(
+        event_type == "pending_work.updated"
+        and payload == {"account_id": account.id}
+        for event_type, payload in published
+    )
+    session.expire_all()
+    rows = list(
+        await session.scalars(
+            select(ContentScheduleEntry).where(
+                ContentScheduleEntry.source_artifact_id == artifact_id
+            )
+        )
+    )
+    assert len(rows) == 5
+    artifact = await session.get(Deliverable, artifact_id)
+    assert artifact is not None and artifact.status is DeliverableStatus.APPROVED
+    assert {item.source_artifact_version for item in rows} == {artifact.version}
+    assert (
+        await session.scalar(
+            select(func.count(AgentToolCall.id)).where(
+                AgentToolCall.tool_code == "platform.content_publish"
+            )
+        )
+        == 0
+    )
 
 
 @pytest.mark.asyncio

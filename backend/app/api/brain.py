@@ -998,6 +998,8 @@ async def stop_brain_generation(
     user: CurrentUser,
     session: SessionDep,
 ) -> StopBrainGenerationOut:
+    user_org_id = user.org_id
+    user_id = user.id
     if body.task_id is not None:
         await _load_task_for_user(session, body.task_id, user)
     run = await get_agent_run(
@@ -1020,11 +1022,11 @@ async def stop_brain_generation(
             # without pretending a second business transaction was committed.
             await session.rollback()
             try:
-                await abort_agent_runtime(run.id)
+                await abort_agent_runtime(stopped.run_id)
             except Exception:  # noqa: BLE001 - terminal DB state remains authoritative
                 log.warning(
                     "Legacy stop worker abort deferred",
-                    extra={"run_id": run.id},
+                    extra={"run_id": stopped.run_id},
                     exc_info=True,
                 )
         else:
@@ -1033,7 +1035,7 @@ async def stop_brain_generation(
             await request_agent_run_cancel(session, run.id)
             if settings.agent_runtime_async_enabled:
                 await abort_agent_runtime(run.id)
-    await generation_control.request_stop(user.org_id, user.id, client_message_id)
+    await generation_control.request_stop(user_org_id, user_id, client_message_id)
     return StopBrainGenerationOut(
         client_message_id=client_message_id,
         stop_requested=True,

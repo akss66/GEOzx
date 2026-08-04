@@ -42,6 +42,7 @@ def evaluate_script_quality(
     *,
     expected_topic_ids: Sequence[str],
     required_constraints: dict[str, list[str]],
+    source_fields_present: bool = True,
 ) -> ArtifactQuality:
     script_ids = [str(item.script_id) for item in scripts]
     topic_ids = [str(item.topic_id) for item in scripts]
@@ -63,7 +64,8 @@ def evaluate_script_quality(
         ),
         QualityCheck(
             code="required_fields",
-            passed=all(
+            passed=source_fields_present
+            and all(
                 all(
                     (
                         str(getattr(item, field)).strip()
@@ -168,6 +170,7 @@ def evaluate_visual_quality(
     visuals: Sequence[Any],
     *,
     expected_script_ids: Sequence[str],
+    source_fields_present: bool = True,
 ) -> ArtifactQuality:
     visual_ids = [str(item.visual_id) for item in visuals]
     script_ids = [str(item.script_id) for item in visuals]
@@ -190,7 +193,8 @@ def evaluate_visual_quality(
             ),
             QualityCheck(
                 code="visual_required_fields",
-                passed=all(
+                passed=source_fields_present
+                and all(
                     str(item.topic_id).strip()
                     and str(item.cover_copy).strip()
                     and str(item.composition).strip()

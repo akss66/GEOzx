@@ -446,6 +446,10 @@ async def test_resolve_requeues_original_run_without_claim_and_enqueues_after_co
         public_message="Provide the missing product facts.",
         response_schema={"type": "object"},
     )
+    interrupt_id = requested.interrupt.id
+    interrupt_account_id = requested.interrupt.account_id
+    run_id = run.id
+    run_turn_id = run.turn_id
     await session.commit()
     enqueued: list[int] = []
     published: list[tuple[str, dict[str, object]]] = []
@@ -470,7 +474,7 @@ async def test_resolve_requeues_original_run_without_claim_and_enqueues_after_co
         capture_publish,
     )
     response = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers={**_auth(admin), "Idempotency-Key": "resolve-original-key"},
         json={
             "expected_version": 1,
@@ -479,34 +483,34 @@ async def test_resolve_requeues_original_run_without_claim_and_enqueues_after_co
     )
 
     assert response.status_code == 200
-    assert response.json()["run_id"] == run.id
+    assert response.json()["run_id"] == run_id
     assert response.json()["dispatch_deferred"] is False
-    assert enqueued == [run.id]
+    assert enqueued == [run_id]
     assert [
         payload
         for event_type, payload in published
         if event_type == "pending_work.updated"
-    ] == [{"account_id": requested.interrupt.account_id}]
+    ] == [{"account_id": interrupt_account_id}]
     await session.refresh(run)
     assert run.status == "queued"
     assert run.phase == "queued"
-    assert run.request_payload["resume_interrupt"]["interrupt_id"] == requested.interrupt.id
+    assert run.request_payload["resume_interrupt"]["interrupt_id"] == interrupt_id
     assert await session.scalar(
-        select(func.count(AgentRun.id)).where(AgentRun.turn_id == run.turn_id)
+        select(func.count(AgentRun.id)).where(AgentRun.turn_id == run_turn_id)
     ) == 1
     account_events = list(
         await session.scalars(
             select(Event)
             .where(
                 Event.type == "pending_work.updated",
-                Event.account_id == requested.interrupt.account_id,
+                Event.account_id == interrupt_account_id,
             )
             .order_by(Event.id)
         )
     )
     assert len(account_events) == 2
     assert all(
-        event.payload == {"account_id": requested.interrupt.account_id}
+        event.payload == {"account_id": interrupt_account_id}
         for event in account_events
     )
     assert all(
@@ -582,6 +586,7 @@ async def test_resolve_is_idempotent_and_version_safe(
         public_message="Paused for operator direction.",
         response_schema={"type": "object"},
     )
+    interrupt_id = requested.interrupt.id
     await session.commit()
     dispatched: list[int] = []
 
@@ -595,17 +600,17 @@ async def test_resolve_is_idempotent_and_version_safe(
     headers = {**_auth(admin), "Idempotency-Key": "same-resolution-key"}
     body = {"expected_version": 1, "resolution": {"continue": True}}
     first = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers=headers,
         json=body,
     )
     replay = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers=headers,
         json=body,
     )
     changed = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers=headers,
         json={"expected_version": 1, "resolution": {"continue": False}},
     )
@@ -613,7 +618,7 @@ async def test_resolve_is_idempotent_and_version_safe(
     assert first.status_code == replay.status_code == 200
     assert first.json()["interrupt"] == replay.json()["interrupt"]
     assert changed.status_code == 409
-    interrupt = await session.get(TurnInterrupt, requested.interrupt.id)
+    interrupt = await session.get(TurnInterrupt, interrupt_id)
     assert interrupt is not None
     assert interrupt.status == "resolved"
     assert interrupt.version == 2
@@ -636,12 +641,13 @@ async def test_resolve_stale_pending_version_is_conflict(session, admin) -> None
         public_message="Need one answer.",
         response_schema={"type": "object"},
     )
+    interrupt_id = requested.interrupt.id
     await session.commit()
     with pytest.raises(Exception) as exc_info:
         await resolve_interrupt(
             session,
             user=admin,
-            interrupt_id=requested.interrupt.id,
+            interrupt_id=interrupt_id,
             expected_version=7,
             idempotency_key="stale-version-key",
             resolution={"answer": "value"},
@@ -663,9 +669,10 @@ async def test_resolve_cross_user_account_is_404(client, session, admin, member)
         public_message="Hidden question.",
         response_schema={"type": "object"},
     )
+    interrupt_id = requested.interrupt.id
     await session.commit()
     response = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers={**_auth(member), "Idempotency-Key": "hidden-resolution-key"},
         json={"expected_version": 1, "resolution": {"answer": "leak"}},
     )
@@ -710,6 +717,8 @@ async def test_canonical_resolve_finalizes_finish_approval_without_enqueue(
         source_version=1,
     )
     interrupt_id = requested.interrupt.id
+    tool_id = tool.id
+    invocation_id = tool.invocation_id
     await session.commit()
     enqueued: list[int] = []
 
@@ -750,8 +759,8 @@ async def test_canonical_resolve_finalizes_finish_approval_without_enqueue(
     assert response.status_code == 200
     assert enqueued == []
     assert len(locked_sources) == 1
-    assert tool.invocation_id in locked_sources[0][0]
-    assert tool.id in locked_sources[0][1]
+    assert invocation_id in locked_sources[0][0]
+    assert tool_id in locked_sources[0][1]
     assert locked_sources[0][2]
     for row in (run, turn, skill, deliverable, tool):
         await session.refresh(row)
@@ -842,6 +851,8 @@ async def test_enqueue_failure_keeps_durable_original_run_for_idempotent_redispa
         public_message="Need one answer.",
         response_schema={"type": "object"},
     )
+    interrupt_id = requested.interrupt.id
+    run_id = run.id
     await session.commit()
     attempts: list[int] = []
 
@@ -857,12 +868,12 @@ async def test_enqueue_failure_keeps_durable_original_run_for_idempotent_redispa
     headers = {**_auth(admin), "Idempotency-Key": "deferred-resolution-key"}
     body = {"expected_version": 1, "resolution": {"answer": "ready"}}
     first = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers=headers,
         json=body,
     )
     replay = await client.post(
-        f"/turn-interrupts/{requested.interrupt.id}/resolve",
+        f"/turn-interrupts/{interrupt_id}/resolve",
         headers=headers,
         json=body,
     )
@@ -870,7 +881,7 @@ async def test_enqueue_failure_keeps_durable_original_run_for_idempotent_redispa
     assert first.status_code == replay.status_code == 200
     assert first.json()["dispatch_deferred"] is True
     assert replay.json()["dispatch_deferred"] is False
-    assert attempts == [run.id, run.id]
+    assert attempts == [run_id, run_id]
     await session.refresh(run)
     assert run.status == "queued"
 
@@ -883,6 +894,9 @@ async def test_legacy_tool_approval_delegates_to_interrupt_resolve(
         session, admin, key="legacy-approval", with_approval=True
     )
     assert tool is not None
+    run_id = run.id
+    run_turn_id = run.turn_id
+    tool_id = tool.id
     enqueued: list[int] = []
 
     async def capture_enqueue(*, run_id: int) -> bool:
@@ -891,7 +905,7 @@ async def test_legacy_tool_approval_delegates_to_interrupt_resolve(
 
     monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", capture_enqueue)
     response = await client.post(
-        f"/brain/tool-calls/{tool.id}/approve",
+        f"/brain/tool-calls/{tool_id}/approve",
         headers=_auth(admin),
         json={"approved": True, "comment": "Proceed"},
     )
@@ -899,15 +913,15 @@ async def test_legacy_tool_approval_delegates_to_interrupt_resolve(
     assert response.status_code == 200
     interrupt = await session.scalar(
         select(TurnInterrupt).where(
-            TurnInterrupt.run_id == run.id,
+            TurnInterrupt.run_id == run_id,
             TurnInterrupt.source_type == "tool_call",
-            TurnInterrupt.source_id == tool.id,
+            TurnInterrupt.source_id == tool_id,
         )
     )
     assert interrupt is not None and interrupt.status == "resolved"
-    assert enqueued == [run.id]
+    assert enqueued == [run_id]
     assert await session.scalar(
-        select(func.count(AgentRun.id)).where(AgentRun.turn_id == run.turn_id)
+        select(func.count(AgentRun.id)).where(AgentRun.turn_id == run_turn_id)
     ) == 1
 
 
@@ -927,6 +941,11 @@ async def test_legacy_stop_delegates_to_scoped_stop(
         public_message="Waiting for input.",
         response_schema={"type": "object"},
     )
+    interrupt_id = requested.interrupt.id
+    client_message_id = run.client_message_id
+    run_id = run.id
+    turn_id = turn.id
+    task_id = task.id
     await session.commit()
     aborted: list[int] = []
 
@@ -936,23 +955,23 @@ async def test_legacy_stop_delegates_to_scoped_stop(
 
     monkeypatch.setattr("app.api.brain.abort_agent_runtime", capture_abort)
     response = await client.post(
-        f"/brain/generations/{run.client_message_id}/stop",
+        f"/brain/generations/{client_message_id}/stop",
         headers=_auth(admin),
-        json={"task_id": task.id},
+        json={"task_id": task_id},
     )
 
     assert response.status_code == 202
     await session.refresh(run)
     await session.refresh(turn)
-    interrupt = await session.get(TurnInterrupt, requested.interrupt.id)
+    interrupt = await session.get(TurnInterrupt, interrupt_id)
     assert interrupt is not None and interrupt.status == "cancelled"
     assert run.status == "stopped"
     assert turn.status == "stopped"
-    assert aborted == [run.id]
+    assert aborted == [run_id]
     event_types = list(
         await session.scalars(
             select(Event.type)
-            .where(Event.turn_id == turn.id)
+            .where(Event.turn_id == turn_id)
             .order_by(Event.sequence)
         )
     )
@@ -1043,10 +1062,13 @@ async def test_resolve_projects_no_pending_interrupt_and_safe_events(
         response_schema={"type": "object"},
     )
     interrupt_id = requested.interrupt.id
+    expected_run_id = run.id
+    thread_id = thread.id
+    auth_headers = _auth(admin)
     await session.commit()
 
     async def capture_enqueue(*, run_id: int) -> bool:
-        return run_id == run.id
+        return run_id == expected_run_id
 
     monkeypatch.setattr(
         "app.api.turn_interrupts.enqueue_agent_runtime",
@@ -1054,19 +1076,19 @@ async def test_resolve_projects_no_pending_interrupt_and_safe_events(
     )
     resolved = await client.post(
         f"/turn-interrupts/{interrupt_id}/resolve",
-        headers={**_auth(admin), "Idempotency-Key": "safe-events-key"},
+        headers={**auth_headers, "Idempotency-Key": "safe-events-key"},
         json={
             "expected_version": 1,
             "resolution": {"private_direction": "Do not expose this"},
         },
     )
     snapshot = await client.get(
-        f"/brain/conversations/{thread.id}",
-        headers=_auth(admin),
+        f"/brain/conversations/{thread_id}",
+        headers=auth_headers,
     )
     events = await client.get(
-        f"/conversation-threads/{thread.id}/events",
-        headers=_auth(admin),
+        f"/conversation-threads/{thread_id}/events",
+        headers=auth_headers,
         params={"after_id": 0},
     )
 
@@ -1141,6 +1163,8 @@ async def test_terminal_interrupt_is_deleted_with_private_runtime_trace(
         response_schema={"type": "object"},
     )
     interrupt_id = requested.interrupt.id
+    thread_id = thread.id
+    auth_headers = _auth(admin)
     await session.commit()
 
     async def capture_enqueue(*, run_id: int) -> bool:
@@ -1152,7 +1176,7 @@ async def test_terminal_interrupt_is_deleted_with_private_runtime_trace(
     )
     resolved = await client.post(
         f"/turn-interrupts/{interrupt_id}/resolve",
-        headers={**_auth(admin), "Idempotency-Key": "delete-terminal-key"},
+        headers={**auth_headers, "Idempotency-Key": "delete-terminal-key"},
         json={"expected_version": 1, "resolution": {"answer": "ready"}},
     )
     assert resolved.status_code == 200
@@ -1163,13 +1187,13 @@ async def test_terminal_interrupt_is_deleted_with_private_runtime_trace(
     await session.commit()
 
     response = await client.delete(
-        f"/brain/conversations/{thread.id}",
-        headers=_auth(admin),
+        f"/brain/conversations/{thread_id}",
+        headers=auth_headers,
     )
 
     assert response.status_code == 200
     assert response.json()["interrupts_deleted"] == 1
     assert await session.get(TurnInterrupt, interrupt_id) is None
     assert await session.scalar(
-        select(func.count(Event.id)).where(Event.thread_id == thread.id)
+        select(func.count(Event.id)).where(Event.thread_id == thread_id)
     ) == 0

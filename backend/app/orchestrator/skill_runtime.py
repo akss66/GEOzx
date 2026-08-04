@@ -3629,7 +3629,19 @@ def _build_operating_report(
             asset_checklist=visual.asset_checklist,
             platform_constraints=visual.platform_constraints,
             visuals=[visual],
-            quality=evaluate_visual_quality([visual], expected_script_ids=[visual.script_id]),
+            quality=evaluate_visual_quality(
+                [visual],
+                expected_script_ids=[visual.script_id],
+                source_fields_present=all(
+                    (
+                        str(latest.get("cover_copy") or "").strip(),
+                        str(latest.get("composition") or "").strip(),
+                        bool(_string_list(latest.get("shot_list"))),
+                        bool(_string_list(latest.get("asset_checklist"))),
+                        bool(_string_list(latest.get("platform_constraints"))),
+                    )
+                ),
+            ),
             evidence_refs=evidence_refs,
             participating_experts=participants,
         )
@@ -3720,6 +3732,19 @@ def _build_operating_report(
                 [script],
                 expected_topic_ids=[script.topic_id],
                 required_constraints={},
+                source_fields_present=all(
+                    (
+                        str(latest.get("title") or "").strip(),
+                        str(latest.get("hook") or "").strip(),
+                        str(latest.get("voiceover") or "").strip()
+                        or bool(_string_list(latest.get("scenes"))),
+                        bool(
+                            _string_list(latest.get("shot_list"))
+                            or _string_list(latest.get("scenes"))
+                        ),
+                        str(latest.get("cta") or "").strip(),
+                    )
+                ),
             ),
             evidence_refs=evidence_refs,
             participating_experts=participants,

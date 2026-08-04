@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AgentRun,
     AgentToolCall,
     BrainTask,
+    ContentScheduleEntry,
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    Event,
     SkillRun,
 )
 from app.models.enums import DeliverableStatus
+from app.orchestrator.skills.operating_tasks import WeeklyOperationPackage
 from app.services.composite_skill_runs import (
     block_composite_parent_from_child,
     resume_composite_parent,
@@ -72,9 +77,7 @@ async def finalize_skill_finish_approval(
         task_id=task.id,
         content_item_id=task.content_item_id,
         skill_run_id=skill_run.id,
-        deliverable_id=(
-            meta["artifact_id"] if type(meta.get("artifact_id")) is int else None
-        ),
+        deliverable_id=(meta["artifact_id"] if type(meta.get("artifact_id")) is int else None),
         tool_call_id=tool_call.id,
     )
     run = await session.get(AgentRun, skill_run.run_id)
@@ -120,9 +123,20 @@ async def finalize_skill_finish_approval(
         raise SkillApprovalConflict("SKILL_APPROVAL_ARTIFACT_MISSING")
 
     output = dict(skill_run.output_snapshot or {})
+    schedule_entry_ids: tuple[int, ...] = ()
+    schedule_publish_intents: tuple[RuntimePublishIntent, ...] = ()
+    if approved and isinstance(dict(deliverable.payload or {}).get("package"), dict):
+        schedule_entry_ids, schedule_intent = await _create_manual_schedule_entries_for_package(
+            session,
+            tool_call=tool_call,
+            task=task,
+            thread=thread,
+            deliverable=deliverable,
+        )
+        schedule_publish_intents = (schedule_intent,)
     next_status = "completed" if approved else "blocked"
     response = (
-        "发布准备已确认采用，本次任务已完成。"
+        "已创建 5 条手动发布任务；请按安排完成拍摄和人工发布，并在发布后记录结果。"
         if approved
         else f"发布准备未被采用，本次任务已停止。{comment or ''}".strip()
     )
@@ -134,15 +148,12 @@ async def finalize_skill_finish_approval(
                 "approved": approved,
                 "comment": comment or "",
                 "tool_call_id": tool_call.id,
+                "schedule_entry_ids": list(schedule_entry_ids),
             },
         }
     )
-    deliverable.status = (
-        DeliverableStatus.APPROVED if approved else DeliverableStatus.REJECTED
-    )
-    nested_parent_id = dict(skill_run.output_snapshot or {}).get(
-        "composite_parent_skill_run_id"
-    )
+    deliverable.status = DeliverableStatus.APPROVED if approved else DeliverableStatus.REJECTED
+    nested_parent_id = dict(skill_run.output_snapshot or {}).get("composite_parent_skill_run_id")
     nested_child = type(nested_parent_id) is int
     child_closure = await close_runtime_state(
         session,
@@ -183,9 +194,7 @@ async def finalize_skill_finish_approval(
     )
     if nested_child and approved:
         await session.refresh(skill_run)
-        await resume_composite_parent(
-            session, child_skill_run=skill_run, prelocked=prelocked
-        )
+        await resume_composite_parent(session, child_skill_run=skill_run, prelocked=prelocked)
     elif nested_child:
         await session.refresh(skill_run)
         parent_closure = await block_composite_parent_from_child(
@@ -196,11 +205,126 @@ async def finalize_skill_finish_approval(
         )
         return SkillFinishApprovalResult(
             handled=True,
-            publish_intents=(
-                parent_closure.publish_intents if parent_closure is not None else ()
-            ),
+            publish_intents=(parent_closure.publish_intents if parent_closure is not None else ())
+            + schedule_publish_intents,
         )
     return SkillFinishApprovalResult(
         handled=True,
-        publish_intents=child_closure.publish_intents,
+        publish_intents=child_closure.publish_intents + schedule_publish_intents,
+    )
+
+
+async def _create_manual_schedule_entries_for_package(
+    session: AsyncSession,
+    *,
+    tool_call: AgentToolCall,
+    task: BrainTask,
+    thread: ConversationThread,
+    deliverable: Deliverable,
+) -> tuple[tuple[int, ...], RuntimePublishIntent]:
+    """Create the five manual-publish rows inside the locked approval transaction."""
+
+    try:
+        package = WeeklyOperationPackage.model_validate(
+            dict(deliverable.payload or {}).get("package")
+        )
+    except ValueError as exc:
+        raise SkillApprovalConflict("SKILL_APPROVAL_PACKAGE_INVALID") from exc
+    publish_slots = [item for item in package.calendar_slots if item.slot_type == "publish"]
+    buffer_slots = [item for item in package.calendar_slots if item.slot_type == "review_buffer"]
+    script_ids = [item.script_id for item in publish_slots]
+    if (
+        len(publish_slots) != 5
+        or len(buffer_slots) != 2
+        or any(item.scheduled_at is None for item in publish_slots)
+        or any(item.script_id is not None for item in buffer_slots)
+        or any(item.scheduled_at is not None for item in buffer_slots)
+        or len(script_ids) != len(set(script_ids))
+        or set(script_ids) != {item.script_id for item in package.scripts}
+        or task.content_item_id != deliverable.content_item_id
+        or task.created_by_id is None
+    ):
+        raise SkillApprovalConflict("SKILL_APPROVAL_PACKAGE_SLOTS_INVALID")
+
+    existing = list(
+        await session.scalars(
+            select(ContentScheduleEntry)
+            .where(
+                ContentScheduleEntry.org_id == task.org_id,
+                ContentScheduleEntry.account_id == thread.account_id,
+                ContentScheduleEntry.source_artifact_id == deliverable.id,
+                ContentScheduleEntry.source_artifact_version == deliverable.version,
+            )
+            .order_by(ContentScheduleEntry.id)
+        )
+    )
+    if existing:
+        if len(existing) != 5:
+            raise SkillApprovalConflict("SKILL_APPROVAL_SCHEDULE_CONFLICT")
+        rows = existing
+
+    else:
+        rows = [
+            ContentScheduleEntry(
+                org_id=task.org_id,
+                account_id=thread.account_id,
+                content_item_id=deliverable.content_item_id,
+                source_artifact_id=deliverable.id,
+                source_artifact_version=deliverable.version,
+                created_by_id=task.created_by_id,
+                scheduled_at=slot.scheduled_at,
+                timezone=slot.timezone,
+                status="planned",
+            )
+            for slot in publish_slots
+        ]
+        try:
+            async with session.begin_nested():
+                session.add_all(rows)
+                await session.flush()
+        except IntegrityError as exc:
+            concurrent = list(
+                await session.scalars(
+                    select(ContentScheduleEntry)
+                    .where(
+                        ContentScheduleEntry.org_id == task.org_id,
+                        ContentScheduleEntry.account_id == thread.account_id,
+                        ContentScheduleEntry.source_artifact_id == deliverable.id,
+                        ContentScheduleEntry.source_artifact_version == deliverable.version,
+                    )
+                    .order_by(ContentScheduleEntry.id)
+                )
+            )
+            if len(concurrent) != 5:
+                raise SkillApprovalConflict("SKILL_APPROVAL_SCHEDULE_CONFLICT") from exc
+            rows = concurrent
+
+    raw_key = (
+        f"operation-schedule-v1:{task.org_id}:{deliverable.id}:{deliverable.version}:{tool_call.id}"
+    )
+    event_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    event = await session.scalar(select(Event).where(Event.idempotency_key == event_key))
+    if event is None:
+        event = Event(
+            type="pending_work.updated",
+            org_id=task.org_id,
+            account_id=thread.account_id,
+            content_item_id=deliverable.content_item_id,
+            project_id=thread.project_id,
+            thread_id=thread.id,
+            turn_id=deliverable.turn_id,
+            run_id=deliverable.run_id,
+            skill_run_id=deliverable.skill_run_id,
+            payload={"account_id": thread.account_id},
+            idempotency_key=event_key,
+        )
+        session.add(event)
+        await session.flush()
+    return (
+        tuple(item.id for item in rows),
+        RuntimePublishIntent(
+            event_id=event.id,
+            event_type=event.type,
+            turn_id=None,
+        ),
     )

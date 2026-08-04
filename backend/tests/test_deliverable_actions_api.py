@@ -181,6 +181,43 @@ async def test_add_to_schedule_creates_one_real_schedule_entry(
     assert await session.scalar(text("SELECT COUNT(*) FROM content_schedule_entries")) == 1
 
 
+async def test_add_to_schedule_reuses_same_source_slot_across_idempotency_keys(
+    client, session, admin
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="schedule-source-slot",
+        payload={
+            "period": "2026-08-10 至 2026-08-16",
+            "items": [{"date": "2026-08-10", "title": "第一条"}],
+            "operating_notes": [],
+        },
+        skill_code="content_calendar_planning",
+        deliverable_type=DeliverableType.PUBLISH_CALENDAR,
+    )
+    token = await _token(client, admin.email, "admin-pw-123")
+    body = {
+        "confirmed": True,
+        "scheduled_at": "2026-08-10T09:00:00+08:00",
+        "timezone": "Asia/Shanghai",
+    }
+    first = await client.post(
+        f"/artifacts/{seeded[8].id}/actions/add_to_schedule",
+        headers={**_auth(token), "Idempotency-Key": "schedule-source-slot-a"},
+        json=body,
+    )
+    second = await client.post(
+        f"/artifacts/{seeded[8].id}/actions/add_to_schedule",
+        headers={**_auth(token), "Idempotency-Key": "schedule-source-slot-b"},
+        json=body,
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["resource"]["id"] == second.json()["resource"]["id"]
+    assert await session.scalar(text("SELECT COUNT(*) FROM content_schedule_entries")) == 1
+
+
 async def test_client_only_or_unadvertised_action_fails_without_a_ledger_row(
     client, session, admin
 ) -> None:

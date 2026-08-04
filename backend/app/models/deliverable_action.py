@@ -80,6 +80,14 @@ class ShootTask(Base, TimestampMixin):
 class ContentScheduleEntry(Base, TimestampMixin):
     __tablename__ = "content_schedule_entries"
     __table_args__ = (
+        UniqueConstraint(
+            "org_id",
+            "account_id",
+            "source_artifact_id",
+            "source_artifact_version",
+            "scheduled_at",
+            name="uq_content_schedule_source_slot",
+        ),
         Index(
             "ix_content_schedule_entries_publication_followup",
             "org_id",
