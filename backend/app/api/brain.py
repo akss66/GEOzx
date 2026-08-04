@@ -1316,6 +1316,25 @@ async def _runtime_response(
     task: BrainTask,
     viewer,
 ) -> BrainRuntimeOut:
+    # Runtime locking may refresh the identity-mapped task without relationship
+    # loader options. Re-apply the response loader contract here so Pydantic
+    # never triggers implicit async IO while extracting ORM attributes.
+    loaded_task = await session.scalar(
+        select(BrainTask)
+        .options(
+            selectinload(BrainTask.brief),
+            selectinload(BrainTask.plan),
+            selectinload(BrainTask.invocations),
+            selectinload(BrainTask.acceptances),
+        )
+        .where(BrainTask.id == task.id, BrainTask.org_id == task.org_id)
+    )
+    if loaded_task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="运营大脑任务不存在",
+        )
+    task = loaded_task
     tool_calls = (
         await session.scalars(
             select(AgentToolCall)
