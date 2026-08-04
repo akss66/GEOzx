@@ -44,6 +44,7 @@ from app.api import (
     risks,
     search,
     skills,
+    turn_events,
     users,
     workspace_context,
     ws,
@@ -86,7 +87,11 @@ async def prevent_authenticated_response_caching(request: Request, call_next):
     """Keep account-scoped API payloads out of browser and intermediary caches."""
 
     response = await call_next(request)
-    response.headers["Cache-Control"] = "no-store, private"
+    content_type = response.headers.get("Content-Type", "").lower()
+    if content_type.startswith("text/event-stream"):
+        response.headers["Cache-Control"] = "no-cache"
+    else:
+        response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
     return response
 
@@ -112,6 +117,7 @@ app.include_router(search.router)
 app.include_router(skills.router)
 app.include_router(brain.router)
 app.include_router(conversations.router)
+app.include_router(turn_events.router)
 app.include_router(experience_memories.router)
 app.include_router(costs.router)
 app.include_router(agents.router)

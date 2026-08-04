@@ -128,6 +128,13 @@ class TurnEventScope:
     skill_run_id: int | None = None
 
 
+@dataclass(frozen=True)
+class ThreadEventScope:
+    org_id: int
+    account_id: int
+    thread_id: int
+
+
 async def append_turn_event(
     session: AsyncSession,
     scope: TurnEventScope,
@@ -233,6 +240,37 @@ async def list_turn_events(
             select(Event)
             .where(*conditions)
             .order_by(Event.sequence.asc(), Event.id.asc())
+            .limit(limit)
+        )
+    )
+
+
+async def list_thread_events(
+    session: AsyncSession,
+    scope: ThreadEventScope,
+    *,
+    after_id: int = 0,
+    limit: int = MAX_LIST_LIMIT,
+) -> list[Event]:
+    """Return one bounded database page from an already authorized Thread."""
+
+    if isinstance(after_id, bool) or not isinstance(after_id, int) or after_id < 0:
+        raise ValueError("after_id must be a non-negative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIST_LIMIT:
+        raise ValueError(f"limit must be between 1 and {MAX_LIST_LIMIT}")
+    return list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.org_id == scope.org_id,
+                Event.account_id == scope.account_id,
+                Event.thread_id == scope.thread_id,
+                Event.id > after_id,
+                Event.type.in_(PUBLIC_EVENT_PAYLOAD_FIELDS),
+                Event.sequence > 0,
+                Event.turn_id.is_not(None),
+            )
+            .order_by(Event.id.asc())
             .limit(limit)
         )
     )
@@ -362,6 +400,26 @@ def _public_payload(
         for key, value in payload.items()
         if isinstance(key, str) and key in allowed_fields
     }
+
+
+def public_turn_event_payload(
+    event_type: str,
+    payload: Mapping[str, object],
+) -> TurnEventPayload:
+    """Sanitize a persisted payload again at the public read boundary."""
+
+    allowed_fields = PUBLIC_EVENT_PAYLOAD_FIELDS.get(event_type)
+    if allowed_fields is None:
+        return {}
+    sanitized: TurnEventPayload = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or key not in allowed_fields:
+            continue
+        try:
+            sanitized[key] = _sanitize_top_level_value(key, value)
+        except (TypeError, ValueError):
+            continue
+    return sanitized
 
 
 def _sanitize_top_level_value(key: str, value: object) -> object:
