@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.runtime_failures import FailureDisposition
 from app.models import (
     Account,
+    AgentRun,
     BrainTask,
     ContentItem,
     ConversationThread,
@@ -757,8 +758,11 @@ async def test_worker_prepares_a_serialized_followup_only_when_it_is_promoted(
         yield session
 
     prepared: list[dict] = []
+    active_lease_owners: list[str | None] = []
 
     async def fake_execute(body, user, runtime_session, **kwargs):
+        claimed_run = await runtime_session.get(AgentRun, kwargs["agent_run_id"])
+        active_lease_owners.append(claimed_run.lease_owner if claimed_run else None)
         prepared.append(
             {
                 "message": body.message,
@@ -785,8 +789,10 @@ async def test_worker_prepares_a_serialized_followup_only_when_it_is_promoted(
             "regeneration_source_event_id": None,
             "force_inline": True,
             "user_message_recorded": True,
+            "execution_owner": "test-worker",
         }
     ]
+    assert prepared[0]["execution_owner"] == active_lease_owners[0] == "test-worker"
 
 
 @pytest.mark.asyncio
@@ -966,6 +972,7 @@ async def test_worker_resumes_a_persisted_decision_run(session, admin, monkeypat
             "record_selection": False,
             "agent_run_id": run.id,
             "agent_run_attempt": run.attempt,
+            "execution_owner": "test-worker",
         }
     ]
 
