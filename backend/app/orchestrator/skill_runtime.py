@@ -81,6 +81,11 @@ from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 from app.services.composite_skill_runs import pause_composite_parent_for_artifacts
 from app.services.runtime_deliverables import write_runtime_deliverable
+from app.services.runtime_locking import (
+    RuntimeRootLock,
+    discover_runtime_skill_lock_ids,
+    lock_runtime_root_scope,
+)
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
 
@@ -2184,6 +2189,59 @@ class SkillRuntime:
         skill_run: SkillRun,
         task: BrainTask,
     ) -> bool:
+        with session.no_autoflush:
+            discovered_tool_ids = tuple(
+                await session.scalars(
+                    select(AgentToolCall.id)
+                    .where(
+                        AgentToolCall.skill_run_id == skill_run.id,
+                        AgentToolCall.status.in_(
+                            {"planned", "running", "ambiguous"}
+                        ),
+                    )
+                    .order_by(AgentToolCall.id)
+                )
+            )
+            discovered_invocation_ids = tuple(
+                await session.scalars(
+                    select(AgentInvocation.id)
+                    .where(
+                        AgentInvocation.skill_run_id == skill_run.id,
+                        AgentInvocation.status.in_(
+                            {
+                                AgentInvocationStatus.QUEUED,
+                                AgentInvocationStatus.RUNNING,
+                            }
+                        ),
+                    )
+                    .order_by(AgentInvocation.id)
+                )
+            )
+            discovered_attempt_ids = tuple(
+                await session.scalars(
+                    select(ToolExecutionAttempt.id)
+                    .where(
+                        ToolExecutionAttempt.tool_call_id.in_(discovered_tool_ids),
+                        ToolExecutionAttempt.status == "dispatched",
+                    )
+                    .order_by(ToolExecutionAttempt.id)
+                )
+            )
+            root_skill_id, child_skill_ids = await discover_runtime_skill_lock_ids(
+                session, skill_run.id
+            )
+        runtime_lock = await lock_runtime_root_scope(
+            session,
+            run_id=run.id,
+            expected_turn_id=turn.id,
+            expected_task_id=task.id,
+            expected_content_item_id=task.content_item_id,
+            root_skill_run_id=root_skill_id,
+            child_skill_run_ids=child_skill_ids,
+            invocation_ids=discovered_invocation_ids,
+            tool_call_ids=discovered_tool_ids,
+            attempt_ids=discovered_attempt_ids,
+        )
         ambiguous_writes = list(
             await session.scalars(
                 select(AgentToolCall)
@@ -2203,7 +2261,6 @@ class SkillRuntime:
                     ),
                 )
                 .distinct()
-                .with_for_update(of=AgentToolCall)
                 .execution_options(populate_existing=True)
             )
         )
@@ -2222,7 +2279,6 @@ class SkillRuntime:
                         ToolExecutionAttempt.tool_call_id.in_(ambiguous_ids),
                         ToolExecutionAttempt.status == "dispatched",
                     )
-                    .with_for_update()
                     .execution_options(populate_existing=True)
                 )
             )
@@ -2254,6 +2310,7 @@ class SkillRuntime:
                 response=response,
                 output_snapshot=output_snapshot,
                 error_code=error_code,
+                prelocked=runtime_lock,
             )
             return True
 
@@ -2264,7 +2321,6 @@ class SkillRuntime:
                     AgentToolCall.skill_run_id == skill_run.id,
                     AgentToolCall.status.in_({"planned", "running"}),
                 )
-                .with_for_update()
                 .execution_options(populate_existing=True)
             )
         )
@@ -2280,7 +2336,6 @@ class SkillRuntime:
                         }
                     ),
                 )
-                .with_for_update()
                 .execution_options(populate_existing=True)
             )
         )
@@ -2322,6 +2377,7 @@ class SkillRuntime:
             response=response,
             output_snapshot=output_snapshot,
             error_code=error_code,
+            prelocked=runtime_lock,
         )
         return True
 
@@ -2510,6 +2566,7 @@ class SkillRuntime:
         output_snapshot: dict[str, Any],
         error_code: str | None = None,
         skill_status: str | None = None,
+        prelocked: RuntimeRootLock | None = None,
     ) -> None:
         if thread is None:
             raise RuntimeError("Skill execution ConversationThread disappeared")
@@ -2567,6 +2624,7 @@ class SkillRuntime:
             status=status,
             message=response,
             error_code=error_code,
+            prelocked=prelocked,
         )
         stages = _ACTIVE_SKILL_STAGES.get()
         if stages:

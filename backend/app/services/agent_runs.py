@@ -12,13 +12,15 @@ from app.core.runtime_failures import FailureDisposition
 from app.models import (
     AgentRun,
     BrainTask,
-    ContentItem,
     ConversationThread,
-    ConversationTurn,
-    RunRevision,
     SkillRun,
 )
 from app.services.run_revisions import cancel_revision_for_run
+from app.services.runtime_locking import (
+    RuntimeRootLock,
+    lock_runtime_root_scope,
+    lock_runtime_run_headers,
+)
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 ACTIVE_TASK_RUN_STATUSES = {
@@ -251,6 +253,15 @@ async def mark_agent_run_queued_record(
 ) -> AgentRun:
     """Mark one run queued without committing the caller-owned transaction."""
 
+    with session.no_autoflush:
+        discovered = await session.get(AgentRun, run_id)
+    if discovered is None:
+        raise ValueError(f"AgentRun not found: {run_id}")
+    await lock_runtime_run_headers(
+        session,
+        run_ids=(run_id,),
+        expected_task_ids=((task_id,) if task_id is not None else ()),
+    )
     run = await session.get(AgentRun, run_id)
     if run is None:
         raise ValueError(f"AgentRun not found: {run_id}")
@@ -294,7 +305,25 @@ async def queue_agent_run_behind_task_record(
 ) -> bool:
     """Queue a follow-up in the caller-owned transaction."""
 
-    await session.scalar(select(BrainTask.id).where(BrainTask.id == task_id).with_for_update())
+    with session.no_autoflush:
+        contender_ids = tuple(
+            await session.scalars(
+                select(AgentRun.id)
+                .where(
+                    AgentRun.task_id == task_id,
+                    AgentRun.id != run_id,
+                    AgentRun.status.in_(
+                        [*ACTIVE_TASK_RUN_STATUSES, WAITING_PREDECESSOR_STATUS]
+                    ),
+                )
+                .order_by(AgentRun.id)
+            )
+        )
+    await lock_runtime_run_headers(
+        session,
+        run_ids=(run_id, *contender_ids),
+        expected_task_ids=(task_id,),
+    )
     blocker = await session.scalar(
         select(AgentRun.id)
         .where(
@@ -328,7 +357,19 @@ async def promote_next_waiting_agent_run(
 ) -> AgentRun | None:
     """Promote the oldest follow-up only when no task run is executable."""
 
-    await session.scalar(select(BrainTask.id).where(BrainTask.id == task_id).with_for_update())
+    with session.no_autoflush:
+        run_ids = tuple(
+            await session.scalars(
+                select(AgentRun.id)
+                .where(AgentRun.task_id == task_id)
+                .order_by(AgentRun.id)
+            )
+        )
+    await lock_runtime_run_headers(
+        session,
+        run_ids=run_ids,
+        expected_task_ids=(task_id,),
+    )
     active = await session.scalar(
         select(AgentRun.id)
         .where(
@@ -349,7 +390,7 @@ async def promote_next_waiting_agent_run(
         )
         .order_by(AgentRun.id)
         .limit(1)
-        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if waiting is None:
         return None
@@ -370,23 +411,16 @@ async def acquire_agent_run(
     worker_id: str,
     lease_seconds: int,
 ) -> AgentRun | None:
-    run = await _lock_agent_run_scope(
+    run, runtime_lock = await _lock_agent_run_scope(
         session,
         run_id,
-        include_cancellation_ledgers=False,
+        include_cancellation_ledgers=True,
     )
     if run is None:
         return None
 
     now = utc_now()
     if run.cancel_requested_at is not None:
-        run = await _lock_agent_run_scope(
-            session,
-            run_id,
-            include_cancellation_ledgers=True,
-        )
-        if run is None:
-            return None
         active_root_id = await _active_root_skill_run_id(session, run.id)
         await cancel_revision_for_run(session, revision_run_id=run.id)
         await _cancel_active_skill_run_records(session, run.id)
@@ -402,6 +436,7 @@ async def acquire_agent_run(
             status="cancelled",
             message="本轮执行已取消。",
             error_code="RUN_CANCELLED",
+            prelocked=runtime_lock,
         )
         return None
     if run.status in {"completed", "cancelled", "dead_letter", "failed"}:
@@ -423,6 +458,7 @@ async def acquire_agent_run(
         scope=await _runtime_state_scope(session, run, include_content_item=True),
         status="running",
         message="AgentRun acquired by worker.",
+        prelocked=runtime_lock,
     )
     return closure.run
 
@@ -460,7 +496,7 @@ async def release_agent_run_failure(
     recovery_action: str | None = None,
 ) -> tuple[bool, int]:
     await session.rollback()
-    run = await _lock_agent_run_scope(
+    run, runtime_lock = await _lock_agent_run_scope(
         session,
         run_id,
         include_cancellation_ledgers=False,
@@ -494,6 +530,7 @@ async def release_agent_run_failure(
             status="failed",
             message=message,
             error_code=error_code[:120],
+            prelocked=runtime_lock,
         )
         return False, 0
     if run.attempt >= run.max_attempts:
@@ -516,6 +553,7 @@ async def release_agent_run_failure(
             status="dead_letter",
             message=message,
             error_code=error_code[:120],
+            prelocked=runtime_lock,
         )
         return False, 0
 
@@ -532,6 +570,7 @@ async def release_agent_run_failure(
         status="retry_wait",
         message=user_message or "任务暂时失败，系统稍后自动重试。",
         error_code=error_code[:120],
+        prelocked=runtime_lock,
     )
     return True, retry_delay
 
@@ -548,11 +587,10 @@ async def request_agent_run_cancel_record(
 ) -> AgentRun | None:
     """Idempotently request cancellation without committing the caller transaction."""
 
-    run = await session.scalar(
-        select(AgentRun)
-        .where(AgentRun.id == run_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
+    run, _runtime_lock = await _lock_agent_run_scope(
+        session,
+        run_id,
+        include_cancellation_ledgers=False,
     )
     if run is None:
         return None
@@ -574,7 +612,7 @@ async def request_agent_run_cancel_record(
 
 async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
     await session.rollback()
-    run = await _lock_agent_run_scope(
+    run, runtime_lock = await _lock_agent_run_scope(
         session,
         run_id,
         include_cancellation_ledgers=True,
@@ -596,6 +634,7 @@ async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
         status="cancelled",
         message="本轮执行已取消。",
         error_code="RUN_CANCELLED",
+        prelocked=runtime_lock,
     )
 
 
@@ -604,7 +643,9 @@ async def _cancel_active_skill_run_records(session: AsyncSession, run_id: int) -
 
     skill_runs = list(
         await session.scalars(
-            select(SkillRun).where(SkillRun.run_id == run_id).with_for_update()
+            select(SkillRun)
+            .where(SkillRun.run_id == run_id)
+            .execution_options(populate_existing=True)
         )
     )
     for skill_run in skill_runs:
@@ -625,8 +666,8 @@ async def _lock_agent_run_scope(
     run_id: int,
     *,
     include_cancellation_ledgers: bool,
-) -> AgentRun | None:
-    """Acquire runtime rows content-first, optionally including cancel ledgers."""
+) -> tuple[AgentRun | None, RuntimeRootLock | None]:
+    """Acquire one complete Run-root scope before any lifecycle mutation."""
 
     with session.no_autoflush:
         discovered = await session.get(AgentRun, run_id)
@@ -636,46 +677,46 @@ async def _lock_agent_run_scope(
             else None
         )
     if discovered is None:
-        return None
-    if discovered_task is not None and discovered_task.content_item_id is not None:
-        content_id = await session.scalar(
-            select(ContentItem.id)
-            .where(ContentItem.id == discovered_task.content_item_id)
-            .with_for_update()
+        return None, None
+    with session.no_autoflush:
+        discovered_skills = list(
+            await session.scalars(
+                select(SkillRun)
+                .where(SkillRun.run_id == run_id)
+                .order_by(SkillRun.id)
+            )
         )
-        if content_id is None:
-            raise ValueError("AgentRun BrainTask ContentItem ownership is missing")
-    run = await session.scalar(
-        select(AgentRun)
-        .where(AgentRun.id == run_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
+    active_skills = [
+        item
+        for item in discovered_skills
+        if item.status not in {"completed", "blocked", "failed", "cancelled", "stopped"}
+    ]
+    fallback_root = active_skills[-1] if active_skills else None
+    if fallback_root is None and discovered_skills:
+        fallback_root = discovered_skills[-1]
+    root = next(
+        (item for item in active_skills if item.skill_code == "operation_iteration"),
+        fallback_root,
     )
-    if run is None:
-        return None
-    if run.turn_id is not None:
-        await session.scalar(
-            select(ConversationTurn.id)
-            .where(ConversationTurn.id == run.turn_id)
-            .with_for_update()
-        )
-    if run.task_id is not None:
-        await session.scalar(
-            select(BrainTask.id).where(BrainTask.id == run.task_id).with_for_update()
-        )
-    if include_cancellation_ledgers:
-        await session.scalars(
-            select(SkillRun)
-            .where(SkillRun.run_id == run.id)
-            .order_by(SkillRun.id)
-            .with_for_update()
-        )
-        await session.scalar(
-            select(RunRevision.id)
-            .where(RunRevision.revision_run_id == run.id)
-            .with_for_update()
-        )
-    return run
+    root_id = root.id if root is not None else None
+    other_skill_ids = tuple(
+        item.id for item in discovered_skills if item.id != root_id
+    )
+    runtime_lock = await lock_runtime_root_scope(
+        session,
+        run_id=run_id,
+        expected_turn_id=discovered.turn_id,
+        expected_task_id=discovered.task_id,
+        expected_content_item_id=(
+            discovered_task.content_item_id if discovered_task is not None else None
+        ),
+        root_skill_run_id=root_id,
+        child_skill_run_ids=other_skill_ids,
+        validate_child_parent=False,
+        include_run_revisions=include_cancellation_ledgers,
+    )
+    run = await session.get(AgentRun, run_id)
+    return run, runtime_lock
 
 
 async def _active_root_skill_run_id(session: AsyncSession, run_id: int) -> int | None:
@@ -733,7 +774,7 @@ async def complete_agent_run(
 
 async def fail_agent_run(session: AsyncSession, run_id: int, exc: Exception) -> None:
     await session.rollback()
-    run = await _lock_agent_run_scope(
+    run, runtime_lock = await _lock_agent_run_scope(
         session,
         run_id,
         include_cancellation_ledgers=False,
@@ -751,6 +792,7 @@ async def fail_agent_run(session: AsyncSession, run_id: int, exc: Exception) -> 
         status="failed",
         message="任务未能继续执行，请检查配置后重试。",
         error_code=type(exc).__name__,
+        prelocked=runtime_lock,
     )
 
 

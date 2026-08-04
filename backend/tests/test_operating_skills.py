@@ -1063,6 +1063,12 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         )
     )
     assert approval_call is not None
+    from app.services.composite_skill_runs import lock_composite_finish_approval
+
+    approval_lock = await lock_composite_finish_approval(
+        session, tool_call=approval_call
+    )
+    approval_call = approval_lock.tool_call
     approval_call.status = "success"
     approval_commit_spy = AsyncMock(wraps=session.commit)
     monkeypatch.setattr(session, "commit", approval_commit_spy)
@@ -1072,6 +1078,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         task=task,
         approved=True,
         comment="approved",
+        prelocked=approval_lock.runtime_lock,
     )
     assert finish_result.handled is True
     assert finish_result.publish_intents == ()
@@ -1228,6 +1235,51 @@ async def test_composite_accept_before_pause_recheck_never_loses_wakeup(
         if node["skill_code"] == "script_generation"
     )
     assert parent is not None and task is not None
+    script_artifact = await session.get(Deliverable, script_node["artifact_id"])
+    assert script_artifact is not None
+    script_artifact.version = 2
+    historical_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        client_message_id="composite-accept-historical-run",
+        status="completed",
+        phase="completed",
+        request_payload={},
+        result_payload={},
+    )
+    session.add(historical_run)
+    await session.flush()
+    historical_skill = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=historical_run.id,
+        task_id=task.id,
+        idempotency_key="composite-accept-historical-skill",
+        skill_code="script_generation",
+        skill_version=1,
+        status="completed",
+        input_snapshot={},
+        output_snapshot={"status": "completed"},
+    )
+    session.add(historical_skill)
+    await session.flush()
+    historical_artifact = Deliverable(
+        content_item_id=script_artifact.content_item_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=historical_run.id,
+        skill_run_id=historical_skill.id,
+        agent_code=script_artifact.agent_code,
+        type=script_artifact.type,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "historical script"},
+    )
+    session.add(historical_artifact)
     parent.status = "running"
     run.status = "running"
     turn.status = "running"
@@ -1255,6 +1307,8 @@ async def test_composite_accept_before_pause_recheck_never_loses_wakeup(
     )
 
     assert paused is False
+    await session.refresh(historical_artifact)
+    assert historical_artifact.status is DeliverableStatus.SUPERSEDED
     assert parent.status == "running"
     assert run.status == "running"
     commit_spy.assert_not_awaited()
@@ -1670,7 +1724,8 @@ async def test_nested_finish_rejection_rollback_publishes_nothing(
     monkeypatch.setattr(
         "app.orchestrator.brain_runtime.publish_realtime_event", capture_publish
     )
-    locked_call = await lock_composite_finish_approval(session, tool_call=call)
+    approval_lock = await lock_composite_finish_approval(session, tool_call=call)
+    locked_call = approval_lock.tool_call
     locked_call.status = "failed"
     locked_call.meta = {
         **dict(locked_call.meta or {}),
@@ -1682,6 +1737,7 @@ async def test_nested_finish_rejection_rollback_publishes_nothing(
         task=task,
         approved=False,
         comment="crash before commit",
+        prelocked=approval_lock.runtime_lock,
     )
 
     assert result.handled is True
@@ -1780,6 +1836,8 @@ async def test_publishing_finish_approval_converges_typed_skill_without_legacy_r
 
     monkeypatch.setattr(brain_api, "lock_composite_finish_approval", tracked_scope_lock)
     event.listen(session.sync_session, "before_flush", reject_prelock_autoflush)
+    api_commit_spy = AsyncMock(wraps=session.commit)
+    monkeypatch.setattr(session, "commit", api_commit_spy)
 
     response = await client.post(
         f"/brain/tool-calls/{call.id}/approve",
@@ -1788,6 +1846,7 @@ async def test_publishing_finish_approval_converges_typed_skill_without_legacy_r
     )
 
     assert response.status_code == 200
+    assert api_commit_spy.await_count == 1
     assert approval_scope_checked
     await session.refresh(run)
     await session.refresh(turn)

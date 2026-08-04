@@ -543,7 +543,10 @@ async def accept_artifact(
         artifact_id,
         roles=ARTIFACT_ACTION_ROLES,
     )
-    selected = await lock_composite_artifact_acceptance(session, artifact=selected)
+    acceptance_lock = await lock_composite_artifact_acceptance(
+        session, artifact=selected
+    )
+    selected = acceptance_lock.artifact
     latest_version = await _require_latest_artifact_version(session, selected)
     if selected.status == DeliverableStatus.SUPERSEDED or selected.version != latest_version:
         raise _artifact_version_conflict(
@@ -574,6 +577,7 @@ async def accept_artifact(
     await resume_composite_parent_after_artifact_acceptance(
         session,
         artifact=selected,
+        prelocked=acceptance_lock.runtime_lock,
     )
     await session.commit()
     if changed:

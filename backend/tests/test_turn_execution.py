@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import (
     Account,
@@ -60,6 +61,12 @@ from app.services.agent_runs import (
     cancel_agent_run,
     complete_agent_run,
     request_agent_run_cancel,
+)
+from app.services.runtime_locking import (
+    RuntimeLockConflict,
+    RuntimeRootLock,
+    lock_runtime_root_scope,
+    require_runtime_root_lock,
 )
 from app.services.runtime_state import (
     RuntimeStateScope,
@@ -512,14 +519,77 @@ async def test_all_terminal_revision_cancel_never_rebinds_completed_skill_or_rec
 
 
 @pytest.mark.asyncio
-async def test_close_runtime_state_locks_content_before_runtime_rows(session, admin) -> None:
+async def test_runtime_root_lock_token_is_unforgeable_and_transaction_bound(
+    session, admin
+) -> None:
+    _account, _thread, turn, run, task, skill = await _four_ledger_context(
+        session, admin, key="runtime-lock-token"
+    )
+
+    with pytest.raises(TypeError, match="created only by the lock helper"):
+        RuntimeRootLock(
+            _seal=object(),
+            session_identity=id(session.sync_session),
+            transaction_identity=0,
+            run_id=run.id,
+            turn_id=turn.id,
+            task_id=task.id,
+            content_item_id=None,
+            root_skill_run_id=skill.id,
+            child_skill_run_ids=(),
+            run_revision_ids=(),
+            deliverable_ids=(),
+            invocation_ids=(),
+            tool_call_ids=(),
+            attempt_ids=(),
+        )
+
+    token = await lock_runtime_root_scope(
+        session,
+        run_id=run.id,
+        expected_turn_id=turn.id,
+        expected_task_id=task.id,
+        root_skill_run_id=skill.id,
+    )
+    require_runtime_root_lock(
+        session,
+        token,
+        run_id=run.id,
+        turn_id=turn.id,
+        task_id=task.id,
+        skill_run_id=skill.id,
+    )
+    with pytest.raises(RuntimeLockConflict, match="Deliverable was not prelocked"):
+        require_runtime_root_lock(
+            session,
+            token,
+            run_id=run.id,
+            deliverable_id=999_999,
+        )
+
+    maker = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with maker() as other_session:
+        await other_session.execute(select(AgentRun.id).where(AgentRun.id == run.id))
+        with pytest.raises(RuntimeLockConflict, match="does not belong to this session"):
+            require_runtime_root_lock(other_session, token, run_id=run.id)
+
+    await session.commit()
+    with pytest.raises(RuntimeLockConflict, match="active transaction"):
+        require_runtime_root_lock(session, token, run_id=run.id)
+    await session.execute(select(AgentRun.id).where(AgentRun.id == run.id))
+    with pytest.raises(RuntimeLockConflict, match="another transaction"):
+        require_runtime_root_lock(session, token, run_id=run.id)
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_locks_run_before_runtime_rows(session, admin) -> None:
     account, thread, turn, run, task, skill = await _four_ledger_context(
-        session, admin, key="content-first-close"
+        session, admin, key="run-first-close"
     )
     content = ContentItem(
         account_id=account.id,
         created_by_id=admin.id,
-        title="content-first-close",
+        title="run-first-close",
     )
     session.add(content)
     await session.flush()
@@ -564,10 +634,10 @@ async def test_close_runtime_state_locks_content_before_runtime_rows(session, ad
         )
 
     assert locked_tables[:5] == [
-        "content_items",
         "agent_runs",
         "conversation_turns",
         "brain_tasks",
+        "content_items",
         "skill_runs",
     ]
 

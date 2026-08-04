@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, select
 
 from app.models import (
@@ -256,15 +257,48 @@ async def test_runtime_deliverable_allocates_next_version_and_replays_same_skill
         status=DeliverableStatus.PENDING_REVIEW,
         payload={"summary": "source"},
     )
-    replay = await write_runtime_deliverable(
-        session,
-        scope=source_scope,
-        content=graph["content"],
-        agent_code=AgentCode.DECISION.value,
-        deliverable_type=DeliverableType.REVIEW_REPORT,
-        status=DeliverableStatus.PENDING_REVIEW,
-        payload={"summary": "source"},
-    )
+    await session.commit()
+    replay_locks: list[str] = []
+
+    def capture_replay_locks(_conn, clauseelement, *_args, **_kwargs) -> None:
+        if getattr(clauseelement, "_for_update_arg", None) is None:
+            return
+        sql = str(clauseelement)
+        for table in (
+            "agent_runs",
+            "conversation_turns",
+            "brain_tasks",
+            "content_items",
+            "skill_runs",
+            "deliverables",
+        ):
+            if f"FROM {table}" in sql:
+                replay_locks.append(table)
+                return
+
+    sqlalchemy_event.listen(session.bind.sync_engine, "before_execute", capture_replay_locks)
+    try:
+        replay = await write_runtime_deliverable(
+            session,
+            scope=source_scope,
+            content=graph["content"],
+            agent_code=AgentCode.DECISION.value,
+            deliverable_type=DeliverableType.REVIEW_REPORT,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload={"summary": "source"},
+        )
+    finally:
+        sqlalchemy_event.remove(
+            session.bind.sync_engine, "before_execute", capture_replay_locks
+        )
+    assert replay_locks[:6] == [
+        "agent_runs",
+        "conversation_turns",
+        "brain_tasks",
+        "content_items",
+        "skill_runs",
+        "deliverables",
+    ]
     other_agent = await write_runtime_deliverable(
         session,
         scope=source_scope,

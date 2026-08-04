@@ -20,6 +20,7 @@ from app.models import (
     AccountMembership,
     AdminSecurityCredential,
     AgentInvocation,
+    AgentRun,
     AgentTask,
     AgentToolCall,
     BrainTask,
@@ -49,6 +50,7 @@ from app.models import (
 )
 from app.models.enums import UserRole
 from app.services.admin_security import verify_secondary_password
+from app.services.runtime_locking import lock_runtime_root_forest
 
 PREVIEW_TTL_MINUTES = 5
 PREVIEW_PURPOSE = "user_deletion_preview"
@@ -783,6 +785,26 @@ async def execute_permanent_deletion(
                 "USER_DELETION_PREVIEW_STALE",
                 "Deletion target changed; create a new preview",
             )
+        impact = await build_deletion_impact(session, actor=actor, target=target)
+        _raise_blocker(impact.blockers)
+        if impact.version_digest != claims.impact_hash:
+            _business_error(
+                status.HTTP_409_CONFLICT,
+                "USER_DELETION_PREVIEW_STALE",
+                "Deletion impact changed; create a new preview",
+            )
+        task_ids = impact.record_ids["brain_tasks"]
+        with session.no_autoflush:
+            runtime_run_ids = tuple(
+                await session.scalars(
+                    select(AgentRun.id)
+                    .where(AgentRun.task_id.in_(task_ids))
+                    .order_by(AgentRun.id)
+                )
+            )
+        await lock_runtime_root_forest(session, run_ids=runtime_run_ids)
+        # Decisions come from a post-lock snapshot; the earlier impact is only
+        # discovery and may not authorize deletion after lock contention.
         impact = await build_deletion_impact(session, actor=actor, target=target)
         _raise_blocker(impact.blockers)
         if impact.version_digest != claims.impact_hash:

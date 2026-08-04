@@ -21,6 +21,10 @@ from app.services.composite_skill_runs import (
     block_composite_parent_from_child,
     resume_composite_parent,
 )
+from app.services.runtime_locking import (
+    RuntimeRootLock,
+    require_runtime_root_lock,
+)
 from app.services.runtime_state import (
     RuntimePublishIntent,
     RuntimeStateScope,
@@ -45,6 +49,7 @@ async def finalize_skill_finish_approval(
     task: BrainTask,
     approved: bool,
     comment: str | None,
+    prelocked: RuntimeRootLock | None,
 ) -> SkillFinishApprovalResult:
     """Close a typed `before_finish` Skill without owning an outer commit."""
 
@@ -53,10 +58,25 @@ async def finalize_skill_finish_approval(
     meta = dict(tool_call.meta or {})
     if meta.get("approval_stage") != "before_finish":
         return SkillFinishApprovalResult(handled=False)
+    if prelocked is None:
+        raise SkillApprovalConflict("SKILL_APPROVAL_RUNTIME_NOT_PRELOCKED")
 
     skill_run = await session.get(SkillRun, tool_call.skill_run_id)
     if skill_run is None:
         raise SkillApprovalConflict("SKILL_APPROVAL_RUN_MISSING")
+    require_runtime_root_lock(
+        session,
+        prelocked,
+        run_id=skill_run.run_id,
+        turn_id=skill_run.turn_id,
+        task_id=task.id,
+        content_item_id=task.content_item_id,
+        skill_run_id=skill_run.id,
+        deliverable_id=(
+            meta["artifact_id"] if type(meta.get("artifact_id")) is int else None
+        ),
+        tool_call_id=tool_call.id,
+    )
     run = await session.get(AgentRun, skill_run.run_id)
     turn = await session.get(ConversationTurn, skill_run.turn_id)
     thread = await session.get(ConversationThread, skill_run.thread_id)
@@ -158,17 +178,21 @@ async def finalize_skill_finish_approval(
         status=next_status,
         message=response,
         error_code=None if approved else "SKILL_APPROVAL_REJECTED",
-        commit=not nested_child,
+        commit=False,
+        prelocked=prelocked,
     )
     if nested_child and approved:
         await session.refresh(skill_run)
-        await resume_composite_parent(session, child_skill_run=skill_run)
+        await resume_composite_parent(
+            session, child_skill_run=skill_run, prelocked=prelocked
+        )
     elif nested_child:
         await session.refresh(skill_run)
         parent_closure = await block_composite_parent_from_child(
             session,
             child_skill_run=skill_run,
             error_code="SKILL_APPROVAL_REJECTED",
+            prelocked=prelocked,
         )
         return SkillFinishApprovalResult(
             handled=True,
@@ -178,5 +202,5 @@ async def finalize_skill_finish_approval(
         )
     return SkillFinishApprovalResult(
         handled=True,
-        publish_intents=(child_closure.publish_intents if nested_child else ()),
+        publish_intents=child_closure.publish_intents,
     )

@@ -1,6 +1,123 @@
 # Task 4C Implementer Report
 
-## Review fix round 4 (latest; supersedes round-3 lock order and Task 6 mapping)
+## Review fix round 5 (latest; supersedes every earlier lock-order conclusion)
+
+### Outcome
+
+- **One Run-first protocol:** `runtime_locking.py` is the common boundary for
+  `AgentRun -> ConversationTurn -> BrainTask -> ContentItem -> root SkillRun -> child SkillRuns
+  by id -> RunRevision -> Deliverables by id -> AgentInvocations by id -> AgentToolCalls by id ->
+  ToolExecutionAttempts by id`. PostgreSQL additionally takes a transaction advisory lock using
+  the two-key namespace `(0x47454F5A, run_id)`. Helpers never commit or roll back.
+- **Proof, not a boolean:** `RuntimeRootLock` has a private seal, immutable scalar/tuple fields,
+  session identity, transaction identity, and exact locked ID sets. Forged construction,
+  cross-session use, post-commit use, reuse in a new transaction, and insufficient
+  Deliverable/ToolCall/Skill subsets are rejected.
+- **Multi-Run callers:** queue and permanent deletion acquire all Run IDs globally ascending,
+  followed by each row family globally ascending. They never lock per-Run bundles. Permanent
+  deletion locks the complete rooted runtime forest, then rebuilds and revalidates the deletion
+  impact before deleting. Runtime-less legacy rows retain their isolated non-runtime lane.
+- **Close and writer ownership:** `close_runtime_state` accepts a caller-owned token and otherwise
+  acquires the full Run-first scope itself. Scoped Deliverable replay discovers read-only, then
+  locks the Run root and the exact existing Deliverable before comparing payloads. Runtime-less
+  writes lock only Content. Nested terminal Skill states are immutable.
+- **Human loop:** ordinary and composite finish approval both prelock before duplicate/opposite
+  decision checks or any ToolCall, Deliverable, audit, or runtime mutation. The finalizer validates
+  the token and owns no commit. The API performs one outer commit and publishes scalar event
+  intents only afterward. Composite accept locks every Deliverable in the selected stream before
+  superseding, and accept/resume reuses the same token. Pause, reject, resume, cancel, acquire,
+  failure, and ambiguous cleanup share the root gate.
+- **Task 6 business mapping unchanged:** `stopped + TOOL_RESULT_AMBIGUOUS` still follows the
+  baseline `brain_task_status(stopped) -> FAILED` mapping. Round 5 changes only the lock boundary:
+  both Skill recovery cleanup and main-brain ambiguous convergence discover Invocation/Tool/Attempt
+  IDs read-only and acquire the common Run-first scope before mutating them.
+
+### Deterministic PostgreSQL 16 concurrency gates
+
+The seven gates run against `geozx_task4c_r5` with independent `AsyncSession`s:
+
+```text
+tests/test_composite_skill_runs_postgres.py
+7 passed in 4.58s
+```
+
+For child finish versus accept, pause, and cancel, an `asyncio.Barrier` releases both writers at
+their first-lock boundary. The first writer is frozen immediately after the production helper
+acquires its Run advisory/root gate. The second writer enters its own production helper. A third
+monitor session bounded-polls `pg_locks` and `pg_stat_activity` and requires both an ungranted
+advisory lock and `wait_event_type='Lock'`; no timing sleep decides the assertion. The child logical
+stream is pre-seeded, and the finish writer must return the exact existing Deliverable ID, proving
+that replay takes `FOR UPDATE` rather than inserting a fresh stream row.
+
+Exact winner states are not expressed as alternatives:
+
+- accept first: `Run=waiting_permission`, parent `waiting_permission`, child `completed`, source
+  artifact `approved`, replay stream count `1`, public terminal Event count `0`;
+- pause first: `Run=waiting_permission`, parent `waiting_permission`, child `completed`, source
+  artifact `pending_review`, replay stream count `1`, public terminal Event count `0`;
+- cancel first: `Run=cancelled`, parent `cancelled`, child `cancelled`, source artifact
+  `pending_review`, replay stream count `1`, public terminal Event count `1`.
+
+The ordinary finish-versus-cancel gate likewise proves an actual advisory wait and the single
+winner: `Run=cancelled`, `SkillRun=cancelled`, `ToolCall=waiting_approval`, and exactly one
+`turn.cancelled` Event. A separate negative gate deliberately takes Deliverable before Run; the
+ordered writer then holds the Run gate while waiting for that Deliverable, and the reverse writer
+deterministically fails with PostgreSQL `lock timeout` rather than being accepted as a legal path.
+The SQLite cross-Run stream gate seeds an older Run's v1 and the active composite Run's v2; accept
+locks both Run roots and the global Deliverable family, approves v2, and supersedes v1. Each forest
+token declares only its own Run's IDs, while the active token alone is reused for runtime resume.
+
+### Regression, migration, and static evidence
+
+Expanded affected suite, with only the pre-existing Task 6 semantic assertion precisely
+deselected:
+
+```text
+238 passed, 1 deselected in 108.71s
+```
+
+The deselected node is exactly:
+
+```text
+tests/test_worker.py::test_worker_recovers_expired_v2_skill_without_replaying_side_effects[running-True-True-stopped-TOOL_RESULT_AMBIGUOUS]
+```
+
+Without the deselection the first run produced `236 passed, 3 failed`; two new exception-boundary
+compatibility failures were fixed and rerun green. The remaining failure is the same Task 6
+baseline mismatch documented in round 4: production persists `BrainTaskStatus.FAILED`, while the
+test expects `PENDING_CONFIRMATION`. No business mapping was changed.
+
+PostgreSQL migration gates were run one at a time with a clean `geozx_task4c_r5.public` schema:
+
+```text
+revision terminal concurrent writers: 1 passed
+revision reference matrix / atomic downgrade: 1 passed
+run revision checkpoint upgrade/downgrade: 1 passed
+turn steering upgrade/downgrade: 1 passed
+```
+
+The reference-matrix test requires a head schema before it performs its own downgrade, so the
+clean schema was first upgraded with `alembic upgrade head`. The initial combined attempt against
+the schema left by `metadata.create_all` failed with `DuplicateTable: orgs`; this was test-database
+state, not a migration or application failure. Only the explicitly disposable
+`geozx_task4c_r5.public` schema was rebuilt. SQLite migration coverage is also green:
+
+```text
+34 passed, 4 PostgreSQL-only skipped, 1 warning in 0.76s
+```
+
+Final static checks:
+
+```text
+ruff check <all round-5 changed production/test files>: All checks passed
+python -m compileall -q <all round-5 changed production/test files>: passed
+mypy --follow-imports=skip <six new/reworked service modules>: no issues found
+git diff --check: passed
+```
+
+The invalid `task-4c-round4-global-lock-map.md` remains excluded from the round-5 commit.
+
+## Review fix round 4 (superseded by round 5)
 
 ### Outcome
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,13 +11,18 @@ from app.models import (
     AgentRun,
     AgentToolCall,
     BrainTask,
-    ContentItem,
     ConversationThread,
     ConversationTurn,
     Deliverable,
     SkillRun,
 )
 from app.models.enums import BrainTaskStatus, DeliverableStatus
+from app.services.runtime_locking import (
+    RuntimeRootLock,
+    lock_runtime_root_forest,
+    lock_runtime_root_scope,
+    require_runtime_root_lock,
+)
 from app.services.runtime_state import (
     RuntimeStateClosure,
     RuntimeStateScope,
@@ -49,7 +56,9 @@ async def _lock_composite_scope(
     *,
     parent_id: int,
     extra_artifact_ids: tuple[int, ...] = (),
-) -> tuple[SkillRun, list[SkillRun], list[Deliverable]]:
+    tool_call_ids: tuple[int, ...] = (),
+    prelocked: RuntimeRootLock | None = None,
+) -> tuple[SkillRun, list[SkillRun], list[Deliverable], RuntimeRootLock]:
     """Lock one composite graph in the protocol's global order.
 
     Discovery reads are deliberately non-mutating. Every decision is made from
@@ -68,48 +77,64 @@ async def _lock_composite_scope(
         )
     if discovered_task is None:
         raise ValueError("COMPOSITE_PARENT_RUNTIME_SCOPE_MISSING")
-    if discovered_task.content_item_id is not None:
-        content_id = await session.scalar(
-            select(ContentItem.id)
-            .where(ContentItem.id == discovered_task.content_item_id)
-            .with_for_update()
+    with session.no_autoflush:
+        child_ids = tuple(
+            await session.scalars(
+                select(SkillRun.id)
+                .where(SkillRun.run_id == discovered.run_id, SkillRun.id != parent_id)
+                .order_by(SkillRun.id)
+            )
         )
-        if content_id is None:
-            raise ValueError("COMPOSITE_PARENT_CONTENT_SCOPE_MISSING")
-    run = await session.scalar(
-        select(AgentRun).where(AgentRun.id == discovered.run_id).with_for_update()
+    artifact_ids = tuple(
+        sorted(set(_interrupt_artifact_ids(discovered)) | set(extra_artifact_ids))
     )
-    turn = await session.scalar(
-        select(ConversationTurn)
-        .where(ConversationTurn.id == discovered.turn_id)
-        .with_for_update()
-    )
-    task = (
-        await session.scalar(
-            select(BrainTask).where(BrainTask.id == discovered.task_id).with_for_update()
+    if prelocked is None:
+        runtime_lock = await lock_runtime_root_scope(
+            session,
+            run_id=discovered.run_id,
+            expected_turn_id=discovered.turn_id,
+            expected_task_id=discovered.task_id,
+            expected_content_item_id=discovered_task.content_item_id,
+            root_skill_run_id=parent_id,
+            child_skill_run_ids=child_ids,
+            deliverable_ids=artifact_ids,
+            tool_call_ids=tool_call_ids,
         )
-        if discovered.task_id is not None
-        else None
-    )
-    if run is None or turn is None or task is None:
-        raise ValueError("COMPOSITE_PARENT_RUNTIME_SCOPE_MISSING")
-    parent = await session.scalar(
-        select(SkillRun)
-        .where(SkillRun.id == parent_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
+    else:
+        require_runtime_root_lock(
+            session,
+            prelocked,
+            run_id=discovered.run_id,
+            turn_id=discovered.turn_id,
+            task_id=discovered.task_id,
+            content_item_id=discovered_task.content_item_id,
+            skill_run_id=parent_id,
+        )
+        for child_id in child_ids:
+            require_runtime_root_lock(
+                session, prelocked, run_id=discovered.run_id, skill_run_id=child_id
+            )
+        for artifact_id in artifact_ids:
+            require_runtime_root_lock(
+                session,
+                prelocked,
+                run_id=discovered.run_id,
+                deliverable_id=artifact_id,
+            )
+        for tool_call_id in tool_call_ids:
+            require_runtime_root_lock(
+                session,
+                prelocked,
+                run_id=discovered.run_id,
+                tool_call_id=tool_call_id,
+            )
+        runtime_lock = prelocked
+    parent = await session.get(SkillRun, parent_id)
     if parent is None or parent.skill_code != "operation_iteration":
         raise ValueError("COMPOSITE_PARENT_SKILL_RUN_MISSING")
-    children = list(
-        await session.scalars(
-            select(SkillRun)
-            .where(SkillRun.run_id == parent.run_id, SkillRun.id != parent.id)
-            .order_by(SkillRun.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    )
+    children = [await session.get(SkillRun, child_id) for child_id in child_ids]
+    if any(child is None for child in children):
+        raise ValueError("COMPOSITE_PARENT_SKILL_SCOPE_CONFLICT")
     for child in children:
         if _parent_id(child) != parent.id:
             raise ValueError("COMPOSITE_PARENT_SKILL_SCOPE_CONFLICT")
@@ -120,72 +145,121 @@ async def _lock_composite_scope(
             or child.org_id != parent.org_id
         ):
             raise ValueError("COMPOSITE_PARENT_SKILL_SCOPE_CONFLICT")
-    artifact_ids = sorted(set(_interrupt_artifact_ids(parent)) | set(extra_artifact_ids))
-    artifacts = (
-        list(
-            await session.scalars(
-                select(Deliverable)
-                .where(Deliverable.id.in_(artifact_ids))
-                .order_by(Deliverable.id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        )
-        if artifact_ids
-        else []
-    )
-    return parent, children, artifacts
+    artifacts = [await session.get(Deliverable, artifact_id) for artifact_id in artifact_ids]
+    if any(artifact is None for artifact in artifacts):
+        raise ValueError("COMPOSITE_CHILD_ARTIFACT_MISSING")
+    return parent, children, artifacts, runtime_lock
+
+
+@dataclass(frozen=True)
+class SkillFinishApprovalLock:
+    tool_call: AgentToolCall
+    runtime_lock: RuntimeRootLock | None
+
+
+@dataclass(frozen=True)
+class CompositeArtifactAcceptanceLock:
+    artifact: Deliverable
+    runtime_lock: RuntimeRootLock | None
 
 
 async def lock_composite_artifact_acceptance(
     session: AsyncSession, *, artifact: Deliverable
-) -> Deliverable:
+) -> CompositeArtifactAcceptanceLock:
     """Join artifact acceptance to the same parent-first transition lock."""
 
     if artifact.skill_run_id is None:
-        return artifact
+        return CompositeArtifactAcceptanceLock(artifact=artifact, runtime_lock=None)
     child = await session.get(SkillRun, artifact.skill_run_id)
     parent_id = _parent_id(child) if child is not None else None
     if parent_id is None:
-        return artifact
-    _parent, _children, artifacts = await _lock_composite_scope(
+        return CompositeArtifactAcceptanceLock(artifact=artifact, runtime_lock=None)
+    with session.no_autoflush:
+        stream_rows = list(
+            await session.scalars(
+                select(Deliverable)
+                .where(
+                    Deliverable.content_item_id == artifact.content_item_id,
+                    Deliverable.agent_code == artifact.agent_code,
+                    Deliverable.type == artifact.type,
+                )
+                .order_by(Deliverable.id)
+            )
+        )
+    stream_ids = tuple(row.id for row in stream_rows)
+    stream_run_ids = tuple(
+        sorted(
+            {row.run_id for row in stream_rows if row.run_id is not None}
+            | {child.run_id}
+        )
+    )
+    forest_tokens = await lock_runtime_root_forest(
+        session,
+        run_ids=stream_run_ids,
+        extra_deliverable_ids=stream_ids,
+    )
+    runtime_lock = next(
+        (token for token in forest_tokens if token.run_id == child.run_id), None
+    )
+    if runtime_lock is None:
+        raise ValueError("COMPOSITE_PARENT_RUNTIME_SCOPE_MISSING")
+    current_run_stream_ids = tuple(
+        row.id for row in stream_rows if row.run_id == child.run_id
+    )
+    _parent, _children, artifacts, runtime_lock = await _lock_composite_scope(
         session,
         parent_id=parent_id,
-        extra_artifact_ids=(artifact.id,),
+        extra_artifact_ids=current_run_stream_ids,
+        prelocked=runtime_lock,
     )
-    locked = next((item for item in artifacts if item.id == artifact.id), None)
+    locked = await session.get(Deliverable, artifact.id)
     if locked is None:
         raise ValueError("COMPOSITE_CHILD_ARTIFACT_MISSING")
-    return locked
+    return CompositeArtifactAcceptanceLock(
+        artifact=locked, runtime_lock=runtime_lock
+    )
 
 
 async def lock_composite_finish_approval(
     session: AsyncSession, *, tool_call: AgentToolCall
-) -> AgentToolCall:
-    """Lock a nested finish approval before its API mutates any ledger row."""
+) -> SkillFinishApprovalLock:
+    """Lock every finish approval before its API mutates any ledger row."""
 
     if tool_call.skill_run_id is None:
-        return tool_call
+        return SkillFinishApprovalLock(tool_call=tool_call, runtime_lock=None)
     with session.no_autoflush:
-        child = await session.get(SkillRun, tool_call.skill_run_id)
-    parent_id = _parent_id(child) if child is not None else None
-    if parent_id is None:
-        return tool_call
+        skill = await session.get(SkillRun, tool_call.skill_run_id)
+    if skill is None or skill.task_id is None:
+        raise ValueError("SKILL_APPROVAL_RUNTIME_SCOPE_MISSING")
     artifact_id = dict(tool_call.meta or {}).get("artifact_id")
-    await _lock_composite_scope(
-        session,
-        parent_id=parent_id,
-        extra_artifact_ids=((artifact_id,) if type(artifact_id) is int else ()),
-    )
-    locked = await session.scalar(
-        select(AgentToolCall)
-        .where(AgentToolCall.id == tool_call.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
+    deliverable_ids = (artifact_id,) if type(artifact_id) is int else ()
+    parent_id = _parent_id(skill)
+    if parent_id is not None:
+        _parent, _children, _artifacts, runtime_lock = await _lock_composite_scope(
+            session,
+            parent_id=parent_id,
+            extra_artifact_ids=deliverable_ids,
+            tool_call_ids=(tool_call.id,),
+        )
+    else:
+        with session.no_autoflush:
+            task = await session.get(BrainTask, skill.task_id)
+        if task is None:
+            raise ValueError("SKILL_APPROVAL_RUNTIME_SCOPE_MISSING")
+        runtime_lock = await lock_runtime_root_scope(
+            session,
+            run_id=skill.run_id,
+            expected_turn_id=skill.turn_id,
+            expected_task_id=skill.task_id,
+            expected_content_item_id=task.content_item_id,
+            root_skill_run_id=skill.id,
+            deliverable_ids=deliverable_ids,
+            tool_call_ids=(tool_call.id,),
+        )
+    locked = await session.get(AgentToolCall, tool_call.id)
     if locked is None:
         raise ValueError("COMPOSITE_CHILD_APPROVAL_MISSING")
-    return locked
+    return SkillFinishApprovalLock(tool_call=locked, runtime_lock=runtime_lock)
 
 
 def resolve_composite_recovery_root(skill_runs: list[SkillRun]) -> SkillRun | None:
@@ -269,7 +343,7 @@ async def pause_composite_parent_for_artifacts(
 ) -> bool:
     """Lock the parent and recheck approvals before a durable pause."""
 
-    parent, _children, artifacts = await _lock_composite_scope(
+    parent, _children, artifacts, _runtime_lock = await _lock_composite_scope(
         session,
         parent_id=parent_skill_run.id,
         extra_artifact_ids=tuple(source_artifact_ids),
@@ -282,14 +356,15 @@ async def resume_composite_parent(
     session: AsyncSession,
     *,
     child_skill_run: SkillRun,
+    prelocked: RuntimeRootLock | None = None,
 ) -> int | None:
     """Queue the persisted parent after a paused child reaches completion."""
 
     parent_id = _parent_id(child_skill_run)
     if parent_id is None:
         return None
-    parent, children, _artifacts = await _lock_composite_scope(
-        session, parent_id=parent_id
+    parent, children, _artifacts, _runtime_lock = await _lock_composite_scope(
+        session, parent_id=parent_id, prelocked=prelocked
     )
     if (
         parent is None
@@ -337,6 +412,7 @@ async def resume_composite_parent_after_artifact_acceptance(
     session: AsyncSession,
     *,
     artifact: Deliverable,
+    prelocked: RuntimeRootLock | None = None,
 ) -> int | None:
     """Complete a review-paused child and queue its exact persisted parent."""
 
@@ -349,8 +425,11 @@ async def resume_composite_parent_after_artifact_acceptance(
     if parent_id is None:
         return None
 
-    parent, children, artifacts = await _lock_composite_scope(
-        session, parent_id=parent_id, extra_artifact_ids=(artifact.id,)
+    parent, children, artifacts, _runtime_lock = await _lock_composite_scope(
+        session,
+        parent_id=parent_id,
+        extra_artifact_ids=(artifact.id,),
+        prelocked=prelocked,
     )
     child = next((item for item in children if item.id == artifact.skill_run_id), None)
     if child is None:
@@ -385,6 +464,7 @@ async def block_composite_parent_from_child(
     *,
     child_skill_run: SkillRun,
     error_code: str,
+    prelocked: RuntimeRootLock | None = None,
 ) -> RuntimeStateClosure | None:
     """Fail closed when a required nested child is rejected."""
 
@@ -393,9 +473,10 @@ async def block_composite_parent_from_child(
     )
     if type(parent_id) is not int:
         return None
-    parent, children, _artifacts = await _lock_composite_scope(
+    parent, children, _artifacts, _runtime_lock = await _lock_composite_scope(
         session,
         parent_id=parent_id,
+        prelocked=prelocked,
     )
     locked_child = next(
         (item for item in children if item.id == child_skill_run.id), None
@@ -466,6 +547,7 @@ async def block_composite_parent_from_child(
         message=response,
         error_code=error_code,
         commit=False,
+        prelocked=_runtime_lock,
     )
 
 

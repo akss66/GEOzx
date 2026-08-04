@@ -1678,6 +1678,8 @@ async def approve_tool_call(
         )
     task = await _load_task(session, tool_call.task_id, user.org_id)
     await require_task_approval_access(session, user, task)
+    finish_lock = await lock_composite_finish_approval(session, tool_call=tool_call)
+    tool_call = finish_lock.tool_call
     if tool_call.status != "waiting_approval":
         prior_decision = dict(tool_call.meta or {}).get("decision")
         if (
@@ -1694,7 +1696,6 @@ async def approve_tool_call(
             detail="该工具调用已经完成审批",
         )
 
-    tool_call = await lock_composite_finish_approval(session, tool_call=tool_call)
     decision = {
         "approved": body.approved,
         "comment": body.comment or "",
@@ -1739,6 +1740,7 @@ async def approve_tool_call(
             task=task,
             approved=body.approved,
             comment=body.comment,
+            prelocked=finish_lock.runtime_lock,
         )
     except SkillApprovalConflict as exc:
         await session.rollback()

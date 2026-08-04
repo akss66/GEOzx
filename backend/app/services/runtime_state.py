@@ -14,7 +14,6 @@ from app.core.events import record_runtime_event_once, runtime_event_idempotency
 from app.models import (
     AgentRun,
     BrainTask,
-    ContentItem,
     ConversationThread,
     ConversationTurn,
     Event,
@@ -22,6 +21,12 @@ from app.models import (
 )
 from app.models.enums import AgentCode, BrainTaskStatus
 from app.orchestrator.agent_identity import OPERATIONS_BRAIN_DISPLAY_NAME
+from app.services.runtime_locking import (
+    RuntimeRootLock,
+    discover_runtime_skill_lock_ids,
+    lock_runtime_root_scope,
+    require_runtime_root_lock,
+)
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_observability import apply_turn_closure_metrics
 
@@ -125,6 +130,7 @@ async def close_runtime_state(
     message: str,
     error_code: str | None = None,
     commit: bool = True,
+    prelocked: RuntimeRootLock | None = None,
 ) -> RuntimeStateClosure:
     """Lock, validate, and update all present runtime ledgers in one transaction."""
 
@@ -136,52 +142,46 @@ async def close_runtime_state(
     broadcasts: list[tuple[Event, str]] = []
     try:
         with session.no_autoflush:
-            if scope.content_item_id is not None:
-                content_id = await session.scalar(
-                    select(ContentItem.id)
-                    .where(ContentItem.id == scope.content_item_id)
-                    .with_for_update()
+            if prelocked is None:
+                root_skill_run_id, child_skill_run_ids = (
+                    await discover_runtime_skill_lock_ids(session, scope.skill_run_id)
                 )
-                if content_id is None:
-                    raise ValueError(f"ContentItem not found: {scope.content_item_id}")
-            run = await session.scalar(
-                select(AgentRun)
-                .where(AgentRun.id == scope.run_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
+                prelocked = await lock_runtime_root_scope(
+                    session,
+                    run_id=scope.run_id,
+                    expected_turn_id=scope.turn_id,
+                    expected_task_id=scope.task_id,
+                    expected_content_item_id=scope.content_item_id,
+                    root_skill_run_id=root_skill_run_id,
+                    child_skill_run_ids=child_skill_run_ids,
+                )
+            require_runtime_root_lock(
+                session,
+                prelocked,
+                run_id=scope.run_id,
+                turn_id=scope.turn_id,
+                task_id=scope.task_id,
+                content_item_id=scope.content_item_id,
+                skill_run_id=scope.skill_run_id,
             )
+            run = await session.get(AgentRun, scope.run_id)
             if run is None:
                 raise ValueError(f"AgentRun not found: {scope.run_id}")
 
             turn_id = scope.turn_id if scope.turn_id is not None else run.turn_id
             task_id = scope.task_id if scope.task_id is not None else run.task_id
             turn = (
-                await session.scalar(
-                    select(ConversationTurn)
-                    .where(ConversationTurn.id == turn_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
+                await session.get(ConversationTurn, turn_id)
                 if turn_id is not None
                 else None
             )
             task = (
-                await session.scalar(
-                    select(BrainTask)
-                    .where(BrainTask.id == task_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
+                await session.get(BrainTask, task_id)
                 if task_id is not None
                 else None
             )
             skill_run = (
-                await session.scalar(
-                    select(SkillRun)
-                    .where(SkillRun.id == scope.skill_run_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
+                await session.get(SkillRun, scope.skill_run_id)
                 if scope.skill_run_id is not None
                 else None
             )
@@ -197,6 +197,24 @@ async def close_runtime_state(
         if scope.nested_skill:
             if skill_run is None:
                 raise ValueError("nested runtime closure requires a SkillRun")
+            if skill_run.status in {
+                "completed",
+                "blocked",
+                "failed",
+                "cancelled",
+                "stopped",
+            }:
+                if commit:
+                    await session.commit()
+                else:
+                    await session.flush()
+                return RuntimeStateClosure(
+                    status=skill_run.status,
+                    turn=turn,
+                    run=run,
+                    skill_run=skill_run,
+                    task=task,
+                )
             nested_status = _skill_status(scope.skill_status_override or status)
             skill_run.status = nested_status
             skill_run.error_code = error_code

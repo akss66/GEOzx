@@ -51,6 +51,7 @@ from app.models import (
     SkillRun,
     StrategyPlan,
     TaskBrief,
+    ToolExecutionAttempt,
     User,
 )
 from app.models.enums import (
@@ -89,6 +90,10 @@ from app.schemas.brain import (
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.services.ai_coo_evidence import build_account_situation
 from app.services.ai_coo_learning import ai_coo_learning_service
+from app.services.runtime_locking import (
+    discover_runtime_skill_lock_ids,
+    lock_runtime_root_scope,
+)
 from app.services.runtime_memory import runtime_memory_service
 from app.services.runtime_state import (
     RuntimeEventSpec,
@@ -1796,13 +1801,39 @@ class BrainRuntimeGraph:
         )
         run_id = int(state.get("agent_run_id") or 0)
         run: AgentRun | None = None
+        runtime_lock = None
         if run_id:
-            run = await session.scalar(
-                select(AgentRun)
-                .where(AgentRun.id == run_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
+            with session.no_autoflush:
+                discovered_run = await session.get(AgentRun, run_id)
+                root_skill_id, child_skill_ids = await discover_runtime_skill_lock_ids(
+                    session, tool_call.skill_run_id
+                )
+                attempt_ids = tuple(
+                    await session.scalars(
+                        select(ToolExecutionAttempt.id)
+                        .where(ToolExecutionAttempt.tool_call_id == tool_call.id)
+                        .order_by(ToolExecutionAttempt.id)
+                    )
+                )
+            if discovered_run is None:
+                raise ValueError("ambiguous ToolCall AgentRun provenance does not match")
+            runtime_lock = await lock_runtime_root_scope(
+                session,
+                run_id=run_id,
+                expected_turn_id=discovered_run.turn_id,
+                expected_task_id=task.id,
+                expected_content_item_id=task.content_item_id,
+                root_skill_run_id=root_skill_id,
+                child_skill_run_ids=child_skill_ids,
+                invocation_ids=(
+                    (tool_call.invocation_id,)
+                    if tool_call.invocation_id is not None
+                    else ()
+                ),
+                tool_call_ids=(tool_call.id,),
+                attempt_ids=attempt_ids,
             )
+            run = await session.get(AgentRun, run_id)
             if (
                 run is None
                 or run.task_id != task.id
@@ -1816,12 +1847,7 @@ class BrainRuntimeGraph:
         if skill_run_id:
             if run is None:
                 raise ValueError("ambiguous SkillRun requires an active AgentRun")
-            skill_run = await session.scalar(
-                select(SkillRun)
-                .where(SkillRun.id == skill_run_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
+            skill_run = await session.get(SkillRun, skill_run_id)
             if (
                 skill_run is None
                 or skill_run.task_id != task.id
@@ -1875,6 +1901,7 @@ class BrainRuntimeGraph:
                 status="waiting_user",
                 message=message,
                 error_code=error_code,
+                prelocked=runtime_lock,
             )
             if closure.turn is None:
                 await self._record_event(
