@@ -42,6 +42,7 @@ _PAUSED_TURN_FIELDS = frozenset(
         "metadata",
     }
 )
+_STEERING_FIELDS = frozenset({"message", "reason", "metadata"})
 _STEP_FIELDS = frozenset(
     {
         "step",
@@ -93,6 +94,7 @@ _METADATA_FIELDS = frozenset(
         "status",
     }
 )
+_STEERING_METADATA_FIELDS = frozenset({"category", "label", "source_id"})
 _PROGRESS_FIELDS = frozenset(
     {
         "completed",
@@ -113,6 +115,7 @@ _PROGRESS_DETAIL_FIELDS = frozenset(
 
 PUBLIC_EVENT_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "turn.received": _TURN_FIELDS,
+    "turn.steered": _STEERING_FIELDS,
     "turn.paused": _PAUSED_TURN_FIELDS,
     "turn.completed": _TURN_FIELDS,
     "turn.failed": _TURN_FIELDS,
@@ -419,8 +422,11 @@ def _public_payload(
         raise ValueError(f"unsupported public turn event type: {event_type}")
     if not isinstance(payload, Mapping):
         raise TypeError("turn event payload must be a mapping")
+    metadata_fields = (
+        _STEERING_METADATA_FIELDS if event_type == "turn.steered" else _METADATA_FIELDS
+    )
     return {
-        key: _sanitize_top_level_value(key, value)
+        key: _sanitize_top_level_value(key, value, metadata_fields=metadata_fields)
         for key, value in payload.items()
         if isinstance(key, str) and key in allowed_fields
     }
@@ -435,20 +441,32 @@ def public_turn_event_payload(
     allowed_fields = PUBLIC_EVENT_PAYLOAD_FIELDS.get(event_type)
     if allowed_fields is None:
         return {}
+    metadata_fields = (
+        _STEERING_METADATA_FIELDS if event_type == "turn.steered" else _METADATA_FIELDS
+    )
     sanitized: TurnEventPayload = {}
     for key, value in payload.items():
         if not isinstance(key, str) or key not in allowed_fields:
             continue
         try:
-            sanitized[key] = _sanitize_top_level_value(key, value)
+            sanitized[key] = _sanitize_top_level_value(
+                key,
+                value,
+                metadata_fields=metadata_fields,
+            )
         except (TypeError, ValueError):
             continue
     return sanitized
 
 
-def _sanitize_top_level_value(key: str, value: object) -> object:
+def _sanitize_top_level_value(
+    key: str,
+    value: object,
+    *,
+    metadata_fields: frozenset[str],
+) -> object:
     if key == "metadata":
-        return _sanitize_public_mapping(value, _METADATA_FIELDS)
+        return _sanitize_public_mapping(value, metadata_fields)
     if key == "progress":
         if value is None or isinstance(value, int | float):
             return value

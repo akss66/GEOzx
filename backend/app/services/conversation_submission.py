@@ -10,6 +10,7 @@ from app.schemas.attachment import AttachmentContext
 from app.schemas.conversation import CreateConversationTurnRequest
 from app.services.agent_runs import claim_agent_run_record, mark_agent_run_queued_record
 from app.services.conversations import append_conversation_turn
+from app.services.turn_steering import TurnSteeringDecision, bind_turn_steering
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ async def prepare_conversation_turn_submission(
     attachment_contexts: list[AttachmentContext],
     *,
     trusted_structured_input: dict | None = None,
+    steering_decision: TurnSteeringDecision | None = None,
 ) -> PreparedTurnSubmission:
     """Flush one Turn and queued AgentRun while leaving commit to the caller."""
 
@@ -39,7 +41,10 @@ async def prepare_conversation_turn_submission(
         ).model_dump(mode="json", exclude_none=True)
 
     async with session.begin_nested():
-        turn, _ = await append_conversation_turn(session, user, thread.id, request)
+        turn, created = await append_conversation_turn(session, user, thread.id, request)
+        if created and steering_decision is not None:
+            bind_turn_steering(turn, steering_decision)
+            await session.flush()
         request_payload = {
             "account_id": thread.account_id,
             "attachment_ids": [item.id for item in attachment_contexts],
@@ -50,6 +55,7 @@ async def prepare_conversation_turn_submission(
             "execution_preference": request.execution_preference,
             "message": request.message,
             "requested_skill_code": request.requested_skill_code,
+            "target_turn_id": request.target_turn_id,
             "thread_id": thread.id,
             "turn_id": turn.id,
         }

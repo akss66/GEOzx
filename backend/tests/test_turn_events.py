@@ -513,6 +513,45 @@ async def test_paused_payload_has_a_minimal_public_allowlist(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_steered_metadata_uses_dedicated_write_and_read_allowlist(session) -> None:
+    scope, _ = await _create_scope(session, "steered-metadata")
+    raw_payload = {
+        "message": "已收到补充要求。",
+        "metadata": {
+            "category": "steering",
+            "label": "supplement",
+            "source_id": 88,
+            "confidence": 0.99,
+            "source": "internal_classifier",
+            "attempt": 4,
+            "prompt": "must not leak",
+        },
+    }
+
+    event = await append_turn_event(
+        session,
+        scope,
+        "turn.steered",
+        raw_payload,
+        "steered-dedicated-metadata",
+    )
+
+    expected = {
+        "message": "已收到补充要求。",
+        "metadata": {
+            "category": "steering",
+            "label": "supplement",
+            "source_id": 88,
+        },
+    }
+    assert event.payload == expected
+    assert turn_events_service.public_turn_event_payload(
+        "turn.steered",
+        raw_payload,
+    ) == expected
+
+
+@pytest.mark.asyncio
 async def test_long_idempotency_keys_are_stably_hashed_without_prefix_collisions(session) -> None:
     scope, _ = await _create_scope(session, "long-key")
     shared_prefix = "same-prefix-" + ("x" * 200)

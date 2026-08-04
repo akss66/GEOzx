@@ -14,12 +14,20 @@ class CreateConversationThreadRequest(BaseModel):
     title: str = Field(default="", max_length=300)
 
 
+class TurnSteeringMode(StrEnum):
+    SUPPLEMENT = "supplement"
+    STOP = "stop"
+    REPLACE_GOAL = "replace_goal"
+    INDEPENDENT_QUERY = "independent_query"
+
+
 class CreateConversationTurnRequest(BaseModel):
     client_message_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1)
     requested_skill_code: str | None = Field(default=None, min_length=1, max_length=120)
     execution_preference: Literal["AUTO", "DISCUSS_ONLY", "FORMAL_TASK"] = "AUTO"
     attachment_ids: list[int] = Field(default_factory=list)
+    target_turn_id: int | None = Field(default=None, gt=0, strict=True)
 
 
 class ConversationTurnIntentOut(BaseModel):
@@ -229,6 +237,8 @@ class ConversationTurnOut(BaseModel):
     created_by_id: int | None
     client_message_id: str | None
     user_input: str
+    target_turn_id: int | None
+    steering_mode: TurnSteeringMode | None
     assistant_response: str | None
     intent: ConversationTurnIntentOut | None
     status: str
@@ -303,6 +313,9 @@ class TurnSubmissionOut(BaseModel):
     turn: ConversationTurnOut
     run: ConversationAgentRunOut
     task_id: int | None = None
+    steering_explanation: str
+    dispatch_deferred: bool = False
+    dispatch_message: str | None = None
     projections: list[ConversationProjectionOut] = Field(default_factory=list)
 
 

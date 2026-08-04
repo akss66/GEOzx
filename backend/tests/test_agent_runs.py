@@ -26,6 +26,7 @@ from app.services.agent_runs import (
     acquire_agent_run,
     claim_agent_run,
     complete_agent_run,
+    enqueue_agent_runtime,
     heartbeat_agent_run,
     mark_agent_run_queued,
     promote_next_waiting_agent_run,
@@ -35,6 +36,47 @@ from app.services.agent_runs import (
     utc_now,
 )
 from app.worker import execute_agent_run, recover_agent_runs
+
+
+@pytest.mark.asyncio
+async def test_enqueue_agent_runtime_reports_created_and_existing_jobs(
+    monkeypatch,
+) -> None:
+    enqueue_results = [object(), None]
+    calls: list[tuple[str, int, str]] = []
+
+    class Pool:
+        async def enqueue_job(self, name: str, run_id: int, *, _job_id: str):
+            calls.append((name, run_id, _job_id))
+            return enqueue_results.pop(0)
+
+    async def get_pool():
+        return Pool()
+
+    monkeypatch.setattr("app.core.events.get_arq_pool", get_pool)
+
+    assert await enqueue_agent_runtime(run_id=42) is True
+    assert await enqueue_agent_runtime(run_id=42) is False
+    assert calls == [
+        ("execute_agent_run", 42, "agent-run:42"),
+        ("execute_agent_run", 42, "agent-run:42"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_agent_runtime_propagates_connection_failure(monkeypatch) -> None:
+    class Pool:
+        async def enqueue_job(self, *args, **kwargs):
+            del args, kwargs
+            raise ConnectionError("queue unavailable")
+
+    async def get_pool():
+        return Pool()
+
+    monkeypatch.setattr("app.core.events.get_arq_pool", get_pool)
+
+    with pytest.raises(ConnectionError, match="queue unavailable"):
+        await enqueue_agent_runtime(run_id=42)
 
 
 async def _turn_owned_run(session, admin, *, key: str):

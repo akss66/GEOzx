@@ -1,5 +1,6 @@
 """Additive Thread and Turn endpoints for the main-Agent V2 runtime."""
 
+import logging
 from datetime import datetime
 from typing import Annotated
 
@@ -43,9 +44,14 @@ from app.services.conversations import (
     get_conversation_thread,
     list_conversation_threads,
 )
+from app.services.turn_steering import apply_turn_steering, resolve_turn_steering
 
 router = APIRouter(prefix="/brain", tags=["brain-conversations"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+logger = logging.getLogger(__name__)
+_DISPATCH_DEFERRED_MESSAGE = "任务已保存，调度暂时延迟，系统将自动恢复。"
+
+
 def _require_v2_rollout_access(user: CurrentUser) -> None:
     del user
     require_main_agent_runtime_enabled()
@@ -63,6 +69,8 @@ def _turn_out(
             "created_by_id": turn.created_by_id,
             "client_message_id": turn.client_message_id,
             "user_input": turn.user_input,
+            "target_turn_id": turn.target_turn_id,
+            "steering_mode": turn.steering_mode,
             "assistant_response": turn.assistant_response,
             "intent": _safe_turn_intent(turn.intent),
             "status": turn.status,
@@ -500,6 +508,7 @@ async def submit_turn(
 ) -> TurnSubmissionOut:
     _require_v2_rollout_access(user)
     thread = await get_conversation_thread(session, user, thread_id)
+    resolved_steering = await resolve_turn_steering(session, user, thread, body)
     attachment_contexts = await resolve_attachment_contexts(
         session,
         user=user,
@@ -512,12 +521,29 @@ async def submit_turn(
         thread,
         body,
         attachment_contexts,
+        steering_decision=resolved_steering.decision,
+    )
+    should_enqueue = await apply_turn_steering(
+        session,
+        thread,
+        prepared.turn,
+        prepared.run,
+        resolved_steering,
     )
     await session.commit()
     turn = prepared.turn
     run = prepared.run
-    if prepared.claimed:
-        await enqueue_agent_runtime(run_id=run.id)
+    dispatch_deferred = False
+    if should_enqueue and run.status == "queued":
+        try:
+            await enqueue_agent_runtime(run_id=run.id)
+        except Exception:  # noqa: BLE001 - durable queued state is recoverable
+            dispatch_deferred = True
+            logger.warning(
+                "Conversation run dispatch deferred",
+                extra={"run_id": run.id, "thread_id": thread.id},
+                exc_info=True,
+            )
     await session.refresh(turn)
     await session.refresh(run)
     projections = await _turn_projections(session, turn)
@@ -526,6 +552,9 @@ async def submit_turn(
         turn=turn_out,
         run=ConversationAgentRunOut.model_validate(run),
         task_id=run.task_id,
+        steering_explanation=resolved_steering.decision.explanation,
+        dispatch_deferred=dispatch_deferred,
+        dispatch_message=_DISPATCH_DEFERRED_MESSAGE if dispatch_deferred else None,
         projections=turn_out.projections,
     )
 

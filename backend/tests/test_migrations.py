@@ -1,14 +1,18 @@
 import importlib
 import inspect
+import os
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy import event
 from sqlalchemy.dialects import postgresql
+
+from app.config import settings
 
 
 def get_head_revision() -> str | None:
@@ -597,8 +601,114 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_deliverable_actions() -> None:
-    assert get_head_revision() == "20260804_0200"
+def test_migration_head_is_turn_steering() -> None:
+    assert get_head_revision() == "20260804_0300"
+
+
+def test_turn_steering_migration_adds_scoped_lineage_and_is_reversible(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0300_turn_steering"
+    )
+    assert migration.down_revision == "20260804_0200"
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("thread_id", sa.Integer, nullable=False),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint(
+            "id",
+            "thread_id",
+            "org_id",
+            name="uq_conversation_turn_id_thread_org",
+        ),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        columns = {item["name"] for item in inspector.get_columns("conversation_turns")}
+        assert {"target_turn_id", "steering_mode"} <= columns
+        foreign_keys = {
+            item["name"]: (
+                tuple(item["constrained_columns"]),
+                tuple(item["referred_columns"]),
+            )
+            for item in inspector.get_foreign_keys("conversation_turns")
+        }
+        assert foreign_keys["fk_conversation_turn_target_turn_thread_org"] == (
+            ("target_turn_id", "thread_id", "org_id"),
+            ("id", "thread_id", "org_id"),
+        )
+        checks = {item["name"] for item in inspector.get_check_constraints("conversation_turns")}
+        assert {
+            "ck_conversation_turn_target_not_self",
+            "ck_conversation_turns_steering_lineage",
+        } <= checks
+
+        migration.downgrade()
+        columns = {
+            item["name"] for item in sa.inspect(connection).get_columns("conversation_turns")
+        }
+        assert {"target_turn_id", "steering_mode"}.isdisjoint(columns)
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the PostgreSQL migration gate",
+)
+def test_turn_steering_postgres_upgrade_and_downgrade_gate(monkeypatch) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace("postgresql+psycopg://", "postgresql+asyncpg://").replace(
+        "postgresql://",
+        "postgresql+asyncpg://",
+    )
+    sync_url = raw_url.replace("postgresql+asyncpg://", "postgresql+psycopg://").replace(
+        "postgresql://",
+        "postgresql+psycopg://",
+    )
+    monkeypatch.setattr(settings, "database_url", async_url)
+    config = Config("alembic.ini")
+
+    command.upgrade(config, "20260804_0200")
+    command.upgrade(config, "20260804_0300")
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0300"
+            )
+            assert {"target_turn_id", "steering_mode"} <= {
+                item["name"] for item in inspector.get_columns("conversation_turns")
+            }
+            assert "fk_conversation_turn_target_turn_thread_org" in {
+                item["name"] for item in inspector.get_foreign_keys("conversation_turns")
+            }
+
+        command.downgrade(config, "20260804_0200")
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0200"
+            )
+            assert {"target_turn_id", "steering_mode"}.isdisjoint(
+                {
+                    item["name"]
+                    for item in sa.inspect(connection).get_columns("conversation_turns")
+                }
+            )
+    finally:
+        engine.dispose()
 
 
 def test_deliverable_actions_migration_creates_real_resources_and_is_reversible(

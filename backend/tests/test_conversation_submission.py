@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
+from app.models import ConversationTurn
 from app.schemas.conversation import CreateConversationTurnRequest
 from app.services.conversation_submission import prepare_conversation_turn_submission
 from tests.test_artifacts_api import _seed_artifact
@@ -70,6 +71,56 @@ async def test_prepare_submission_rejects_changed_trusted_input_for_same_client_
             request,
             attachment_contexts=[],
             trusted_structured_input={"confirmed_review_artifact_id": 12, "cycle_days": 7},
+        )
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail["code"] == "CLIENT_MESSAGE_CONFLICT"
+
+
+async def test_prepare_submission_rejects_changed_target_for_same_client_id(
+    session, admin
+) -> None:
+    seeded = await _seed_artifact(session, admin, account_name="prepare-target-conflict")
+    thread = seeded[3]
+    first_target = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="first-target",
+        user_input="first active turn",
+        status="running",
+    )
+    second_target = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="second-target",
+        user_input="second active turn",
+        status="running",
+    )
+    session.add_all([first_target, second_target])
+    await session.commit()
+    request = CreateConversationTurnRequest(
+        client_message_id="prepared-target-conflict",
+        message="先停一下",
+        target_turn_id=first_target.id,
+    )
+    await prepare_conversation_turn_submission(
+        session,
+        admin,
+        thread,
+        request,
+        attachment_contexts=[],
+    )
+    await session.commit()
+
+    with pytest.raises(HTTPException) as raised:
+        await prepare_conversation_turn_submission(
+            session,
+            admin,
+            thread,
+            request.model_copy(update={"target_turn_id": second_target.id}),
+            attachment_contexts=[],
         )
 
     assert raised.value.status_code == 409

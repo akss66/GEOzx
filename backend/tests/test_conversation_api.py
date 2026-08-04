@@ -42,6 +42,7 @@ from app.models.enums import (
     WorkspaceRole,
 )
 from app.schemas.conversation import CreateConversationTurnRequest
+from app.services.agent_runs import enqueue_agent_runtime
 from app.services.conversations import delete_conversation_thread
 from app.services.turn_execution import execute_conversation_turn
 from app.worker import recover_agent_runs
@@ -97,6 +98,7 @@ async def _submit_turn(
     execution_preference: str = "AUTO",
     requested_skill_code: str | None = None,
     attachment_ids: list[int] | None = None,
+    target_turn_id: int | None = None,
 ):
     return await client.post(
         f"/brain/conversations/{thread_id}/turns",
@@ -107,8 +109,509 @@ async def _submit_turn(
             "execution_preference": execution_preference,
             "requested_skill_code": requested_skill_code,
             "attachment_ids": attachment_ids or [],
+            "target_turn_id": target_turn_id,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_supplement_creates_immutable_steering_turn_without_cancelling_target(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "supplement-steering")
+    thread = await _create_thread(client, admin, account)
+    target_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="supplement-target",
+        message="规划五条拍摄稿",
+    )
+
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="supplement-message",
+        message="第一条不要讲价格",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["turn"]["user_input"] == "第一条不要讲价格"
+    assert body["turn"]["target_turn_id"] == target_response.json()["turn"]["id"]
+    assert body["turn"]["steering_mode"] == "supplement"
+    assert body["steering_explanation"] == "已补充到当前任务的要求中。"
+    target_turn = await session.get(ConversationTurn, target_response.json()["turn"]["id"])
+    target_run = await session.get(AgentRun, target_response.json()["run"]["id"])
+    steering_run = await session.get(AgentRun, body["run"]["id"])
+    assert target_turn is not None
+    assert target_turn.user_input == "规划五条拍摄稿"
+    assert target_turn.status == "queued"
+    assert target_run is not None
+    assert target_run.cancel_requested_at is None
+    assert steering_run is not None
+    assert steering_run.status == "completed"
+    assert steering_run.phase == "completed"
+    assert steering_run.started_at is not None
+    assert steering_run.finished_at is not None
+    control_events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == body["turn"]["id"])
+            .order_by(Event.sequence)
+        )
+    )
+    assert [event.type for event in control_events] == [
+        "turn.received",
+        "turn.completed",
+    ]
+
+    event = await session.scalar(
+        select(Event).where(
+            Event.turn_id == target_turn.id,
+            Event.type == "turn.steered",
+        )
+    )
+    assert event is not None
+    assert event.payload == {
+        "message": "已收到补充要求。",
+        "metadata": {
+            "category": "steering",
+            "label": "supplement",
+            "source_id": body["turn"]["id"],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_stop_marks_target_cancel_once_and_does_not_enqueue_replacement(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    queued_run_ids: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        queued_run_ids.append(run_id)
+
+    monkeypatch.setattr("app.api.conversations.enqueue_agent_runtime", capture_enqueue)
+    account = await _account(session, admin, "stop-steering")
+    thread = await _create_thread(client, admin, account)
+    target_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="stop-target",
+        message="执行账号检查",
+    )
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="stop-message",
+        message="先停一下",
+    )
+    first_cancelled_at = (
+        await session.get(AgentRun, target_response.json()["run"]["id"])
+    ).cancel_requested_at
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="stop-message",
+        message="先停一下",
+    )
+
+    assert response.status_code == 202
+    assert replay.status_code == 202
+    body = response.json()
+    assert replay.json()["turn"]["id"] == body["turn"]["id"]
+    assert body["turn"]["steering_mode"] == "stop"
+    assert body["turn"]["target_turn_id"] == target_response.json()["turn"]["id"]
+    assert body["steering_explanation"] == "已请求停止当前任务。"
+    target_run = await session.get(AgentRun, target_response.json()["run"]["id"])
+    target_turn = await session.get(ConversationTurn, target_response.json()["turn"]["id"])
+    steering_run = await session.get(AgentRun, body["run"]["id"])
+    assert target_run is not None
+    assert target_run.cancel_requested_at == first_cancelled_at
+    assert first_cancelled_at is not None
+    assert target_turn is not None
+    assert target_turn.status == "queued"
+    assert steering_run is not None
+    assert steering_run.status == "completed"
+    assert queued_run_ids == [target_response.json()["run"]["id"]]
+    events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == target_response.json()["turn"]["id"],
+                Event.type == "turn.steered",
+            )
+        )
+    )
+    assert len(events) == 1
+    assert events[0].payload["metadata"] == {
+        "category": "steering",
+        "label": "stop",
+        "source_id": body["turn"]["id"],
+    }
+
+    public_events = await client.get(
+        f"/conversation-threads/{thread['id']}/events",
+        headers=_auth(admin),
+    )
+    assert public_events.status_code == 200
+    paused = next(
+        item for item in public_events.json()["data"] if item["type"] == "turn.steered"
+    )
+    assert paused["payload"]["metadata"] == events[0].payload["metadata"]
+    assert "confidence" not in json.dumps(paused, ensure_ascii=False)
+    assert "classifier" not in json.dumps(paused, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_replace_goal_cancels_target_and_enqueues_new_execution(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    queued_run_ids: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        queued_run_ids.append(run_id)
+
+    monkeypatch.setattr("app.api.conversations.enqueue_agent_runtime", capture_enqueue)
+    account = await _account(session, admin, "replace-steering")
+    thread = await _create_thread(client, admin, account)
+    target_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="replace-target",
+        message="按品牌曝光目标规划",
+    )
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="replace-message",
+        message="重新按获客目标规划",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["turn"]["steering_mode"] == "replace_goal"
+    assert body["turn"]["target_turn_id"] == target_response.json()["turn"]["id"]
+    assert body["steering_explanation"] == "已按新目标创建替代任务。"
+    target_turn = await session.get(ConversationTurn, target_response.json()["turn"]["id"])
+    target_run = await session.get(AgentRun, target_response.json()["run"]["id"])
+    replacement_run = await session.get(AgentRun, body["run"]["id"])
+    assert target_turn is not None
+    assert target_turn.user_input == "按品牌曝光目标规划"
+    assert target_run is not None
+    assert target_run.cancel_requested_at is not None
+    assert replacement_run is not None
+    assert replacement_run.status == "queued"
+    assert queued_run_ids == [target_run.id, replacement_run.id]
+
+
+@pytest.mark.asyncio
+async def test_replace_enqueue_failure_returns_deferred_and_replay_retries_dispatch(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "replace-dispatch-deferred")
+    thread = await _create_thread(client, admin, account)
+    target = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="replace-deferred-target",
+        message="执行旧方案",
+    )
+    dispatch_attempts: list[int] = []
+
+    async def fail_enqueue(*, run_id: int) -> None:
+        dispatch_attempts.append(run_id)
+        raise ConnectionError("queue temporarily unavailable")
+
+    monkeypatch.setattr("app.api.conversations.enqueue_agent_runtime", fail_enqueue)
+    first = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="replace-deferred-message",
+        message="重新按获客目标规划",
+    )
+    target_run = await session.get(AgentRun, target.json()["run"]["id"])
+    assert target_run is not None
+    first_cancelled_at = target_run.cancel_requested_at
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="replace-deferred-message",
+        message="重新按获客目标规划",
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert first.json()["dispatch_deferred"] is True
+    assert replay.json()["dispatch_deferred"] is True
+    assert first.json()["dispatch_message"] == "任务已保存，调度暂时延迟，系统将自动恢复。"
+    assert replay.json()["run"]["id"] == first.json()["run"]["id"]
+    replacement_run = await session.get(AgentRun, first.json()["run"]["id"])
+    await session.refresh(target_run)
+    assert replacement_run is not None
+    assert replacement_run.status == "queued"
+    assert replacement_run.phase == "queued"
+    assert first_cancelled_at is not None
+    assert target_run.cancel_requested_at is not None
+    assert target_run.cancel_requested_at.replace(tzinfo=first_cancelled_at.tzinfo) == (
+        first_cancelled_at
+    )
+    assert dispatch_attempts == [replacement_run.id, replacement_run.id]
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.turn_id == target.json()["turn"]["id"],
+                Event.type == "turn.steered",
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_independent_query_leaves_active_target_unchanged(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "independent-steering")
+    thread = await _create_thread(client, admin, account)
+    target_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="independent-target",
+        message="规划下周内容",
+    )
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="independent-message",
+        message="顺便看看昨天的数据",
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["turn"]["steering_mode"] == "independent_query"
+    assert body["turn"]["target_turn_id"] is None
+    assert body["steering_explanation"] == "已作为新的独立问题处理。"
+    target_run = await session.get(AgentRun, target_response.json()["run"]["id"])
+    independent_run = await session.get(AgentRun, body["run"]["id"])
+    assert target_run is not None
+    assert target_run.cancel_requested_at is None
+    assert independent_run is not None
+    assert independent_run.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_cross_thread_target_returns_404_without_persisting_submission(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "cross-thread-steering")
+    first_thread = await _create_thread(client, admin, account)
+    second_thread = await _create_thread(client, admin, account)
+    target_response = await _submit_turn(
+        client,
+        admin,
+        first_thread["id"],
+        client_message_id="cross-thread-target",
+        message="执行原任务",
+    )
+
+    response = await _submit_turn(
+        client,
+        admin,
+        second_thread["id"],
+        client_message_id="cross-thread-stop",
+        message="先停一下",
+        target_turn_id=target_response.json()["turn"]["id"],
+    )
+
+    assert response.status_code == 404
+    assert (
+        await session.scalar(
+            select(func.count(ConversationTurn.id)).where(
+                ConversationTurn.thread_id == second_thread["id"]
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_target_degrades_stop_to_independent_query(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "terminal-steering")
+    thread = await _create_thread(client, admin, account)
+    target_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="terminal-target",
+        message="已完成的任务",
+    )
+    target_turn = await session.get(ConversationTurn, target_response.json()["turn"]["id"])
+    target_run = await session.get(AgentRun, target_response.json()["run"]["id"])
+    assert target_turn is not None
+    assert target_run is not None
+    target_turn.status = "completed"
+    target_run.status = "completed"
+    await session.commit()
+
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="terminal-stop",
+        message="先停一下",
+        target_turn_id=target_turn.id,
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["turn"]["steering_mode"] == "independent_query"
+    assert body["turn"]["target_turn_id"] is None
+    await session.refresh(target_run)
+    assert target_run.cancel_requested_at is None
+    degraded_run = await session.get(AgentRun, body["run"]["id"])
+    assert degraded_run is not None
+    assert degraded_run.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_control_message_rejects_rebinding_same_client_id_to_another_target(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "control-target-conflict")
+    thread = await _create_thread(client, admin, account)
+    first_target = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="control-first-target",
+        message="第一个任务",
+    )
+    second_target = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="control-second-target",
+        message="第二个任务",
+    )
+    first = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="control-target-conflict-message",
+        message="先停一下",
+        target_turn_id=first_target.json()["turn"]["id"],
+    )
+    conflict = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="control-target-conflict-message",
+        message="先停一下",
+        target_turn_id=second_target.json()["turn"]["id"],
+    )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "CLIENT_MESSAGE_CONFLICT"
+    assert (
+        await session.scalar(
+            select(func.count(ConversationTurn.id)).where(
+                ConversationTurn.client_message_id == "control-target-conflict-message"
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_matching_turn_replays_without_applying_steering_side_effects(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    enqueued: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> None:
+        enqueued.append(run_id)
+
+    monkeypatch.setattr("app.api.conversations.enqueue_agent_runtime", capture_enqueue)
+    account = await _account(session, admin, "legacy-steering-replay")
+    thread = await _create_thread(client, admin, account)
+    legacy_turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="legacy-steering-message",
+        user_input="先停一下",
+        status="queued",
+    )
+    session.add(legacy_turn)
+    await session.flush()
+    legacy_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        thread_id=thread["id"],
+        turn_id=legacy_turn.id,
+        client_message_id="legacy-steering-message",
+        status="queued",
+        phase="queued",
+        request_payload={
+            "account_id": account.id,
+            "attachment_ids": [],
+            "attachment_contexts": [],
+            "client_message_id": "legacy-steering-message",
+            "execution_preference": "AUTO",
+            "message": "先停一下",
+            "requested_skill_code": None,
+            "thread_id": thread["id"],
+            "turn_id": legacy_turn.id,
+        },
+    )
+    session.add(legacy_run)
+    await session.commit()
+
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="legacy-steering-message",
+        message="先停一下",
+    )
+
+    assert response.status_code == 202
+    assert response.json()["turn"]["id"] == legacy_turn.id
+    assert response.json()["run"]["id"] == legacy_run.id
+    await session.refresh(legacy_turn)
+    await session.refresh(legacy_run)
+    assert legacy_turn.steering_mode is None
+    assert legacy_turn.target_turn_id is None
+    assert legacy_turn.status == "queued"
+    assert legacy_run.status == "queued"
+    assert legacy_run.phase == "queued"
+    assert legacy_run.cancel_requested_at is None
+    assert enqueued == []
+    assert await session.scalar(select(func.count(Event.id))) == 0
 
 
 async def _execute_queued_turn(
@@ -1021,9 +1524,10 @@ async def test_submit_turn_claims_one_owned_run_without_task(
         "attachment_contexts": [],
         "client_message_id": "turn-api-1",
         "execution_preference": "AUTO",
-        "message": "查看最近七天数据",
-        "requested_skill_code": "account_data_query",
-        "thread_id": thread["id"],
+            "message": "查看最近七天数据",
+            "requested_skill_code": "account_data_query",
+            "target_turn_id": None,
+            "thread_id": thread["id"],
         "turn_id": body["turn"]["id"],
     }
 
@@ -1036,22 +1540,29 @@ async def test_submit_turn_claims_one_owned_run_without_task(
 
 
 @pytest.mark.asyncio
-async def test_duplicate_turn_submission_does_not_enqueue_the_same_run_twice(
+async def test_duplicate_queued_turn_safely_retries_enqueue(
     client, session, admin, monkeypatch
 ) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
     account = await _account(session, admin, "幂等入队账号")
     thread = await _create_thread(client, admin, account)
-    enqueued: list[int] = []
+    enqueued: list[tuple[str, int, str]] = []
+    enqueue_results = [object(), None]
 
-    async def capture_enqueue(*, run_id: int) -> None:
-        enqueued.append(run_id)
+    class Pool:
+        async def enqueue_job(self, name: str, run_id: int, *, _job_id: str):
+            enqueued.append((name, run_id, _job_id))
+            return enqueue_results.pop(0)
+
+    async def get_pool():
+        return Pool()
 
     monkeypatch.setattr(
         "app.api.conversations.enqueue_agent_runtime",
-        capture_enqueue,
+        enqueue_agent_runtime,
         raising=False,
     )
+    monkeypatch.setattr("app.core.events.get_arq_pool", get_pool)
 
     first = await _submit_turn(
         client,
@@ -1070,8 +1581,16 @@ async def test_duplicate_turn_submission_does_not_enqueue_the_same_run_twice(
 
     assert first.status_code == 202
     assert replay.status_code == 202
+    assert first.json()["dispatch_deferred"] is False
+    assert replay.json()["dispatch_deferred"] is False
+    assert first.json()["dispatch_message"] is None
+    assert replay.json()["dispatch_message"] is None
     assert replay.json()["run"]["id"] == first.json()["run"]["id"]
-    assert enqueued == [first.json()["run"]["id"]]
+    run_id = first.json()["run"]["id"]
+    assert enqueued == [
+        ("execute_agent_run", run_id, f"agent-run:{run_id}"),
+        ("execute_agent_run", run_id, f"agent-run:{run_id}"),
+    ]
     assert await session.scalar(select(func.count(ConversationTurn.id))) == 1
     assert await session.scalar(select(func.count(AgentRun.id))) == 1
 
@@ -1093,14 +1612,17 @@ async def test_queue_submission_failure_keeps_a_durable_queued_run(
         raising=False,
     )
 
-    with pytest.raises(ConnectionError, match="queue unavailable"):
-        await _submit_turn(
-            client,
-            admin,
-            thread["id"],
-            client_message_id="queue-failure-1",
-            message="查看最近七天数据",
-        )
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="queue-failure-1",
+        message="查看最近七天数据",
+    )
+
+    assert response.status_code == 202
+    assert response.json()["dispatch_deferred"] is True
+    assert response.json()["dispatch_message"] == "任务已保存，调度暂时延迟，系统将自动恢复。"
 
     run = await session.scalar(
         select(AgentRun).where(AgentRun.client_message_id == "queue-failure-1")

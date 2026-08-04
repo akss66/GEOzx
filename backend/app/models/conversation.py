@@ -81,6 +81,26 @@ class ConversationTurn(Base, TimestampMixin):
             ["conversation_threads.id", "conversation_threads.org_id"],
             name="fk_conversation_turn_thread_org",
         ),
+        ForeignKeyConstraint(
+            ["target_turn_id", "thread_id", "org_id"],
+            [
+                "conversation_turns.id",
+                "conversation_turns.thread_id",
+                "conversation_turns.org_id",
+            ],
+            name="fk_conversation_turn_target_turn_thread_org",
+        ),
+        CheckConstraint(
+            "(steering_mode IS NULL AND target_turn_id IS NULL) OR "
+            "(steering_mode = 'independent_query' AND target_turn_id IS NULL) OR "
+            "(steering_mode IN ('supplement', 'stop', 'replace_goal') "
+            "AND target_turn_id IS NOT NULL)",
+            name="ck_conversation_turns_steering_lineage",
+        ),
+        CheckConstraint(
+            "target_turn_id IS NULL OR target_turn_id != id",
+            name="ck_conversation_turn_target_not_self",
+        ),
         CheckConstraint(
             "status IN ("
             "'queued', 'running', 'retry_wait', 'waiting_permission', "
@@ -123,6 +143,8 @@ class ConversationTurn(Base, TimestampMixin):
     )
     client_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     user_input: Mapped[str] = mapped_column(Text, nullable=False)
+    target_turn_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
+    steering_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     assistant_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     intent: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
     status: Mapped[str] = mapped_column(

@@ -158,6 +158,7 @@ def _immutable_request_payload(value: dict) -> dict:
         "execution_preference",
         "message",
         "requested_skill_code",
+        "target_turn_id",
         "trusted_structured_input",
         "thread_id",
         "turn_id",
@@ -184,7 +185,9 @@ async def get_agent_run(
 async def enqueue_agent_runtime(
     *,
     run_id: int,
-) -> None:
+) -> bool:
+    """Enqueue a run once; return whether this call created the ARQ job."""
+
     from app.core.events import get_arq_pool
 
     pool = await get_arq_pool()
@@ -193,8 +196,7 @@ async def enqueue_agent_runtime(
         run_id,
         _job_id=f"agent-run:{run_id}",
     )
-    if job is None:
-        raise RuntimeError(f"AgentRun queue claim already exists: {run_id}")
+    return job is not None
 
 
 async def abort_agent_runtime(run_id: int) -> bool:
@@ -485,14 +487,38 @@ async def release_agent_run_failure(
 
 
 async def request_agent_run_cancel(session: AsyncSession, run_id: int) -> AgentRun | None:
-    run = await session.get(AgentRun, run_id)
+    run = await request_agent_run_cancel_record(session, run_id)
+    await session.commit()
+    return run
+
+
+async def request_agent_run_cancel_record(
+    session: AsyncSession,
+    run_id: int,
+) -> AgentRun | None:
+    """Idempotently request cancellation without committing the caller transaction."""
+
+    run = await session.scalar(
+        select(AgentRun)
+        .where(AgentRun.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if run is None:
         return None
-    if run.status in {"completed", "cancelled", "dead_letter", "failed"}:
+    if run.status in {
+        "completed",
+        "blocked",
+        "cancelled",
+        "dead_letter",
+        "failed",
+        "stopped",
+    }:
         return run
-    run.cancel_requested_at = utc_now()
-    run.phase = "cancel_requested"
-    await session.commit()
+    if run.cancel_requested_at is None:
+        run.cancel_requested_at = utc_now()
+        run.phase = "cancel_requested"
+        await session.flush()
     return run
 
 
