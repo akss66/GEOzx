@@ -1,6 +1,7 @@
 import pytest
 from sqlalchemy import select
 
+from app.api.approvals import _latest_deliverable
 from app.core.approval_access import require_task_approval_access, task_project_ids
 from app.models import (
     Account,
@@ -30,7 +31,6 @@ from app.models.enums import (
     Platform,
     WorkspaceRole,
 )
-from app.api.approvals import _latest_deliverable
 
 
 async def _token(client, email: str, password: str) -> str:
