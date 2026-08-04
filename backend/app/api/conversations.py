@@ -1,8 +1,9 @@
 """Additive Thread and Turn endpoints for the main-Agent V2 runtime."""
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
@@ -51,6 +52,7 @@ from app.services.turn_steering import apply_turn_steering, resolve_turn_steerin
 router = APIRouter(prefix="/brain", tags=["brain-conversations"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 logger = logging.getLogger(__name__)
+_ProjectionRow = TypeVar("_ProjectionRow")
 _DISPATCH_DEFERRED_MESSAGE = "任务已保存，调度暂时延迟，系统将自动恢复。"
 
 
@@ -118,6 +120,7 @@ async def _thread_out(
         session,
         tuple(turn.id for turn in turns),
     )
+    projections_by_turn = await _turn_projections_by_turn(session, turns)
     return ConversationThreadOut(
         id=thread.id,
         org_id=thread.org_id,
@@ -129,7 +132,7 @@ async def _thread_out(
         turns=[
             _turn_out(
                 turn,
-                await _turn_projections(session, turn),
+                projections_by_turn.get(turn.id, []),
                 pending_by_turn.get(turn.id),
             )
             for turn in turns
@@ -162,129 +165,53 @@ async def _turn_projections(
     session: AsyncSession,
     turn: ConversationTurn,
 ) -> list[dict]:
-    payload = await session.scalar(
-        select(AgentRun.result_payload)
-        .where(
-            AgentRun.org_id == turn.org_id,
-            AgentRun.thread_id == turn.thread_id,
-            AgentRun.turn_id == turn.id,
-        )
-        .order_by(AgentRun.id.desc())
-        .limit(1)
-    )
-    raw_projections = (
-        list(payload.get("projections", []))
-        if isinstance(payload, dict) and isinstance(payload.get("projections"), list)
-        else []
-    )
-    result_payload_types = {
-        "progress",
-        "expert",
-        "artifact",
-        "account_data",
-        "execution_blocked",
-    }
-    projections = [
-        safe
-        for projection in raw_projections
-        if isinstance(projection, dict) and projection.get("type") in result_payload_types
-        if (safe := sanitize_conversation_projection(projection)) is not None
-    ]
-    projections.extend(await _approval_projections(session, turn))
-    execution_summary = await _execution_summary_projection(session, turn)
-    if execution_summary is not None:
-        projections.append(execution_summary)
-    return projections
+    return (await _turn_projections_by_turn(session, [turn])).get(turn.id, [])
 
 
-async def _approval_projections(
+async def _turn_projections_by_turn(
     session: AsyncSession,
-    turn: ConversationTurn,
-) -> list[dict]:
-    """Restore pending approvals without exposing ToolCall meta or raw payloads."""
+    turns: list[ConversationTurn],
+) -> dict[int, list[dict]]:
+    """Load every projection family in constant queries for a Turn snapshot."""
 
-    approvals = list(
+    if not turns:
+        return {}
+    turn_ids = tuple(turn.id for turn in turns)
+    runs = list(
         await session.scalars(
-            select(AgentToolCall)
-            .where(
-                AgentToolCall.org_id == turn.org_id,
-                AgentToolCall.thread_id == turn.thread_id,
-                AgentToolCall.turn_id == turn.id,
-                AgentToolCall.requires_human_confirmation.is_(True),
-                AgentToolCall.status == "waiting_approval",
-            )
-            .order_by(AgentToolCall.id)
+            select(AgentRun)
+            .where(AgentRun.turn_id.in_(turn_ids))
+            .order_by(AgentRun.turn_id, AgentRun.id.desc())
         )
     )
-    return [
-        {
-            "type": "approval",
-            "approval": ConversationApprovalOut.model_validate(approval).model_dump(mode="json"),
-        }
-        for approval in approvals
-    ]
-
-
-async def _execution_summary_projection(
-    session: AsyncSession,
-    turn: ConversationTurn,
-) -> dict | None:
-    """Expose business provenance while keeping raw execution traces collapsed."""
-
-    run = await session.scalar(
-        select(AgentRun)
-        .where(
-            AgentRun.org_id == turn.org_id,
-            AgentRun.thread_id == turn.thread_id,
-            AgentRun.turn_id == turn.id,
+    skill_runs = list(
+        await session.scalars(
+            select(SkillRun)
+            .where(SkillRun.turn_id.in_(turn_ids))
+            .order_by(SkillRun.turn_id, SkillRun.id.desc())
         )
-        .order_by(AgentRun.id.desc())
-        .limit(1)
-    )
-    skill_run = await session.scalar(
-        select(SkillRun)
-        .where(
-            SkillRun.org_id == turn.org_id,
-            SkillRun.thread_id == turn.thread_id,
-            SkillRun.turn_id == turn.id,
-        )
-        .order_by(SkillRun.id.desc())
-        .limit(1)
     )
     invocations = list(
         await session.scalars(
             select(AgentInvocation)
-            .where(
-                AgentInvocation.thread_id == turn.thread_id,
-                AgentInvocation.turn_id == turn.id,
-            )
-            .order_by(AgentInvocation.id)
+            .where(AgentInvocation.turn_id.in_(turn_ids))
+            .order_by(AgentInvocation.turn_id, AgentInvocation.id)
         )
     )
     tool_calls = list(
         await session.scalars(
             select(AgentToolCall)
-            .where(
-                AgentToolCall.org_id == turn.org_id,
-                AgentToolCall.thread_id == turn.thread_id,
-                AgentToolCall.turn_id == turn.id,
-            )
-            .order_by(AgentToolCall.id)
+            .where(AgentToolCall.turn_id.in_(turn_ids))
+            .order_by(AgentToolCall.turn_id, AgentToolCall.id)
         )
     )
     deliverables = list(
         await session.scalars(
             select(Deliverable)
-            .where(
-                Deliverable.thread_id == turn.thread_id,
-                Deliverable.turn_id == turn.id,
-            )
-            .order_by(Deliverable.id)
+            .where(Deliverable.turn_id.in_(turn_ids))
+            .order_by(Deliverable.turn_id, Deliverable.id)
         )
     )
-    if skill_run is None and not invocations and not tool_calls:
-        return None
-    safe_intent = _safe_turn_intent(turn.intent)
     attempt_counts: dict[int, int] = {}
     if tool_calls:
         attempt_counts = {
@@ -304,8 +231,97 @@ async def _execution_summary_projection(
                 )
             ).all()
         }
+
+    latest_run_by_turn = _latest_by_turn(runs, lambda row: row.turn_id or 0)
+    latest_skill_run_by_turn = _latest_by_turn(skill_runs, lambda row: row.turn_id or 0)
+    invocations_by_turn = _group_by_turn(invocations, lambda row: row.turn_id or 0)
+    tool_calls_by_turn = _group_by_turn(tool_calls, lambda row: row.turn_id or 0)
+    deliverables_by_turn = _group_by_turn(deliverables, lambda row: row.turn_id or 0)
+    projections_by_turn: dict[int, list[dict]] = {}
+    result_payload_types = {
+        "progress",
+        "expert",
+        "artifact",
+        "account_data",
+        "execution_blocked",
+    }
+    for turn in turns:
+        run = latest_run_by_turn.get(turn.id)
+        payload = run.result_payload if run is not None else None
+        raw_projections = (
+            list(payload.get("projections", []))
+            if isinstance(payload, dict) and isinstance(payload.get("projections"), list)
+            else []
+        )
+        projections = [
+            safe
+            for projection in raw_projections
+            if isinstance(projection, dict) and projection.get("type") in result_payload_types
+            if (safe := sanitize_conversation_projection(projection)) is not None
+        ]
+        turn_tool_calls = tool_calls_by_turn.get(turn.id, [])
+        projections.extend(
+            {
+                "type": "approval",
+                "approval": ConversationApprovalOut.model_validate(approval).model_dump(
+                    mode="json"
+                ),
+            }
+            for approval in turn_tool_calls
+            if approval.requires_human_confirmation
+            and approval.status == "waiting_approval"
+        )
+        execution_summary = _execution_summary_from_loaded(
+            turn,
+            run=run,
+            skill_run=latest_skill_run_by_turn.get(turn.id),
+            invocations=invocations_by_turn.get(turn.id, []),
+            tool_calls=turn_tool_calls,
+            deliverables=deliverables_by_turn.get(turn.id, []),
+            attempt_counts=attempt_counts,
+        )
+        if execution_summary is not None:
+            projections.append(execution_summary)
+        projections_by_turn[turn.id] = projections
+    return projections_by_turn
+
+
+def _latest_by_turn(
+    rows: list[_ProjectionRow],
+    turn_id: Callable[[_ProjectionRow], int],
+) -> dict[int, _ProjectionRow]:
+    latest: dict[int, _ProjectionRow] = {}
+    for row in rows:
+        latest.setdefault(turn_id(row), row)
+    return latest
+
+
+def _group_by_turn(
+    rows: list[_ProjectionRow],
+    turn_id: Callable[[_ProjectionRow], int],
+) -> dict[int, list[_ProjectionRow]]:
+    grouped: dict[int, list[_ProjectionRow]] = {}
+    for row in rows:
+        grouped.setdefault(turn_id(row), []).append(row)
+    return grouped
+
+
+def _execution_summary_from_loaded(
+    turn: ConversationTurn,
+    *,
+    run: AgentRun | None,
+    skill_run: SkillRun | None,
+    invocations: list[AgentInvocation],
+    tool_calls: list[AgentToolCall],
+    deliverables: list[Deliverable],
+    attempt_counts: dict[int, int],
+) -> dict | None:
+    if skill_run is None and not invocations and not tool_calls:
+        return None
+    safe_intent = _safe_turn_intent(turn.intent)
     retry_counts = {
-        tool_call.id: max(0, attempt_counts.get(tool_call.id, 0) - 1) for tool_call in tool_calls
+        tool_call.id: max(0, attempt_counts.get(tool_call.id, 0) - 1)
+        for tool_call in tool_calls
     }
     summary = ConversationExecutionSummaryOut(
         run_id=run.id if run is not None else None,

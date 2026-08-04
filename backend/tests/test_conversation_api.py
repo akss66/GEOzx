@@ -916,6 +916,72 @@ async def test_create_and_get_thread_with_ordered_turn_history(
 
 
 @pytest.mark.asyncio
+async def test_thread_snapshot_projection_queries_do_not_grow_with_turn_count(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "batched snapshot projections")
+    created = await _create_thread(client, admin, account)
+    session.add(
+        ConversationTurn(
+            thread_id=created["id"],
+            org_id=admin.org_id,
+            created_by_id=admin.id,
+            client_message_id="batched-snapshot-1",
+            user_input="Turn 1",
+            status="completed",
+        )
+    )
+    await session.commit()
+
+    statements: list[str] = []
+    sync_engine = session.get_bind()
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    sqlalchemy_event.listen(sync_engine, "before_cursor_execute", capture)
+    try:
+        first = await client.get(
+            f"/brain/conversations/{created['id']}",
+            headers=_auth(admin),
+        )
+        one_turn_query_count = len(statements)
+        statements.clear()
+        session.add_all(
+            [
+                ConversationTurn(
+                    thread_id=created["id"],
+                    org_id=admin.org_id,
+                    created_by_id=admin.id,
+                    client_message_id=f"batched-snapshot-{index}",
+                    user_input=f"Turn {index}",
+                    status="completed",
+                )
+                for index in range(2, 7)
+            ]
+        )
+        await session.commit()
+        statements.clear()
+        many = await client.get(
+            f"/brain/conversations/{created['id']}",
+            headers=_auth(admin),
+        )
+        six_turn_query_count = len(statements)
+    finally:
+        sqlalchemy_event.remove(sync_engine, "before_cursor_execute", capture)
+
+    assert first.status_code == many.status_code == 200
+    assert len(first.json()["turns"]) == 1
+    assert len(many.json()["turns"]) == 6
+    assert six_turn_query_count == one_turn_query_count
+
+
+@pytest.mark.asyncio
 async def test_history_lists_only_the_current_users_selected_account_threads(
     client,
     session,

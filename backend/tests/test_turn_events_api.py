@@ -792,6 +792,77 @@ async def test_stream_replays_interrupt_identity_without_private_contracts(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_interrupt_replays_through_list_and_sse_without_private_data(
+    client,
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run, _scope = await _event_scope(
+        session,
+        admin,
+        key="interrupt-cancelled-replay",
+    )
+    cancelled = Event(
+        type="turn.interrupt_cancelled",
+        org_id=admin.org_id,
+        account_id=account.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        sequence=1,
+        payload={
+            "interrupt_id": 24,
+            "kind": "clarification",
+            "status": "cancelled",
+            "message": "Input is no longer required.",
+            "action_label": None,
+            "version": 2,
+            "resolution": {"answer": "must not leak"},
+        },
+        idempotency_key="interrupt-cancelled-replay",
+    )
+    session.add(cancelled)
+    await session.commit()
+
+    listing = await client.get(
+        f"/conversation-threads/{thread.id}/events",
+        headers=_auth(admin),
+        params={"after_id": 0},
+    )
+    tracker = _SessionTracker()
+    stream = _stream_generator(
+        scope=_stream_scope(account, thread),
+        after_id=0,
+        request=_ConnectedRequest(),
+        session_factory=_tracked_session_factory(session, tracker),
+        redis_client=_FakeRedis(_FakePubSub(tracker=tracker)),
+        poll_seconds=60,
+        heartbeat_seconds=60,
+    )
+    frame = await anext(stream)
+    await stream.aclose()
+
+    assert listing.status_code == 200
+    listed = next(
+        row for row in listing.json()["data"] if row["type"] == "turn.interrupt_cancelled"
+    )
+    expected_payload = {
+        "interrupt_id": 24,
+        "kind": "clarification",
+        "status": "cancelled",
+        "message": "Input is no longer required.",
+        "action_label": None,
+        "version": 2,
+    }
+    assert listed["payload"] == expected_payload
+    assert "event: turn.interrupt_cancelled" in frame
+    streamed = json.loads(frame.splitlines()[2].removeprefix("data: "))
+    assert streamed["payload"] == expected_payload
+    assert "resolution" not in str(listed)
+    assert "resolution" not in frame
+
+
+@pytest.mark.asyncio
 async def test_list_contains_bad_legacy_rows_and_returns_later_valid_event_safely(
     client,
     session,
