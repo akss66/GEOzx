@@ -1360,6 +1360,70 @@ async def test_permanent_delete_locks_multi_run_forest_once_in_sorted_order(
 
 
 @pytest.mark.asyncio
+async def test_permanent_delete_locks_runless_content_before_deliverable(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "delete-runless-content-order")
+    thread = await _create_thread(client, admin, account)
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="Runless deliverable content",
+    )
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="delete-runless-content-order",
+        user_input="done",
+        status="completed",
+    )
+    session.add_all([content, turn])
+    await session.flush()
+    deliverable = Deliverable(
+        content_item_id=content.id,
+        thread_id=thread["id"],
+        turn_id=turn.id,
+        agent_code="runless-content-order",
+        type=DeliverableType.VIDEO_SCRIPT,
+        status=DeliverableStatus.DRAFT,
+        payload={"title": "Runless"},
+    )
+    session.add(deliverable)
+    await session.commit()
+    content_id = content.id
+    deliverable_id = deliverable.id
+    import app.services.conversations as conversations_module
+    import app.services.runtime_locking as locking_module
+
+    real_forest = conversations_module.lock_runtime_root_forest
+    real_lock_rows = locking_module._lock_rows
+    forest_calls = []
+    locked_families = []
+
+    async def observed_forest(*args, **kwargs):
+        forest_calls.append((kwargs["run_ids"], kwargs["extra_deliverable_ids"]))
+        return await real_forest(*args, **kwargs)
+
+    async def observed_family(lock_session, model, row_ids):
+        if row_ids:
+            locked_families.append(model)
+        return await real_lock_rows(lock_session, model, row_ids)
+
+    monkeypatch.setattr(conversations_module, "lock_runtime_root_forest", observed_forest)
+    monkeypatch.setattr(locking_module, "_lock_rows", observed_family)
+
+    await delete_conversation_thread(session, admin, thread["id"])
+
+    assert forest_calls == [((), (deliverable_id,))]
+    assert locked_families.index(ContentItem) < locked_families.index(Deliverable)
+    assert await session.get(ConversationThread, thread["id"]) is None
+    assert await session.get(Deliverable, deliverable_id) is None
+    assert await session.get(ContentItem, content_id) is not None
+
+
+@pytest.mark.asyncio
 async def test_permanent_delete_rejects_cross_account_runtime_lineage_without_partial_delete(
     client, session, admin, monkeypatch
 ) -> None:

@@ -35,6 +35,7 @@ class RuntimeRootLock:
     turn_id: int | None
     task_id: int | None
     content_item_id: int | None
+    content_item_ids: tuple[int, ...]
     root_skill_run_id: int | None
     child_skill_run_ids: tuple[int, ...]
     run_revision_ids: tuple[int, ...]
@@ -51,6 +52,7 @@ class RuntimeRootLock:
         "turn_id",
         "task_id",
         "content_item_id",
+        "content_item_ids",
         "root_skill_run_id",
         "child_skill_run_ids",
         "run_revision_ids",
@@ -78,6 +80,7 @@ class RuntimeRootLock:
         invocation_ids: tuple[int, ...],
         tool_call_ids: tuple[int, ...],
         attempt_ids: tuple[int, ...],
+        content_item_ids: tuple[int, ...] = (),
         pending_object_ids_at_acquire: frozenset[int] = frozenset(),
     ) -> None:
         if _seal is not _TOKEN_SEAL:
@@ -88,6 +91,14 @@ class RuntimeRootLock:
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "task_id", task_id)
         object.__setattr__(self, "content_item_id", content_item_id)
+        canonical_content_ids = (
+            {content_item_id} if content_item_id is not None else set()
+        )
+        object.__setattr__(
+            self,
+            "content_item_ids",
+            tuple(sorted(set(content_item_ids) | canonical_content_ids)),
+        )
         object.__setattr__(self, "root_skill_run_id", root_skill_run_id)
         object.__setattr__(self, "child_skill_run_ids", child_skill_run_ids)
         object.__setattr__(self, "run_revision_ids", run_revision_ids)
@@ -163,7 +174,8 @@ async def lock_runtime_root_forest(
     """Lock a multi-Run forest by family, never as per-Run bundles."""
 
     requested_run_ids = tuple(sorted(set(run_ids)))
-    if not requested_run_ids:
+    extra_deliverable_ids = tuple(sorted(set(extra_deliverable_ids)))
+    if not requested_run_ids and not extra_deliverable_ids:
         return ()
     with session.no_autoflush:
         run_id_set = set(requested_run_ids)
@@ -201,7 +213,7 @@ async def lock_runtime_root_forest(
                 select(BrainTask).where(BrainTask.id.in_(task_ids)).order_by(BrainTask.id)
             )
         )
-        content_ids = tuple(
+        task_content_ids = tuple(
             sorted({task.content_item_id for task in tasks if task.content_item_id is not None})
         )
         skills = list(
@@ -235,6 +247,19 @@ async def lock_runtime_root_forest(
                 | set(extra_deliverable_ids)
             )
         )
+        discovered_deliverables = list(
+            await session.scalars(
+                select(Deliverable)
+                .where(Deliverable.id.in_(deliverable_ids))
+                .order_by(Deliverable.id)
+            )
+        )
+        content_ids = tuple(
+            sorted(
+                set(task_content_ids)
+                | {row.content_item_id for row in discovered_deliverables}
+            )
+        )
         invocation_ids = tuple(
             await session.scalars(
                 select(AgentInvocation.id)
@@ -266,21 +291,35 @@ async def lock_runtime_root_forest(
     await _lock_rows(session, SkillRun, root_skill_ids)
     await _lock_rows(session, SkillRun, child_skill_ids)
     await _lock_rows(session, RunRevision, revision_ids)
-    await _lock_rows(session, Deliverable, deliverable_ids)
+    deliverable_rows = await _lock_rows(session, Deliverable, deliverable_ids)
     await _lock_rows(session, AgentInvocation, invocation_ids)
     await _lock_rows(session, AgentToolCall, tool_ids)
     await _lock_rows(session, ToolExecutionAttempt, attempt_ids)
     task_by_id = {task.id: task for task in tasks}
     revision_rows = [await session.get(RunRevision, row_id) for row_id in revision_ids]
-    deliverable_rows = [await session.get(Deliverable, row_id) for row_id in deliverable_ids]
     invocation_rows = [await session.get(AgentInvocation, row_id) for row_id in invocation_ids]
     tool_rows = [await session.get(AgentToolCall, row_id) for row_id in tool_ids]
     attempt_rows = [await session.get(ToolExecutionAttempt, row_id) for row_id in attempt_ids]
-    if any(
-        row is None or row.run_id not in set(run_ids)
+    forest_thread_ids = {run.thread_id for run in runs if run.thread_id is not None}
+    forest_turn_ids = {run.turn_id for run in runs if run.turn_id is not None}
+    if len(discovered_deliverables) != len(deliverable_ids) or any(
+        (row.run_id is not None and row.run_id not in set(run_ids))
+        or (
+            row.run_id is None
+            and bool(run_ids)
+            and row.thread_id not in forest_thread_ids
+            and row.turn_id not in forest_turn_ids
+        )
         for row in deliverable_rows
     ):
         raise RuntimeLockConflict("runtime Deliverable lineage mismatch")
+    rebuilt_content_ids = {
+        task.content_item_id
+        for task in tasks
+        if task.content_item_id is not None
+    } | {row.content_item_id for row in deliverable_rows}
+    if rebuilt_content_ids != set(content_ids):
+        raise RuntimeLockConflict("runtime ContentItem set changed")
     tokens: list[RuntimeRootLock] = []
     for run in runs:
         run_skills = [skill for skill in skills if skill.run_id == run.id]
@@ -312,6 +351,21 @@ async def lock_runtime_root_forest(
             if row is not None and row.tool_call_id in set(run_tool_ids)
         )
         task = task_by_id.get(run.task_id) if run.task_id is not None else None
+        canonical_content_ids = (
+            {task.content_item_id}
+            if task is not None and task.content_item_id is not None
+            else set()
+        )
+        run_content_ids = tuple(
+            sorted(
+                canonical_content_ids
+                | {
+                    row.content_item_id
+                    for row in deliverable_rows
+                    if row.run_id == run.id
+                }
+            )
+        )
         tokens.append(
             RuntimeRootLock(
                 _seal=_TOKEN_SEAL,
@@ -321,6 +375,7 @@ async def lock_runtime_root_forest(
                 turn_id=run.turn_id,
                 task_id=run.task_id,
                 content_item_id=(task.content_item_id if task is not None else None),
+                content_item_ids=run_content_ids,
                 root_skill_run_id=(root.id if root is not None else None),
                 child_skill_run_ids=tuple(
                     sorted(run_skill_ids - ({root.id} if root is not None else set()))
@@ -448,6 +503,16 @@ async def lock_runtime_root_scope(
         and task.content_item_id != expected_content_item_id
     ):
         raise RuntimeLockConflict("runtime ContentItem does not belong to BrainTask")
+    discovered_deliverables = list(
+        await session.scalars(
+            select(Deliverable)
+            .where(Deliverable.id.in_(deliverable_ids))
+            .order_by(Deliverable.id)
+        )
+    )
+    discovered_deliverable_content_ids = {
+        row.content_item_id for row in discovered_deliverables
+    }
     content_item_ids = tuple(
         sorted(
             {
@@ -455,6 +520,7 @@ async def lock_runtime_root_scope(
                 for row in locked_tasks
                 if row.content_item_id is not None
             }
+            | {row.content_item_id for row in discovered_deliverables}
         )
     )
     await _lock_rows(session, ContentItem, content_item_ids)
@@ -517,6 +583,12 @@ async def lock_runtime_root_scope(
         or locked_attempts
     ):
         raise RuntimeLockConflict("runtime cannot rebind existing runtime family")
+    if len(discovered_deliverables) != len(deliverable_ids):
+        raise RuntimeLockConflict("runtime Deliverable set changed")
+    if {
+        row.content_item_id for row in locked_deliverables
+    } != discovered_deliverable_content_ids:
+        raise RuntimeLockConflict("runtime Deliverable ContentItem set changed")
     for row in locked_deliverables:
         if row.run_id != run.id:
             raise RuntimeLockConflict("runtime Deliverable lineage mismatch")
@@ -549,6 +621,7 @@ async def lock_runtime_root_scope(
         turn_id=turn_id,
         task_id=task_id,
         content_item_id=content_item_id,
+        content_item_ids=content_item_ids,
         root_skill_run_id=root_skill_run_id,
         child_skill_run_ids=child_skill_run_ids,
         run_revision_ids=tuple(row.id for row in revisions),
@@ -664,6 +737,12 @@ async def extend_runtime_root_lock(
         turn_id=run.turn_id,
         task_id=task.id,
         content_item_id=content_item_id,
+        content_item_ids=tuple(
+            sorted(
+                set(token.content_item_ids)
+                | ({content_item_id} if content_item_id is not None else set())
+            )
+        ),
         root_skill_run_id=root_skill_run_id,
         child_skill_run_ids=child_skill_run_ids,
         run_revision_ids=token.run_revision_ids,
@@ -698,6 +777,7 @@ def require_runtime_root_lock(
     turn_id: int | None = None,
     task_id: int | None = None,
     content_item_id: int | None = None,
+    content_item_ids: tuple[int, ...] = (),
     skill_run_id: int | None = None,
     deliverable_id: int | None = None,
     tool_call_id: int | None = None,
@@ -721,6 +801,8 @@ def require_runtime_root_lock(
     if task_id is not None and token.task_id != task_id:
         raise RuntimeLockConflict("runtime BrainTask was not prelocked")
     if content_item_id is not None and token.content_item_id != content_item_id:
+        raise RuntimeLockConflict("runtime ContentItem was not prelocked")
+    if not set(content_item_ids).issubset(token.content_item_ids):
         raise RuntimeLockConflict("runtime ContentItem was not prelocked")
     locked_skill_ids = {
         token.root_skill_run_id,

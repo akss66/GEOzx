@@ -686,6 +686,85 @@ async def test_runtime_forest_expands_both_run_revision_endpoints(
 
 
 @pytest.mark.asyncio
+async def test_runtime_forest_locks_task_and_deliverable_content_before_deliverables(
+    session, admin, monkeypatch
+) -> None:
+    account, thread, turn, run, task, _skill = await _four_ledger_context(
+        session, admin, key="runtime-forest-deliverable-content"
+    )
+    task_content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="Task content",
+    )
+    deliverable_content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="Deliverable content",
+    )
+    session.add_all([task_content, deliverable_content])
+    await session.flush()
+    task.content_item_id = task_content.id
+    deliverable = Deliverable(
+        content_item_id=deliverable_content.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        agent_code="forest-content-order",
+        type=DeliverableType.VIDEO_SCRIPT,
+        payload={"title": "Forest content order"},
+    )
+    session.add(deliverable)
+    await session.commit()
+    import app.services.runtime_locking as locking_module
+
+    real_lock_rows = locking_module._lock_rows
+    locked_families = []
+
+    async def observe_family(lock_session, model, row_ids):
+        if row_ids:
+            locked_families.append((model, tuple(row_ids)))
+        return await real_lock_rows(lock_session, model, row_ids)
+
+    monkeypatch.setattr(locking_module, "_lock_rows", observe_family)
+
+    (token,) = await lock_runtime_root_forest(
+        session,
+        run_ids=(run.id,),
+        extra_deliverable_ids=(deliverable.id,),
+    )
+
+    assert token.content_item_id == task_content.id
+    assert token.content_item_ids == tuple(
+        sorted((task_content.id, deliverable_content.id))
+    )
+    content_index = next(
+        index
+        for index, (model, _ids) in enumerate(locked_families)
+        if model is ContentItem
+    )
+    deliverable_index = next(
+        index
+        for index, (model, _ids) in enumerate(locked_families)
+        if model is Deliverable
+    )
+    assert content_index < deliverable_index
+    require_runtime_root_lock(
+        session,
+        token,
+        run_id=run.id,
+        content_item_ids=(task_content.id, deliverable_content.id),
+    )
+    with pytest.raises(RuntimeLockConflict, match="ContentItem was not prelocked"):
+        require_runtime_root_lock(
+            session,
+            token,
+            run_id=run.id,
+            content_item_ids=(999_999,),
+        )
+
+
+@pytest.mark.asyncio
 async def test_runtime_lock_rejects_tool_via_unlocked_invocation(
     session, admin
 ) -> None:

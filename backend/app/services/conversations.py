@@ -88,7 +88,12 @@ async def _discover_conversation_runtime_roots(
     *,
     user: User,
     thread_id: int,
-) -> tuple[ConversationThread, tuple[int, ...], tuple[int, ...]]:
+) -> tuple[
+    ConversationThread,
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+]:
     """Read only the Run roots needed before any deletion lock or mutation."""
 
     with session.no_autoflush:
@@ -124,18 +129,18 @@ async def _discover_conversation_runtime_roots(
                 )
             )
         )
-        run_ids.update(
-            row
-            for row in await session.scalars(
-                select(SkillRun.run_id).where(
+        scoped_skill_rows = (
+            await session.execute(
+                select(SkillRun.id, SkillRun.run_id).where(
                     or_(
                         SkillRun.thread_id == thread.id,
                         SkillRun.turn_id.in_(turn_ids),
                     )
                 )
             )
-            if row is not None
-        )
+        ).all()
+        scoped_skill_ids = tuple(row.id for row in scoped_skill_rows)
+        run_ids.update(row.run_id for row in scoped_skill_rows)
         run_ids.update(
             row
             for row in await session.scalars(
@@ -154,6 +159,8 @@ async def _discover_conversation_runtime_roots(
                     or_(
                         Deliverable.thread_id == thread.id,
                         Deliverable.turn_id.in_(turn_ids),
+                        Deliverable.run_id.in_(run_ids),
+                        Deliverable.skill_run_id.in_(scoped_skill_ids),
                     )
                 )
             )
@@ -161,16 +168,36 @@ async def _discover_conversation_runtime_roots(
         run_ids.update(
             row.run_id for row in scoped_deliverables if row.run_id is not None
         )
-        runtime_deliverable_ids = tuple(
-            sorted(row.id for row in scoped_deliverables if row.run_id is not None)
+        deliverable_ids = tuple(sorted(row.id for row in scoped_deliverables))
+        task_ids = tuple(
+            row
+            for row in await session.scalars(
+                select(AgentRun.task_id).where(AgentRun.id.in_(run_ids))
+            )
+            if row is not None
         )
-    return thread, tuple(sorted(run_ids)), runtime_deliverable_ids
+        task_content_ids = set(
+            row
+            for row in await session.scalars(
+                select(BrainTask.content_item_id).where(BrainTask.id.in_(task_ids))
+            )
+            if row is not None
+        )
+        content_ids = tuple(
+            sorted(
+                task_content_ids
+                | {row.content_item_id for row in scoped_deliverables}
+            )
+        )
+    return thread, tuple(sorted(run_ids)), deliverable_ids, content_ids
 
 
 def _validate_locked_conversation_runtime(
     *,
     thread: ConversationThread,
     discovered_run_ids: tuple[int, ...],
+    discovered_deliverable_ids: tuple[int, ...],
+    discovered_content_ids: tuple[int, ...],
     tokens: tuple[RuntimeRootLock, ...],
     runs: list[AgentRun],
     tasks: list[BrainTask],
@@ -195,7 +222,7 @@ def _validate_locked_conversation_runtime(
     locked_turn_ids = {token.turn_id for token in tokens if token.turn_id is not None}
     locked_task_ids = {token.task_id for token in tokens if token.task_id is not None}
     locked_content_ids = {
-        token.content_item_id for token in tokens if token.content_item_id is not None
+        row_id for token in tokens for row_id in token.content_item_ids
     }
     locked_skill_ids = {
         skill_id
@@ -257,6 +284,10 @@ def _validate_locked_conversation_runtime(
         raise _active_delete_conflict()
 
     content_by_id = {row.id: row for row in contents}
+    if {row.id for row in deliverables} != set(discovered_deliverable_ids) or set(
+        content_by_id
+    ) != set(discovered_content_ids):
+        raise _active_delete_conflict()
     runtime_content_ids = {
         row.content_item_id
         for row in tasks
@@ -412,7 +443,12 @@ async def delete_conversation_thread(
     """Permanently delete one terminal, owned conversation and its private traces."""
 
     try:
-        _, discovered_run_ids, discovered_deliverable_ids = (
+        (
+            _,
+            discovered_run_ids,
+            discovered_deliverable_ids,
+            discovered_content_ids,
+        ) = (
             await _discover_conversation_runtime_roots(
                 session,
                 user=user,
@@ -420,7 +456,7 @@ async def delete_conversation_thread(
             )
         )
         runtime_tokens: tuple[RuntimeRootLock, ...] = ()
-        if discovered_run_ids:
+        if discovered_run_ids or discovered_deliverable_ids:
             runtime_tokens = await lock_runtime_root_forest(
                 session,
                 run_ids=discovered_run_ids,
@@ -603,7 +639,6 @@ async def delete_conversation_thread(
             await session.scalars(
                 select(Deliverable)
                 .where(deliverable_scope)
-                .with_for_update()
                 .execution_options(populate_existing=True)
             )
         )
@@ -643,7 +678,6 @@ async def delete_conversation_thread(
                 await session.scalars(
                     select(ContentItem)
                     .where(ContentItem.id.in_(scoped_content_ids))
-                    .with_for_update()
                     .execution_options(populate_existing=True)
                 )
             )
@@ -664,6 +698,8 @@ async def delete_conversation_thread(
         _validate_locked_conversation_runtime(
             thread=thread,
             discovered_run_ids=discovered_run_ids,
+            discovered_deliverable_ids=discovered_deliverable_ids,
+            discovered_content_ids=discovered_content_ids,
             tokens=runtime_tokens,
             runs=runs,
             tasks=tasks,

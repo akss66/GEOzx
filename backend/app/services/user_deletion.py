@@ -1016,7 +1016,6 @@ async def _discover_runtime_deletion_footprint(
                 .order_by(ToolExecutionAttempt.id)
             )
         )
-    impacted_deliverable_id_set = set(impacted_deliverable_ids)
     return RuntimeDeletionFootprint(
         run_ids=run_ids,
         skill_ids=skill_ids,
@@ -1025,9 +1024,7 @@ async def _discover_runtime_deletion_footprint(
         invocation_ids=invocation_ids,
         tool_call_ids=tool_ids,
         attempt_ids=attempt_ids,
-        extra_deliverable_ids=tuple(
-            row.id for row in deliverables if row.id in impacted_deliverable_id_set
-        ),
+        extra_deliverable_ids=tuple(sorted(impacted_deliverable_ids)),
     )
 
 

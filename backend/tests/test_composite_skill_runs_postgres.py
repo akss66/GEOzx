@@ -82,6 +82,30 @@ async def _wait_for_advisory_gate(
     raise AssertionError("writer never waited on the Run advisory gate")
 
 
+async def _wait_for_database_lock(
+    sessions, pid: int, *, deadline_seconds: float = 10
+) -> None:
+    """Prove a backend is waiting on a PostgreSQL row/transaction lock."""
+
+    deadline = monotonic() + deadline_seconds
+    async with sessions() as monitor:
+        while monotonic() < deadline:
+            waiting, wait_type = (
+                await monitor.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE pid = :pid AND NOT granted), "
+                        "(SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid)"
+                    ),
+                    {"pid": pid},
+                )
+            ).one()
+            if waiting and wait_type == "Lock":
+                return
+            await asyncio.sleep(0.01)
+    raise AssertionError("writer never waited on a PostgreSQL lock")
+
+
 @pytest.mark.skipif(
     not os.getenv("TEST_POSTGRES_URL"),
     reason="TEST_POSTGRES_URL is required for the first-create gate",
@@ -221,6 +245,177 @@ def test_postgres_first_skill_create_waits_on_run_gate_against_cancel(
                         Event.run_id == ids["run"], Event.type == "turn.cancelled"
                     )
                 ) == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the content/deliverable forest gate",
+)
+def test_postgres_accept_content_lock_and_deletion_forest_do_not_deadlock(
+    monkeypatch,
+) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+
+    async def exercise() -> None:
+        import app.services.artifacts as artifacts_module
+        import app.services.conversations as conversations_module
+
+        engine = create_async_engine(
+            async_url,
+            connect_args={
+                "server_settings": {
+                    "lock_timeout": "5000",
+                    "statement_timeout": "15000",
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with sessions() as setup:
+                from app.models import Org
+
+                org = Org(name=f"content-deliverable-gate-{suffix}")
+                admin = User(
+                    org=org,
+                    email=f"content-deliverable-gate-{suffix}@test.invalid",
+                    hashed_password="unused",
+                    display_name="Content deliverable gate",
+                    role=UserRole.ADMIN,
+                )
+                setup.add(admin)
+                await setup.commit()
+                account, thread, turn, run = await _scope(
+                    setup,
+                    admin,
+                    key=f"content-deliverable-gate-{suffix}",
+                    message="accept while deleting",
+                )
+                run.status = "completed"
+                run.phase = "completed"
+                turn.status = "completed"
+                content = ContentItem(
+                    account_id=account.id,
+                    created_by_id=admin.id,
+                    title="Run-linked extra content",
+                )
+                setup.add(content)
+                await setup.flush()
+                artifact = Deliverable(
+                    content_item_id=content.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    agent_code=AgentCode.CONTENT_DIRECTOR.value,
+                    type=DeliverableType.VIDEO_SCRIPT,
+                    version=1,
+                    status=DeliverableStatus.PENDING_REVIEW,
+                    payload={
+                        "title": "Lock order",
+                        "hook": "Start",
+                        "scenes": ["one", "two", "three"],
+                        "duration_seconds": 30,
+                        "presentation_format": "storyboard",
+                    },
+                )
+                setup.add(artifact)
+                await setup.commit()
+                ids = {
+                    "admin": admin.id,
+                    "thread": thread.id,
+                    "run": run.id,
+                    "content": content.id,
+                    "artifact": artifact.id,
+                }
+
+            accept_holds_content = asyncio.Event()
+            release_accept = asyncio.Event()
+            delete_entered_forest = asyncio.Event()
+            delete_pid = None
+            original_latest = artifacts_module._require_latest_artifact_version
+            original_forest = conversations_module.lock_runtime_root_forest
+
+            async def hold_after_content_lock(*args, **kwargs):
+                version = await original_latest(*args, **kwargs)
+                accept_holds_content.set()
+                await release_accept.wait()
+                return version
+
+            async def observe_delete_forest(*args, **kwargs):
+                nonlocal delete_pid
+                delete_pid = await args[0].scalar(select(func.pg_backend_pid()))
+                delete_entered_forest.set()
+                return await original_forest(*args, **kwargs)
+
+            monkeypatch.setattr(
+                artifacts_module,
+                "_require_latest_artifact_version",
+                hold_after_content_lock,
+            )
+            monkeypatch.setattr(
+                conversations_module,
+                "lock_runtime_root_forest",
+                observe_delete_forest,
+            )
+
+            async def accept_writer():
+                async with sessions() as accept_session:
+                    actor = await accept_session.get(User, ids["admin"])
+                    assert actor is not None
+                    return await accept_artifact(
+                        accept_session,
+                        actor,
+                        artifact_id=ids["artifact"],
+                    )
+
+            async def delete_writer():
+                await accept_holds_content.wait()
+                async with sessions() as delete_session:
+                    actor = await delete_session.get(User, ids["admin"])
+                    assert actor is not None
+                    return await delete_conversation_thread(
+                        delete_session,
+                        actor,
+                        ids["thread"],
+                    )
+
+            accept_task = asyncio.create_task(
+                accept_writer(), name="accept-content-first"
+            )
+            await asyncio.wait_for(accept_holds_content.wait(), timeout=10)
+            delete_task = asyncio.create_task(
+                delete_writer(), name="delete-forest-second"
+            )
+            await asyncio.wait_for(delete_entered_forest.wait(), timeout=10)
+            assert delete_pid is not None
+            await _wait_for_database_lock(sessions, delete_pid)
+            assert not delete_task.done()
+            release_accept.set()
+            accepted, deletion_summary = await asyncio.wait_for(
+                asyncio.gather(accept_task, delete_task), timeout=15
+            )
+            assert accepted.version == 1
+            assert deletion_summary.messages_deleted == 1
+
+            async with sessions() as verify:
+                assert await verify.get(ConversationThread, ids["thread"]) is None
+                assert await verify.get(AgentRun, ids["run"]) is None
+                retained = await verify.get(Deliverable, ids["artifact"])
+                assert retained is not None
+                assert retained.version == 1
+                assert retained.status == DeliverableStatus.APPROVED
+                assert retained.run_id is None
+                assert retained.thread_id is None
+                assert await verify.get(ContentItem, ids["content"]) is not None
         finally:
             await engine.dispose()
 
