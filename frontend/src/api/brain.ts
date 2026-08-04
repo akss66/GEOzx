@@ -8,6 +8,7 @@ import type {
   Artifact,
   ArtifactStatus,
   ConversationThread,
+  ConversationTurnEvent,
   ConversationDeletionSummary,
   ConversationThreadSummary,
   CreateConversationInput,
@@ -21,6 +22,18 @@ import type {
   SendConversationTurnInput,
   TurnSubmission,
 } from "../types";
+
+export async function listConversationEvents(
+  threadId: number,
+  afterId: number,
+  signal?: AbortSignal,
+): Promise<ConversationTurnEvent[]> {
+  const { data } = await api.get<{ data: ConversationTurnEvent[] }>(
+    `/conversation-threads/${threadId}/events`,
+    { params: { after_id: afterId }, signal },
+  );
+  return data.data;
+}
 
 export async function createConversation(
   input: CreateConversationInput,

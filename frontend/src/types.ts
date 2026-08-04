@@ -830,6 +830,19 @@ export interface ConversationThreadSummary {
   updated_at: string;
 }
 
+/** A durable, account-scoped runtime event persisted for a conversation turn. */
+export interface ConversationTurnEvent {
+  id: number;
+  sequence: number;
+  type: string;
+  payload: Record<string, unknown>;
+  thread_id: number;
+  turn_id: number;
+  run_id: number | null;
+  skill_run_id: number | null;
+  created_at: string;
+}
+
 export interface TurnSubmission {
   turn: ConversationTurn;
   run: ConversationAgentRun;

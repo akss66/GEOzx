@@ -16,6 +16,7 @@ import {
   listBrainTasks,
   listComposerSkills,
   listConversations,
+  listConversationEvents,
   listDeliverableAcceptances,
   listPendingToolCallApprovals,
   listTaskInvocations,
@@ -164,6 +165,28 @@ describe("brain api", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     installLocalStorage();
+  });
+
+  it("lists durable conversation events after the supplied recovery cursor", async () => {
+    const signal = new AbortController().signal;
+    const events = [{
+      id: 81,
+      sequence: 2,
+      type: "brain.runtime.message_done",
+      payload: { content: "done" },
+      thread_id: 21,
+      turn_id: 31,
+      run_id: 41,
+      skill_run_id: null,
+      created_at: "2026-08-04T00:00:00Z",
+    }];
+    apiGet.mockResolvedValueOnce({ data: { data: events } });
+
+    await expect(listConversationEvents(21, 80, signal)).resolves.toEqual(events);
+    expect(apiGet).toHaveBeenCalledWith("/conversation-threads/21/events", {
+      params: { after_id: 80 },
+      signal,
+    });
   });
 
   it("calls the account-scoped conversation endpoints with an idempotent turn", async () => {
