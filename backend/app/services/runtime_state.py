@@ -21,6 +21,7 @@ from app.models import (
 )
 from app.models.enums import AgentCode, BrainTaskStatus
 from app.orchestrator.agent_identity import OPERATIONS_BRAIN_DISPLAY_NAME
+from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_observability import apply_turn_closure_metrics
 
 TURN_STATUSES = frozenset(
@@ -55,8 +56,10 @@ SKILL_RUN_STATUSES = frozenset(
 )
 
 ACTIVE_STATUSES = frozenset({"claimed", "waiting_predecessor", "queued", "running", "retry_wait"})
-PAUSED_STATUSES = frozenset({"waiting_permission", "waiting_decision", "waiting_user", "stopped"})
-TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "dead_letter", "cancelled"})
+PAUSED_STATUSES = frozenset({"waiting_permission", "waiting_decision", "waiting_user"})
+TERMINAL_STATUSES = frozenset(
+    {"completed", "blocked", "failed", "dead_letter", "cancelled", "stopped"}
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,8 @@ class RuntimeStateScope:
     """Stable IDs and delivery metadata for one owned runtime scope."""
 
     run_id: int
+    org_id: int | None = None
+    thread_id: int | None = None
     turn_id: int | None = None
     skill_run_id: int | None = None
     task_id: int | None = None
@@ -281,6 +286,31 @@ async def close_runtime_state(
                     if event is not None
                 ),
             )
+            if (
+                effective_status in TERMINAL_STATUSES
+                and scope.org_id is not None
+                and scope.account_id is not None
+                and scope.thread_id is not None
+                and scope.turn_id is not None
+            ):
+                await append_turn_event(
+                    session,
+                    TurnEventScope(
+                        org_id=scope.org_id,
+                        account_id=scope.account_id,
+                        thread_id=scope.thread_id,
+                        turn_id=scope.turn_id,
+                        run_id=run.id,
+                        skill_run_id=(skill_run.id if skill_run is not None else None),
+                    ),
+                    _public_terminal_event_type(effective_status),
+                    {
+                        "status": effective_status,
+                        "message": effective_message,
+                        "error_code": effective_error,
+                    },
+                    "terminal",
+                )
         elif turn is None and effective_status in {
             "failed",
             "dead_letter",
@@ -315,6 +345,18 @@ async def close_runtime_state(
     )
 
 
+def _public_terminal_event_type(status: str) -> str:
+    if status == "completed":
+        return "turn.completed"
+    if status in {"failed", "dead_letter"}:
+        return "turn.failed"
+    if status == "cancelled":
+        return "turn.cancelled"
+    if status == "stopped":
+        return "turn.stopped"
+    return "turn.blocked"
+
+
 def runtime_status_family(status: str) -> str:
     if status in ACTIVE_STATUSES:
         return "active"
@@ -328,11 +370,11 @@ def runtime_status_family(status: str) -> str:
 def brain_task_status(status: str) -> BrainTaskStatus:
     if status in {"claimed", "queued", "running", "retry_wait"}:
         return BrainTaskStatus.RUNNING
-    if status.startswith("waiting_") or status == "stopped":
+    if status.startswith("waiting_"):
         return BrainTaskStatus.PENDING_CONFIRMATION
     if status == "completed":
         return BrainTaskStatus.COMPLETED
-    if status in {"blocked", "failed", "dead_letter", "cancelled"}:
+    if status in {"blocked", "failed", "dead_letter", "cancelled", "stopped"}:
         return BrainTaskStatus.FAILED
     raise ValueError(f"unsupported BrainTask runtime status: {status}")
 
@@ -355,6 +397,10 @@ def _validate_scope(
         run.turn_id != turn.id or run.thread_id != turn.thread_id or run.org_id != turn.org_id
     ):
         raise ValueError("runtime state Turn and AgentRun ownership do not match")
+    if scope.org_id is not None and scope.org_id != run.org_id:
+        raise ValueError("runtime state organization ownership does not match")
+    if scope.thread_id is not None and scope.thread_id != run.thread_id:
+        raise ValueError("runtime state Thread ownership does not match")
     if task is not None and (run.task_id != task.id or run.org_id != task.org_id):
         raise ValueError("runtime state BrainTask and AgentRun ownership do not match")
     if skill_run is not None and (

@@ -9,8 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.runtime_failures import FailureDisposition
-from app.models import BrainTask, Event, OrchestrationPlan, TaskBrief
-from app.models.enums import BrainTaskStatus, BrainTaskType
+from app.models import (
+    Account,
+    BrainTask,
+    ConversationThread,
+    ConversationTurn,
+    Event,
+    OrchestrationPlan,
+    TaskBrief,
+)
+from app.models.enums import AccountStatus, BrainTaskStatus, BrainTaskType, Platform
 from app.orchestrator.agent_harness import AgentHarnessError
 from app.schemas.brain import IntentDecision
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
@@ -27,6 +35,45 @@ from app.services.agent_runs import (
     utc_now,
 )
 from app.worker import execute_agent_run, recover_agent_runs
+
+
+async def _turn_owned_run(session, admin, *, key: str):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname=f"account-{key}",
+        status=AccountStatus.ACTIVE,
+        auth={"auth_status": "manual"},
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title=key,
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=key,
+        user_input=key,
+    )
+    session.add(turn)
+    await session.commit()
+    run, _ = await claim_agent_run(
+        session,
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        client_message_id=key,
+        request_payload={"message": key, "account_id": account.id},
+        thread_id=thread.id,
+        turn_id=turn.id,
+    )
+    return account, thread, turn, run
 
 
 @pytest.mark.asyncio
@@ -164,6 +211,38 @@ async def test_agent_run_failure_retries_then_moves_to_dead_letter(session, admi
 
 
 @pytest.mark.asyncio
+async def test_turn_owned_retry_exhaustion_projects_public_terminal_event(
+    session,
+    admin,
+) -> None:
+    _account, _thread, turn, run = await _turn_owned_run(
+        session, admin, key="turn-owned-retry-exhaustion"
+    )
+    run.max_attempts = 1
+    await mark_agent_run_queued(session, run.id, task_id=None)
+    await acquire_agent_run(session, run.id, worker_id="worker-a", lease_seconds=60)
+
+    retryable, retry_delay = await release_agent_run_failure(
+        session,
+        run.id,
+        disposition=FailureDisposition.RETRYABLE,
+        error_code="TemporaryFailure",
+        error_detail="retry budget exhausted",
+    )
+
+    assert (retryable, retry_delay) == (False, 0)
+    terminal_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == turn.id,
+                Event.type.in_({"turn.failed", "turn.cancelled", "turn.completed"}),
+            )
+        )
+    )
+    assert [event.type for event in terminal_events] == ["turn.failed"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_failure_finalization_is_idempotent_and_closes_task(
     session, admin
 ) -> None:
@@ -248,6 +327,33 @@ async def test_cancel_requested_run_is_not_acquired(session, admin) -> None:
     assert acquired is None
     assert run.status == "cancelled"
     assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_turn_owned_cancel_projects_public_terminal_event(session, admin) -> None:
+    _account, _thread, turn, run = await _turn_owned_run(
+        session, admin, key="turn-owned-cancel"
+    )
+    await mark_agent_run_queued(session, run.id, task_id=None)
+    await request_agent_run_cancel(session, run.id)
+
+    acquired = await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="worker-a",
+        lease_seconds=60,
+    )
+
+    assert acquired is None
+    terminal_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == turn.id,
+                Event.type.in_({"turn.failed", "turn.cancelled", "turn.completed"}),
+            )
+        )
+    )
+    assert [event.type for event in terminal_events] == ["turn.cancelled"]
 
 
 @pytest.mark.asyncio

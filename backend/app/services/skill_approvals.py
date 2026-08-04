@@ -108,6 +108,8 @@ async def finalize_skill_finish_approval(
         session,
         scope=RuntimeStateScope(
             run_id=run.id,
+            org_id=task.org_id,
+            thread_id=thread.id,
             turn_id=turn.id,
             skill_run_id=skill_run.id,
             task_id=task.id,

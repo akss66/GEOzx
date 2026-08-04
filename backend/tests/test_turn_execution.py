@@ -25,6 +25,7 @@ from app.models import (
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, Platform
 from app.orchestrator.brain_runtime import runtime_graph
+from app.orchestrator.skill_runtime import SkillRuntime
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.attachment import AttachmentContext
 from app.schemas.conversation import (
@@ -34,6 +35,7 @@ from app.schemas.conversation import (
     TurnRouteDecision,
 )
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_execution import execute_conversation_turn
 
 
@@ -107,6 +109,582 @@ async def _four_ledger_context(session, admin, *, key: str):
     session.add(skill_run)
     await session.commit()
     return account, thread, turn, run, task, skill_run
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_persists_ordered_public_turn_progress(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    from tests.test_account_inspection_skill import (
+        _FakeHarness,
+        _FakeTools,
+        _PassingCritic,
+    )
+
+    account, thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="durable-account-inspection-progress",
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime",
+        SkillRuntime(
+            tool_executor=_FakeTools(sufficient=True),
+            harness=_FakeHarness(),
+            critic=_PassingCritic(),
+        ),
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "durable-account-inspection-progress",
+            requested_skill_code="account_inspection",
+        ),
+    )
+
+    reliable_types = {
+        "turn.received",
+        "step.started",
+        "step.completed",
+        "step.failed",
+        "deliverable.updated",
+        "turn.completed",
+        "turn.failed",
+        "turn.blocked",
+        "turn.cancelled",
+        "turn.stopped",
+    }
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == turn.id, Event.type.in_(reliable_types))
+            .order_by(Event.sequence)
+        )
+    )
+
+    assert result.status == "completed"
+    assert [(event.type, event.payload.get("step")) for event in events] == [
+        ("turn.received", None),
+        ("step.started", "read_data"),
+        ("step.completed", "read_data"),
+        ("step.started", "specialist_work"),
+        ("step.completed", "specialist_work"),
+        ("step.started", "quality_review"),
+        ("step.completed", "quality_review"),
+        ("step.started", "prepare_deliverable"),
+        ("deliverable.updated", None),
+        ("step.completed", "prepare_deliverable"),
+        ("turn.completed", None),
+    ]
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert {
+        (event.org_id, event.account_id, event.thread_id, event.turn_id, event.run_id)
+        for event in events
+    } == {(admin.org_id, account.id, thread.id, turn.id, run.id)}
+
+    skill_run = await session.scalar(select(SkillRun).where(SkillRun.run_id == run.id))
+    deliverable = await session.get(Deliverable, result.projections[0]["artifact_id"])
+    assert skill_run is not None
+    assert deliverable is not None
+    assert events[0].skill_run_id is None
+    assert {event.skill_run_id for event in events[1:]} == {skill_run.id}
+    deliverable_event = next(
+        event for event in events if event.type == "deliverable.updated"
+    )
+    assert deliverable_event.payload == {
+        "deliverable_id": deliverable.id,
+        "deliverable_type": deliverable.type.value,
+        "version": deliverable.version,
+        "status": deliverable.status.value,
+    }
+
+    repeated = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "durable-account-inspection-progress",
+            requested_skill_code="account_inspection",
+        ),
+    )
+    repeated_events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == turn.id, Event.type.in_(reliable_types))
+            .order_by(Event.sequence)
+        )
+    )
+    assert repeated == result
+    assert [event.id for event in repeated_events] == [event.id for event in events]
+
+
+@pytest.mark.asyncio
+async def test_terminal_turn_event_is_first_writer_wins_across_terminal_types(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="durable-terminal-first-wins",
+    )
+    scope = TurnEventScope(
+        org_id=admin.org_id,
+        account_id=account.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+    )
+
+    completed = await append_turn_event(
+        session,
+        scope,
+        "turn.completed",
+        {"status": "completed"},
+        "terminal",
+    )
+    late_failure = await append_turn_event(
+        session,
+        scope,
+        "turn.failed",
+        {"status": "failed"},
+        "terminal",
+    )
+
+    assert late_failure.id == completed.id
+    assert late_failure.type == "turn.completed"
+    with pytest.raises(ValueError, match="reserved for terminal events"):
+        await append_turn_event(
+            session,
+            scope,
+            "step.started",
+            {"step": "read_data"},
+            "terminal",
+        )
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_first_writer_wins_across_skill_attribution(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run, _task, skill_run = await _four_ledger_context(
+        session,
+        admin,
+        key="terminal-skill-attribution",
+    )
+    skill_scope = TurnEventScope(
+        org_id=admin.org_id,
+        account_id=account.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+    )
+
+    completed = await append_turn_event(
+        session,
+        skill_scope,
+        "turn.completed",
+        {"status": "completed"},
+        "terminal",
+    )
+    late_failure = await append_turn_event(
+        session,
+        replace(skill_scope, skill_run_id=None),
+        "turn.failed",
+        {"status": "failed"},
+        "terminal",
+    )
+
+    assert late_failure.id == completed.id
+    assert late_failure.type == "turn.completed"
+    assert late_failure.skill_run_id == skill_run.id
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "turn.completed",
+                        "turn.failed",
+                        "turn.blocked",
+                        "turn.cancelled",
+                        "turn.stopped",
+                    }
+                ),
+            )
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_logical_key_is_reserved_for_terminal_events(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _turn_context(
+        session, admin, key="terminal-key-reserved"
+    )
+
+    with pytest.raises(ValueError, match="reserved for terminal events"):
+        await append_turn_event(
+            session,
+            TurnEventScope(
+                org_id=admin.org_id,
+                account_id=account.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                run_id=run.id,
+            ),
+            "step.started",
+            {"step": "read_data"},
+            "terminal",
+        )
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_events_do_not_replay_across_skill_attribution(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run, _task, skill_run = await _four_ledger_context(
+        session, admin, key="nonterminal-skill-scope"
+    )
+    skill_scope = TurnEventScope(
+        org_id=admin.org_id,
+        account_id=account.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        skill_run_id=skill_run.id,
+    )
+
+    skill_event = await append_turn_event(
+        session,
+        skill_scope,
+        "step.started",
+        {"step": "read_data"},
+        "step:read_data:attempt:1:started",
+    )
+    run_event = await append_turn_event(
+        session,
+        replace(skill_scope, skill_run_id=None),
+        "step.started",
+        {"step": "read_data"},
+        "step:read_data:attempt:1:started",
+    )
+
+    assert skill_event.id != run_event.id
+    assert skill_event.skill_run_id == skill_run.id
+    assert run_event.skill_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_failure_preserves_started_checkpoint_and_fails_step(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    from tests.test_account_inspection_skill import _FakeHarness, _PassingCritic
+
+    class FailingReadTools:
+        async def execute(self, **_kwargs):
+            raise ValueError("read boundary failed")
+
+    account, thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="durable-account-inspection-failure",
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime",
+        SkillRuntime(
+            tool_executor=FailingReadTools(),
+            harness=_FakeHarness(),
+            critic=_PassingCritic(),
+        ),
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "durable-account-inspection-failure",
+            requested_skill_code="account_inspection",
+        ),
+    )
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "turn.received",
+                        "step.started",
+                        "step.completed",
+                        "step.failed",
+                        "deliverable.updated",
+                        "turn.failed",
+                    }
+                ),
+            )
+            .order_by(Event.sequence)
+        )
+    )
+
+    assert result.status == "failed"
+    assert [(event.type, event.payload.get("step")) for event in events] == [
+        ("turn.received", None),
+        ("step.started", "read_data"),
+        ("step.failed", "read_data"),
+        ("turn.failed", None),
+    ]
+    assert [event.sequence for event in events] == [1, 2, 3, 4]
+    assert {event.account_id for event in events} == {account.id}
+    assert {event.thread_id for event in events} == {thread.id}
+    assert not any(event.type == "step.completed" for event in events)
+    assert not any(event.type == "deliverable.updated" for event in events)
+
+
+@pytest.mark.parametrize(
+    "failed_stage",
+    ["specialist_work", "quality_review", "prepare_deliverable"],
+)
+@pytest.mark.asyncio
+async def test_account_inspection_records_the_actual_failed_stage(
+    session,
+    admin,
+    monkeypatch,
+    failed_stage,
+) -> None:
+    from tests.test_account_inspection_skill import (
+        _FakeHarness,
+        _FakeTools,
+        _PassingCritic,
+    )
+
+    class FailingHarness(_FakeHarness):
+        async def execute(self, *args, **kwargs):
+            raise ValueError("specialist boundary failed")
+
+    class FailingCritic:
+        async def review(self, **_kwargs):
+            raise ValueError("quality boundary failed")
+
+    account, _thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key=f"durable-{failed_stage}-failure",
+    )
+    runtime = SkillRuntime(
+        tool_executor=_FakeTools(sufficient=True),
+        harness=(FailingHarness() if failed_stage == "specialist_work" else _FakeHarness()),
+        critic=(FailingCritic() if failed_stage == "quality_review" else _PassingCritic()),
+    )
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime", runtime)
+    if failed_stage == "prepare_deliverable":
+
+        async def fail_deliverable(*_args, **_kwargs):
+            raise ValueError("deliverable boundary failed")
+
+        monkeypatch.setattr(
+            "app.orchestrator.skill_runtime.write_runtime_deliverable",
+            fail_deliverable,
+        )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            f"durable-{failed_stage}-failure",
+            requested_skill_code="account_inspection",
+        ),
+    )
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "step.started",
+                        "step.completed",
+                        "step.failed",
+                        "deliverable.updated",
+                        "turn.failed",
+                    }
+                ),
+            )
+            .order_by(Event.sequence)
+        )
+    )
+    failed_events = [event for event in events if event.type == "step.failed"]
+
+    assert result.status == "failed"
+    assert len(failed_events) == 1
+    assert failed_events[0].payload["step"] == failed_stage
+    assert failed_events[0].payload["metadata"] == {"attempt": 1}
+    assert not any(
+        event.type == "step.completed" and event.payload.get("step") == failed_stage
+        for event in events
+    )
+    assert sum(event.type == "turn.failed" for event in events) == 1
+    assert not any(event.type == "deliverable.updated" for event in events)
+    assert {event.account_id for event in events} == {account.id}
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_commit_failure_is_attributed_to_quality_stage(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    from tests.test_account_inspection_skill import _FakeHarness, _FakeTools, _PassingCritic
+
+    class CommitFailingCritic(_PassingCritic):
+        async def review(self, **kwargs):
+            result = await super().review(**kwargs)
+            runtime_session = kwargs["session"]
+            real_commit = runtime_session.commit
+
+            async def fail_once():
+                runtime_session.commit = real_commit
+                raise RuntimeError("quality checkpoint commit failed")
+
+            runtime_session.commit = fail_once
+            return result
+
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="quality-checkpoint-commit-failure"
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime",
+        SkillRuntime(
+            tool_executor=_FakeTools(sufficient=True),
+            harness=_FakeHarness(),
+            critic=CommitFailingCritic(),
+        ),
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "quality-checkpoint-commit-failure",
+            requested_skill_code="account_inspection",
+        ),
+    )
+    failed_steps = list(
+        await session.scalars(
+            select(Event).where(Event.turn_id == turn.id, Event.type == "step.failed")
+        )
+    )
+
+    assert result.status == "failed"
+    assert [(event.payload["step"], event.payload["metadata"]) for event in failed_steps] == [
+        ("quality_review", {"attempt": 1})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completed_stage_is_not_released_when_checkpoint_commit_fails(
+    monkeypatch,
+) -> None:
+    from app.orchestrator import skill_runtime as skill_runtime_module
+
+    class FailingSession:
+        async def commit(self):
+            raise RuntimeError("checkpoint commit failed")
+
+    async def append_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(skill_runtime_module, "_append_skill_step_event", append_noop)
+    token = skill_runtime_module._ACTIVE_SKILL_STAGES.set((("quality_review", 1),))
+    try:
+        with pytest.raises(RuntimeError, match="checkpoint commit failed"):
+            await skill_runtime_module._complete_skill_stage(
+                FailingSession(),
+                scope=object(),
+                step_code="quality_review",
+                attempt=1,
+                commit=True,
+            )
+        assert skill_runtime_module._ACTIVE_SKILL_STAGES.get() == (
+            ("quality_review", 1),
+        )
+    finally:
+        skill_runtime_module._ACTIVE_SKILL_STAGES.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_close_failure_is_attributed_to_deferred_stage(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    from app.orchestrator import skill_runtime as skill_runtime_module
+    from tests.test_account_inspection_skill import _FakeHarness, _FakeTools, _PassingCritic
+
+    real_close = skill_runtime_module.close_runtime_state
+    failed = False
+
+    async def fail_completed_close_once(*args, **kwargs):
+        nonlocal failed
+        if kwargs["status"] == "completed" and not failed:
+            failed = True
+            raise RuntimeError("owning closure failed")
+        return await real_close(*args, **kwargs)
+
+    monkeypatch.setattr(skill_runtime_module, "close_runtime_state", fail_completed_close_once)
+    _account, _thread, turn, run = await _turn_context(
+        session, admin, key="prepare-deferred-close-failure"
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime",
+        SkillRuntime(
+            tool_executor=_FakeTools(sufficient=True),
+            harness=_FakeHarness(),
+            critic=_PassingCritic(),
+        ),
+    )
+
+    result = await execute_conversation_turn(
+        session,
+        admin,
+        turn,
+        run,
+        _request(
+            "prepare-deferred-close-failure",
+            requested_skill_code="account_inspection",
+        ),
+    )
+    failed_steps = list(
+        await session.scalars(
+            select(Event).where(Event.turn_id == turn.id, Event.type == "step.failed")
+        )
+    )
+
+    assert result.status == "failed"
+    assert [(event.payload["step"], event.payload["metadata"]) for event in failed_steps] == [
+        ("prepare_deliverable", {"attempt": 1})
+    ]
 
 
 @pytest.mark.asyncio
@@ -487,6 +1065,73 @@ async def test_close_runtime_state_first_terminal_preserves_skill_snapshot_on_re
 
 
 @pytest.mark.asyncio
+async def test_close_runtime_state_stopped_is_terminal_and_first_writer_wins(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run, task, skill_run = await _four_ledger_context(
+        session, admin, key="state-stopped-first-wins"
+    )
+    scope_values = {
+        "run_id": run.id,
+        "org_id": admin.org_id,
+        "thread_id": thread.id,
+        "turn_id": turn.id,
+        "skill_run_id": skill_run.id,
+        "task_id": task.id,
+        "account_id": account.id,
+    }
+
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "stopped", "reason": "ambiguous side effect"},
+        ),
+        status="stopped",
+        message="Execution stopped for manual reconciliation.",
+        error_code="SIDE_EFFECT_AMBIGUOUS",
+    )
+    await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            **scope_values,
+            result_payload={"status": "completed"},
+        ),
+        status="completed",
+        message="Late completion must not overwrite stopped.",
+    )
+
+    await session.refresh(turn)
+    await session.refresh(run)
+    await session.refresh(skill_run)
+    await session.refresh(task)
+    assert (turn.status, run.status, skill_run.status, task.status) == (
+        "stopped",
+        "stopped",
+        "stopped",
+        BrainTaskStatus.FAILED,
+    )
+    terminal_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "turn.completed",
+                        "turn.failed",
+                        "turn.blocked",
+                        "turn.cancelled",
+                        "turn.stopped",
+                    }
+                ),
+            )
+        )
+    )
+    assert [event.type for event in terminal_events] == ["turn.stopped"]
+
+
+@pytest.mark.asyncio
 async def test_close_runtime_state_rejects_cross_scope_without_partial_commit(
     session,
     admin,
@@ -834,6 +1479,15 @@ async def test_answer_turn_streams_provider_deltas_before_persisting_final_turn(
     assert published[0][0] == "brain.runtime.message_start"
     assert published[-2][0] == "brain.runtime.message_done"
     assert published[-1][0] == "brain.runtime.completed"
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.turn_id == turn.id,
+                Event.type == "brain.runtime.message_delta",
+            )
+        )
+        == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -1650,7 +2304,7 @@ async def test_operation_runtime_state_is_persisted_without_reexecution(
     assert run.status == expected_run_status
     assert starts == 1
     assert task is not None
-    if runtime_state == "failed":
+    if runtime_state in {"failed", "stopped"}:
         assert task.status == BrainTaskStatus.FAILED
     else:
         assert task.status == BrainTaskStatus.PENDING_CONFIRMATION

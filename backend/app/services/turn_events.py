@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -108,6 +108,15 @@ PUBLIC_EVENT_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "step.failed": _STEP_FIELDS,
     "deliverable.updated": _DELIVERABLE_FIELDS,
 }
+_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        "turn.completed",
+        "turn.failed",
+        "turn.blocked",
+        "turn.cancelled",
+        "turn.stopped",
+    }
+)
 
 @dataclass(frozen=True)
 class TurnEventScope:
@@ -131,12 +140,23 @@ async def append_turn_event(
     public_payload = _public_payload(event_type, payload)
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise ValueError("turn event idempotency key must not be empty")
+    if idempotency_key == "terminal" and event_type not in _TERMINAL_EVENT_TYPES:
+        raise ValueError("turn event idempotency key 'terminal' is reserved for terminal events")
 
+    allow_terminal_replay = (
+        idempotency_key == "terminal" and event_type in _TERMINAL_EVENT_TYPES
+    )
     turn = await _validate_scope(session, scope, lock_turn=True)
-    database_key = turn_event_idempotency_key(scope, idempotency_key)
+    key_scope = replace(scope, skill_run_id=None) if allow_terminal_replay else scope
+    database_key = turn_event_idempotency_key(key_scope, idempotency_key)
     existing = await _find_by_idempotency_key(session, database_key)
     if existing is not None:
-        _require_matching_event(existing, scope, event_type)
+        _require_matching_event(
+            existing,
+            scope,
+            event_type,
+            allow_terminal_replay=allow_terminal_replay,
+        )
         return existing
 
     # Python's sqlite3 legacy transaction mode does not start a physical
@@ -171,7 +191,12 @@ async def append_turn_event(
             await session.flush()
     except IntegrityError:
         existing = await _find_by_idempotency_key(session, database_key)
-        if existing is None or not _event_matches(existing, scope, event_type):
+        if existing is None or not _event_matches(
+            existing,
+            scope,
+            event_type,
+            allow_terminal_replay=allow_terminal_replay,
+        ):
             raise
         return existing
     return event
@@ -282,20 +307,44 @@ def _require_matching_event(
     event: Event,
     scope: TurnEventScope,
     event_type: str,
+    *,
+    allow_terminal_replay: bool,
 ) -> None:
-    if not _event_matches(event, scope, event_type):
+    if not _event_matches(
+        event,
+        scope,
+        event_type,
+        allow_terminal_replay=allow_terminal_replay,
+    ):
         raise ValueError("turn event idempotency key conflicts with another event")
 
 
-def _event_matches(event: Event, scope: TurnEventScope, event_type: str) -> bool:
+def _event_matches(
+    event: Event,
+    scope: TurnEventScope,
+    event_type: str,
+    *,
+    allow_terminal_replay: bool,
+) -> bool:
     return (
-        event.type == event_type
+        (
+            event.type == event_type
+            or (
+                allow_terminal_replay
+                and
+                event.type in _TERMINAL_EVENT_TYPES
+                and event_type in _TERMINAL_EVENT_TYPES
+            )
+        )
         and event.org_id == scope.org_id
         and event.account_id == scope.account_id
         and event.thread_id == scope.thread_id
         and event.turn_id == scope.turn_id
         and event.run_id == scope.run_id
-        and event.skill_run_id == scope.skill_run_id
+        and (
+            allow_terminal_replay
+            or event.skill_run_id == scope.skill_run_id
+        )
     )
 
 

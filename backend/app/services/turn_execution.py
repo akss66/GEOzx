@@ -58,6 +58,7 @@ from app.services.runtime_state import (
     RuntimeStateScope,
     close_runtime_state,
 )
+from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_observability import (
     TurnObservabilityScope,
     bind_turn_observability,
@@ -179,6 +180,25 @@ async def _execute_conversation_turn(
             item.model_dump(mode="json") for item in capability_request.attachment_contexts
         ],
     }
+    await append_turn_event(
+        session,
+        TurnEventScope(
+            org_id=user.org_id,
+            account_id=account.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+        ),
+        "turn.received",
+        {
+            "client_message_id": run.client_message_id,
+            "status": "received",
+        },
+        "received",
+    )
+    # This is the public receipt checkpoint for a real persisted Turn. Commit it
+    # before routing or external execution so a retry can resume from it.
+    await session.commit()
     try:
         decision = (
             _route_persisted_skill_run(resume_skill_run)
@@ -415,6 +435,8 @@ async def _execute_composite_skill(
         session,
         scope=RuntimeStateScope(
             run_id=run.id,
+            org_id=turn.org_id,
+            thread_id=turn.thread_id,
             turn_id=turn.id,
             skill_run_id=(persisted_skill_run.id if persisted_skill_run is not None else None),
             task_id=task.id,
@@ -675,6 +697,8 @@ async def _deliver_task_free(
         session,
         scope=RuntimeStateScope(
             run_id=run.id,
+            org_id=turn.org_id,
+            thread_id=turn.thread_id,
             turn_id=turn.id,
             skill_run_id=skill_run_id,
             account_id=account_id,
@@ -1184,6 +1208,8 @@ async def _close_operation_state(
         session,
         scope=RuntimeStateScope(
             run_id=run.id,
+            org_id=turn.org_id,
+            thread_id=turn.thread_id,
             turn_id=turn.id,
             task_id=task.id,
             account_id=account_id,

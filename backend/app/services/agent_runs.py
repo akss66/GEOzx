@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition
-from app.models import AgentRun, BrainTask, SkillRun
+from app.models import AgentRun, BrainTask, ConversationThread, SkillRun
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 ACTIVE_TASK_RUN_STATUSES = {
@@ -526,16 +526,24 @@ async def _runtime_state_scope(
     skill_run_id = await session.scalar(
         select(SkillRun.id).where(SkillRun.run_id == run.id).order_by(SkillRun.id.desc()).limit(1)
     )
-    request_payload = dict(run.request_payload or {})
-    account_id = request_payload.get("account_id")
-    project_id = request_payload.get("project_id")
+    thread = (
+        await session.get(ConversationThread, run.thread_id)
+        if run.thread_id is not None
+        else None
+    )
+    if run.thread_id is not None and thread is None:
+        raise ValueError("AgentRun ConversationThread ownership is missing")
+    if thread is not None and thread.org_id != run.org_id:
+        raise ValueError("AgentRun ConversationThread ownership does not match")
     return RuntimeStateScope(
         run_id=run.id,
+        org_id=run.org_id,
+        thread_id=run.thread_id,
         turn_id=run.turn_id,
         skill_run_id=skill_run_id,
         task_id=run.task_id,
-        account_id=account_id if isinstance(account_id, int) else None,
-        project_id=project_id if isinstance(project_id, int) else None,
+        account_id=thread.account_id if thread is not None else None,
+        project_id=thread.project_id if thread is not None else None,
         result_payload=result_payload,
         error_detail=error_detail,
     )

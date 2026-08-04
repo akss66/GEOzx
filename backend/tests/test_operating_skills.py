@@ -14,19 +14,26 @@ from app.models import (
     AgentRun,
     AgentToolCall,
     BrainTask,
+    ContentItem,
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    Event,
     SkillRun,
 )
 from app.models.enums import (
     AccountStatus,
     AgentCode,
     AgentInvocationStatus,
+    BrainTaskStatus,
+    ContentStage,
+    ContentStatus,
     DeliverableStatus,
+    DeliverableType,
     Platform,
     UserRole,
 )
+from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.skill_runtime import (
     SkillRecoveryConflict,
     SkillRuntime,
@@ -34,6 +41,7 @@ from app.orchestrator.skill_runtime import (
 )
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.capability_request import CapabilityRequest
+from app.services.runtime_deliverables import write_runtime_deliverable
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
@@ -351,6 +359,326 @@ async def test_operating_skill_executes_bounded_experts_and_persists_artifact(
 
 
 @pytest.mark.asyncio
+async def test_generic_operating_skill_persists_real_execution_boundaries(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="generic-durable-boundaries",
+        message="复盘最近30天的账号表现",
+    )
+
+    result = await SkillRuntime(tool_executor=_Tools(), harness=_Harness()).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="performance_review",
+    )
+    reliable_types = {
+        "step.started",
+        "step.completed",
+        "step.failed",
+        "deliverable.updated",
+        "turn.completed",
+        "turn.failed",
+    }
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == turn.id, Event.type.in_(reliable_types))
+            .order_by(Event.sequence)
+        )
+    )
+
+    assert result.status == "completed"
+    assert [(event.type, event.payload.get("step")) for event in events] == [
+        ("step.started", "read_data"),
+        ("step.completed", "read_data"),
+        ("step.started", "specialist_work"),
+        ("step.completed", "specialist_work"),
+        ("step.started", "prepare_deliverable"),
+        ("deliverable.updated", None),
+        ("step.completed", "prepare_deliverable"),
+        ("turn.completed", None),
+    ]
+    assert [event.sequence for event in events] == list(range(1, 9))
+    assert {
+        (event.org_id, event.account_id, event.thread_id, event.turn_id, event.run_id)
+        for event in events
+    } == {(admin.org_id, account.id, thread.id, turn.id, run.id)}
+    assert {event.skill_run_id for event in events} == {result.skill_run_id}
+
+
+@pytest.mark.asyncio
+async def test_deliverable_and_updated_event_rollback_together(session, admin) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="deliverable-event-rollback",
+        message="生成报告",
+    )
+    content = ContentItem(
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="rollback report",
+        current_stage=ContentStage.OPERATION,
+        status=ContentStatus.IN_PROGRESS,
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="rollback task",
+        status=BrainTaskStatus.RUNNING,
+        progress=0,
+        current_focus="running",
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="skill:rollback",
+        skill_code="performance_review",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(skill_run)
+    await session.commit()
+    scope = await RuntimeScope.from_conversation(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+    )
+    scope = await scope.bind_task(session, task)
+    scope = await scope.bind_skill(session, skill_run)
+
+    deliverable = await write_runtime_deliverable(
+        session,
+        scope=scope,
+        content=content,
+        agent_code="06-operator",
+        deliverable_type=DeliverableType.REVIEW_REPORT,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "pending transaction"},
+    )
+    deliverable_id = deliverable.id
+    durable_event = await session.scalar(
+        select(Event).where(
+            Event.turn_id == turn.id,
+            Event.type == "deliverable.updated",
+        )
+    )
+    assert durable_event is not None
+    durable_event_id = durable_event.id
+
+    await session.rollback()
+
+    assert await session.get(Deliverable, deliverable_id) is None
+    assert await session.get(Event, durable_event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_stage_context_does_not_leak_into_next_execution(
+    session,
+    admin,
+) -> None:
+    class PausingTools:
+        async def execute(self, **_kwargs):
+            return SimpleNamespace(status="failed", result=None, tool_call=None)
+
+    _first_account, first_thread, first_turn, first_run = await _scope(
+        session,
+        admin,
+        key="stage-context-first",
+        message="先失败",
+    )
+    first = await SkillRuntime(
+        tool_executor=PausingTools(),
+        harness=_Harness(),
+    ).execute(
+        session,
+        user=admin,
+        thread=first_thread,
+        turn=first_turn,
+        run=first_run,
+        skill_code="performance_review",
+    )
+    _second_account, second_thread, second_turn, second_run = await _scope(
+        session,
+        admin,
+        key="stage-context-second",
+        message="再成功",
+    )
+    second = await SkillRuntime(
+        tool_executor=_Tools(),
+        harness=_Harness(),
+    ).execute(
+        session,
+        user=admin,
+        thread=second_thread,
+        turn=second_turn,
+        run=second_run,
+        skill_code="performance_review",
+    )
+    leaked_failures = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == second_turn.id,
+                Event.type == "step.failed",
+            )
+        )
+    )
+
+    assert first.status == "failed"
+    assert second.status == "completed"
+    assert leaked_failures == []
+
+
+@pytest.mark.asyncio
+async def test_content_publishing_persists_only_its_real_publish_stage(
+    session,
+    admin,
+) -> None:
+    from tests.test_content_publishing_skill import _PublishingTools
+    from tests.test_visual_brief_skill import _source
+
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="durable-content-publishing",
+        message="发布这个内容",
+    )
+    source = await _source(
+        session,
+        account_id=account.id,
+        created_by_id=admin.id,
+        status=DeliverableStatus.APPROVED,
+    )
+    result = await SkillRuntime(tool_executor=_PublishingTools()).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="content_publishing",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="content_publishing",
+            structured_input={"approved_publish_artifact_id": source.id},
+        ),
+    )
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "step.started",
+                        "step.completed",
+                        "step.failed",
+                        "turn.completed",
+                    }
+                ),
+            )
+            .order_by(Event.sequence)
+        )
+    )
+
+    assert result.status == "completed"
+    assert [(event.type, event.payload.get("step")) for event in events] == [
+        ("step.started", "publish_content"),
+        ("step.completed", "publish_content"),
+        ("turn.completed", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_operation_iteration_persists_deterministic_plan_boundary(
+    session,
+    admin,
+) -> None:
+    from tests.test_operation_iteration_skill import _artifact
+
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="durable-operation-iteration",
+        message="根据复盘安排下周运营",
+    )
+    review = await _artifact(
+        session,
+        admin,
+        account,
+        kind=DeliverableType.REVIEW_REPORT,
+        status=DeliverableStatus.APPROVED,
+    )
+    result = await SkillRuntime().execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={"confirmed_review_artifact_id": review.id, "cycle_days": 7},
+        ),
+    )
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "step.started",
+                        "step.completed",
+                        "step.failed",
+                        "deliverable.updated",
+                        "turn.completed",
+                    }
+                ),
+            )
+            .order_by(Event.sequence)
+        )
+    )
+
+    assert result.status == "completed"
+    assert [(event.type, event.payload.get("step")) for event in events] == [
+        ("step.started", "prepare_deliverable"),
+        ("deliverable.updated", None),
+        ("step.completed", "prepare_deliverable"),
+        ("turn.completed", None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_topic_skill_honors_structured_days_and_topic_count(session, admin) -> None:
     account, thread, turn, run = await _scope(
         session,
@@ -520,6 +848,23 @@ async def test_publishing_preparation_executes_declared_prepare_tool(session, ad
     await session.refresh(turn)
     assert run.status == "waiting_permission"
     assert turn.status == "waiting_permission"
+    assert (
+        await session.scalar(
+            select(func.count(Event.id)).where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "turn.completed",
+                        "turn.failed",
+                        "turn.blocked",
+                        "turn.cancelled",
+                        "turn.stopped",
+                    }
+                ),
+            )
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize(
@@ -588,3 +933,22 @@ async def test_publishing_finish_approval_converges_typed_skill_without_legacy_r
     assert turn.status == expected_runtime_status
     assert skill_run.status == expected_runtime_status
     assert deliverable.status is expected_deliverable_status
+    terminal_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == turn.id,
+                Event.type.in_(
+                    {
+                        "turn.completed",
+                        "turn.failed",
+                        "turn.blocked",
+                        "turn.cancelled",
+                        "turn.stopped",
+                    }
+                ),
+            )
+        )
+    )
+    assert [event.type for event in terminal_events] == [
+        "turn.completed" if approved else "turn.blocked"
+    ]

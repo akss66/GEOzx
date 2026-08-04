@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -79,11 +80,125 @@ from app.schemas.skills import SkillDefinition
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 from app.services.runtime_deliverables import write_runtime_deliverable
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.turn_events import TurnEventScope, append_turn_event
 
 _ACCOUNT_INSPECTION = "account_inspection"
 _MAX_CRITIC_IMPROVEMENTS = 2
 DataSufficiency = Literal["insufficient", "partial", "sufficient"]
 log = logging.getLogger("dyflow.skill_runtime")
+_ACTIVE_SKILL_STAGES: ContextVar[tuple[tuple[str, int], ...]] = ContextVar(
+    "active_skill_stages",
+    default=(),
+)
+
+
+class _SkillStageFailure(Exception):
+    def __init__(self, step_code: str, attempt: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.step_code = step_code
+        self.attempt = attempt
+        self.cause = cause
+
+
+async def _append_skill_step_event(
+    session: AsyncSession,
+    *,
+    scope: RuntimeScope,
+    step_code: str,
+    attempt: int,
+    state: str,
+    error_code: str | None = None,
+) -> None:
+    payload: dict[str, object] = {
+        "step": step_code,
+        "step_id": f"{step_code}:attempt:{attempt}",
+        "status": state,
+        "metadata": {"attempt": attempt},
+    }
+    if error_code is not None:
+        payload["error_code"] = error_code
+    await append_turn_event(
+        session,
+        TurnEventScope(
+            org_id=scope.org_id,
+            account_id=scope.account_id,
+            thread_id=scope.thread_id,
+            turn_id=scope.turn_id,
+            run_id=scope.run_id,
+            skill_run_id=scope.skill_run_id,
+        ),
+        f"step.{state}",
+        payload,
+        f"step:{step_code}:attempt:{attempt}:{state}",
+    )
+
+
+async def _start_skill_stage(
+    session: AsyncSession,
+    *,
+    scope: RuntimeScope,
+    step_code: str,
+    attempt: int,
+) -> None:
+    await _append_skill_step_event(
+        session,
+        scope=scope,
+        step_code=step_code,
+        attempt=attempt,
+        state="started",
+    )
+    await session.commit()
+    _ACTIVE_SKILL_STAGES.set(
+        (*_ACTIVE_SKILL_STAGES.get(), (step_code, attempt))
+    )
+
+
+async def _complete_skill_stage(
+    session: AsyncSession,
+    *,
+    scope: RuntimeScope,
+    step_code: str,
+    attempt: int,
+    commit: bool,
+) -> None:
+    await _append_skill_step_event(
+        session,
+        scope=scope,
+        step_code=step_code,
+        attempt=attempt,
+        state="completed",
+    )
+    if not commit:
+        return
+    await session.commit()
+    _release_skill_stage(step_code=step_code, attempt=attempt)
+
+
+def _release_skill_stage(*, step_code: str, attempt: int) -> None:
+    stages = _ACTIVE_SKILL_STAGES.get()
+    if stages and stages[-1] == (step_code, attempt):
+        _ACTIVE_SKILL_STAGES.set(stages[:-1])
+
+
+async def _fail_skill_stage(
+    session: AsyncSession,
+    *,
+    scope: RuntimeScope,
+    step_code: str,
+    attempt: int,
+    error_code: str,
+) -> None:
+    await _append_skill_step_event(
+        session,
+        scope=scope,
+        step_code=step_code,
+        attempt=attempt,
+        state="failed",
+        error_code=error_code,
+    )
+    stages = _ACTIVE_SKILL_STAGES.get()
+    if stages and stages[-1] == (step_code, attempt):
+        _ACTIVE_SKILL_STAGES.set(stages[:-1])
 
 
 async def run_bounded_stage(
@@ -393,6 +508,8 @@ class SkillRuntime:
                     session,
                     scope=RuntimeStateScope(
                         run_id=run.id,
+                        org_id=user.org_id,
+                        thread_id=thread.id,
                         turn_id=turn.id,
                         skill_run_id=skill_run.id,
                         task_id=task.id,
@@ -447,6 +564,7 @@ class SkillRuntime:
             task=task,
         ):
             return self._existing_result(skill_run)
+        stage_context_token = _ACTIVE_SKILL_STAGES.set(())
         try:
             if definition.code == _ACCOUNT_INSPECTION:
                 return await self._execute_account_inspection(
@@ -514,10 +632,30 @@ class SkillRuntime:
                 raise
             return self._existing_result(persisted)
         except Exception as exc:
-            retryable = classify_runtime_failure(exc) is FailureDisposition.RETRYABLE
+            failure = exc.cause if isinstance(exc, _SkillStageFailure) else exc
+            retryable = classify_runtime_failure(failure) is FailureDisposition.RETRYABLE
+            active_stages = _ACTIVE_SKILL_STAGES.get()
+            failed_stage = (
+                (exc.step_code, exc.attempt)
+                if isinstance(exc, _SkillStageFailure)
+                else active_stages[-1]
+                if active_stages
+                else None
+            )
             await session.rollback()
+            if failed_stage is not None:
+                await _fail_skill_stage(
+                    session,
+                    scope=runtime_scope,
+                    step_code=failed_stage[0],
+                    attempt=failed_stage[1],
+                    error_code=type(failure).__name__,
+                )
             if retryable:
-                raise
+                await session.commit()
+                if failure is exc:
+                    raise
+                raise failure from exc
             log.exception(
                 "Skill execution failed",
                 extra={
@@ -532,9 +670,13 @@ class SkillRuntime:
             persisted_run = await session.get(AgentRun, run_id)
             persisted_turn = await session.get(ConversationTurn, turn_id)
             persisted_thread = await session.get(ConversationThread, thread_id)
-            scope_mismatch = isinstance(exc, _ToolScopeMismatch)
+            scope_mismatch = isinstance(failure, _ToolScopeMismatch)
             terminal_status = "blocked" if scope_mismatch else "failed"
-            error_code = "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(exc).__name__
+            error_code = (
+                "TOOL_RESULT_SCOPE_MISMATCH"
+                if scope_mismatch
+                else type(failure).__name__
+            )
             response = (
                 "工具返回的数据不属于当前账号，账号体检已停止。"
                 if scope_mismatch
@@ -556,7 +698,7 @@ class SkillRuntime:
                     or persisted_turn is None
                     or persisted_thread is None
                 ):
-                    raise RuntimeError("Skill execution scope disappeared") from exc
+                    raise RuntimeError("Skill execution scope disappeared") from failure
                 await self._close_skill_state(
                     session,
                     thread=persisted_thread,
@@ -579,6 +721,8 @@ class SkillRuntime:
                 response=response,
                 error_code=error_code,
             )
+        finally:
+            _ACTIVE_SKILL_STAGES.reset(stage_context_token)
 
     async def _execute_content_publishing(
         self,
@@ -604,6 +748,13 @@ class SkillRuntime:
             artifact_ids=[artifact_id],
         )
         source = sources[0]
+        attempt = max(1, run.attempt)
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="publish_content",
+            attempt=attempt,
+        )
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
         tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         outcome = await tool_executor.execute(
@@ -627,6 +778,13 @@ class SkillRuntime:
         )
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
         if outcome.status != "success" or outcome.result is None:
+            await _fail_skill_stage(
+                session,
+                scope=scope,
+                step_code="publish_content",
+                attempt=attempt,
+                error_code="TOOL_EXECUTION_FAILED",
+            )
             return await self._pause_for_tool(
                 session,
                 thread=thread,
@@ -661,6 +819,13 @@ class SkillRuntime:
             "response": response,
             "error_code": receipt.get("reason") if blocked else None,
         }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="publish_content",
+            attempt=attempt,
+            commit=False,
+        )
         await self._close_skill_state(
             session,
             thread=thread,
@@ -708,6 +873,13 @@ class SkillRuntime:
             != DeliverableType.POSITIONING_STRATEGY.value
         ):
             raise PermissionError("OPERATION_ITERATION_POSITIONING_ARTIFACT_INVALID")
+        attempt = max(1, run.attempt)
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+        )
         source_refs = [
             {
                 "artifact_id": item["artifact_id"],
@@ -742,6 +914,13 @@ class SkillRuntime:
             "report": report,
             "response": "下一运营周期的执行图已生成；各专业成果仍将由对应子 Skill 产出。",
         }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+            commit=False,
+        )
         await self._close_skill_state(
             session,
             thread=thread,
@@ -772,6 +951,13 @@ class SkillRuntime:
         attachment_contexts: list[dict[str, Any]],
         lease_owner: str,
     ) -> SkillExecutionResult:
+        attempt = max(1, run.attempt)
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="read_data",
+            attempt=attempt,
+        )
         tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
         for tool_code, arguments in (
@@ -779,21 +965,31 @@ class SkillRuntime:
             ("account.data_context", {"days": days}),
         ):
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            outcome = await tool_executor.execute(
-                task=task,
-                user=user,
-                request=RuntimeToolCall(
-                    tool_code=tool_code,
-                    arguments=arguments,
-                    purpose=f"一键账号体检读取 {tool_code}",
-                    idempotency_key=f"{skill_run.id}:{tool_code}",
-                ),
-                project_id=thread.project_id,
-                agent_code=AgentCode.DECISION.value,
-                scope=scope,
-            )
+            try:
+                outcome = await tool_executor.execute(
+                    task=task,
+                    user=user,
+                    request=RuntimeToolCall(
+                        tool_code=tool_code,
+                        arguments=arguments,
+                        purpose=f"一键账号体检读取 {tool_code}",
+                        idempotency_key=f"{skill_run.id}:{tool_code}",
+                    ),
+                    project_id=thread.project_id,
+                    agent_code=AgentCode.DECISION.value,
+                    scope=scope,
+                )
+            except Exception as exc:
+                raise _SkillStageFailure("read_data", attempt, exc) from exc
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             if outcome.status != "success" or outcome.result is None:
+                await _fail_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="read_data",
+                    attempt=attempt,
+                    error_code="TOOL_EXECUTION_FAILED",
+                )
                 return await self._pause_for_tool(
                     session,
                     thread=thread,
@@ -811,12 +1007,26 @@ class SkillRuntime:
                 outcome.tool_call.turn_id = turn.id
                 await session.commit()
 
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="read_data",
+            attempt=attempt,
+            commit=True,
+        )
+
         data_context = tool_results["account.data_context"]
         evidence_refs = _evidence_refs(data_context)
         expert_results: list[Any] = []
         upstream_outputs: list[dict[str, Any]] = []
         tool_packet = [{"tool_code": code, "result": value} for code, value in tool_results.items()]
         definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="specialist_work",
+            attempt=attempt,
+        )
         for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             stage_results = await self._execute_expert_stage(
@@ -848,6 +1058,14 @@ class SkillRuntime:
                     }
                 )
 
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="specialist_work",
+            attempt=attempt,
+            commit=True,
+        )
+
         latest_result = expert_results[-1]
         critic_history: list[_CriticResult] = []
         report = _build_report(
@@ -858,6 +1076,12 @@ class SkillRuntime:
             evidence_refs=evidence_refs,
             critic=_CriticResult(False, 0, [], []),
             critic_iterations=1,
+        )
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="quality_review",
+            attempt=attempt,
         )
         for iteration in range(_MAX_CRITIC_IMPROVEMENTS + 1):
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
@@ -887,6 +1111,19 @@ class SkillRuntime:
             if review.passed:
                 break
             if iteration == _MAX_CRITIC_IMPROVEMENTS:
+                await _complete_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="quality_review",
+                    attempt=attempt,
+                    commit=True,
+                )
+                await _start_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="prepare_deliverable",
+                    attempt=attempt,
+                )
                 return await self._complete_for_human_review(
                     session,
                     skill_run=skill_run,
@@ -898,6 +1135,7 @@ class SkillRuntime:
                     report=report,
                     scope=scope,
                     producer=latest_result.invocation,
+                    attempt=attempt,
                 )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             latest_result = await self._harness.execute(
@@ -943,7 +1181,21 @@ class SkillRuntime:
                 critic_iterations=iteration + 1,
             )
 
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="quality_review",
+            attempt=attempt,
+            commit=True,
+        )
+
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+        )
         self._require_formal_producer(
             latest_result.invocation,
             scope=scope,
@@ -985,6 +1237,13 @@ class SkillRuntime:
             "report": report.model_dump(mode="json"),
             "response": "账号体检已完成，正式体检报告已生成。",
         }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+            commit=False,
+        )
         await SkillRuntime._close_skill_state(
             session,
             thread=thread,
@@ -1016,11 +1275,16 @@ class SkillRuntime:
     ) -> SkillExecutionResult:
         """Run one bounded specialist graph and persist its business artifact."""
 
+        attempt = max(1, run.attempt)
         tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
         tool_plan = build_skill_tool_plan(definition)
 
-        async def execute_tool(tool_code: str) -> SkillExecutionResult | None:
+        async def execute_tool(
+            tool_code: str,
+            *,
+            step_code: str,
+        ) -> SkillExecutionResult | None:
             arguments = _operating_tool_arguments(
                 tool_code=tool_code,
                 frozen_input=frozen_input,
@@ -1028,20 +1292,30 @@ class SkillRuntime:
                 user_input=turn.user_input,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            outcome = await tool_executor.execute(
-                task=task,
-                user=user,
-                request=RuntimeToolCall(
-                    tool_code=tool_code,
-                    arguments=arguments,
-                    purpose=f"{definition.name}: {tool_code}",
-                    idempotency_key=f"{skill_run.id}:{tool_code}",
-                ),
-                project_id=thread.project_id,
-                agent_code=AgentCode.DECISION.value,
-                scope=scope,
-            )
+            try:
+                outcome = await tool_executor.execute(
+                    task=task,
+                    user=user,
+                    request=RuntimeToolCall(
+                        tool_code=tool_code,
+                        arguments=arguments,
+                        purpose=f"{definition.name}: {tool_code}",
+                        idempotency_key=f"{skill_run.id}:{tool_code}",
+                    ),
+                    project_id=thread.project_id,
+                    agent_code=AgentCode.DECISION.value,
+                    scope=scope,
+                )
+            except Exception as exc:
+                raise _SkillStageFailure(step_code, attempt, exc) from exc
             if outcome.status != "success" or outcome.result is None:
+                await _fail_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code=step_code,
+                    attempt=attempt,
+                    error_code="TOOL_EXECUTION_FAILED",
+                )
                 return await self._pause_for_tool(
                     session,
                     thread=thread,
@@ -1062,12 +1336,25 @@ class SkillRuntime:
                 await session.commit()
             return None
 
-        for step in tool_plan:
-            if step.phase != "read":
-                continue
-            paused = await execute_tool(step.tool_code)
-            if paused is not None:
-                return paused
+        read_steps = [step for step in tool_plan if step.phase == "read"]
+        if read_steps:
+            await _start_skill_stage(
+                session,
+                scope=scope,
+                step_code="read_data",
+                attempt=attempt,
+            )
+            for step in read_steps:
+                paused = await execute_tool(step.tool_code, step_code="read_data")
+                if paused is not None:
+                    return paused
+            await _complete_skill_stage(
+                session,
+                scope=scope,
+                step_code="read_data",
+                attempt=attempt,
+                commit=True,
+            )
 
         if definition.code == "engagement_review":
             engagement_context = tool_results.get("account.engagement_context", {})
@@ -1126,6 +1413,12 @@ class SkillRuntime:
             for item in source_artifacts
         )
         definition_index = {code: index for index, code in enumerate(definition.expert_codes)}
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="specialist_work",
+            attempt=attempt,
+        )
         for stage in definition.expert_stages:
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             stage_results = await self._execute_expert_stage(
@@ -1168,6 +1461,21 @@ class SkillRuntime:
                     }
                 )
 
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="specialist_work",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+        )
+
         for step in tool_plan:
             if step.phase == "side_effect":
                 raise SkillToolPlanError(
@@ -1175,7 +1483,10 @@ class SkillRuntime:
                 )
             if step.phase != "prepare":
                 continue
-            paused = await execute_tool(step.tool_code)
+            paused = await execute_tool(
+                step.tool_code,
+                step_code="prepare_deliverable",
+            )
             if paused is not None:
                 return paused
 
@@ -1196,7 +1507,20 @@ class SkillRuntime:
             definition=definition,
         )
         if definition.critic_policy == "required":
+            await _start_skill_stage(
+                session,
+                scope=scope,
+                step_code="quality_review",
+                attempt=attempt,
+            )
             if self._critic is None:
+                await _complete_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="quality_review",
+                    attempt=attempt,
+                    commit=True,
+                )
                 return await self._complete_operating_skill_for_human_review(
                     session,
                     content=content,
@@ -1212,6 +1536,7 @@ class SkillRuntime:
                     deliverable_payload=deliverable_payload,
                     producer=expert_results[-1].invocation,
                     review_reason="No safe Critic adapter is configured.",
+                    attempt=attempt,
                 )
             review = await self._critic.review(
                 session=session,
@@ -1220,6 +1545,13 @@ class SkillRuntime:
                 report=report,
                 evidence_refs=evidence_refs,
                 iteration=0,
+            )
+            await _complete_skill_stage(
+                session,
+                scope=scope,
+                step_code="quality_review",
+                attempt=attempt,
+                commit=True,
             )
             if not bool(review.passed):
                 return await self._complete_operating_skill_for_human_review(
@@ -1238,6 +1570,7 @@ class SkillRuntime:
                     producer=expert_results[-1].invocation,
                     review_reason="Critic review requires human confirmation.",
                     quality_score=int(review.score),
+                    attempt=attempt,
                 )
         deliverable = await write_runtime_deliverable(
             session,
@@ -1297,6 +1630,13 @@ class SkillRuntime:
                 "response": f"{definition.name}已生成，等待你确认后完成。",
                 "approval_tool_call_id": approval_call.id,
             }
+            await _complete_skill_stage(
+                session,
+                scope=scope,
+                step_code="prepare_deliverable",
+                attempt=attempt,
+                commit=False,
+            )
             await self._close_skill_state(
                 session,
                 thread=thread,
@@ -1317,6 +1657,13 @@ class SkillRuntime:
             "report": report,
             "response": f"{definition.name} completed.",
         }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+            commit=False,
+        )
         await self._close_skill_state(
             session,
             thread=thread,
@@ -1347,6 +1694,7 @@ class SkillRuntime:
         deliverable_payload: dict[str, Any],
         producer: AgentInvocation,
         review_reason: str,
+        attempt: int,
         quality_score: int | None = None,
     ) -> SkillExecutionResult:
         deliverable = await write_runtime_deliverable(
@@ -1377,6 +1725,13 @@ class SkillRuntime:
             "response": f"{definition.name} completed and is pending human review.",
             "review_reason": review_reason,
         }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+            commit=False,
+        )
         await SkillRuntime._close_skill_state(
             session,
             thread=thread,
@@ -1745,6 +2100,7 @@ class SkillRuntime:
         report: AccountInspectionReport,
         scope: RuntimeScope,
         producer: AgentInvocation,
+        attempt: int,
     ) -> SkillExecutionResult:
         deliverable = await write_runtime_deliverable(
             session,
@@ -1781,6 +2137,13 @@ class SkillRuntime:
                 "未达到自动通过标准，请人工确认后采用。"
             ),
         }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+            commit=False,
+        )
         await SkillRuntime._close_skill_state(
             session,
             thread=thread,
@@ -1900,6 +2263,8 @@ class SkillRuntime:
             session,
             scope=RuntimeStateScope(
                 run_id=run.id,
+                org_id=turn.org_id,
+                thread_id=thread.id,
                 turn_id=turn.id,
                 skill_run_id=skill_run.id,
                 task_id=task.id,
@@ -1921,6 +2286,9 @@ class SkillRuntime:
             message=response,
             error_code=error_code,
         )
+        stages = _ACTIVE_SKILL_STAGES.get()
+        if stages:
+            _release_skill_stage(step_code=stages[-1][0], attempt=stages[-1][1])
 
     @staticmethod
     async def _compatibility_task(

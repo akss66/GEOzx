@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import ContentItem, Deliverable
 from app.models.enums import DeliverableStatus, DeliverableType
 from app.orchestrator.runtime_scope import RuntimeScope, RuntimeScopeConflict
+from app.services.turn_events import TurnEventScope, append_turn_event
 
 _PROVENANCE_FIELDS = ("thread_id", "turn_id", "run_id", "skill_run_id")
 
@@ -60,4 +61,24 @@ async def write_runtime_deliverable(
     )
     session.add(deliverable)
     await session.flush()
+    if scope is not None:
+        await append_turn_event(
+            session,
+            TurnEventScope(
+                org_id=scope.org_id,
+                account_id=scope.account_id,
+                thread_id=scope.thread_id,
+                turn_id=scope.turn_id,
+                run_id=scope.run_id,
+                skill_run_id=scope.skill_run_id,
+            ),
+            "deliverable.updated",
+            {
+                "deliverable_id": deliverable.id,
+                "deliverable_type": deliverable.type.value,
+                "version": deliverable.version,
+                "status": deliverable.status.value,
+            },
+            f"deliverable:{deliverable.id}:v{deliverable.version}",
+        )
     return deliverable
