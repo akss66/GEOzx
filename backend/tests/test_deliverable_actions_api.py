@@ -515,6 +515,8 @@ async def test_generate_next_iteration_queues_one_trusted_turn_and_replays(
     assert queued_run.request_payload["trusted_structured_input"] == {
         "confirmed_review_artifact_id": source.id,
         "cycle_days": 7,
+        "topic_count": 5,
+        "constraints": [],
     }
     assert enqueued == [queued_run.id]
     assert await session.scalar(text("SELECT COUNT(*) FROM deliverable_action_executions")) == 1
