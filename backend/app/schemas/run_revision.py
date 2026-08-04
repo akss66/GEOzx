@@ -46,8 +46,36 @@ _MAX_ENVELOPE_BYTES = 256 * 1024
 
 def _normalized_persistence_key(key: str) -> str:
     normalized = unicodedata.normalize("NFC", key)
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
+    acronym_separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", normalized)
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", acronym_separated)
     return re.sub(r"[^0-9A-Za-z]+", "_", separated).strip("_").casefold()
+
+
+_FORBIDDEN_KEY_SUFFIXES = (
+    "secret",
+    "password",
+    "token",
+    "auth",
+    "authorization",
+    "api_key",
+    "prompt",
+    "raw_response",
+    "file_path",
+    "filesystem_path",
+    "local_path",
+    "absolute_path",
+    "sql",
+    "sql_query",
+)
+
+
+def _is_forbidden_persistence_key(key: str) -> bool:
+    if key in _FORBIDDEN_KEYS:
+        return True
+    return any(
+        key == suffix or key.endswith(f"_{suffix}")
+        for suffix in _FORBIDDEN_KEY_SUFFIXES
+    )
 
 
 def _validate_json_column_size(value: Any, *, label: str) -> None:
@@ -84,21 +112,7 @@ def _validate_persistence_value(value: Any, *, path: str = "data") -> None:
                 raise ValueError(f"{path} contains duplicate keys after NFC normalization")
             normalized.add(normalized_key)
             safe_key = _normalized_persistence_key(normalized_key)
-            key_parts = frozenset(part for part in safe_key.split("_") if part)
-            if safe_key in _FORBIDDEN_KEYS or key_parts.intersection(
-                {
-                    "secret",
-                    "password",
-                    "token",
-                    "auth",
-                    "authorization",
-                    "prompt",
-                    "sql",
-                    "path",
-                }
-            ) or safe_key.endswith(
-                ("_raw_response", "_api_key")
-            ):
+            if _is_forbidden_persistence_key(safe_key):
                 raise ValueError(f"forbidden persistence key: {key}")
             _validate_persistence_value(item, path=f"{path}.{key}")
         return

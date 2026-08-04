@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from datetime import UTC, date, datetime, timedelta
+from enum import Enum
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     Account,
+    AccountMetricSnapshot,
+    AudienceProfileItem,
+    AudienceProfileSnapshot,
+    BenchmarkSnapshot,
     ContentItem,
     DataArtifact,
     DataConflict,
     DataFieldObservation,
     DataImportBatch,
     Deliverable,
+    MetricSnapshot,
+    PlatformContentRecord,
 )
+from app.models.enums import MetricSource
 from app.orchestrator.checkpoint_graph_contracts import CheckpointStepSpec
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.schemas.run_revision import FreshnessStamp, StageDataEnvelope
@@ -196,6 +204,105 @@ class _AccountDatabaseFreshnessValidator:
                 )
             ).all()
         )
+        period_start, period_end = _query_window(input)
+        metric_statement = select(MetricSnapshot).where(
+            MetricSnapshot.org_id == scope.org_id,
+            MetricSnapshot.account_id == scope.account_id,
+            MetricSnapshot.source != MetricSource.DEMO,
+        )
+        account_snapshot_statement = select(AccountMetricSnapshot).where(
+            AccountMetricSnapshot.org_id == scope.org_id,
+            AccountMetricSnapshot.account_id == scope.account_id,
+        )
+        audience_statement = select(AudienceProfileSnapshot).where(
+            AudienceProfileSnapshot.org_id == scope.org_id,
+            AudienceProfileSnapshot.account_id == scope.account_id,
+        )
+        benchmark_statement = select(BenchmarkSnapshot).where(
+            BenchmarkSnapshot.org_id == scope.org_id,
+            BenchmarkSnapshot.account_id == scope.account_id,
+        )
+        if period_start is not None and period_end is not None:
+            metric_statement = metric_statement.where(
+                MetricSnapshot.stat_date.between(period_start, period_end)
+            )
+            account_snapshot_statement = account_snapshot_statement.where(
+                AccountMetricSnapshot.stat_date.between(period_start, period_end)
+            )
+            audience_statement = audience_statement.where(
+                AudienceProfileSnapshot.stat_date.between(period_start, period_end)
+            )
+            benchmark_statement = benchmark_statement.where(
+                BenchmarkSnapshot.stat_date.between(period_start, period_end)
+            )
+        metric_snapshots = tuple(
+            (
+                await session.scalars(
+                    metric_statement.order_by(MetricSnapshot.id)
+                )
+            ).all()
+        )
+        account_snapshots = tuple(
+            (
+                await session.scalars(
+                    account_snapshot_statement.order_by(AccountMetricSnapshot.id)
+                )
+            ).all()
+        )
+        audience_snapshots = tuple(
+            (
+                await session.scalars(
+                    audience_statement.order_by(AudienceProfileSnapshot.id)
+                )
+            ).all()
+        )
+        audience_ids = tuple(row.id for row in audience_snapshots)
+        audience_items = (
+            tuple(
+                (
+                    await session.scalars(
+                        select(AudienceProfileItem)
+                        .where(AudienceProfileItem.snapshot_id.in_(audience_ids))
+                        .order_by(AudienceProfileItem.id)
+                    )
+                ).all()
+            )
+            if audience_ids
+            else ()
+        )
+        benchmark_snapshots = tuple(
+            (
+                await session.scalars(
+                    benchmark_statement.order_by(BenchmarkSnapshot.id)
+                )
+            ).all()
+        )
+        platform_content_ids = tuple(
+            sorted(
+                {
+                    row.platform_content_record_id
+                    for row in metric_snapshots
+                    if row.platform_content_record_id is not None
+                }
+            )
+        )
+        platform_contents = (
+            tuple(
+                (
+                    await session.scalars(
+                        select(PlatformContentRecord)
+                        .where(
+                            PlatformContentRecord.org_id == scope.org_id,
+                            PlatformContentRecord.account_id == scope.account_id,
+                            PlatformContentRecord.id.in_(platform_content_ids),
+                        )
+                        .order_by(PlatformContentRecord.id)
+                    )
+                ).all()
+            )
+            if platform_content_ids
+            else ()
+        )
         watermark = canonical_json_sha256(
             domain="checkpoint-freshness-watermark/v1",
             value={
@@ -286,6 +393,24 @@ class _AccountDatabaseFreshnessValidator:
                     }
                     for row in conflict_rows
                 ],
+                "metric_snapshots": [
+                    _model_watermark_projection(row) for row in metric_snapshots
+                ],
+                "account_metric_snapshots": [
+                    _model_watermark_projection(row) for row in account_snapshots
+                ],
+                "audience_profile_snapshots": [
+                    _model_watermark_projection(row) for row in audience_snapshots
+                ],
+                "audience_profile_items": [
+                    _model_watermark_projection(row) for row in audience_items
+                ],
+                "benchmark_snapshots": [
+                    _model_watermark_projection(row) for row in benchmark_snapshots
+                ],
+                "platform_content_records": [
+                    _model_watermark_projection(row) for row in platform_contents
+                ],
                 "input": input.model_dump(mode="python"),
             },
         )
@@ -304,6 +429,39 @@ def _as_utc(value: datetime) -> datetime:
 
 def _optional_utc(value: datetime | None) -> datetime | None:
     return _as_utc(value) if value is not None else None
+
+
+def _query_window(input: StageDataEnvelope) -> tuple[date | None, date | None]:
+    value = input.data.get("query_window")
+    if type(value) is not dict:
+        return None, None
+    start = value.get("start")
+    end = value.get("end")
+    if type(start) is not str or type(end) is not str:
+        return None, None
+    try:
+        return date.fromisoformat(start), date.fromisoformat(end)
+    except ValueError:
+        return None, None
+
+
+def _model_watermark_projection(row: Any) -> dict[str, Any]:
+    return {
+        column.name: _watermark_value(getattr(row, column.name))
+        for column in row.__table__.columns
+    }
+
+
+def _watermark_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return _as_utc(value)
+    if type(value) is list:
+        return [_watermark_value(item) for item in value]
+    if type(value) is dict:
+        return {key: _watermark_value(item) for key, item in value.items()}
+    return value
 
 
 # Validators are deliberately server-owned and query only the current database transaction.

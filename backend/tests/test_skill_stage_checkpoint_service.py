@@ -258,6 +258,38 @@ async def test_source_input_snapshot_is_revalidated_before_reuse(
     )
 
 
+@pytest.mark.parametrize("column", ("source_artifact_refs", "evidence_refs"))
+async def test_oversized_legacy_reference_array_falls_back_without_partial_reuse(
+    session, admin, monkeypatch, column
+) -> None:
+    scopes = await _lineage(session, admin, suffix=f"oversized-{column}")
+    _allow_freshness(monkeypatch)
+    sources, expected_inputs = _canonical_reuse_fixtures(scopes)
+    setattr(sources[-1], column, [{"padding": "x" * 100}] * 3000)
+    session.add_all(sources)
+    await session.flush()
+    revision = await _revision(session, scopes)
+
+    result = await prepare_revision_execution(
+        session,
+        revision_scope=scopes.revision,
+        revision_id=revision.id,
+        contract=require_checkpoint_graph_contract("operation_iteration", 1),
+        expected_inputs=ExpectedStageInputs(values=expected_inputs),
+    )
+
+    assert isinstance(result, FullRecompute)
+    assert result.reason == "artifact_hash_mismatch"
+    assert (
+        await session.scalar(
+            select(func.count(SkillStageCheckpoint.id)).where(
+                SkillStageCheckpoint.status == "reused"
+            )
+        )
+        == 0
+    )
+
+
 async def test_manual_side_effect_verdict_precedes_reuse_and_writes_zero_rows(
     session, admin
 ) -> None:

@@ -115,6 +115,25 @@ def test_stage_envelope_normalizes_and_rejects_token_and_auth_keys(forbidden: st
         )
 
 
+@pytest.mark.parametrize(
+    "safe_key",
+    ("token_count", "prompt_version", "conversion_path"),
+)
+def test_stage_envelope_allows_safe_metadata_identifiers(safe_key: str) -> None:
+    envelope = StageDataEnvelope(
+        schema_version="input/v1",
+        data={safe_key: "safe metadata"},
+    )
+
+    assert envelope.data[safe_key] == "safe metadata"
+
+
+@pytest.mark.parametrize("forbidden", ("APIKey", "providerAPIKey", "SQLQuery"))
+def test_stage_envelope_rejects_acronym_sensitive_identifiers(forbidden: str) -> None:
+    with pytest.raises(ValidationError, match="forbidden persistence key"):
+        StageDataEnvelope(schema_version="input/v1", data={forbidden: "unsafe"})
+
+
 def test_completed_stage_bounds_each_persisted_reference_array() -> None:
     ref = ArtifactRef(
         deliverable_id=1,

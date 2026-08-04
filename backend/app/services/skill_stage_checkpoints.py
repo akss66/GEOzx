@@ -414,7 +414,7 @@ async def prepare_revision_execution(
             evidence_refs = tuple(
                 EvidenceRef.model_validate(item, strict=True) for item in candidate.evidence_refs
             )
-        except ValidationError:
+        except (ValidationError, ValueError):
             return await _full_result(
                 session,
                 revision=revision,
