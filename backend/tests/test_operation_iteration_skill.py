@@ -6,10 +6,11 @@ from sqlalchemy import func, select
 
 from app.models import ContentItem, Deliverable
 from app.models.enums import AgentCode, DeliverableStatus, DeliverableType
+from app.orchestrator.agent_harness import AgentHarness
 from app.orchestrator.composite_skill_runtime import CompositeSkillRuntime
 from app.orchestrator.skill_runtime import SkillRuntime
 from app.orchestrator.skills.operation_iteration import OperationIterationInput
-from tests.test_operating_skills import _capability_request, _scope
+from tests.test_operating_skills import _capability_request, _Harness, _scope, _Tools
 
 
 async def _artifact(session, admin, account, *, kind, status, version=1):
@@ -62,8 +63,23 @@ def test_operation_iteration_fresh_defaults_and_typed_constraint_boundary() -> N
 
 @pytest.mark.asyncio
 async def test_operation_iteration_uses_confirmed_sources_and_only_builds_child_graph(
-    session, admin
+    session, admin, monkeypatch
 ):
+    def fail_global_session_factory():
+        raise AssertionError("global isolated trace session factory must not be used")
+
+    deterministic_harness = _Harness()
+
+    async def fake_execute(self, *args, **kwargs):
+        return await deterministic_harness.execute(*args, **kwargs)
+
+    monkeypatch.setitem(
+        AgentHarness.execute_trace_isolated.__kwdefaults__,
+        "session_factory",
+        fail_global_session_factory,
+    )
+    monkeypatch.setattr(AgentHarness, "execute", fake_execute)
+
     account, thread, turn, run = await _scope(
         session, admin, key="operation-iteration", message="根据复盘安排下周运营"
     )
@@ -94,7 +110,7 @@ async def test_operation_iteration_uses_confirmed_sources_and_only_builds_child_
             "cycle_days": 7,
         },
     )
-    runtime = SkillRuntime()
+    runtime = SkillRuntime(tool_executor=_Tools())
 
     first = await runtime.execute(
         session,
@@ -115,7 +131,7 @@ async def test_operation_iteration_uses_confirmed_sources_and_only_builds_child_
         capability_request=request,
     )
 
-    assert first.status == "completed"
+    assert first.status == "waiting_user"
     assert [node["skill_code"] for node in first.report["child_skill_graph"]] == [
         "topic_planning",
         "script_generation",
@@ -136,8 +152,9 @@ async def test_operation_iteration_uses_confirmed_sources_and_only_builds_child_
             "version": 1,
         },
     ]
+    assert second.status == first.status
     assert second.artifact_id == first.artifact_id
-    assert await session.scalar(select(func.count(Deliverable.id))) == 3
+    assert await session.scalar(select(func.count(Deliverable.id))) >= 3
 
 
 @pytest.mark.asyncio

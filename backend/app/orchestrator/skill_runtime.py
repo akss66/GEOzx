@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.core.approval_audit import add_approval_requested
@@ -2635,6 +2635,7 @@ class SkillRuntime:
                 )
             return results
 
+        session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
         operations = [
             (
                 lambda code=code: self._harness.execute_trace_isolated(
@@ -2646,6 +2647,7 @@ class SkillRuntime:
                     attempt=0,
                     upstream=json.loads(json.dumps(frozen_upstream)),
                     execution_owner=lease_owner,
+                    session_factory=session_factory,
                 )
             )
             for code in codes
