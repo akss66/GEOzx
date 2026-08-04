@@ -51,6 +51,11 @@ from app.models.compliance import ComplianceCheck
 from app.models.configuration import IntegrationConfig, ModelConfig, ModelProvider
 from app.models.content import ContentItem, Deliverable
 from app.models.conversation import ConversationThread, ConversationTurn
+from app.models.deliverable_action import (
+    ContentScheduleEntry,
+    DeliverableActionExecution,
+    ShootTask,
+)
 from app.models.distribution import MatrixDistributionItem, MatrixDistributionPlan
 from app.models.feedback import OptimizationSuggestion
 from app.models.identity import (
@@ -100,6 +105,9 @@ __all__ = [
     "Account",
     "ContentItem",
     "Deliverable",
+    "DeliverableActionExecution",
+    "ShootTask",
+    "ContentScheduleEntry",
     "ConversationThread",
     "ConversationTurn",
     "ConversationAttachment",

@@ -25,6 +25,7 @@ from app.api import (
     clients,
     conversations,
     costs,
+    deliverable_actions,
     experience_memories,
     feedback,
     health,
@@ -108,6 +109,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(approvals.router)
 app.include_router(artifacts.router)
+app.include_router(deliverable_actions.router)
 app.include_router(attachments.router)
 app.include_router(users.router)
 app.include_router(clients.router)

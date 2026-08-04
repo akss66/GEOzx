@@ -45,6 +45,7 @@ from app.schemas.artifacts import (
     ScriptPresentationFormat,
 )
 from app.schemas.deliverable import get_schema, validate_payload
+from app.services.deliverable_action_registry import SERVER_ACTIONS
 
 ARTIFACT_ACTION_ROLES = {
     WorkspaceRole.LEAD,
@@ -180,14 +181,7 @@ _FIXED_PRESENTATIONS: dict[str, tuple[str, str, str]] = {
     "operation_execution_plan": ("本周运营执行计划", "已整理本周执行步骤", "查看运营执行计划"),
 }
 ActionSpec: TypeAlias = tuple[DeliverableActionCode, str, bool]
-_REQUEST_REVISION_ACTION: ActionSpec = ("request_revision", "提出修改", False)
 _EXPORT_ACTION: ActionSpec = ("export", "导出内容", False)
-_PRIMARY_ACTIONS: dict[str, ActionSpec] = {
-    "account_inspection_report": ("generate_next_iteration", "生成下一轮优化方案", False),
-    "review_report": ("generate_next_iteration", "生成下一轮优化方案", False),
-    "engagement_review": ("generate_next_iteration", "生成下一轮优化方案", False),
-    "operation_execution_plan": ("generate_next_iteration", "生成下一轮优化方案", False),
-}
 _ACTIONABLE_ARTIFACT_STATUSES: frozenset[ArtifactStatus] = frozenset(
     {"ready_for_review", "accepted"}
 )
@@ -856,12 +850,13 @@ def _artifact_next_actions(
 ) -> list[DeliverableActionOut]:
     if artifact_status not in _ACTIONABLE_ARTIFACT_STATUSES:
         return []
-    primary = _PRIMARY_ACTIONS.get(artifact_type)
-    specs = (
-        (primary, _REQUEST_REVISION_ACTION, _EXPORT_ACTION)
-        if primary is not None
-        else (_REQUEST_REVISION_ACTION, _EXPORT_ACTION)
-    )
+    executable_specs: list[ActionSpec] = [
+        (definition.code, definition.label, definition.requires_confirmation)
+        for definition in SERVER_ACTIONS.values()
+        if artifact_type in definition.artifact_types
+        and artifact_status in definition.statuses
+    ]
+    specs = (*executable_specs, _EXPORT_ACTION)
     return [
         DeliverableActionOut(
             code=code,

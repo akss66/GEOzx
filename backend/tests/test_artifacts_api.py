@@ -409,9 +409,9 @@ async def test_spoken_script_presentation_counts_one_artifact_not_its_scenes(
     }
     assert artifact["next_actions"] == [
         {
-            "code": "request_revision",
-            "label": "提出修改",
-            "requires_confirmation": False,
+            "code": "create_shoot_task",
+            "label": "创建拍摄任务",
+            "requires_confirmation": True,
         },
         {
             "code": "export",
@@ -419,9 +419,6 @@ async def test_spoken_script_presentation_counts_one_artifact_not_its_scenes(
             "requires_confirmation": False,
         },
     ]
-    assert "create_shoot_task" not in {
-        action["code"] for action in artifact["next_actions"]
-    }
 
 
 @pytest.mark.asyncio
@@ -487,21 +484,27 @@ async def test_structured_deliverable_counts_drive_presentation_and_actions(
     assert response.status_code == 200
     artifact = response.json()
     assert artifact["presentation"] == expected_presentation
-    assert artifact["next_actions"] == [
-        {
-            "code": "request_revision",
-            "label": "提出修改",
-            "requires_confirmation": False,
-        },
+    expected_actions = [
         {
             "code": "export",
             "label": "导出内容",
             "requires_confirmation": False,
         },
     ]
-    assert forbidden_action not in {
-        action["code"] for action in artifact["next_actions"]
-    }
+    if deliverable_type == DeliverableType.PUBLISH_CALENDAR:
+        expected_actions.insert(
+            0,
+            {
+                "code": "add_to_schedule",
+                "label": "加入内容排期",
+                "requires_confirmation": True,
+            },
+        )
+    assert artifact["next_actions"] == expected_actions
+    if deliverable_type != DeliverableType.PUBLISH_CALENDAR:
+        assert forbidden_action not in {
+            action["code"] for action in artifact["next_actions"]
+        }
 
 
 @pytest.mark.asyncio
@@ -533,11 +536,6 @@ async def test_unknown_business_type_fails_closed_to_operations_report(
         "detail_action_label": "查看完整报告",
     }
     assert artifact["next_actions"] == [
-        {
-            "code": "request_revision",
-            "label": "提出修改",
-            "requires_confirmation": False,
-        },
         {
             "code": "export",
             "label": "导出内容",

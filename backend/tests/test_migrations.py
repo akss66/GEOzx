@@ -597,8 +597,51 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_scoped_turn_events() -> None:
-    assert get_head_revision() == "20260804_0100"
+def test_migration_head_is_deliverable_actions() -> None:
+    assert get_head_revision() == "20260804_0200"
+
+
+def test_deliverable_actions_migration_creates_real_resources_and_is_reversible(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0200_deliverable_actions"
+    )
+    assert migration.down_revision == "20260804_0100"
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    for table_name in ("orgs", "accounts", "users", "content_items", "deliverables"):
+        sa.Table(table_name, metadata, sa.Column("id", sa.Integer, primary_key=True))
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        assert {
+            "deliverable_action_executions",
+            "shoot_tasks",
+            "content_schedule_entries",
+        } <= set(inspector.get_table_names())
+        unique_names = {
+            item["name"]
+            for item in inspector.get_unique_constraints(
+                "deliverable_action_executions"
+            )
+        }
+        assert "uq_deliverable_action_idempotency" in unique_names
+
+        migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert {
+            "deliverable_action_executions",
+            "shoot_tasks",
+            "content_schedule_entries",
+        }.isdisjoint(inspector.get_table_names())
 
 
 def test_scoped_turn_events_migration_backfills_only_inferable_scope_and_is_reversible(
