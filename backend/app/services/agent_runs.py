@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition
 from app.models import AgentRun, BrainTask, ConversationThread, SkillRun
+from app.services.run_revisions import cancel_revision_for_run
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 ACTIVE_TASK_RUN_STATUSES = {
@@ -372,6 +373,8 @@ async def acquire_agent_run(
 
     now = utc_now()
     if run.cancel_requested_at is not None:
+        await cancel_revision_for_run(session, revision_run_id=run.id)
+        await _cancel_active_skill_run_records(session, run.id)
         await close_runtime_state(
             session,
             scope=await _runtime_state_scope(session, run),
@@ -546,6 +549,8 @@ async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
     run = await session.get(AgentRun, run_id)
     if run is None:
         return
+    await cancel_revision_for_run(session, revision_run_id=run.id)
+    await _cancel_active_skill_run_records(session, run.id)
     await close_runtime_state(
         session,
         scope=await _runtime_state_scope(session, run),
@@ -553,6 +558,27 @@ async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
         message="本轮执行已取消。",
         error_code="RUN_CANCELLED",
     )
+
+
+async def _cancel_active_skill_run_records(session: AsyncSession, run_id: int) -> None:
+    """Join every active child/parent SkillRun to the run cancellation transaction."""
+
+    skill_runs = list(
+        await session.scalars(
+            select(SkillRun).where(SkillRun.run_id == run_id).with_for_update()
+        )
+    )
+    for skill_run in skill_runs:
+        if skill_run.status in {"completed", "blocked", "failed", "cancelled", "stopped"}:
+            continue
+        skill_run.status = "cancelled"
+        skill_run.error_code = "RUN_CANCELLED"
+        skill_run.output_snapshot = {
+            **dict(skill_run.output_snapshot or {}),
+            "status": "cancelled",
+            "error_code": "RUN_CANCELLED",
+        }
+    await session.flush()
 
 
 def _is_future(value: datetime | None, now: datetime) -> bool:

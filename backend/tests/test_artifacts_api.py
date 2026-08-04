@@ -578,7 +578,7 @@ async def test_video_script_revision_inherits_missing_presentation_format_from_s
         json={"artifact_id": seeded[8].id, "payload": revision_payload},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 201, response.text
     assert response.json()["version"] == 2
     assert response.json()["presentation_format"] == presentation_format
     persisted = await session.scalar(
@@ -966,6 +966,41 @@ async def test_artifact_revision_increments_version_and_rejects_stale_source(
         )
     )
     assert [row.version for row in versions] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_artifact_revision_and_supersede_are_scoped_to_source_agent_stream(
+    client, session, admin
+) -> None:
+    seeded = await _seed_artifact(
+        session, admin, account_name="cross-agent-artifact-revision"
+    )
+    source = seeded[8]
+    other = Deliverable(
+        content_item_id=source.content_item_id,
+        agent_code="02-content-director",
+        type=source.type,
+        version=2,
+        status=DeliverableStatus.APPROVED,
+        payload=dict(source.payload),
+    )
+    session.add(other)
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.post(
+        "/artifact-revisions",
+        headers=_auth(token),
+        json={
+            "artifact_id": source.id,
+            "payload": _review_payload(summary="agent scoped revision"),
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["version"] == 2
+    await session.refresh(other)
+    assert other.status == DeliverableStatus.APPROVED
 
 
 @pytest.mark.asyncio

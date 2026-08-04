@@ -36,7 +36,17 @@ class CompositeSkillRuntime:
         for index, (skill_code, dependencies) in enumerate(self._NODES, start=1):
             previous = prior.get(skill_code, {})
             status = str(previous.get("status") or "pending")
-            if status not in {"pending", "running", "completed", "failed", "blocked"}:
+            if status not in {
+                "pending",
+                "running",
+                "waiting_user",
+                "waiting_permission",
+                "needs_review",
+                "completed",
+                "failed",
+                "blocked",
+                "skipped",
+            }:
                 status = "pending"
             nodes.append(
                 {
@@ -46,6 +56,9 @@ class CompositeSkillRuntime:
                     "depends_on": list(dependencies),
                     "artifact_id": previous.get("artifact_id"),
                     "error_code": previous.get("error_code"),
+                    "required": True,
+                    "executor_owner": "child_skill",
+                    "terminal_reason": previous.get("terminal_reason"),
                     "input": self._child_input(
                         skill_code=skill_code,
                         cycle_days=cycle_days,

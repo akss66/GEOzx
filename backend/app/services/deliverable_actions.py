@@ -44,6 +44,7 @@ from app.services.artifacts import (
 from app.services.conversation_submission import prepare_conversation_turn_submission
 from app.services.conversations import get_conversation_thread
 from app.services.deliverable_action_registry import SERVER_ACTIONS, server_action_for
+from app.services.deliverable_streams import latest_deliverable_version
 
 
 @dataclass(frozen=True)
@@ -141,14 +142,11 @@ async def execute_deliverable_action(
     )
     if locked_content_id is None:
         raise HTTPException(status_code=404, detail="内容不存在")
-    latest_version = await session.scalar(
-        select(Deliverable.version)
-        .where(
-            Deliverable.content_item_id == artifact.content_item_id,
-            Deliverable.type == artifact.type,
-        )
-        .order_by(Deliverable.version.desc())
-        .limit(1)
+    latest_version = await latest_deliverable_version(
+        session,
+        content_item_id=artifact.content_item_id,
+        agent_code=artifact.agent_code,
+        deliverable_type=artifact.type,
     )
     if artifact.status == DeliverableStatus.SUPERSEDED or artifact.version != latest_version:
         raise _business_conflict(

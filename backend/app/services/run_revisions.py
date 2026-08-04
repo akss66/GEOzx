@@ -533,6 +533,31 @@ async def complete_revision(session: AsyncSession, *, revision_id: int) -> RunRe
     return await finish_revision(session, revision_id=revision_id, status="completed")
 
 
+async def cancel_revision_for_run(
+    session: AsyncSession,
+    *,
+    revision_run_id: int,
+) -> RunRevision | None:
+    """Join revision cancellation to the caller's existing terminal transaction."""
+
+    revision = await session.scalar(
+        select(RunRevision)
+        .where(RunRevision.revision_run_id == revision_run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if revision is None:
+        return None
+    if revision.status == "cancelled":
+        return revision
+    if revision.status not in {"planned", "waiting_predecessor", "running"}:
+        return revision
+    revision.status = "cancelled"
+    revision.finished_at = await load_transaction_db_now(session)
+    await session.flush()
+    return revision
+
+
 async def finish_revision(
     session: AsyncSession,
     *,
@@ -563,6 +588,7 @@ __all__ = [
     "RevisionResolution",
     "RevisionScopeConflict",
     "RevisionStateConflict",
+    "cancel_revision_for_run",
     "complete_revision",
     "create_revision_record",
     "fall_back_to_full_recompute",

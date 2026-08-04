@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.approval_audit import add_approval_decided, add_approval_requested
@@ -68,6 +68,10 @@ from app.schemas.orchestrator import (
     PublishReadinessOut,
     PublishReadinessRequest,
     RerunStageRequest,
+)
+from app.services.deliverable_streams import (
+    deliverable_stream_clause,
+    latest_deliverable_version,
 )
 
 router = APIRouter(tags=["orchestrator"])
@@ -825,25 +829,28 @@ async def create_deliverable_revision(
     current = list(
         await session.scalars(
             select(Deliverable).where(
-                Deliverable.content_item_id == source.content_item_id,
-                Deliverable.type == source.type,
+                deliverable_stream_clause(
+                    content_item_id=source.content_item_id,
+                    agent_code=source.agent_code,
+                    deliverable_type=source.type,
+                ),
                 Deliverable.status != DeliverableStatus.SUPERSEDED,
             )
         )
     )
     for row in current:
         row.status = DeliverableStatus.SUPERSEDED
-    latest_version = await session.scalar(
-        select(func.max(Deliverable.version)).where(
-            Deliverable.content_item_id == source.content_item_id,
-            Deliverable.type == source.type,
-        )
+    latest_version = await latest_deliverable_version(
+        session,
+        content_item_id=source.content_item_id,
+        agent_code=source.agent_code,
+        deliverable_type=source.type,
     )
     revision = Deliverable(
         content_item_id=source.content_item_id,
         agent_code=source.agent_code,
         type=source.type,
-        version=(latest_version or 0) + 1,
+        version=latest_version + 1,
         status=DeliverableStatus.PENDING_REVIEW,
         payload=payload,
         note=body.note,

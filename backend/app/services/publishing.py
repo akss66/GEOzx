@@ -59,6 +59,7 @@ from app.schemas.publishing import (
     PublishHandoffOut,
     PublishJobOut,
 )
+from app.services.deliverable_streams import deliverable_stream_clause
 
 
 class PublishingServiceError(RuntimeError):
@@ -138,8 +139,11 @@ async def publish_approved_artifact(
         )
     newer_version = await session.scalar(
         select(Deliverable.id).where(
-            Deliverable.content_item_id == artifact.content_item_id,
-            Deliverable.type == artifact.type,
+            deliverable_stream_clause(
+                content_item_id=artifact.content_item_id,
+                agent_code=artifact.agent_code,
+                deliverable_type=artifact.type,
+            ),
             Deliverable.version > artifact.version,
         )
     )

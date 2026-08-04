@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -24,10 +25,19 @@ from app.models import (
     SkillRun,
     StrategyPlan,
 )
-from app.models.enums import AccountStatus, BrainTaskStatus, Platform
+from app.models.enums import (
+    AccountStatus,
+    AgentCode,
+    BrainTaskStatus,
+    ContentStage,
+    ContentStatus,
+    DeliverableStatus,
+    DeliverableType,
+    Platform,
+)
 from app.orchestrator.brain_runtime import runtime_graph
 from app.orchestrator.checkpoint_graph_contracts import require_checkpoint_graph_contract
-from app.orchestrator.skill_runtime import SkillRuntime
+from app.orchestrator.skill_runtime import SkillRuntime, skill_input_hash
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.attachment import AttachmentContext
 from app.schemas.conversation import (
@@ -44,7 +54,12 @@ from app.schemas.run_revision import (
     StageDataEnvelope,
     StageReuseBinding,
 )
-from app.services.agent_runs import complete_agent_run
+from app.services.agent_runs import (
+    acquire_agent_run,
+    cancel_agent_run,
+    complete_agent_run,
+    request_agent_run_cancel,
+)
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
@@ -199,6 +214,187 @@ async def _revision_execution_context(session, admin, *, key: str):
     }
     await session.commit()
     return account, thread, revision_turn, revision_run, task, revision_skill, revision
+
+
+async def _real_revision_runtime_context(session, admin, monkeypatch, *, key: str):
+    """Bind a revision to the real SkillRuntime with only external seams faked."""
+
+    from tests.test_operating_skills import _Harness, _Tools
+
+    account, thread, turn, run, task, skill, revision = (
+        await _revision_execution_context(session, admin, key=key)
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title=f"revision-content-{key}",
+        current_stage=ContentStage.OPERATION,
+        status=ContentStatus.IN_PROGRESS,
+    )
+    session.add(content)
+    await session.flush()
+    review = Deliverable(
+        content_item_id=content.id,
+        agent_code=AgentCode.OPERATOR.value,
+        type=DeliverableType.REVIEW_REPORT,
+        version=1,
+        status=DeliverableStatus.APPROVED,
+        payload={"summary": "approved revision source"},
+    )
+    session.add(review)
+    await session.flush()
+    task.content_item_id = content.id
+    frozen_input = {
+        "account_id": account.id,
+        "confirmed_review_artifact_id": review.id,
+        "cycle_days": 7,
+        "topic_count": 4,
+        "script_duration_seconds": 30,
+        "positioning_artifact_id": None,
+    }
+    skill.input_snapshot = frozen_input
+    skill.input_hash = skill_input_hash(frozen_input)
+    await session.commit()
+
+    tools = _Tools()
+    harness = _Harness()
+
+    class PassingCritic:
+        async def review(self, **_kwargs):
+            return SimpleNamespace(passed=True, score=95)
+
+    runtime = SkillRuntime(
+        tool_executor=tools,
+        harness=harness,
+        critic=PassingCritic(),
+    )
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime", runtime)
+    return account, thread, turn, run, task, skill, revision, runtime, tools, harness
+
+
+async def _real_runtime_counts(session, *, run_id: int, tools, harness) -> dict[str, int]:
+    tool_calls = tools.calls if isinstance(tools.calls, int) else len(tools.calls)
+    return {
+        "provider": len(harness.calls),
+        "tool": tool_calls,
+        "expert": int(
+            await session.scalar(
+                select(func.count(AgentInvocation.id)).where(
+                    AgentInvocation.run_id == run_id
+                )
+            )
+            or 0
+        ),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_status", "revision_status"),
+    [("queued", "planned"), ("waiting_predecessor", "waiting_predecessor")],
+)
+async def test_revision_pre_acquire_cancel_converges_three_ledgers_without_completion_event(
+    session, admin, run_status: str, revision_status: str
+) -> None:
+    _account, _thread, _turn, run, _task, skill, revision = (
+        await _revision_execution_context(
+            session, admin, key=f"cancel-before-acquire-{run_status}"
+        )
+    )
+    run.status = run_status
+    run.phase = run_status
+    revision.status = revision_status
+    await session.commit()
+    await request_agent_run_cancel(session, run.id)
+
+    assert await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="cancel-pre-acquire-worker",
+        lease_seconds=60,
+    ) is None
+    await session.refresh(run)
+    await session.refresh(skill)
+    await session.refresh(revision)
+    first_finished_at = revision.finished_at
+    assert (run.status, skill.status, revision.status) == (
+        "cancelled",
+        "cancelled",
+        "cancelled",
+    )
+    assert first_finished_at is not None
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.run_id == run.id,
+            Event.type == "run.revision_completed",
+        )
+    ) == 0
+
+    assert await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="cancel-pre-acquire-worker",
+        lease_seconds=60,
+    ) is None
+    await session.refresh(revision)
+    assert revision.status == "cancelled"
+    assert revision.finished_at == first_finished_at
+
+
+@pytest.mark.asyncio
+async def test_running_revision_cancelled_error_hook_is_idempotent_and_never_completes(
+    session, admin
+) -> None:
+    _account, _thread, _turn, run, _task, skill, revision = (
+        await _revision_execution_context(session, admin, key="running-cancelled-error")
+    )
+    now = datetime.now(UTC)
+    run.status = "running"
+    run.phase = "running"
+    run.started_at = now
+    skill.status = "running"
+    skill.started_at = now
+    revision.status = "running"
+    revision.started_at = now
+    child = SkillRun(
+        org_id=run.org_id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        idempotency_key="cancel-active-child",
+        skill_code="topic_planning",
+        skill_version=1,
+        status="running",
+        input_snapshot={"account_id": revision.account_id, "days": 7, "topic_count": 4},
+        output_snapshot={},
+    )
+    session.add(child)
+    await session.commit()
+
+    await cancel_agent_run(session, run.id)
+    await session.refresh(run)
+    await session.refresh(skill)
+    await session.refresh(child)
+    await session.refresh(revision)
+    first_finished_at = revision.finished_at
+    assert (run.status, skill.status, child.status, revision.status) == (
+        "cancelled",
+        "cancelled",
+        "cancelled",
+        "cancelled",
+    )
+    assert first_finished_at is not None
+
+    await cancel_agent_run(session, run.id)
+    await session.refresh(revision)
+    assert revision.finished_at == first_finished_at
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.run_id == run.id,
+            Event.type == "run.revision_completed",
+        )
+    ) == 0
 
 
 @pytest.mark.asyncio
@@ -537,6 +733,479 @@ async def test_revision_terminal_executor_error_marks_revision_failed(session, a
     await session.refresh(revision)
     assert revision.status == "failed"
     assert revision.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_1_real_runtime_barrier_commit_failure_has_zero_external_calls(
+    session, admin, monkeypatch
+) -> None:
+    (
+        _account,
+        _thread,
+        _turn,
+        run,
+        task,
+        _skill,
+        _revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-1"
+    )
+    real_commit = session.commit
+    barrier_commits = 0
+
+    async def fail_barrier_commit():
+        nonlocal barrier_commits
+        barrier_commits += 1
+        if barrier_commits == 1:
+            raise ConnectionError("barrier commit interrupted")
+        await real_commit()
+
+    monkeypatch.setattr(session, "commit", fail_barrier_commit)
+    run_id = run.id
+    task_id = task.id
+
+    with pytest.raises(ConnectionError, match="barrier commit interrupted"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="i4-real-worker"
+        )
+
+    assert await _real_runtime_counts(
+        session, run_id=run_id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    assert await session.scalar(
+        select(func.count(AgentInvocation.id)).where(AgentInvocation.run_id == run.id)
+    ) == 0
+    assert await session.scalar(
+        select(func.count(AgentToolCall.id)).where(AgentToolCall.task_id == task.id)
+    ) == 0
+    await session.rollback()
+    assert await session.scalar(
+        select(func.count(Event.id)).where(Event.run_id == run_id)
+    ) == 0
+    monkeypatch.setattr(session, "commit", real_commit)
+    run = await session.get(AgentRun, run_id)
+    task = await session.get(BrainTask, task_id)
+    assert run is not None and task is not None
+
+    retry = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+
+    assert retry == "waiting_user"
+    assert await _real_runtime_counts(
+        session, run_id=run_id, tools=tools, harness=harness
+    ) == {"provider": 2, "tool": 3, "expert": 2}
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_2_real_stage_retry_reuses_committed_revision_plan(
+    session, admin, monkeypatch
+) -> None:
+    from app.orchestrator import skill_runtime as skill_runtime_module
+
+    (
+        _account,
+        _thread,
+        _turn,
+        run,
+        task,
+        _skill,
+        revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-2"
+    )
+    original_plan_hash = revision.plan_hash
+    real_start = skill_runtime_module._start_skill_stage
+    starts = 0
+
+    async def fail_before_first_stage(*_args, **_kwargs):
+        nonlocal starts
+        starts += 1
+        if starts == 1:
+            raise ConnectionError("after barrier before stage start")
+        return await real_start(*_args, **_kwargs)
+
+    monkeypatch.setattr(skill_runtime_module, "_start_skill_stage", fail_before_first_stage)
+    run_id = run.id
+    task_id = task.id
+
+    with pytest.raises(ConnectionError, match="after barrier before stage start"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="i4-real-worker"
+        )
+    await session.refresh(revision)
+    durable_plan_hash = revision.plan_hash
+    assert durable_plan_hash != original_plan_hash
+    assert await _real_runtime_counts(
+        session, run_id=run_id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    first_events = list(
+        await session.scalars(select(Event).where(Event.run_id == run_id))
+    )
+    assert len(
+        [event for event in first_events if event.type == "step.invalidated"]
+    ) == len(revision.affected_steps)
+    assert not any(event.type == "step.started" for event in first_events)
+    run = await session.get(AgentRun, run_id)
+    task = await session.get(BrainTask, task_id)
+    assert run is not None and task is not None
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+
+    await session.refresh(revision)
+    assert status == "waiting_user"
+    assert revision.plan_hash == durable_plan_hash
+    assert starts > 1
+    assert await _real_runtime_counts(
+        session, run_id=run.id, tools=tools, harness=harness
+    ) == {"provider": 2, "tool": 3, "expert": 2}
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_3_all_reused_real_runtime_has_only_reused_events_and_zero_external(
+    session, admin, monkeypatch
+) -> None:
+    (
+        _account,
+        _thread,
+        turn,
+        run,
+        task,
+        _skill,
+        revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-3"
+    )
+    revision.mode = "partial"
+    revision.affected_steps = []
+    revision.direct_affected_steps = []
+    contract = require_checkpoint_graph_contract("operation_iteration", 1)
+    bindings = tuple(
+        StageReuseBinding(
+            step_key=step.key,
+            source_checkpoint_id=100 + index,
+            checkpoint_id=200 + index,
+            output=StageDataEnvelope(
+                schema_version=step.output_schema_version,
+                data={key: {"summary": "durable"} for key in step.produces_outputs},
+            ),
+        )
+        for index, step in enumerate(contract.steps, start=1)
+    )
+    revision.reused_steps = [binding.step_key for binding in bindings]
+
+    async def reused_plan(*_args, **_kwargs):
+        return PartialExecution(
+            execute_steps=(),
+            reused=bindings,
+            hydrated_outputs={binding.step_key: binding.output for binding in bindings},
+            plan_hash=revision.plan_hash,
+        )
+
+    async def hydrate(*_args, step_key, **_kwargs):
+        binding = next(item for item in bindings if item.step_key == step_key)
+        return ResolvedStageOutput(
+            checkpoint_id=binding.checkpoint_id,
+            source_checkpoint_id=binding.source_checkpoint_id,
+            output=binding.output,
+        )
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.resolve_revision_executor_boundaries",
+        lambda _contract: SimpleNamespace(requires_full_recompute=False),
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", reused_plan
+    )
+    monkeypatch.setattr("app.services.turn_execution.load_latest_stage_output", hydrate)
+    await session.commit()
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+    revision_events = list(
+        await session.scalars(
+            select(Event).where(Event.turn_id == turn.id).order_by(Event.sequence)
+        )
+    )
+
+    assert status == "completed"
+    first_counts = await _real_runtime_counts(
+        session, run_id=run.id, tools=tools, harness=harness
+    )
+    retry = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+    assert retry == "completed"
+    assert first_counts == await _real_runtime_counts(
+        session, run_id=run.id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    assert revision.affected_steps == []
+    assert set(revision.reused_steps) == {step.key for step in contract.steps}
+    assert [event.type for event in revision_events].count("step.reused") == len(
+        contract.steps
+    )
+    assert not any(
+        event.type in {"step.started", "step.completed", "step.invalidated"}
+        for event in revision_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_4_invalidated_is_durable_before_real_stage_start_and_external(
+    session, admin, monkeypatch
+) -> None:
+    from app.orchestrator import skill_runtime as skill_runtime_module
+
+    (
+        _account,
+        _thread,
+        turn,
+        run,
+        task,
+        _skill,
+        revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-4"
+    )
+    real_start = skill_runtime_module._start_skill_stage
+
+    async def fail_at_real_start(*_args, **_kwargs):
+        invalidated = list(
+            await session.scalars(
+                select(Event).where(
+                    Event.turn_id == turn.id,
+                    Event.type == "step.invalidated",
+                )
+            )
+        )
+        assert {event.payload["step_key"] for event in invalidated} == set(
+            revision.affected_steps
+        )
+        assert len(tools.calls) == len(harness.calls) == 0
+        raise ConnectionError("invalidated durable before real start")
+
+    monkeypatch.setattr(skill_runtime_module, "_start_skill_stage", fail_at_real_start)
+    run_id = run.id
+    task_id = task.id
+
+    with pytest.raises(ConnectionError, match="invalidated durable before real start"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="i4-real-worker"
+        )
+    assert await _real_runtime_counts(
+        session, run_id=run_id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    first_events = list(
+        await session.scalars(select(Event).where(Event.run_id == run_id))
+    )
+    assert not any(event.type == "step.started" for event in first_events)
+    monkeypatch.setattr(skill_runtime_module, "_start_skill_stage", real_start)
+    run = await session.get(AgentRun, run_id)
+    task = await session.get(BrainTask, task_id)
+    assert run is not None and task is not None
+
+    retry = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+
+    assert retry == "waiting_user"
+    assert await _real_runtime_counts(
+        session, run_id=run_id, tools=tools, harness=harness
+    ) == {"provider": 2, "tool": 3, "expert": 2}
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_5_durable_completed_skill_retry_does_not_reenter_real_stage(
+    session, admin, monkeypatch
+) -> None:
+    from app.orchestrator import skill_runtime as skill_runtime_module
+
+    (
+        _account,
+        _thread,
+        _turn,
+        run,
+        task,
+        skill,
+        revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-5"
+    )
+    revision.status = "running"
+    revision.started_at = datetime.now(UTC)
+    skill.status = "completed"
+    skill.output_snapshot = {"status": "completed", "response": "durable"}
+    await session.commit()
+
+    async def forbidden_stage(*_args, **_kwargs):
+        raise AssertionError("durable completed retry must not reenter a stage")
+
+    monkeypatch.setattr(skill_runtime_module, "_start_skill_stage", forbidden_stage)
+
+    first = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+    second = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+
+    assert first == second == "completed"
+    assert await _real_runtime_counts(
+        session, run_id=run.id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.run_id == run.id,
+            Event.type == "run.revision_completed",
+        )
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_6_non_idempotent_child_success_without_local_completion_goes_manual_once(
+    session, admin, monkeypatch
+) -> None:
+    (
+        _account,
+        _thread,
+        _turn,
+        run,
+        task,
+        _skill,
+        revision,
+        runtime,
+        _tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-6"
+    )
+
+    class ExternalSuccessThenCrash:
+        calls = 0
+
+        async def execute(self, *, scope, request, **_kwargs):
+            self.calls += 1
+            session.add(
+                AgentToolCall(
+                    org_id=run.org_id,
+                    task_id=task.id,
+                    skill_run_id=scope.skill_run_id,
+                    thread_id=scope.thread_id,
+                    turn_id=scope.turn_id,
+                    tool_code=request.tool_code,
+                    tool_name=request.tool_code,
+                    idempotency_key=f"i4-rule-6:{self.calls}",
+                    side_effect_level="non_idempotent_write",
+                    status="completed",
+                    input_summary="safe",
+                    output_summary="safe",
+                )
+            )
+            await session.commit()
+            raise ConnectionError("lost after external success")
+
+    external = ExternalSuccessThenCrash()
+    runtime._tool_executor = external
+
+    with pytest.raises(ConnectionError, match="lost after external success"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="i4-real-worker"
+        )
+    first_counts = await _real_runtime_counts(
+        session, run_id=run.id, tools=external, harness=harness
+    )
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+    await session.refresh(revision)
+
+    assert status == "stopped"
+    assert first_counts == await _real_runtime_counts(
+        session, run_id=run.id, tools=external, harness=harness
+    ) == {"provider": 0, "tool": 1, "expert": 0}
+    assert revision.status == "manual_reconciliation"
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.run_id == run.id,
+            Event.type == "run.revision_manual_reconciliation",
+        )
+    ) == 1
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.run_id == run.id,
+            Event.type == "run.revision_completed",
+        )
+    ) == 0
+
+
+@pytest.mark.asyncio
+async def test_i4_rule_7_terminal_duplicate_never_classifies_or_reenters_real_runtime(
+    session, admin, monkeypatch
+) -> None:
+    from app.orchestrator import skill_runtime as skill_runtime_module
+
+    (
+        _account,
+        _thread,
+        _turn,
+        run,
+        task,
+        _skill,
+        revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-rule-7"
+    )
+    revision.status = "completed"
+    revision.finished_at = datetime.now(UTC)
+    await session.commit()
+
+    def forbidden_classification(_exc):
+        raise AssertionError("terminal duplicate must not classify")
+
+    async def forbidden_stage(*_args, **_kwargs):
+        raise AssertionError("terminal duplicate must not enter real runtime")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.classify_runtime_failure", forbidden_classification
+    )
+    monkeypatch.setattr(skill_runtime_module, "_start_skill_stage", forbidden_stage)
+
+    first = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+    second = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+
+    assert first == second == "completed"
+    assert await _real_runtime_counts(
+        session, run_id=run.id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    assert await session.scalar(
+        select(func.count(Event.id)).where(Event.run_id == run.id)
+    ) == 0
 
 
 @pytest.mark.asyncio

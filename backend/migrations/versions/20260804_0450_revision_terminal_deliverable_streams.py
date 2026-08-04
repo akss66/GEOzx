@@ -39,27 +39,25 @@ def _replace_revision_constraints(*, terminal_statuses: str) -> None:
         )
 
 
-def _resequence_deliverables(*, partition_columns: str) -> None:
-    op.execute(
+def _require_legacy_version_compatibility() -> None:
+    collision = op.get_bind().scalar(
         sa.text(
-            "WITH ranked AS ("
-            "SELECT id, row_number() OVER ("
-            f"PARTITION BY {partition_columns} ORDER BY version, id"
-            ") AS new_version FROM deliverables"
-            ") UPDATE deliverables SET version = ("
-            "SELECT ranked.new_version FROM ranked WHERE ranked.id = deliverables.id"
-            ")"
+            "SELECT COUNT(*) FROM ("
+            "SELECT 1 FROM deliverables "
+            "GROUP BY content_item_id, type, version HAVING COUNT(*) > 1"
+            ") AS cross_agent_collisions"
         )
     )
+    if collision:
+        raise RuntimeError(
+            "cannot downgrade deliverable streams: cross-agent version collisions exist"
+        )
 
 
 def upgrade() -> None:
     _replace_revision_constraints(terminal_statuses=_NEW_TERMINALS)
     with op.batch_alter_table("deliverables") as batch_op:
         batch_op.drop_constraint("uq_deliverable_version", type_="unique")
-    _resequence_deliverables(
-        partition_columns="content_item_id, agent_code, type",
-    )
     with op.batch_alter_table("deliverables") as batch_op:
         batch_op.create_unique_constraint(
             "uq_deliverable_version",
@@ -68,9 +66,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _require_legacy_version_compatibility()
     with op.batch_alter_table("deliverables") as batch_op:
         batch_op.drop_constraint("uq_deliverable_version", type_="unique")
-    _resequence_deliverables(partition_columns="content_item_id, type")
     with op.batch_alter_table("deliverables") as batch_op:
         batch_op.create_unique_constraint(
             "uq_deliverable_version",

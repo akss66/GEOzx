@@ -1,5 +1,6 @@
 import importlib
 import inspect
+import json
 import os
 
 import pytest
@@ -495,26 +496,31 @@ def test_data_import_parser_version_migration_is_reversible(monkeypatch) -> None
 
         inspector = sa.inspect(connection)
         columns = {
-            column["name"]: column
-            for column in inspector.get_columns("data_import_batches")
+            column["name"]: column for column in inspector.get_columns("data_import_batches")
         }
         checks = {
             constraint["name"]
             for constraint in inspector.get_check_constraints("data_import_batches")
         }
         assert columns["parser_version"]["nullable"] is False
-        assert connection.execute(
-            sa.text("SELECT parser_version FROM data_import_batches WHERE id = 1")
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                sa.text("SELECT parser_version FROM data_import_batches WHERE id = 1")
+            ).scalar_one()
+            == 1
+        )
         connection.execute(
             sa.text(
                 "INSERT INTO data_import_batches (id, template_code) "
                 "VALUES (2, 'douyin_daily_play_v1')"
             )
         )
-        assert connection.execute(
-            sa.text("SELECT parser_version FROM data_import_batches WHERE id = 2")
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                sa.text("SELECT parser_version FROM data_import_batches WHERE id = 2")
+            ).scalar_one()
+            == 1
+        )
         assert "ck_data_import_batches_parser_version_positive" in checks
         with pytest.raises(sa.exc.IntegrityError):
             connection.execute(
@@ -573,9 +579,7 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         assert {"data_import_jobs", "data_import_files", "data_field_observations"} <= set(
             inspector.get_table_names()
         )
-        batch_columns = {
-            column["name"] for column in inspector.get_columns("data_import_batches")
-        }
+        batch_columns = {column["name"] for column in inspector.get_columns("data_import_batches")}
         assert {
             "job_id",
             "job_file_id",
@@ -622,9 +626,7 @@ def test_revision_terminal_deliverable_streams_sqlite_upgrade_and_downgrade(
         sa.Column("agent_code", sa.String(64), nullable=False),
         sa.Column("type", sa.String(64), nullable=False),
         sa.Column("version", sa.Integer, nullable=False),
-        sa.UniqueConstraint(
-            "content_item_id", "type", "version", name="uq_deliverable_version"
-        ),
+        sa.UniqueConstraint("content_item_id", "type", "version", name="uq_deliverable_version"),
     )
     sa.Table(
         "run_revisions",
@@ -658,9 +660,7 @@ def test_revision_terminal_deliverable_streams_sqlite_upgrade_and_downgrade(
                 "(3, 1, 'decision', 'review', 3)"
             )
         )
-        connection.execute(
-            sa.text("INSERT INTO run_revisions (id, status) VALUES (1, 'planned')")
-        )
+        connection.execute(sa.text("INSERT INTO run_revisions (id, status) VALUES (1, 'planned')"))
         monkeypatch.setattr(
             migration,
             "op",
@@ -670,25 +670,15 @@ def test_revision_terminal_deliverable_streams_sqlite_upgrade_and_downgrade(
         migration.upgrade()
 
         rows = connection.execute(
-            sa.text(
-                "SELECT agent_code, version FROM deliverables "
-                "ORDER BY agent_code, version"
-            )
+            sa.text("SELECT agent_code, version FROM deliverables ORDER BY agent_code, version")
         ).all()
-        assert rows == [("content", 1), ("decision", 1), ("decision", 2)]
-        connection.execute(
-            sa.text(
-                "INSERT INTO deliverables "
-                "(id, content_item_id, agent_code, type, version) "
-                "VALUES (4, 1, 'operator', 'review', 1)"
-            )
-        )
+        assert rows == [("content", 2), ("decision", 1), ("decision", 3)]
         with pytest.raises(sa.exc.IntegrityError):
             connection.execute(
                 sa.text(
                     "INSERT INTO deliverables "
                     "(id, content_item_id, agent_code, type, version) "
-                    "VALUES (5, 1, 'decision', 'review', 2)"
+                    "VALUES (5, 1, 'decision', 'review', 3)"
                 )
             )
         connection.execute(
@@ -700,16 +690,94 @@ def test_revision_terminal_deliverable_streams_sqlite_upgrade_and_downgrade(
 
         migration.downgrade()
 
-        assert connection.scalar(
-            sa.text("SELECT status FROM run_revisions WHERE id = 1")
-        ) == "failed"
-        versions = connection.execute(
-            sa.text(
-                "SELECT version FROM deliverables WHERE content_item_id = 1 "
-                "AND type = 'review' ORDER BY version"
+        assert (
+            connection.scalar(sa.text("SELECT status FROM run_revisions WHERE id = 1")) == "failed"
+        )
+        versions = (
+            connection.execute(
+                sa.text(
+                    "SELECT version FROM deliverables WHERE content_item_id = 1 "
+                    "AND type = 'review' ORDER BY version"
+                )
             )
-        ).scalars().all()
-        assert versions == [1, 2, 3, 4]
+            .scalars()
+            .all()
+        )
+        assert versions == [1, 2, 3]
+
+
+def test_revision_terminal_deliverable_streams_downgrade_rejects_collision_atomically(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0450_revision_terminal_deliverable_streams"
+    )
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "deliverables",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("content_item_id", sa.Integer, nullable=False),
+        sa.Column("agent_code", sa.String(64), nullable=False),
+        sa.Column("type", sa.String(64), nullable=False),
+        sa.Column("version", sa.Integer, nullable=False),
+        sa.UniqueConstraint(
+            "content_item_id",
+            "agent_code",
+            "type",
+            "version",
+            name="uq_deliverable_version",
+        ),
+    )
+    sa.Table(
+        "run_revisions",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint(
+            "status IN ('planned', 'waiting_predecessor', 'running', "
+            "'completed', 'failed', 'cancelled', 'blocked', 'stopped', "
+            "'manual_reconciliation')",
+            name="ck_run_revisions_status",
+        ),
+        sa.CheckConstraint(
+            "(status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL) OR "
+            "(status IN ('completed', 'failed', 'cancelled', 'blocked', 'stopped', "
+            "'manual_reconciliation') AND finished_at IS NOT NULL) OR "
+            "(status IN ('planned', 'waiting_predecessor') AND "
+            "started_at IS NULL AND finished_at IS NULL)",
+            name="ck_run_revisions_lifecycle",
+        ),
+    )
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverables "
+                "(id, content_item_id, agent_code, type, version) VALUES "
+                "(1, 1, 'decision', 'review', 1), "
+                "(2, 1, 'content', 'review', 1)"
+            )
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        with pytest.raises(RuntimeError, match="cross-agent version collisions"):
+            migration.downgrade()
+
+        assert connection.execute(
+            sa.text("SELECT id, version FROM deliverables ORDER BY id")
+        ).all() == [(1, 1), (2, 1)]
+        assert {
+            tuple(item["column_names"])
+            for item in sa.inspect(connection).get_unique_constraints("deliverables")
+        } == {("content_item_id", "agent_code", "type", "version")}
 
 
 @pytest.mark.skipif(
@@ -780,10 +848,13 @@ def test_revision_terminal_deliverable_streams_postgres_concurrent_writers(
             assert not second.done()
             allow_first_commit.set()
             assert await asyncio.gather(first, second) == [1, 2]
-            assert await write_one(
-                "other-agent",
-                agent_code=AgentCode.CONTENT_DIRECTOR.value,
-            ) == 1
+            assert (
+                await write_one(
+                    "other-agent",
+                    agent_code=AgentCode.CONTENT_DIRECTOR.value,
+                )
+                == 1
+            )
         finally:
             async with sessions() as session:
                 content = await session.get(ContentItem, content_id)
@@ -793,6 +864,382 @@ def test_revision_terminal_deliverable_streams_postgres_concurrent_writers(
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the PostgreSQL reference matrix gate",
+)
+def test_revision_terminal_deliverable_streams_postgres_reference_matrix_and_atomic_downgrade(
+    monkeypatch,
+) -> None:
+    from uuid import uuid4
+
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace("postgresql+psycopg://", "postgresql+asyncpg://").replace(
+        "postgresql://", "postgresql+asyncpg://"
+    )
+    sync_url = raw_url.replace("postgresql+asyncpg://", "postgresql+psycopg://").replace(
+        "postgresql://", "postgresql+psycopg://"
+    )
+    monkeypatch.setattr(settings, "database_url", async_url)
+    payload = json.dumps
+    config = Config("alembic.ini")
+    engine = sa.create_engine(sync_url)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text("DELETE FROM deliverables WHERE payload @> CAST(:marker AS jsonb)"),
+            {"marker": payload({"task4c_downgrade_collision": True})},
+        )
+    command.downgrade(config, "20260804_0400")
+    suffix = uuid4().hex
+
+    with engine.begin() as connection:
+
+        def insert_id(sql: str, values: dict) -> int:
+            return int(connection.scalar(sa.text(sql), values))
+
+        org_id = insert_id("INSERT INTO orgs (name) VALUES (:name) RETURNING id", {"name": suffix})
+        user_id = insert_id(
+            "INSERT INTO users "
+            "(org_id, email, hashed_password, display_name, role, is_active) "
+            "VALUES (:org, :email, 'x', 'matrix', 'admin', true) RETURNING id",
+            {"org": org_id, "email": f"{suffix}@example.com"},
+        )
+        account_id = insert_id(
+            "INSERT INTO accounts (org_id, platform, nickname, status) "
+            "VALUES (:org, 'douyin', :name, 'active') RETURNING id",
+            {"org": org_id, "name": suffix},
+        )
+        content_id = insert_id(
+            "INSERT INTO content_items "
+            "(created_by_id, account_id, title, current_stage, status) "
+            "VALUES (:user, :account, :title, 'positioning', 'draft') RETURNING id",
+            {"user": user_id, "account": account_id, "title": suffix},
+        )
+        thread_id = insert_id(
+            "INSERT INTO conversation_threads (org_id, created_by_id, account_id, title) "
+            "VALUES (:org, :user, :account, :title) RETURNING id",
+            {"org": org_id, "user": user_id, "account": account_id, "title": suffix},
+        )
+        turn_id = insert_id(
+            "INSERT INTO conversation_turns "
+            "(thread_id, org_id, created_by_id, client_message_id, user_input) "
+            "VALUES (:thread, :org, :user, :key, 'matrix') RETURNING id",
+            {"thread": thread_id, "org": org_id, "user": user_id, "key": suffix},
+        )
+        task_id = insert_id(
+            "INSERT INTO brain_tasks "
+            "(org_id, created_by_id, content_item_id, title, type, status, progress, "
+            "current_focus, risk_count) VALUES "
+            "(:org, :user, :content, 'matrix', 'content_creation', 'running', 1, '', 0) "
+            "RETURNING id",
+            {"org": org_id, "user": user_id, "content": content_id},
+        )
+        run_id = insert_id(
+            "INSERT INTO agent_runs "
+            "(org_id, requested_by_id, task_id, thread_id, turn_id, client_message_id, "
+            "status, phase, request_payload, result_payload) VALUES "
+            "(:org, :user, :task, :thread, :turn, :key, 'running', 'running', "
+            "CAST(:request AS jsonb), CAST(:result AS jsonb)) RETURNING id",
+            {
+                "org": org_id,
+                "user": user_id,
+                "task": task_id,
+                "thread": thread_id,
+                "turn": turn_id,
+                "key": suffix,
+                "request": payload({"artifact_id": "pending"}),
+                "result": payload({}),
+            },
+        )
+        skill_id = insert_id(
+            "INSERT INTO skill_runs "
+            "(org_id, thread_id, turn_id, run_id, task_id, idempotency_key, skill_code, "
+            "skill_version, status, input_snapshot, output_snapshot, input_hash) VALUES "
+            "(:org, :thread, :turn, :run, :task, :key, 'operation_iteration', 1, "
+            "'running', CAST(:input AS json), CAST(:output AS json), :hash) RETURNING id",
+            {
+                "org": org_id,
+                "thread": thread_id,
+                "turn": turn_id,
+                "run": run_id,
+                "task": task_id,
+                "key": suffix,
+                "input": payload({"source_artifact_ids": []}),
+                "output": payload({"operation_plan": {"artifact_id": "pending"}}),
+                "hash": "a" * 64,
+            },
+        )
+        deliverable_ids: list[int] = []
+        for agent_code, version in (
+            ("00-decision", 1),
+            ("02-content-director", 2),
+            ("00-decision", 3),
+        ):
+            deliverable_ids.append(
+                insert_id(
+                    "INSERT INTO deliverables "
+                    "(content_item_id, thread_id, turn_id, run_id, skill_run_id, agent_code, "
+                    "type, version, status, payload) VALUES "
+                    "(:content, :thread, :turn, :run, :skill, :agent, 'review_report', "
+                    ":version, 'pending_review', CAST(:payload AS jsonb)) RETURNING id",
+                    {
+                        "content": content_id,
+                        "thread": thread_id,
+                        "turn": turn_id,
+                        "run": run_id,
+                        "skill": skill_id,
+                        "agent": agent_code,
+                        "version": version,
+                        "payload": payload({"version": version}),
+                    },
+                )
+            )
+        source_id = deliverable_ids[-1]
+        connection.execute(
+            sa.text("UPDATE agent_runs SET request_payload=CAST(:value AS jsonb) WHERE id=:id"),
+            {"id": run_id, "value": payload({"source_artifact_id": source_id, "version": 3})},
+        )
+        connection.execute(
+            sa.text("UPDATE skill_runs SET output_snapshot=CAST(:value AS json) WHERE id=:id"),
+            {
+                "id": skill_id,
+                "value": payload({"operation_plan": {"artifact_id": source_id, "version": 3}}),
+            },
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverable_acceptances "
+                "(task_id, deliverable_id, agent_code, agent_name, deliverable_type, title, "
+                "version, summary, acceptance_items, history_versions, status, "
+                "brain_rejudge_basis) VALUES "
+                "(:task, :artifact, '00-decision', 'decision', 'review_report', 'matrix', 3, "
+                "'', CAST('[]' AS json), CAST(:history AS json), 'pending', CAST('[]' AS json))"
+            ),
+            {"task": task_id, "artifact": source_id, "history": payload([{"version": 3}])},
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverable_action_executions "
+                "(org_id, account_id, requested_by_id, artifact_id, artifact_version, "
+                "action_code, idempotency_key, request_fingerprint, status, result_payload) "
+                "VALUES (:org, :account, :user, :artifact, 3, 'shoot', :key, :hash, "
+                "'completed', CAST(:result AS jsonb))"
+            ),
+            {
+                "org": org_id,
+                "account": account_id,
+                "user": user_id,
+                "artifact": source_id,
+                "key": suffix,
+                "hash": "b" * 64,
+                "result": payload({"source_artifact_id": source_id, "version": 3}),
+            },
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO shoot_tasks "
+                "(org_id, account_id, content_item_id, source_artifact_id, "
+                "source_artifact_version, created_by_id, title, status) VALUES "
+                "(:org, :account, :content, :artifact, 3, :user, 'matrix', 'pending')"
+            ),
+            {
+                "org": org_id,
+                "account": account_id,
+                "content": content_id,
+                "artifact": source_id,
+                "user": user_id,
+            },
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO content_schedule_entries "
+                "(org_id, account_id, content_item_id, source_artifact_id, "
+                "source_artifact_version, created_by_id, scheduled_at, timezone, status) "
+                "VALUES (:org, :account, :content, :artifact, 3, :user, NOW(), 'UTC', 'planned')"
+            ),
+            {
+                "org": org_id,
+                "account": account_id,
+                "content": content_id,
+                "artifact": source_id,
+                "user": user_id,
+            },
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO skill_stage_checkpoints "
+                "(org_id, account_id, thread_id, turn_id, task_id, run_id, skill_run_id, "
+                "step_key, stage_revision, status, skill_code, skill_version, "
+                "dependency_graph_version, stage_contract_hash, input_snapshot, input_hash, "
+                "output_snapshot, output_hash, source_artifact_refs, evidence_refs, "
+                "reuse_policy, side_effect_level, manual_reconciliation_required, finalized_at) "
+                "VALUES (:org, :account, :thread, :turn, :task, :run, :skill, 'matrix', 1, "
+                "'completed', 'operation_iteration', 1, 'v1', :hash, CAST('{}' AS jsonb), "
+                ":hash, CAST(:output AS jsonb), :hash, CAST(:refs AS jsonb), "
+                "CAST(:refs AS jsonb), 'immutable', 'none', false, NOW())"
+            ),
+            {
+                "org": org_id,
+                "account": account_id,
+                "thread": thread_id,
+                "turn": turn_id,
+                "task": task_id,
+                "run": run_id,
+                "skill": skill_id,
+                "hash": "c" * 64,
+                "output": payload({"artifact_id": source_id, "version": 3}),
+                "refs": payload([{"artifact_id": source_id, "version": 3}]),
+            },
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO agent_tool_calls "
+                "(org_id, task_id, skill_run_id, thread_id, turn_id, module, tool_code, "
+                "tool_name, status, permission_mode, requires_human_confirmation, "
+                "input_summary, output_summary, cost, meta) VALUES "
+                "(:org, :task, :skill, :thread, :turn, 'brain', 'matrix', 'matrix', "
+                "'success', 'auto', false, '', '', 0, CAST(:meta AS jsonb))"
+            ),
+            {
+                "org": org_id,
+                "task": task_id,
+                "skill": skill_id,
+                "thread": thread_id,
+                "turn": turn_id,
+                "meta": payload({"publish_receipt": {"artifact_id": source_id, "version": 3}}),
+            },
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO events (type, org_id, account_id, content_item_id, thread_id, "
+                "turn_id, run_id, payload, idempotency_key) VALUES "
+                "('matrix.reference', :org, :account, :content, :thread, :turn, :run, "
+                "CAST(:payload AS jsonb), :key)"
+            ),
+            {
+                "org": org_id,
+                "account": account_id,
+                "content": content_id,
+                "thread": thread_id,
+                "turn": turn_id,
+                "run": run_id,
+                "payload": payload({"artifact_id": source_id, "version": 3}),
+                "key": f"matrix:{suffix}",
+            },
+        )
+
+    command.upgrade(config, "20260804_0450")
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text(
+                "SELECT agent_code, version FROM deliverables "
+                "WHERE content_item_id=:content ORDER BY version"
+            ),
+            {"content": content_id},
+        ).all() == [("00-decision", 1), ("02-content-director", 2), ("00-decision", 3)]
+        checks = {
+            "acceptance": connection.scalar(
+                sa.text("SELECT version FROM deliverable_acceptances WHERE deliverable_id=:id"),
+                {"id": source_id},
+            ),
+            "action": connection.scalar(
+                sa.text(
+                    "SELECT artifact_version FROM deliverable_action_executions "
+                    "WHERE artifact_id=:id"
+                ),
+                {"id": source_id},
+            ),
+            "shoot": connection.scalar(
+                sa.text(
+                    "SELECT source_artifact_version FROM shoot_tasks WHERE source_artifact_id=:id"
+                ),
+                {"id": source_id},
+            ),
+            "schedule": connection.scalar(
+                sa.text(
+                    "SELECT source_artifact_version FROM content_schedule_entries "
+                    "WHERE source_artifact_id=:id"
+                ),
+                {"id": source_id},
+            ),
+            "checkpoint": connection.scalar(
+                sa.text(
+                    "SELECT output_snapshot->>'version' FROM skill_stage_checkpoints "
+                    "WHERE skill_run_id=:id"
+                ),
+                {"id": skill_id},
+            ),
+            "skill": connection.scalar(
+                sa.text(
+                    "SELECT output_snapshot->'operation_plan'->>'version' "
+                    "FROM skill_runs WHERE id=:id"
+                ),
+                {"id": skill_id},
+            ),
+            "tool": connection.scalar(
+                sa.text(
+                    "SELECT meta->'publish_receipt'->>'version' FROM agent_tool_calls "
+                    "WHERE skill_run_id=:id"
+                ),
+                {"id": skill_id},
+            ),
+            "event": connection.scalar(
+                sa.text("SELECT payload->>'version' FROM events WHERE idempotency_key=:key"),
+                {"key": f"matrix:{suffix}"},
+            ),
+        }
+        assert checks == {
+            "acceptance": 3,
+            "action": 3,
+            "shoot": 3,
+            "schedule": 3,
+            "checkpoint": "3",
+            "skill": "3",
+            "tool": "3",
+            "event": "3",
+        }
+
+    command.downgrade(config, "20260804_0400")
+    command.upgrade(config, "20260804_0450")
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverables "
+                "(content_item_id, agent_code, type, version, status, payload) VALUES "
+                "(:content, '02-content-director', 'review_report', 1, "
+                "'pending_review', CAST(:payload AS jsonb))"
+            ),
+            {
+                "content": content_id,
+                "payload": payload({"task4c_downgrade_collision": True}),
+            },
+        )
+    with pytest.raises(RuntimeError, match="cross-agent version collisions"):
+        command.downgrade(config, "20260804_0400")
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                sa.text(
+                    "SELECT count(*) FROM deliverables WHERE content_item_id=:content AND version=1"
+                ),
+                {"content": content_id},
+            )
+            == 2
+        )
+        unique = {
+            tuple(item["column_names"])
+            for item in sa.inspect(connection).get_unique_constraints("deliverables")
+            if item["name"] == "uq_deliverable_version"
+        }
+        assert unique == {("content_item_id", "agent_code", "type", "version")}
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text("DELETE FROM deliverables WHERE payload @> CAST(:marker AS jsonb)"),
+            {"marker": payload({"task4c_downgrade_collision": True})},
+        )
+    engine.dispose()
 
 
 def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
@@ -927,14 +1374,9 @@ def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
             )
             == 1
         )
+        connection.execute(sa.text("INSERT INTO accounts (id, org_id) VALUES (1, 1)"))
         connection.execute(
-            sa.text("INSERT INTO accounts (id, org_id) VALUES (1, 1)")
-        )
-        connection.execute(
-            sa.text(
-                "INSERT INTO conversation_threads (id, account_id, org_id) "
-                "VALUES (1, 1, 1)"
-            )
+            sa.text("INSERT INTO conversation_threads (id, account_id, org_id) VALUES (1, 1, 1)")
         )
         connection.execute(
             sa.text(
@@ -943,9 +1385,7 @@ def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
                 "(1, NULL, 1, 1), (2, 1, 1, 1)"
             )
         )
-        connection.execute(
-            sa.text("INSERT INTO brain_tasks (id, org_id) VALUES (1, 1)")
-        )
+        connection.execute(sa.text("INSERT INTO brain_tasks (id, org_id) VALUES (1, 1)"))
         connection.execute(
             sa.text(
                 "INSERT INTO agent_runs (id, task_id, thread_id, turn_id, org_id) "
@@ -998,17 +1438,14 @@ def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
         with pytest.raises(sa.exc.DatabaseError, match="immutable"):
             connection.execute(
                 sa.text(
-                    "UPDATE skill_stage_checkpoints SET output_hash = :output_hash "
-                    "WHERE id = 1"
+                    "UPDATE skill_stage_checkpoints SET output_hash = :output_hash WHERE id = 1"
                 ),
                 {"output_hash": "d" * 64},
             )
 
         connection.execute(sa.text("DELETE FROM skill_runs WHERE id IN (1, 2)"))
         assert connection.scalar(sa.text("SELECT COUNT(*) FROM run_revisions")) == 0
-        assert connection.scalar(
-            sa.text("SELECT COUNT(*) FROM skill_stage_checkpoints")
-        ) == 0
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM skill_stage_checkpoints")) == 0
         connection.execute(sa.text("DELETE FROM agent_runs WHERE id IN (1, 2)"))
         deleted_turns = connection.execute(
             sa.text("DELETE FROM conversation_turns WHERE id IN (1, 2)")
@@ -1556,9 +1993,7 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                     reused_values
                     | {
                         "stage_revision": 2,
-                        "source_stage_checkpoint_id": (
-                            cross_scope["source_checkpoint"].id
-                        ),
+                        "source_stage_checkpoint_id": (cross_scope["source_checkpoint"].id),
                     },
                     constraint_name="fk_stage_checkpoints_source_compatibility",
                 )
@@ -1570,21 +2005,13 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                     "source_stage_checkpoint_id": 9_999_999,
                 }
             )
-            assert_checkpoint_rejected(
-                reused_values | {"stage_revision": 2, "input_hash": hash_a}
-            )
+            assert_checkpoint_rejected(reused_values | {"stage_revision": 2, "input_hash": hash_a})
 
             for cross_scope in cross_source_scopes:
                 session.execute(
-                    sa.delete(SkillRun).where(
-                        SkillRun.id.in_(cross_scope["skill_ids"])
-                    )
+                    sa.delete(SkillRun).where(SkillRun.id.in_(cross_scope["skill_ids"]))
                 )
-                session.execute(
-                    sa.delete(AgentRun).where(
-                        AgentRun.id.in_(cross_scope["run_ids"])
-                    )
-                )
+                session.execute(sa.delete(AgentRun).where(AgentRun.id.in_(cross_scope["run_ids"])))
                 session.execute(
                     sa.delete(ConversationTurn).where(
                         ConversationTurn.id.in_(cross_scope["turn_ids"])
@@ -1685,16 +2112,12 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                 freshness_source,
                 freshness_validated_at=datetime.now(UTC),
             )
+            assert_checkpoint_rejected(freshness_values | {"data_watermark_hash": hash_b})
             assert_checkpoint_rejected(
-                freshness_values | {"data_watermark_hash": hash_b}
+                freshness_values | {"freshness_expires_at": expires_at + timedelta(seconds=1)}
             )
             assert_checkpoint_rejected(
-                freshness_values
-                | {"freshness_expires_at": expires_at + timedelta(seconds=1)}
-            )
-            assert_checkpoint_rejected(
-                freshness_values
-                | {"freshness_validated_at": expires_at + timedelta(seconds=1)}
+                freshness_values | {"freshness_validated_at": expires_at + timedelta(seconds=1)}
             )
             for unsafe_source in (
                 never_source,
@@ -1736,39 +2159,38 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                 sa.delete(AgentRun).where(AgentRun.thread_id == thread_id)
             )
             deleted_turns = session.execute(
-                sa.delete(ConversationTurn).where(
-                    ConversationTurn.thread_id == thread_id
-                )
+                sa.delete(ConversationTurn).where(ConversationTurn.thread_id == thread_id)
             )
             deleted_thread = session.execute(
-                sa.delete(ConversationThread).where(
-                    ConversationThread.id == thread_id
-                )
+                sa.delete(ConversationThread).where(ConversationThread.id == thread_id)
             )
             session.commit()
             assert deleted_skills.rowcount == 2
             assert deleted_runs.rowcount == 2
             assert deleted_turns.rowcount == 2
             assert deleted_thread.rowcount == 1
-            assert session.scalar(
-                sa.select(sa.func.count(ConversationTurn.id)).where(
-                    ConversationTurn.thread_id == thread_id
+            assert (
+                session.scalar(
+                    sa.select(sa.func.count(ConversationTurn.id)).where(
+                        ConversationTurn.thread_id == thread_id
+                    )
                 )
-            ) == 0
-            assert session.scalar(
-                sa.select(sa.func.count(SkillStageCheckpoint.id))
-            ) == 0
+                == 0
+            )
+            assert session.scalar(sa.select(sa.func.count(SkillStageCheckpoint.id))) == 0
             assert session.scalar(sa.select(sa.func.count(RunRevision.id))) == 0
-            assert session.scalar(
-                sa.select(sa.func.count(AgentRun.id)).where(
-                    AgentRun.thread_id == thread_id
+            assert (
+                session.scalar(
+                    sa.select(sa.func.count(AgentRun.id)).where(AgentRun.thread_id == thread_id)
                 )
-            ) == 0
-            assert session.scalar(
-                sa.select(sa.func.count(SkillRun.id)).where(
-                    SkillRun.thread_id == thread_id
+                == 0
+            )
+            assert (
+                session.scalar(
+                    sa.select(sa.func.count(SkillRun.id)).where(SkillRun.thread_id == thread_id)
                 )
-            ) == 0
+                == 0
+            )
             assert session.get(ConversationThread, thread_id) is None
 
             session.execute(
@@ -1911,10 +2333,7 @@ def test_turn_steering_postgres_upgrade_and_downgrade_gate(monkeypatch) -> None:
                 "20260804_0200"
             )
             assert {"target_turn_id", "steering_mode"}.isdisjoint(
-                {
-                    item["name"]
-                    for item in sa.inspect(connection).get_columns("conversation_turns")
-                }
+                {item["name"] for item in sa.inspect(connection).get_columns("conversation_turns")}
             )
     finally:
         engine.dispose()
@@ -1923,9 +2342,7 @@ def test_turn_steering_postgres_upgrade_and_downgrade_gate(monkeypatch) -> None:
 def test_deliverable_actions_migration_creates_real_resources_and_is_reversible(
     monkeypatch,
 ) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260804_0200_deliverable_actions"
-    )
+    migration = importlib.import_module("migrations.versions.20260804_0200_deliverable_actions")
     assert migration.down_revision == "20260804_0100"
     engine = sa.create_engine("sqlite://")
     metadata = sa.MetaData()
@@ -1948,9 +2365,7 @@ def test_deliverable_actions_migration_creates_real_resources_and_is_reversible(
         } <= set(inspector.get_table_names())
         unique_names = {
             item["name"]
-            for item in inspector.get_unique_constraints(
-                "deliverable_action_executions"
-            )
+            for item in inspector.get_unique_constraints("deliverable_action_executions")
         }
         assert "uq_deliverable_action_idempotency" in unique_names
 
@@ -1966,9 +2381,7 @@ def test_deliverable_actions_migration_creates_real_resources_and_is_reversible(
 def test_scoped_turn_events_migration_backfills_only_inferable_scope_and_is_reversible(
     monkeypatch,
 ) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260804_0100_scope_turn_events"
-    )
+    migration = importlib.import_module("migrations.versions.20260804_0100_scope_turn_events")
     assert migration.down_revision == "20260803_0400"
 
     engine = sa.create_engine("sqlite://")
@@ -2095,21 +2508,16 @@ def test_scoped_turn_events_migration_backfills_only_inferable_scope_and_is_reve
         migration.upgrade()
 
         inspector = sa.inspect(connection)
-        event_columns = {
-            column["name"]: column for column in inspector.get_columns("events")
-        }
+        event_columns = {column["name"]: column for column in inspector.get_columns("events")}
         turn_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("conversation_turns")
+            column["name"]: column for column in inspector.get_columns("conversation_turns")
         }
         assert {"org_id", "account_id", "sequence"} <= event_columns.keys()
         assert all(event_columns[name]["nullable"] for name in ("org_id", "account_id", "sequence"))
         assert turn_columns["next_event_sequence"]["nullable"] is False
         assert str(turn_columns["next_event_sequence"]["default"]).strip("'()") == "1"
         assert connection.execute(
-            sa.text(
-                "SELECT id, org_id, account_id, sequence FROM events ORDER BY id"
-            )
+            sa.text("SELECT id, org_id, account_id, sequence FROM events ORDER BY id")
         ).all() == [
             (1, 1, 10, 1),
             (2, 1, 10, None),
@@ -2120,9 +2528,7 @@ def test_scoped_turn_events_migration_backfills_only_inferable_scope_and_is_reve
             (7, None, None, None),
         ]
         assert connection.execute(
-            sa.text(
-                "SELECT id, next_event_sequence FROM conversation_turns ORDER BY id"
-            )
+            sa.text("SELECT id, next_event_sequence FROM conversation_turns ORDER BY id")
         ).all() == [(1000, 3), (1001, 1), (2000, 2)]
 
         indexes = {index["name"]: index for index in inspector.get_indexes("events")}
@@ -2186,9 +2592,7 @@ def test_scoped_turn_events_migration_backfills_only_inferable_scope_and_is_reve
 
 
 def test_turn_tool_call_count_migration_is_linear_and_reversible(monkeypatch) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260803_0400_turn_tool_call_count"
-    )
+    migration = importlib.import_module("migrations.versions.20260803_0400_turn_tool_call_count")
     assert migration.down_revision == "20260803_0300"
     engine = sa.create_engine("sqlite://")
     metadata = sa.MetaData()
@@ -2224,15 +2628,12 @@ def test_turn_tool_call_count_migration_is_linear_and_reversible(monkeypatch) ->
 
         migration.downgrade()
         assert "tool_call_count" not in {
-            column["name"]
-            for column in sa.inspect(connection).get_columns("conversation_turns")
+            column["name"] for column in sa.inspect(connection).get_columns("conversation_turns")
         }
 
 
 def test_minimal_audit_records_migration_is_linear_and_reversible(monkeypatch) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260803_0300_minimal_audit_records"
-    )
+    migration = importlib.import_module("migrations.versions.20260803_0300_minimal_audit_records")
     assert migration.down_revision == "20260803_0200"
     engine = sa.create_engine("sqlite://")
     metadata = sa.MetaData()
@@ -2263,9 +2664,7 @@ def test_minimal_audit_records_migration_is_linear_and_reversible(monkeypatch) -
             "details",
             "occurred_at",
         } <= columns
-        assert {"thread_id", "turn_id", "run_id", "skill_run_id", "prompt"}.isdisjoint(
-            columns
-        )
+        assert {"thread_id", "turn_id", "run_id", "skill_run_id", "prompt"}.isdisjoint(columns)
 
         migration.downgrade()
         assert sa.inspect(connection).has_table("audit_records") is False

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.approval_access import (
@@ -45,17 +45,26 @@ from app.schemas.approval import (
     ApprovalQueueItemOut,
     ApprovalWorkspaceOut,
 )
+from app.services.deliverable_streams import deliverable_stream_clause
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
-GATE_DELIVERABLE_TYPES: dict[GateType, tuple[DeliverableType, ...]] = {
-    GateType.POSITIONING_REVIEW: (DeliverableType.POSITIONING_STRATEGY,),
-    GateType.TOPIC_REVIEW: (DeliverableType.TOPIC_PLAN, DeliverableType.VIDEO_SCRIPT),
-    GateType.SCRIPT_COMPLIANCE: (DeliverableType.VIDEO_SCRIPT,),
-    GateType.FINAL_VIDEO_REVIEW: (DeliverableType.EDITED_VIDEO,),
-    GateType.PRE_PUBLISH_REVIEW: (DeliverableType.EDITED_VIDEO, DeliverableType.VIDEO_SCRIPT),
-    GateType.LARGE_AD_SPEND: (DeliverableType.AD_PLAN,),
+GATE_DELIVERABLE_STREAMS: dict[GateType, tuple[tuple[str, DeliverableType], ...]] = {
+    GateType.POSITIONING_REVIEW: (
+        ("01-positioning", DeliverableType.POSITIONING_STRATEGY),
+    ),
+    GateType.TOPIC_REVIEW: (
+        ("02-content", DeliverableType.TOPIC_PLAN),
+        ("02-content", DeliverableType.VIDEO_SCRIPT),
+    ),
+    GateType.SCRIPT_COMPLIANCE: (("02-content", DeliverableType.VIDEO_SCRIPT),),
+    GateType.FINAL_VIDEO_REVIEW: (("05-editing", DeliverableType.EDITED_VIDEO),),
+    GateType.PRE_PUBLISH_REVIEW: (
+        ("05-editing", DeliverableType.EDITED_VIDEO),
+        ("02-content", DeliverableType.VIDEO_SCRIPT),
+    ),
+    GateType.LARGE_AD_SPEND: (("07-advertiser", DeliverableType.AD_PLAN),),
 }
 
 GATE_LABELS = {
@@ -98,13 +107,21 @@ async def _approval_project_scope(
 async def _latest_deliverable(
     session: AsyncSession,
     content_item_id: int,
-    types: tuple[DeliverableType, ...],
+    streams: tuple[tuple[str, DeliverableType], ...],
 ) -> Deliverable | None:
     return await session.scalar(
         select(Deliverable)
         .where(
-            Deliverable.content_item_id == content_item_id,
-            Deliverable.type.in_(types),
+            or_(
+                *(
+                    deliverable_stream_clause(
+                        content_item_id=content_item_id,
+                        agent_code=agent_code,
+                        deliverable_type=deliverable_type,
+                    )
+                    for agent_code, deliverable_type in streams
+                )
+            ),
             Deliverable.status != DeliverableStatus.SUPERSEDED,
         )
         .order_by(Deliverable.version.desc(), Deliverable.id.desc())
@@ -244,7 +261,7 @@ async def get_approval_workspace(
         deliverable = await _latest_deliverable(
             session,
             content_item.id,
-            GATE_DELIVERABLE_TYPES[gate.gate],
+            GATE_DELIVERABLE_STREAMS[gate.gate],
         )
         risk = _gate_risk(gate.gate, check)
         reasons = ["该质量门会决定内容是否继续进入下游生产"]

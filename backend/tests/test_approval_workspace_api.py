@@ -30,6 +30,7 @@ from app.models.enums import (
     Platform,
     WorkspaceRole,
 )
+from app.api.approvals import _latest_deliverable
 
 
 async def _token(client, email: str, password: str) -> str:
@@ -39,6 +40,41 @@ async def _token(client, email: str, password: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.asyncio
+async def test_gate_preview_latest_deliverable_uses_explicit_agent_stream(
+    session,
+) -> None:
+    content = ContentItem(title="explicit approval preview stream")
+    session.add(content)
+    await session.flush()
+    expected = Deliverable(
+        content_item_id=content.id,
+        agent_code="01-positioning",
+        type=DeliverableType.POSITIONING_STRATEGY,
+        version=1,
+        status=DeliverableStatus.DRAFT,
+        payload={"stream": "expected"},
+    )
+    other = Deliverable(
+        content_item_id=content.id,
+        agent_code="06-operation",
+        type=DeliverableType.POSITIONING_STRATEGY,
+        version=9,
+        status=DeliverableStatus.DRAFT,
+        payload={"stream": "other"},
+    )
+    session.add_all([expected, other])
+    await session.commit()
+
+    latest = await _latest_deliverable(
+        session,
+        content.id,
+        (("01-positioning", DeliverableType.POSITIONING_STRATEGY),),
+    )
+
+    assert latest is expected
 
 
 @pytest.mark.asyncio

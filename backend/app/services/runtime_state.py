@@ -87,6 +87,7 @@ class RuntimeStateScope:
     result_payload: dict[str, Any] | None = None
     skill_output_snapshot: dict[str, Any] | None = None
     skill_status_override: str | None = None
+    nested_skill: bool = False
     intent: dict[str, Any] | None = None
     error_detail: str | None = None
     response_streamed: bool = False
@@ -172,6 +173,23 @@ async def close_runtime_state(
             skill_run=skill_run,
             task=task,
         )
+
+        if scope.nested_skill:
+            if skill_run is None:
+                raise ValueError("nested runtime closure requires a SkillRun")
+            nested_status = _skill_status(scope.skill_status_override or status)
+            skill_run.status = nested_status
+            skill_run.error_code = error_code
+            if scope.skill_output_snapshot is not None:
+                skill_run.output_snapshot = scope.skill_output_snapshot
+            await session.commit()
+            return RuntimeStateClosure(
+                status=nested_status,
+                turn=turn,
+                run=run,
+                skill_run=skill_run,
+                task=task,
+            )
 
         replaying_terminal = run.status in TERMINAL_STATUSES
         previous_run_status = run.status

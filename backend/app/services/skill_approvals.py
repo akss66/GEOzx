@@ -15,6 +15,10 @@ from app.models import (
     SkillRun,
 )
 from app.models.enums import DeliverableStatus
+from app.services.composite_skill_runs import (
+    block_composite_parent_from_child,
+    resume_composite_parent,
+)
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
 
@@ -104,6 +108,10 @@ async def finalize_skill_finish_approval(
     deliverable.status = (
         DeliverableStatus.APPROVED if approved else DeliverableStatus.REJECTED
     )
+    nested_parent_id = dict(skill_run.output_snapshot or {}).get(
+        "composite_parent_skill_run_id"
+    )
+    nested_child = type(nested_parent_id) is int
     await close_runtime_state(
         session,
         scope=RuntimeStateScope(
@@ -133,9 +141,20 @@ async def finalize_skill_finish_approval(
                 ],
             },
             skill_output_snapshot=output,
+            nested_skill=nested_child,
         ),
         status=next_status,
         message=response,
         error_code=None if approved else "SKILL_APPROVAL_REJECTED",
     )
+    if nested_child and approved:
+        await session.refresh(skill_run)
+        await resume_composite_parent(session, child_skill_run=skill_run)
+    elif nested_child:
+        await session.refresh(skill_run)
+        await block_composite_parent_from_child(
+            session,
+            child_skill_run=skill_run,
+            error_code="SKILL_APPROVAL_REJECTED",
+        )
     return True

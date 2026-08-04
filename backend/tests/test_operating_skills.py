@@ -40,8 +40,12 @@ from app.orchestrator.skill_runtime import (
     run_bounded_stage,
 )
 from app.orchestrator.tool_executor import DurableToolExecutor
+from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
+from app.services.agent_runs import acquire_agent_run
+from app.services.artifacts import accept_artifact
 from app.services.runtime_deliverables import write_runtime_deliverable
+from app.services.skill_approvals import finalize_skill_finish_approval
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
@@ -112,6 +116,7 @@ def _capability_request(
 
 class _Tools:
     def __init__(self) -> None:
+        self.calls: list[RuntimeToolCall] = []
         class EmptyParams(BaseModel):
             model_config = ConfigDict(extra="forbid")
 
@@ -186,17 +191,20 @@ class _Tools:
         )
 
     async def execute(self, **kwargs):
+        self.calls.append(kwargs["request"])
         return await self.executor.execute(**kwargs)
 
 
 class _Harness:
     def __init__(self) -> None:
         self.calls: list[AgentCode] = []
+        self.upstreams: list[dict] = []
 
     async def execute(self, *args, **kwargs):
         session = args[0]
         code = kwargs["code"]
         self.calls.append(code)
+        self.upstreams.append(dict(kwargs["upstream"]))
         output = (
             {
                 "title": "玻璃贴膜避坑指南",
@@ -613,7 +621,7 @@ async def test_content_publishing_persists_only_its_real_publish_stage(
 
 
 @pytest.mark.asyncio
-async def test_operation_iteration_persists_deterministic_plan_boundary(
+async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
     session,
     admin,
 ) -> None:
@@ -632,7 +640,65 @@ async def test_operation_iteration_persists_deterministic_plan_boundary(
         kind=DeliverableType.REVIEW_REPORT,
         status=DeliverableStatus.APPROVED,
     )
-    result = await SkillRuntime().execute(
+    tools = _Tools()
+    harness = _Harness()
+
+    class ObservedRuntime(SkillRuntime):
+        def __init__(self) -> None:
+            class PassingCritic:
+                async def review(self, **_kwargs):
+                    return SimpleNamespace(passed=True, score=95)
+
+            super().__init__(
+                tool_executor=tools,
+                harness=harness,
+                critic=PassingCritic(),
+            )
+            self.child_requests: list[CapabilityRequest] = []
+
+        async def _execute_child_skill(self, *args, capability_request, **kwargs):
+            parent_stage_started = await args[0].scalar(
+                select(Event.id).where(
+                    Event.turn_id == turn.id,
+                    Event.type == "step.started",
+                    Event.payload["step"].as_string() == "prepare_deliverable",
+                )
+            )
+            assert parent_stage_started is not None
+            self.child_requests.append(capability_request)
+            return await super()._execute_child_skill(
+                *args,
+                capability_request=capability_request,
+                **kwargs,
+            )
+
+    runtime = ObservedRuntime()
+
+    async def external_counts() -> dict[str, int]:
+        return {
+            "provider": len(harness.calls),
+            "tool": len(tools.calls),
+            "expert": int(
+                await session.scalar(
+                    select(func.count(AgentInvocation.id)).where(
+                        AgentInvocation.run_id == run.id
+                    )
+                )
+                or 0
+            ),
+            "durable_tool": int(
+                await session.scalar(
+                    select(func.count(AgentToolCall.id)).where(
+                        AgentToolCall.skill_run_id.in_(
+                            select(SkillRun.id).where(SkillRun.run_id == run.id)
+                        )
+                    )
+                )
+                or 0
+            ),
+        }
+
+    result = await runtime.execute(
         session,
         user=admin,
         thread=thread,
@@ -649,6 +715,7 @@ async def test_operation_iteration_persists_deterministic_plan_boundary(
             structured_input={
                 "confirmed_review_artifact_id": review.id,
                 "cycle_days": 7,
+                "topic_count": 4,
                 "script_duration_seconds": 30,
             },
         ),
@@ -672,19 +739,361 @@ async def test_operation_iteration_persists_deterministic_plan_boundary(
         )
     )
 
-    assert result.status == "completed"
-    script_node = next(
-        node
-        for node in result.report["child_skill_graph"]
-        if node["skill_code"] == "script_generation"
-    )
+    assert result.status == "waiting_user"
+    nodes = {node["skill_code"]: node for node in result.report["child_skill_graph"]}
+    script_node = nodes["script_generation"]
+    topic_node = nodes["topic_planning"]
     assert script_node["input"] == {"duration_seconds": 30}
-    assert [(event.type, event.payload.get("step")) for event in events] == [
-        ("step.started", "prepare_deliverable"),
-        ("deliverable.updated", None),
-        ("step.completed", "prepare_deliverable"),
-        ("turn.completed", None),
+    assert topic_node["input"] == {"days": 7, "topic_count": 4}
+    assert topic_node["status"] == script_node["status"] == "completed"
+    assert isinstance(topic_node["artifact_id"], int)
+    assert isinstance(script_node["artifact_id"], int)
+    requests = {
+        request.requested_skill_code: request.structured_input
+        for request in runtime.child_requests
+    }
+    assert requests == {
+        "topic_planning": {"days": 7, "topic_count": 4},
+        "script_generation": {"duration_seconds": 30},
+    }
+    child_runs = {
+        row.skill_code: row
+        for row in await session.scalars(
+            select(SkillRun).where(
+                SkillRun.run_id == run.id,
+                SkillRun.skill_code.in_({"topic_planning", "script_generation"}),
+            )
+        )
+    }
+    assert child_runs["topic_planning"].input_snapshot == {
+        "account_id": account.id,
+        "days": 7,
+        "topic_count": 4,
+    }
+    assert child_runs["script_generation"].input_snapshot == {
+        "account_id": account.id,
+        "duration_seconds": 30,
+        "presentation_format": "storyboard",
+    }
+    assert all(row.status == "completed" for row in child_runs.values())
+    data_context = next(
+        call for call in tools.calls if call.tool_code == "account.data_context"
+    )
+    assert data_context.arguments["days"] == 7
+    assert [upstream["structured_input"] for upstream in harness.upstreams] == [
+        {"account_id": account.id, "days": 7, "topic_count": 4},
+        {
+            "account_id": account.id,
+            "duration_seconds": 30,
+            "presentation_format": "storyboard",
+        },
     ]
+    visual_node = nodes["visual_brief_generation"]
+    assert visual_node["status"] == "waiting_user"
+    assert visual_node["error_code"] == "DEPENDENCY_ARTIFACT_APPROVAL_REQUIRED"
+    assert nodes["content_calendar_planning"]["status"] == "pending"
+    assert nodes["publishing_preparation"]["status"] == "pending"
+    assert result.report["required_children_completed"] is False
+    assert result.report["interrupt"] == {
+        "kind": "artifact_approval_required",
+        "skill_code": "visual_brief_generation",
+        "source_artifact_ids": [script_node["artifact_id"]],
+    }
+    await session.refresh(run)
+    parent_run = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "operation_iteration",
+        )
+    )
+    task = await session.get(BrainTask, result.task_id)
+    assert run.status == "waiting_user"
+    assert parent_run is not None and parent_run.status == "waiting_permission"
+    assert task is not None and task.progress < 100
+    assert sum(event.type == "turn.completed" for event in events) == 0
+    assert await external_counts() == {
+        "provider": 2,
+        "tool": 3,
+        "expert": 2,
+        "durable_tool": 3,
+    }
+
+    calls_before_retry = (len(tools.calls), len(harness.calls))
+    replay = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={
+                "confirmed_review_artifact_id": review.id,
+                "cycle_days": 7,
+                "topic_count": 4,
+                "script_duration_seconds": 30,
+            },
+        ),
+    )
+    assert replay.skill_run_id == result.skill_run_id
+    assert (len(tools.calls), len(harness.calls)) == calls_before_retry
+    assert await external_counts() == {
+        "provider": 2,
+        "tool": 3,
+        "expert": 2,
+        "durable_tool": 3,
+    }
+
+    await accept_artifact(session, admin, artifact_id=script_node["artifact_id"])
+    await session.refresh(run)
+    await session.refresh(parent_run)
+    assert run.status == "queued"
+    assert parent_run.status == "running"
+    claimed = await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="operation-test-worker",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+    resumed = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=claimed,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=claimed,
+            skill_code="operation_iteration",
+            structured_input={
+                "confirmed_review_artifact_id": review.id,
+                "cycle_days": 7,
+                "topic_count": 4,
+                "script_duration_seconds": 30,
+            },
+        ),
+        lease_owner="operation-test-worker",
+        resume_skill_run=parent_run,
+    )
+    resumed_nodes = {
+        node["skill_code"]: node for node in resumed.report["child_skill_graph"]
+    }
+    visual_node = resumed_nodes["visual_brief_generation"]
+    assert resumed.status == "waiting_user"
+    assert visual_node["status"] == "completed"
+    assert visual_node["input"] == {}
+    assert resumed_nodes["content_calendar_planning"]["status"] == "waiting_user"
+    assert resumed.report["interrupt"] == {
+        "kind": "artifact_approval_required",
+        "skill_code": "content_calendar_planning",
+        "source_artifact_ids": [visual_node["artifact_id"]],
+    }
+    assert runtime.child_requests[-1].requested_skill_code == "visual_brief_generation"
+    assert runtime.child_requests[-1].structured_input == {
+        "source_artifact_ids": [script_node["artifact_id"]]
+    }
+    child_ids_after_resume = {
+        row.skill_code: row.id
+        for row in await session.scalars(
+            select(SkillRun).where(SkillRun.run_id == run.id)
+        )
+    }
+    assert child_ids_after_resume["topic_planning"] == child_runs["topic_planning"].id
+    assert child_ids_after_resume["script_generation"] == child_runs["script_generation"].id
+    assert await external_counts() == {
+        "provider": 4,
+        "tool": 4,
+        "expert": 4,
+        "durable_tool": 4,
+    }
+
+    await accept_artifact(session, admin, artifact_id=visual_node["artifact_id"])
+    await session.refresh(run)
+    await session.refresh(parent_run)
+    claimed = await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="operation-test-worker",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+    calendar_result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=claimed,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=claimed,
+            skill_code="operation_iteration",
+            structured_input={
+                "confirmed_review_artifact_id": review.id,
+                "cycle_days": 7,
+                "topic_count": 4,
+                "script_duration_seconds": 30,
+            },
+        ),
+        lease_owner="operation-test-worker",
+        resume_skill_run=parent_run,
+    )
+    calendar_nodes = {
+        node["skill_code"]: node
+        for node in calendar_result.report["child_skill_graph"]
+    }
+    calendar_node = calendar_nodes["content_calendar_planning"]
+    assert calendar_result.status == "waiting_permission"
+    assert calendar_node["status"] == "completed"
+    assert runtime.child_requests[-2].requested_skill_code == "content_calendar_planning"
+    assert runtime.child_requests[-2].structured_input == {
+        "source_artifact_ids": [visual_node["artifact_id"]],
+        "days": 7,
+    }
+    publishing_node = calendar_nodes["publishing_preparation"]
+    assert publishing_node["status"] == "waiting_permission"
+    assert runtime.child_requests[-1].requested_skill_code == "publishing_preparation"
+    assert runtime.child_requests[-1].structured_input == {
+        "content_item_id": task.content_item_id
+    }
+    assert await external_counts() == {
+        "provider": 6,
+        "tool": 6,
+        "expert": 6,
+        "durable_tool": 6,
+    }
+    publishing_child = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "publishing_preparation",
+        )
+    )
+    assert publishing_child is not None
+    approval_call = await session.scalar(
+        select(AgentToolCall).where(
+            AgentToolCall.skill_run_id == publishing_child.id,
+            AgentToolCall.status == "waiting_approval",
+        )
+    )
+    assert approval_call is not None
+    approval_call.status = "success"
+    handled = await finalize_skill_finish_approval(
+        session,
+        tool_call=approval_call,
+        task=task,
+        approved=True,
+        comment="approved",
+    )
+    assert handled is True
+    await session.refresh(run)
+    await session.refresh(parent_run)
+    await session.refresh(publishing_child)
+    assert publishing_child.status == "completed"
+    assert parent_run.status == "running"
+    assert run.status == "queued"
+
+    plan_deliverables = list(
+        await session.scalars(
+            select(Deliverable).where(
+                Deliverable.skill_run_id == parent_run.id,
+                Deliverable.agent_code == AgentCode.DECISION.value,
+            )
+        )
+    )
+    assert len(plan_deliverables) == 1
+    assert plan_deliverables[0].payload["required_children_completed"] is False
+    assert parent_run.output_snapshot["report"]["child_skill_graph"][-1]["status"] == (
+        "waiting_permission"
+    )
+
+    external_counts_before_finish = (len(tools.calls), len(harness.calls))
+    claimed = await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="operation-test-worker",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+    completed = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=claimed,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=claimed,
+            skill_code="operation_iteration",
+            structured_input={
+                "confirmed_review_artifact_id": review.id,
+                "cycle_days": 7,
+                "topic_count": 4,
+                "script_duration_seconds": 30,
+            },
+        ),
+        lease_owner="operation-test-worker",
+        resume_skill_run=parent_run,
+    )
+    assert completed.status == "completed"
+    assert completed.report["required_children_completed"] is True
+    assert all(
+        node["status"] == "completed"
+        for node in completed.report["child_skill_graph"]
+        if node["required"]
+    )
+    assert (len(tools.calls), len(harness.calls)) == external_counts_before_finish
+    assert await external_counts() == {
+        "provider": 6,
+        "tool": 6,
+        "expert": 6,
+        "durable_tool": 6,
+    }
+    await session.refresh(run)
+    await session.refresh(parent_run)
+    await session.refresh(task)
+    await session.refresh(turn)
+    assert run.status == "completed"
+    assert parent_run.status == "completed"
+    assert task.status == BrainTaskStatus.COMPLETED
+    assert task.progress == 100
+    assert turn.status == "completed"
+    terminal_events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.turn_id == turn.id,
+                Event.type == "turn.completed",
+            )
+        )
+    )
+    assert len(terminal_events) == 1
+    final_plan_deliverables = list(
+        await session.scalars(
+            select(Deliverable).where(
+                Deliverable.skill_run_id == parent_run.id,
+                Deliverable.agent_code == AgentCode.DECISION.value,
+            )
+        )
+    )
+    assert [item.id for item in final_plan_deliverables] == [plan_deliverables[0].id]
+    assert final_plan_deliverables[0].payload == plan_deliverables[0].payload
 
 
 @pytest.mark.asyncio

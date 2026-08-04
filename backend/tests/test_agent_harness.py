@@ -31,11 +31,13 @@ from app.models.enums import (
     BrainTaskStatus,
     BrainTaskType,
     ContentStatus,
+    DeliverableStatus,
     DeliverableType,
     Platform,
 )
 from app.orchestrator.agent_harness import AgentHarness, AgentHarnessError
 from app.orchestrator.agent_kernel import KernelAction, SpecialistKernelDecision
+from app.orchestrator.brain_adapter import _history_versions
 from app.orchestrator.brain_runtime import BrainRuntimeGraph, bind_runtime_session
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.skill_runtime import run_bounded_stage
@@ -399,6 +401,27 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     )
     session.add(task)
     await session.flush()
+    content = ContentItem(
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Cross-agent positioning streams",
+        status=ContentStatus.DRAFT,
+    )
+    session.add(content)
+    await session.flush()
+    task.content_item_id = content.id
+    other_stream = [
+        Deliverable(
+            content_item_id=content.id,
+            agent_code=AgentCode.DECISION.value,
+            type=DeliverableType.POSITIONING_STRATEGY,
+            version=version,
+            status=DeliverableStatus.DRAFT,
+            payload={"stream": "decision", "version": version},
+        )
+        for version in (1, 2)
+    ]
+    session.add_all(other_stream)
     run = AgentRun(
         org_id=admin.org_id,
         requested_by_id=admin.id,
@@ -532,6 +555,17 @@ async def test_harness_runs_positioning_with_one_account_without_project(
     )
 
     assert result.invocation.status == AgentInvocationStatus.DONE
+    assert result.deliverable.version == 1
+    assert result.acceptance.version == result.deliverable.version
+    assert result.acceptance.history_versions[0]["version"] == result.deliverable.version
+    assert [
+        item["version"]
+        for item in await _history_versions(session, result.deliverable)
+    ] == [1]
+    assert [item.status for item in other_stream] == [
+        DeliverableStatus.DRAFT,
+        DeliverableStatus.DRAFT,
+    ]
     assert result.deliverable.content_item_id == result.task.content_item_id
     assert result.task.content_item_id is not None
     content_item = await session.get(ContentItem, result.task.content_item_id)

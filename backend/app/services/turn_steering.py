@@ -318,6 +318,18 @@ def _normalized_supplement_input(
     if normalized in {"保持现有要求不变", "保持不变", "无需修改"}:
         return set(), dict(source_input)
     extracted = extract_structured_constraints(message)
+    unsupported_goal_fields = {
+        key for key in ("generate_strategy", "requested_output") if key in extracted
+    }
+    if unsupported_goal_fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "UNSUPPORTED_OPERATION_ITERATION_GOAL",
+                "message": "当前运营迭代不支持修改输出目标，请创建独立任务。",
+                "fields": sorted(unsupported_goal_fields),
+            },
+        )
     merged_input = dict(source_input)
     mapped: set[ConstraintPath | str] = set()
     if "days" in extracted:
@@ -335,8 +347,6 @@ def _normalized_supplement_input(
         if merged_input.get("script_duration_seconds") != duration_seconds:
             mapped.add(ConstraintPath.SCRIPT_REQUIREMENTS)
         merged_input["script_duration_seconds"] = duration_seconds
-    if "generate_strategy" in extracted or "requested_output" in extracted:
-        mapped.add(ConstraintPath.GOAL)
     # Unknown free text must never be guessed into a concrete field. A stable
     # unknown marker makes the dependency planner choose safe full recompute.
     if not extracted:

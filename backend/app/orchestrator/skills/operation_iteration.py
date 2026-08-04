@@ -30,6 +30,8 @@ class OperationIterationPlan(BaseModel):
     dependencies: list[dict[str, Any]] = Field(min_length=1)
     approval_points: list[dict[str, Any]] = Field(min_length=1)
     participating_experts: list[str] = Field(default_factory=list)
+    required_children_completed: bool = False
+    interrupt: dict[str, Any] | None = None
 
 
 OPERATION_ITERATION_SKILL = SkillDefinition(

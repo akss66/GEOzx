@@ -67,6 +67,39 @@ async def test_create_shoot_task_action_creates_one_real_task_and_replays_same_r
     assert await session.scalar(text("SELECT COUNT(*) FROM deliverable_action_executions")) == 1
 
 
+async def test_action_latest_gate_is_scoped_to_the_source_agent_stream(
+    client, session, admin
+) -> None:
+    seeded = await _seed_script_artifact(
+        session, admin, account_name="cross-agent-action-stream"
+    )
+    source = seeded[8]
+    session.add(
+        Deliverable(
+            content_item_id=source.content_item_id,
+            agent_code="02-content-director",
+            type=source.type,
+            version=2,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=dict(source.payload),
+        )
+    )
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.post(
+        f"/artifacts/{source.id}/actions/create_shoot_task",
+        headers={
+            **_auth(token),
+            "Idempotency-Key": "cross-agent-action-stream-key",
+        },
+        json={"confirmed": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["artifact_version"] == 1
+
+
 async def test_create_shoot_task_rejects_same_key_with_different_request_fingerprint(
     client, session, admin
 ) -> None:
@@ -143,7 +176,7 @@ async def test_add_to_schedule_creates_one_real_schedule_entry(
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["resource"]["type"] == "schedule_entry"
     assert await session.scalar(text("SELECT COUNT(*) FROM content_schedule_entries")) == 1
 

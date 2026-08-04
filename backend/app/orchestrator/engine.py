@@ -9,7 +9,7 @@
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,6 +39,10 @@ from app.models.enums import (
 )
 from app.orchestrator.gates import is_forced
 from app.orchestrator.pipeline import PIPELINE, AgentStep, GateStep
+from app.services.deliverable_streams import (
+    deliverable_stream_clause,
+    latest_deliverable_version,
+)
 from app.services.knowledge_workspace import knowledge_context, list_agent_knowledge
 
 EmitFn = Callable[..., Awaitable[None]]
@@ -138,8 +142,11 @@ class OrchestrationEngine:
         others = (
             await session.scalars(
                 select(Deliverable).where(
-                    Deliverable.content_item_id == target.content_item_id,
-                    Deliverable.type == target.type,
+                    deliverable_stream_clause(
+                        content_item_id=target.content_item_id,
+                        agent_code=target.agent_code,
+                        deliverable_type=target.type,
+                    ),
                     Deliverable.id != target.id,
                 )
             )
@@ -297,9 +304,13 @@ class OrchestrationEngine:
             )
             raise
 
-        version = await self._next_version(session, ci.id, step.agent.output_type)
+        version = await self._next_version(
+            session, ci.id, step.agent.code, step.agent.output_type
+        )
         # 同 type 的旧版标记 superseded（版本化：始终保留历史，仅最新版生效）
-        await self._supersede_prior(session, ci.id, step.agent.output_type)
+        await self._supersede_prior(
+            session, ci.id, step.agent.code, step.agent.output_type
+        )
         deliverable = Deliverable(
             content_item_id=ci.id,
             agent_code=step.agent.code,
@@ -370,11 +381,25 @@ class OrchestrationEngine:
 
     async def _upstream(self, session: AsyncSession, ci_id: int) -> dict[str, dict]:
         """上游交付物：每个 type 仅取当前生效版本（最高 version 且非 superseded）。"""
+        stream_agents = {
+            step.agent.output_type: step.agent.code
+            for step in PIPELINE
+            if isinstance(step, AgentStep)
+        }
         rows = (
             await session.scalars(
                 select(Deliverable)
                 .where(
-                    Deliverable.content_item_id == ci_id,
+                    or_(
+                        *(
+                            deliverable_stream_clause(
+                                content_item_id=ci_id,
+                                agent_code=agent_code,
+                                deliverable_type=deliverable_type,
+                            )
+                            for deliverable_type, agent_code in stream_agents.items()
+                        )
+                    ),
                     Deliverable.status != DeliverableStatus.SUPERSEDED,
                 )
                 .order_by(Deliverable.version)
@@ -384,14 +409,21 @@ class OrchestrationEngine:
         return {r.type.value: r.payload for r in rows}
 
     async def _supersede_prior(
-        self, session: AsyncSession, ci_id: int, dtype: DeliverableType
+        self,
+        session: AsyncSession,
+        ci_id: int,
+        agent_code: str,
+        dtype: DeliverableType,
     ) -> None:
         """把某内容某 type 的所有现存交付物标记 superseded（产新版前调用）。"""
         prior = (
             await session.scalars(
                 select(Deliverable).where(
-                    Deliverable.content_item_id == ci_id,
-                    Deliverable.type == dtype,
+                    deliverable_stream_clause(
+                        content_item_id=ci_id,
+                        agent_code=agent_code,
+                        deliverable_type=dtype,
+                    ),
                     Deliverable.status != DeliverableStatus.SUPERSEDED,
                 )
             )
@@ -459,13 +491,20 @@ class OrchestrationEngine:
             for row in rows
         ]
 
-    async def _next_version(self, session: AsyncSession, ci_id: int, dtype: DeliverableType) -> int:
-        current = await session.scalar(
-            select(func.max(Deliverable.version)).where(
-                Deliverable.content_item_id == ci_id, Deliverable.type == dtype
-            )
+    async def _next_version(
+        self,
+        session: AsyncSession,
+        ci_id: int,
+        agent_code: str,
+        dtype: DeliverableType,
+    ) -> int:
+        current = await latest_deliverable_version(
+            session,
+            content_item_id=ci_id,
+            agent_code=agent_code,
+            deliverable_type=dtype,
         )
-        return (current or 0) + 1
+        return current + 1
 
     # —— 质量门 ——
 
@@ -510,8 +549,11 @@ class OrchestrationEngine:
         script = await session.scalar(
             select(Deliverable)
             .where(
-                Deliverable.content_item_id == ci_id,
-                Deliverable.type == DeliverableType.VIDEO_SCRIPT,
+                deliverable_stream_clause(
+                    content_item_id=ci_id,
+                    agent_code="02-content",
+                    deliverable_type=DeliverableType.VIDEO_SCRIPT,
+                ),
                 Deliverable.status != DeliverableStatus.SUPERSEDED,
             )
             .order_by(Deliverable.version.desc())

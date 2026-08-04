@@ -91,6 +91,10 @@ _ACTIVE_SKILL_STAGES: ContextVar[tuple[tuple[str, int], ...]] = ContextVar(
     "active_skill_stages",
     default=(),
 )
+_NESTED_PARENT_SKILL_RUN_ID: ContextVar[int | None] = ContextVar(
+    "nested_parent_skill_run_id",
+    default=None,
+)
 _OPERATION_ITERATION_NATIVE_BOUNDARIES = frozenset({"prepare_deliverable"})
 
 
@@ -385,6 +389,7 @@ class SkillRuntime:
         days: int = 30,
         lease_owner: str | None = None,
         resume_skill_run: SkillRun | None = None,
+        parent_skill_run_id: int | None = None,
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
         if capability_request is not None:
@@ -559,6 +564,7 @@ class SkillRuntime:
                         project_id=thread.project_id,
                         content_item_id=task.content_item_id,
                         skill_output_snapshot={},
+                        nested_skill=parent_skill_run_id is not None,
                     ),
                     status="running",
                     message=f"{definition.name}正在执行。",
@@ -607,6 +613,7 @@ class SkillRuntime:
         ):
             return self._existing_result(skill_run)
         stage_context_token = _ACTIVE_SKILL_STAGES.set(())
+        nested_parent_token = _NESTED_PARENT_SKILL_RUN_ID.set(parent_skill_run_id)
         try:
             if definition.code == _ACCOUNT_INSPECTION:
                 return await self._execute_account_inspection(
@@ -643,6 +650,7 @@ class SkillRuntime:
             if definition.code == "operation_iteration":
                 return await self._execute_operation_iteration(
                     session,
+                    user=user,
                     thread=thread,
                     turn=turn,
                     run=run,
@@ -651,6 +659,7 @@ class SkillRuntime:
                     skill_run=skill_run,
                     scope=runtime_scope,
                     frozen_input=dict(skill_run.input_snapshot or {}),
+                    lease_owner=lease_owner,
                 )
             return await self._execute_operating_skill(
                 session,
@@ -764,6 +773,7 @@ class SkillRuntime:
                 error_code=error_code,
             )
         finally:
+            _NESTED_PARENT_SKILL_RUN_ID.reset(nested_parent_token)
             _ACTIVE_SKILL_STAGES.reset(stage_context_token)
 
     async def _execute_content_publishing(
@@ -886,6 +896,7 @@ class SkillRuntime:
         self,
         session: AsyncSession,
         *,
+        user: User,
         thread: ConversationThread,
         turn: ConversationTurn,
         run: AgentRun,
@@ -894,6 +905,7 @@ class SkillRuntime:
         skill_run: SkillRun,
         scope: RuntimeScope,
         frozen_input: dict[str, Any],
+        lease_owner: str,
     ) -> SkillExecutionResult:
         """Persist a child-Skill DAG without impersonating its specialists."""
 
@@ -930,6 +942,11 @@ class SkillRuntime:
             }
             for item in sources
         ]
+        previous_graph = (
+            dict(skill_run.output_snapshot or {}).get("report", {}).get("child_skill_graph")
+            if isinstance(dict(skill_run.output_snapshot or {}).get("report"), dict)
+            else None
+        )
         report = OperationIterationPlan.model_validate(
             composite_skill_runtime.build(
                 account_id=thread.account_id,
@@ -945,25 +962,162 @@ class SkillRuntime:
                     else None
                 ),
                 source_artifacts=source_refs,
+                previous_graph=previous_graph,
             )
         ).model_dump(mode="json")
-        deliverable = await write_runtime_deliverable(
-            session,
-            scope=scope,
-            content=content,
-            agent_code=AgentCode.DECISION.value,
-            deliverable_type=DeliverableType.PUBLISH_CALENDAR,
-            status=DeliverableStatus.PENDING_REVIEW,
-            payload=report,
-            note="business_artifact_type=operation_execution_plan; deterministic child Skill DAG",
+        nodes_by_code = {
+            str(node["skill_code"]): node for node in report["child_skill_graph"]
+        }
+        parent_status = "completed"
+        interrupt: dict[str, Any] | None = None
+        for node in report["child_skill_graph"]:
+            skill_code = str(node["skill_code"])
+            if node["status"] == "completed":
+                continue
+            try:
+                skill_registry.get(skill_code)
+            except KeyError:
+                node["status"] = "blocked"
+                node["error_code"] = "REQUIRED_CHILD_OWNER_UNAVAILABLE"
+                node["terminal_reason"] = "registered_skill_owner_missing"
+                parent_status = "blocked"
+                break
+            dependencies = [nodes_by_code[str(code)] for code in node["depends_on"]]
+            if any(item["status"] != "completed" for item in dependencies):
+                break
+            structured_input = dict(node["input"])
+            if skill_code in {
+                "visual_brief_generation",
+                "content_calendar_planning",
+            }:
+                dependency_artifact_ids = [
+                    int(item["artifact_id"])
+                    for item in dependencies
+                    if isinstance(item.get("artifact_id"), int)
+                ]
+                if len(dependency_artifact_ids) != len(dependencies):
+                    node["status"] = "blocked"
+                    node["error_code"] = "REQUIRED_CHILD_DEPENDENCY_MISSING"
+                    node["terminal_reason"] = "dependency_artifact_missing"
+                    parent_status = "blocked"
+                    break
+                dependency_artifacts = list(
+                    await session.scalars(
+                        select(Deliverable).where(
+                            Deliverable.id.in_(dependency_artifact_ids),
+                            Deliverable.content_item_id == content.id,
+                        )
+                    )
+                )
+                approved_ids = {
+                    item.id
+                    for item in dependency_artifacts
+                    if item.status == DeliverableStatus.APPROVED
+                }
+                if approved_ids != set(dependency_artifact_ids):
+                    node["status"] = "waiting_user"
+                    node["error_code"] = "DEPENDENCY_ARTIFACT_APPROVAL_REQUIRED"
+                    node["terminal_reason"] = "dependency_artifact_not_approved"
+                    parent_status = "waiting_user"
+                    interrupt = {
+                        "kind": "artifact_approval_required",
+                        "skill_code": skill_code,
+                        "source_artifact_ids": dependency_artifact_ids,
+                    }
+                    break
+                structured_input["source_artifact_ids"] = dependency_artifact_ids
+                if skill_code == "content_calendar_planning":
+                    structured_input["days"] = int(frozen_input.get("cycle_days") or 7)
+            elif skill_code == "publishing_preparation":
+                structured_input["content_item_id"] = content.id
+            child_result = await self._execute_child_skill(
+                session,
+                user=user,
+                thread=thread,
+                turn=turn,
+                run=run,
+                parent_skill_run=skill_run,
+                skill_code=skill_code,
+                capability_request=CapabilityRequest(
+                    org_id=user.org_id,
+                    user_id=user.id,
+                    account_id=thread.account_id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    message=turn.user_input,
+                    requested_skill_code=skill_code,
+                    execution_preference="FORMAL_TASK",
+                    structured_input=structured_input,
+                ),
+                lease_owner=lease_owner,
+            )
+            node["status"] = child_result.status
+            node["artifact_id"] = child_result.artifact_id
+            node["error_code"] = child_result.error_code
+            if child_result.status != "completed":
+                parent_status = child_result.status
+                interrupt = {
+                    "kind": "child_skill_paused",
+                    "skill_code": skill_code,
+                    "child_skill_run_id": child_result.skill_run_id,
+                    **(
+                        {"source_artifact_ids": [child_result.artifact_id]}
+                        if child_result.artifact_id is not None
+                        else {}
+                    ),
+                }
+                break
+        report["required_children_completed"] = all(
+            not bool(node["required"]) or node["status"] == "completed"
+            for node in report["child_skill_graph"]
+        )
+        report["interrupt"] = interrupt
+        if parent_status == "completed" and not report["required_children_completed"]:
+            parent_status = "blocked"
+            report["interrupt"] = {
+                "kind": "required_child_incomplete",
+                "skill_code": next(
+                    str(node["skill_code"])
+                    for node in report["child_skill_graph"]
+                    if bool(node["required"]) and node["status"] != "completed"
+                ),
+            }
+        OperationIterationPlan.model_validate(report)
+        deliverable = await session.scalar(
+            select(Deliverable).where(
+                Deliverable.skill_run_id == skill_run.id,
+                Deliverable.content_item_id == content.id,
+                Deliverable.agent_code == AgentCode.DECISION.value,
+                Deliverable.type == DeliverableType.PUBLISH_CALENDAR,
+            )
+        )
+        if deliverable is None:
+            deliverable = await write_runtime_deliverable(
+                session,
+                scope=scope,
+                content=content,
+                agent_code=AgentCode.DECISION.value,
+                deliverable_type=DeliverableType.PUBLISH_CALENDAR,
+                status=DeliverableStatus.PENDING_REVIEW,
+                payload=report,
+                note=(
+                    "business_artifact_type=operation_execution_plan; "
+                    "deterministic child Skill DAG"
+                ),
+            )
+        response = (
+            "下一运营周期的全部专业成果已生成。"
+            if parent_status == "completed"
+            else "运营迭代已安全暂停，等待完成当前子成果的确认或处理。"
         )
         output = {
-            "status": "completed",
+            "status": parent_status,
             "task_id": task.id,
             "artifact_id": deliverable.id,
             "artifact_type": "operation_execution_plan",
             "report": report,
-            "response": "下一运营周期的执行图已生成；各专业成果仍将由对应子 Skill 产出。",
+            "response": response,
         }
         await _complete_skill_stage(
             session,
@@ -979,11 +1133,47 @@ class SkillRuntime:
             run=run,
             task=task,
             skill_run=skill_run,
-            status="completed",
-            response=output["response"],
+            status=parent_status,
+            response=response,
             output_snapshot=output,
         )
         return self._existing_result(skill_run)
+
+    async def _execute_child_skill(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        parent_skill_run: SkillRun,
+        skill_code: str,
+        capability_request: CapabilityRequest,
+        lease_owner: str,
+    ) -> SkillExecutionResult:
+        """Execute one child through the complete audited SkillRuntime boundary."""
+
+        result = await self.execute(
+            session,
+            user=user,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code=skill_code,
+            capability_request=capability_request,
+            lease_owner=lease_owner,
+            parent_skill_run_id=parent_skill_run.id,
+        )
+        child_skill_run = await session.get(SkillRun, result.skill_run_id)
+        if child_skill_run is None:
+            raise SkillRecoveryConflict("COMPOSITE_CHILD_SKILL_RUN_MISSING")
+        child_skill_run.output_snapshot = {
+            **dict(child_skill_run.output_snapshot or {}),
+            "composite_parent_skill_run_id": parent_skill_run.id,
+        }
+        await session.commit()
+        return result
 
     async def _execute_account_inspection(
         self,
@@ -1487,6 +1677,7 @@ class SkillRuntime:
                     for code in stage
                 },
                 upstream={
+                    "structured_input": dict(frozen_input),
                     "tool_results": {
                         "items": [
                             {"tool_code": key, "result": value}
@@ -2328,6 +2519,7 @@ class SkillRuntime:
                 },
                 skill_output_snapshot=output_snapshot,
                 skill_status_override=skill_status,
+                nested_skill=_NESTED_PARENT_SKILL_RUN_ID.get() is not None,
             ),
             status=status,
             message=response,

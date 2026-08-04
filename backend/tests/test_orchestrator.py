@@ -326,6 +326,20 @@ async def test_rerun_stage_supersedes_old_version(session, content_item):
     engine = OrchestrationEngine(emit=FakeEmit())
     await engine.start(session, content_item.id)  # 跑到 Gate3，定位已产 v1
 
+    other_stream = [
+        Deliverable(
+            content_item_id=content_item.id,
+            agent_code="00-decision",
+            type=DeliverableType.POSITIONING_STRATEGY,
+            version=version,
+            status=DeliverableStatus.DRAFT,
+            payload={"stream": "decision", "version": version},
+        )
+        for version in (1, 2)
+    ]
+    session.add_all(other_stream)
+    await session.commit()
+
     await engine.rerun_stage(session, content_item.id, ContentStage.POSITIONING)
 
     delivs = (
@@ -333,6 +347,7 @@ async def test_rerun_stage_supersedes_old_version(session, content_item):
             select(Deliverable)
             .where(
                 Deliverable.content_item_id == content_item.id,
+                Deliverable.agent_code == "01-positioning",
                 Deliverable.type == DeliverableType.POSITIONING_STRATEGY,
             )
             .order_by(Deliverable.version)
@@ -341,6 +356,10 @@ async def test_rerun_stage_supersedes_old_version(session, content_item):
     assert [d.version for d in delivs] == [1, 2]
     assert delivs[0].status == DeliverableStatus.SUPERSEDED
     assert delivs[1].status == DeliverableStatus.DRAFT
+    assert [row.status for row in other_stream] == [
+        DeliverableStatus.DRAFT,
+        DeliverableStatus.DRAFT,
+    ]
 
 
 @pytest.mark.asyncio

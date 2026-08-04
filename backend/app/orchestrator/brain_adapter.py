@@ -37,6 +37,7 @@ from app.models.enums import (
     RerunScope,
 )
 from app.orchestrator.engine import OrchestrationEngine
+from app.services.deliverable_streams import deliverable_stream_clause
 
 _AGENT_CODE_MAP = {
     "01-positioning": AgentCode.POSITIONING,
@@ -183,7 +184,12 @@ async def rerun_brain_acceptance(
     await _engine.rerun_stage(session, task.content_item_id, stage)
     await sync_brain_task_from_pipeline(session, task)
 
-    latest = await _latest_acceptance(session, task.id, acceptance.deliverable_type)
+    latest = await _latest_acceptance(
+        session,
+        task.id,
+        acceptance.agent_code,
+        acceptance.deliverable_type,
+    )
     return latest or acceptance
 
 
@@ -597,8 +603,11 @@ async def _history_versions(
         await session.scalars(
             select(Deliverable)
             .where(
-                Deliverable.content_item_id == deliverable.content_item_id,
-                Deliverable.type == deliverable.type,
+                deliverable_stream_clause(
+                    content_item_id=deliverable.content_item_id,
+                    agent_code=deliverable.agent_code,
+                    deliverable_type=deliverable.type,
+                ),
             )
             .order_by(Deliverable.version)
         )
@@ -630,12 +639,16 @@ def _acceptance_status(
 
 
 async def _latest_acceptance(
-    session: AsyncSession, task_id: int, deliverable_type: DeliverableType
+    session: AsyncSession,
+    task_id: int,
+    agent_code: AgentCode,
+    deliverable_type: DeliverableType,
 ) -> DeliverableAcceptance | None:
     return await session.scalar(
         select(DeliverableAcceptance)
         .where(
             DeliverableAcceptance.task_id == task_id,
+            DeliverableAcceptance.agent_code == agent_code,
             DeliverableAcceptance.deliverable_type == deliverable_type,
         )
         .order_by(DeliverableAcceptance.version.desc(), DeliverableAcceptance.id.desc())

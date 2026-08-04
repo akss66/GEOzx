@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -7,9 +8,24 @@ from app.models.enums import Platform
 from app.schemas.conversation import CreateConversationTurnRequest
 from app.services.turn_steering import (
     TurnSteeringMode,
+    _normalized_supplement_input,
     classify_turn_steering,
     resolve_turn_steering,
 )
+
+
+@pytest.mark.parametrize("message", ["只诊断，不生成策略", "只看数据"])
+def test_unsupported_goal_supplements_are_rejected_before_revision_lineage(
+    message: str,
+) -> None:
+    with pytest.raises(HTTPException) as captured:
+        _normalized_supplement_input(
+            message,
+            source_input={"confirmed_review_artifact_id": 7, "cycle_days": 14},
+        )
+
+    assert captured.value.status_code == 422
+    assert captured.value.detail["code"] == "UNSUPPORTED_OPERATION_ITERATION_GOAL"
 
 
 @pytest.mark.parametrize(

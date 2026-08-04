@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ContentItem, Deliverable
 from app.models.enums import DeliverableStatus, DeliverableType
 from app.orchestrator.runtime_scope import RuntimeScope, RuntimeScopeConflict
+from app.services.deliverable_streams import (
+    deliverable_stream_clause,
+    latest_deliverable_version,
+)
 from app.services.turn_events import TurnEventScope, append_turn_event
 
 _PROVENANCE_FIELDS = ("thread_id", "turn_id", "run_id", "skill_run_id")
@@ -62,9 +66,11 @@ async def write_runtime_deliverable(
         replay = await session.scalar(
             select(Deliverable)
             .where(
-                Deliverable.content_item_id == content.id,
-                Deliverable.agent_code == agent_code,
-                Deliverable.type == deliverable_type,
+                deliverable_stream_clause(
+                    content_item_id=content.id,
+                    agent_code=agent_code,
+                    deliverable_type=deliverable_type,
+                ),
                 Deliverable.skill_run_id == scope.skill_run_id,
             )
             .order_by(Deliverable.id)
@@ -81,15 +87,11 @@ async def write_runtime_deliverable(
                 return replay
             raise RuntimeScopeConflict("runtime deliverable replay differs from durable write")
 
-    version = (
-        await session.scalar(
-            select(func.max(Deliverable.version)).where(
-                Deliverable.content_item_id == content.id,
-                Deliverable.agent_code == agent_code,
-                Deliverable.type == deliverable_type,
-            )
-        )
-        or 0
+    version = await latest_deliverable_version(
+        session,
+        content_item_id=content.id,
+        agent_code=agent_code,
+        deliverable_type=deliverable_type,
     ) + 1
 
     deliverable = Deliverable(

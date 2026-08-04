@@ -9,7 +9,7 @@ from typing import Any, TypeAlias
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,7 +45,14 @@ from app.schemas.artifacts import (
     ScriptPresentationFormat,
 )
 from app.schemas.deliverable import get_schema, validate_payload
+from app.services.composite_skill_runs import (
+    resume_composite_parent_after_artifact_acceptance,
+)
 from app.services.deliverable_action_registry import SERVER_ACTIONS
+from app.services.deliverable_streams import (
+    deliverable_stream_clause,
+    latest_deliverable_version,
+)
 
 ARTIFACT_ACTION_ROLES = {
     WorkspaceRole.LEAD,
@@ -443,8 +450,11 @@ async def create_artifact_revision_record(
     active_rows = list(
         await session.scalars(
             select(Deliverable).where(
-                Deliverable.content_item_id == source.content_item_id,
-                Deliverable.type == source.type,
+                deliverable_stream_clause(
+                    content_item_id=source.content_item_id,
+                    agent_code=source.agent_code,
+                    deliverable_type=source.type,
+                ),
                 Deliverable.id != revision.id,
                 Deliverable.status != DeliverableStatus.SUPERSEDED,
             )
@@ -542,8 +552,11 @@ async def accept_artifact(
     other_active = list(
         await session.scalars(
             select(Deliverable).where(
-                Deliverable.content_item_id == selected.content_item_id,
-                Deliverable.type == selected.type,
+                deliverable_stream_clause(
+                    content_item_id=selected.content_item_id,
+                    agent_code=selected.agent_code,
+                    deliverable_type=selected.type,
+                ),
                 Deliverable.id != selected.id,
                 Deliverable.version < selected.version,
                 Deliverable.status != DeliverableStatus.SUPERSEDED,
@@ -556,6 +569,10 @@ async def accept_artifact(
     if selected.status != DeliverableStatus.APPROVED:
         selected.status = DeliverableStatus.APPROVED
         changed = True
+    await resume_composite_parent_after_artifact_acceptance(
+        session,
+        artifact=selected,
+    )
     await session.commit()
     if changed:
         await session.refresh(selected)
@@ -1174,16 +1191,11 @@ async def _require_latest_artifact_version(
     )
     if locked_content_id is None:
         raise _artifact_not_found()
-    return int(
-        (
-            await session.scalar(
-                select(func.max(Deliverable.version)).where(
-                    Deliverable.content_item_id == selected.content_item_id,
-                    Deliverable.type == selected.type,
-                )
-            )
-        )
-        or 0
+    return await latest_deliverable_version(
+        session,
+        content_item_id=selected.content_item_id,
+        agent_code=selected.agent_code,
+        deliverable_type=selected.type,
     )
 
 

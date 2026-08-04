@@ -261,6 +261,47 @@ async def test_publish_approved_artifact_rejects_unapproved_and_stale_versions(
 
 
 @pytest.mark.asyncio
+async def test_publish_staleness_is_scoped_to_the_approved_agent_stream(
+    session, admin, monkeypatch
+) -> None:
+    account, _material, package, tool_call = await _seed_publish_context(
+        session, admin, approved=True
+    )
+    approved = await _approved_publish_artifact(
+        session,
+        admin,
+        account=account,
+        package=package,
+        tool_call=tool_call,
+    )
+    session.add(
+        Deliverable(
+            content_item_id=approved.content_item_id,
+            agent_code="02-content-director",
+            type=approved.type,
+            version=2,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=dict(approved.payload),
+        )
+    )
+    await session.commit()
+
+    monkeypatch.setattr(publishing_service.settings, "douyin_h5_publish_enabled", False)
+    result = await publishing_service.publish_approved_artifact(
+        session,
+        admin,
+        account_id=account.id,
+        artifact_id=approved.id,
+        artifact_version=approved.version,
+        scheduled_at=None,
+        visibility="public",
+        allow_comment=True,
+    )
+
+    assert result["source_artifact_version"] == 1
+
+
+@pytest.mark.asyncio
 async def test_publish_approved_artifact_returns_no_fake_receipt_without_connection(
     session, admin, monkeypatch
 ) -> None:

@@ -115,16 +115,17 @@ log = logging.getLogger("dyflow.main_agent_v2")
 async def _has_uncertain_revision_write(
     session: AsyncSession,
     *,
-    skill_run_id: int,
+    run_id: int,
 ) -> bool:
     receipt_id = await session.scalar(
         select(AgentToolCall.id)
+        .join(SkillRun, SkillRun.id == AgentToolCall.skill_run_id)
         .outerjoin(
             ToolExecutionAttempt,
             ToolExecutionAttempt.tool_call_id == AgentToolCall.id,
         )
         .where(
-            AgentToolCall.skill_run_id == skill_run_id,
+            SkillRun.run_id == run_id,
             AgentToolCall.side_effect_level == "non_idempotent_write",
             or_(
                 AgentToolCall.status.in_({"completed", "ambiguous"}),
@@ -220,7 +221,7 @@ async def execute_revision_task_run(
         return "completed"
     if revision.status == "running" and await _has_uncertain_revision_write(
         session,
-        skill_run_id=revision_skill.id,
+        run_id=run.id,
     ):
         reason = "non_idempotent_effect_completed"
         revision = await require_manual_reconciliation(
@@ -358,6 +359,38 @@ async def execute_revision_task_run(
     # This commit is the one-way barrier: no expert/tool/provider/deliverable
     # execution is reachable above it.
     await session.commit()
+
+    if isinstance(verdict, PartialExecution) and not verdict.execute_steps:
+        contract_step_keys = {step.key for step in contract.steps}
+        reused_step_keys = {binding.step_key for binding in verdict.reused}
+        if reused_step_keys != contract_step_keys or not set(
+            revision.affected_steps
+        ).issubset(reused_step_keys):
+            raise RuntimeError("REVISION_REUSE_COVERAGE_INCOMPLETE")
+        response = "Revision reused all durable stage outputs."
+        revision_skill.status = "completed"
+        revision_skill.error_code = None
+        revision_skill.output_snapshot = {
+            "status": "completed",
+            "response": response,
+            "hydrated_outputs_by_step_key": hydrated_outputs,
+        }
+        await complete_revision(session, revision_id=revision.id)
+        await append_turn_event(
+            session,
+            event_scope,
+            "run.revision_completed",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": run.id,
+                "task_id": task.id,
+                "mode": revision.mode,
+                "status": "completed",
+            },
+            f"revision:{revision.id}:completed",
+        )
+        await session.commit()
+        return "completed"
 
     capability_request = CapabilityRequest(
         org_id=run.org_id,
