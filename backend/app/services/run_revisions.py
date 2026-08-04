@@ -22,7 +22,7 @@ from app.orchestrator.checkpoint_graph_contracts import (
     require_checkpoint_graph_contract,
 )
 from app.orchestrator.runtime_scope import RuntimeScope
-from app.orchestrator.step_dependencies import InvalidationPlan
+from app.orchestrator.step_dependencies import InvalidationPlan, build_invalidation_plan
 from app.schemas.run_revision import NoRevisionRequired, RevisionResolution
 from app.services.checkpoint_freshness import load_transaction_db_now
 from app.services.checkpoint_hashing import revision_plan_hash
@@ -155,28 +155,10 @@ def resolve_revision_policy(
     if not invalidation.changed_constraints:
         return NoRevisionRequired()
     order = tuple(step.key for step in contract.steps)
-    if invalidation.mode == "full_recompute":
-        return _resolution(
-            mode="full_recompute",
-            reason=invalidation.fallback_reason or "dependency_full_recompute",
-            execute_steps=order,
-            reused_steps=(),
-        )
-
-    candidate_by_step: dict[str, CheckpointCandidateVerdict] = {}
-    for candidate in candidates:
-        existing = candidate_by_step.get(candidate.step_key)
-        if existing is not None and existing != candidate:
-            return _resolution(
-                mode="full_recompute",
-                reason="checkpoint_candidate_ambiguous",
-                execute_steps=order,
-                reused_steps=(),
-            )
-        candidate_by_step[candidate.step_key] = candidate
-
     manual = tuple(
-        candidate for candidate in candidates if candidate.outcome == "manual_reconciliation"
+        candidate
+        for candidate in candidates
+        if candidate.outcome == "manual_reconciliation" and candidate.step_key in order
     )
     if manual:
         first = min(manual, key=lambda item: order.index(item.step_key))
@@ -191,18 +173,34 @@ def resolve_revision_policy(
             blocking_receipt_ids=receipt_ids,
         )
 
-    execute = set(invalidation.affected_steps)
-    execute.update(step.key for step in contract.steps if step.reuse_policy == "never")
-    producer = {output: step.key for step in contract.steps for output in step.produces_outputs}
-    changed = True
-    while changed:
-        changed = False
-        for step in contract.steps:
-            if step.key in execute:
-                continue
-            if any(producer.get(output) in execute for output in step.consumes_outputs):
-                execute.add(step.key)
-                changed = True
+    candidate_by_step: dict[str, CheckpointCandidateVerdict] = {}
+    for candidate in candidates:
+        if candidate.step_key not in order:
+            return _resolution(
+                mode="full_recompute",
+                reason="checkpoint_contract_mismatch",
+                execute_steps=order,
+                reused_steps=(),
+            )
+        existing = candidate_by_step.get(candidate.step_key)
+        if existing is not None and existing != candidate:
+            return _resolution(
+                mode="full_recompute",
+                reason="checkpoint_candidate_ambiguous",
+                execute_steps=order,
+                reused_steps=(),
+            )
+        candidate_by_step[candidate.step_key] = candidate
+
+    if invalidation.mode == "full_recompute":
+        return _resolution(
+            mode="full_recompute",
+            reason=invalidation.fallback_reason or "dependency_full_recompute",
+            execute_steps=order,
+            reused_steps=(),
+        )
+
+    execute = _canonical_execute_steps(invalidation=invalidation, contract=contract)
 
     reusable_steps: list[str] = []
     source_checkpoint_ids: list[int] = []
@@ -246,6 +244,24 @@ def resolve_revision_policy(
         reused_steps=tuple(reusable_steps),
         source_checkpoint_ids=tuple(source_checkpoint_ids),
     )
+
+
+def _canonical_execute_steps(
+    *, invalidation: InvalidationPlan, contract: CheckpointGraphContract
+) -> set[str]:
+    execute = set(invalidation.affected_steps)
+    execute.update(step.key for step in contract.steps if step.reuse_policy == "never")
+    producer = {output: step.key for step in contract.steps for output in step.produces_outputs}
+    changed = True
+    while changed:
+        changed = False
+        for step in contract.steps:
+            if step.key in execute:
+                continue
+            if any(producer.get(output) in execute for output in step.consumes_outputs):
+                execute.add(step.key)
+                changed = True
+    return execute
 
 
 def _persisted_plan_hash(revision: RunRevision) -> str:
@@ -342,25 +358,39 @@ async def create_revision_record(
         return NoRevisionRequired()
     if resolution is not None and not isinstance(resolution, RevisionResolution):
         raise TypeError("resolution must be a validated RevisionResolution DTO")
+    if resolution is not None:
+        raise RevisionStateConflict("Revision resolution is server-owned")
+    canonical_invalidation = build_invalidation_plan(
+        invalidation.skill_code, set(invalidation.changed_constraints)
+    )
+    if invalidation != canonical_invalidation:
+        raise RevisionStateConflict("Invalidation does not match the dependency planner")
     await _validate_lineage(session, source_scope=source_scope, revision_scope=revision_scope)
     existing = await session.scalar(
         select(RunRevision)
         .where(RunRevision.revision_run_id == revision_scope.run_id)
         .with_for_update()
     )
-    if resolution is None:
-        mode: ResolutionMode = invalidation.mode
-        reason = invalidation.fallback_reason
-        execute_steps = invalidation.affected_steps
-        resolution = _resolution(
-            mode=mode,
-            reason=reason,
-            execute_steps=execute_steps,
-            reused_steps=(),
-        )
-    _validate_reason(resolution.mode, resolution.reason)
     contract = require_checkpoint_graph_contract(invalidation.skill_code, 1)
     order = tuple(step.key for step in contract.steps)
+    mode: ResolutionMode = invalidation.mode
+    reason = invalidation.fallback_reason
+    execute_steps = (
+        order
+        if mode == "full_recompute"
+        else tuple(
+            step.key
+            for step in contract.steps
+            if step.key in _canonical_execute_steps(invalidation=invalidation, contract=contract)
+        )
+    )
+    resolution = _resolution(
+        mode=mode,
+        reason=reason,
+        execute_steps=execute_steps,
+        reused_steps=(),
+    )
+    _validate_reason(resolution.mode, resolution.reason)
     if (
         invalidation.graph_version != contract.graph_version
         or len(set(resolution.execute_steps)) != len(resolution.execute_steps)

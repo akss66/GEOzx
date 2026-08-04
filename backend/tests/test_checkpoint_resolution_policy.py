@@ -82,6 +82,62 @@ def test_manual_precedes_full_and_full_precedes_partial() -> None:
     assert resolution.reused_steps == ()
 
 
+def test_manual_candidate_precedes_dependency_full_recompute() -> None:
+    resolution = resolve_revision_policy(
+        invalidation=build_invalidation_plan("operation_iteration", {"unknown_constraint"}),
+        contract=require_checkpoint_graph_contract("operation_iteration", 1),
+        expected_source_run_id=10,
+        expected_source_turn_id=20,
+        expected_source_skill_run_id=30,
+        candidates=_candidates(
+            outcome_by_step={
+                "benchmark_analysis": (
+                    "manual_reconciliation",
+                    "external_write_ambiguous",
+                )
+            }
+        ),
+    )
+
+    assert resolution.mode == "manual_reconciliation"
+    assert resolution.reason == "external_write_ambiguous"
+    assert resolution.execute_steps == ()
+    assert resolution.reused_steps == ()
+
+
+def test_manual_candidate_precedes_ambiguous_candidate_full_fallback() -> None:
+    candidates = list(
+        _candidates(
+            outcome_by_step={
+                "benchmark_analysis": (
+                    "manual_reconciliation",
+                    "external_write_ambiguous",
+                )
+            }
+        )
+    )
+    first = candidates[0]
+    candidates.append(
+        _candidate(first.step_key, source_run_id=999)
+    )
+
+    resolution = resolve_revision_policy(
+        invalidation=build_invalidation_plan(
+            "operation_iteration", {ConstraintPath.SCHEDULE_REQUIREMENTS}
+        ),
+        contract=require_checkpoint_graph_contract("operation_iteration", 1),
+        expected_source_run_id=10,
+        expected_source_turn_id=20,
+        expected_source_skill_run_id=30,
+        candidates=candidates,
+    )
+
+    assert resolution.mode == "manual_reconciliation"
+    assert resolution.reason == "external_write_ambiguous"
+    assert resolution.execute_steps == ()
+    assert resolution.reused_steps == ()
+
+
 def test_never_policy_executes_and_never_creates_reuse_binding() -> None:
     invalidation = build_invalidation_plan(
         "operation_iteration", {ConstraintPath.SCHEDULE_REQUIREMENTS}
@@ -100,6 +156,11 @@ def test_never_policy_executes_and_never_creates_reuse_binding() -> None:
     assert "publishing_preparation" in resolution.execute_steps
     assert "quality_review" not in resolution.reused_steps
     assert "publishing_preparation" not in resolution.reused_steps
+    assert len(resolution.source_checkpoint_ids) == len(resolution.reused_steps)
+    candidates = {candidate.step_key: candidate for candidate in _candidates()}
+    assert resolution.source_checkpoint_ids == tuple(
+        candidates[step_key].checkpoint_id for step_key in resolution.reused_steps
+    )
 
 
 def test_candidate_from_wrong_source_lineage_fails_closed() -> None:

@@ -90,6 +90,49 @@ def test_stage_envelope_is_strict_bounded_and_forbids_sensitive_payloads() -> No
             StageDataEnvelope(schema_version="input/v1", data={forbidden: "unsafe"})
 
 
+@pytest.mark.parametrize(
+    "forbidden",
+    (
+        "token",
+        "provider_token",
+        "Provider-Token",
+        "authorization",
+        "auth",
+        "apiKey",
+        "accessToken",
+        "customerPrompt",
+        "querySql",
+        "localPath",
+        "customRawResponse",
+        "providerApiKey",
+    ),
+)
+def test_stage_envelope_normalizes_and_rejects_token_and_auth_keys(forbidden: str) -> None:
+    with pytest.raises(ValidationError, match="forbidden persistence key"):
+        StageDataEnvelope(
+            schema_version="input/v1",
+            data={"nested": {forbidden: "unsafe"}},
+        )
+
+
+def test_completed_stage_bounds_each_persisted_reference_array() -> None:
+    ref = ArtifactRef(
+        deliverable_id=1,
+        artifact_type="report",
+        version=1,
+        payload_hash="a" * 64,
+        account_id=1,
+    )
+
+    with pytest.raises(ValidationError, match="256 KiB"):
+        CompletedStageDraft(
+            step_key="topic_planning",
+            input=StageDataEnvelope(schema_version="input/v1", data={}),
+            output=StageDataEnvelope(schema_version="output/v1", data={}),
+            artifact_refs=(ref,) * 3000,
+        )
+
+
 def test_hash_fields_are_lowercase_hex_and_caller_cannot_forge_derived_fields() -> None:
     with pytest.raises(ValidationError):
         ArtifactRef(

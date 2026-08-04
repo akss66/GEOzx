@@ -21,8 +21,10 @@ from app.models import (
 from app.orchestrator.checkpoint_graph_contracts import (
     CheckpointGraphContract,
     CheckpointStepSpec,
+    require_checkpoint_graph_contract,
 )
 from app.orchestrator.runtime_scope import RuntimeScope
+from app.orchestrator.step_dependencies import build_invalidation_plan
 from app.schemas.run_revision import (
     ArtifactRef,
     CheckpointWriteResult,
@@ -36,6 +38,7 @@ from app.schemas.run_revision import (
     ResolvedStageOutput,
     StageDataEnvelope,
     StageReuseBinding,
+    _validate_json_column_size,
 )
 from app.services.checkpoint_freshness import (
     assess_checkpoint_freshness,
@@ -49,6 +52,7 @@ from app.services.checkpoint_hashing import (
     stage_output_hash,
 )
 from app.services.run_revisions import (
+    _canonical_execute_steps,
     _persisted_plan_hash,
     fall_back_to_full_recompute,
     require_manual_reconciliation,
@@ -92,6 +96,21 @@ def _step(contract: CheckpointGraphContract, step_key: str) -> CheckpointStepSpe
     raise CheckpointServiceConflict(
         "CHECKPOINT_GRAPH_CONTRACT_MISSING", "Checkpoint step is not registered"
     )
+
+
+def _require_registry_contract(contract: CheckpointGraphContract) -> None:
+    try:
+        canonical = require_checkpoint_graph_contract(
+            contract.skill_code, contract.skill_version
+        )
+    except (AttributeError, ValueError) as error:
+        raise CheckpointServiceConflict(
+            "CHECKPOINT_GRAPH_CONTRACT_MISSING", "Checkpoint graph contract is not registered"
+        ) from error
+    if contract is not canonical:
+        raise CheckpointServiceConflict(
+            "CHECKPOINT_GRAPH_CONTRACT_MISSING", "Checkpoint graph contract is not canonical"
+        )
 
 
 def _parse_output(row: SkillStageCheckpoint, step: CheckpointStepSpec) -> StageDataEnvelope:
@@ -175,6 +194,7 @@ async def prepare_revision_execution(
 ) -> PartialExecution | FullRecompute | ManualReconciliation:
     if not isinstance(expected_inputs, ExpectedStageInputs):
         raise TypeError("expected_inputs must be a validated ExpectedStageInputs DTO")
+    _require_registry_contract(contract)
     revision_skill = await _validate_skill_scope(session, revision_scope)
     revision = await session.scalar(
         select(RunRevision).where(RunRevision.id == revision_id).with_for_update()
@@ -202,21 +222,11 @@ async def prepare_revision_execution(
             contract=contract,
             reason="checkpoint_source_skill_missing",
         )
-    if revision.mode == "full_recompute":
-        return FullRecompute(
-            reason=revision.fallback_reason or "dependency_full_recompute",
-            execute_steps=tuple(revision.affected_steps),
-            plan_hash=revision.plan_hash,
-        )
     if revision.mode == "manual_reconciliation":
         return ManualReconciliation(
             reason=revision.manual_reconciliation_reason or "source_checkpoint_manual",
             blocking_receipt_ids=(),
             plan_hash=revision.plan_hash,
-        )
-    if revision.mode != "partial":
-        raise CheckpointServiceConflict(
-            "CHECKPOINT_IMMUTABILITY_CONFLICT", "Revision mode is not executable"
         )
 
     effect, effect_reason, receipt_ids, _effect_level = await _side_effect_verdict(
@@ -231,6 +241,26 @@ async def prepare_revision_execution(
             blocking_receipt_ids=receipt_ids,
             plan_hash=revision.plan_hash,
         )
+    source_manual = await session.scalar(
+        select(SkillStageCheckpoint.id)
+        .where(
+            SkillStageCheckpoint.skill_run_id == revision.source_skill_run_id,
+            SkillStageCheckpoint.status == "completed",
+            SkillStageCheckpoint.manual_reconciliation_required.is_(True),
+        )
+        .order_by(SkillStageCheckpoint.id)
+        .limit(1)
+        .with_for_update()
+    )
+    if source_manual is not None:
+        await require_manual_reconciliation(
+            session, revision_id=revision.id, reason="source_checkpoint_manual"
+        )
+        return ManualReconciliation(
+            reason="source_checkpoint_manual",
+            blocking_receipt_ids=(),
+            plan_hash=revision.plan_hash,
+        )
     if effect == "full_recompute":
         return await _full_result(
             session,
@@ -238,9 +268,35 @@ async def prepare_revision_execution(
             contract=contract,
             reason=effect_reason or "checkpoint_read_in_flight",
         )
+    if revision.mode == "full_recompute":
+        return FullRecompute(
+            reason=revision.fallback_reason or "dependency_full_recompute",
+            execute_steps=tuple(step.key for step in contract.steps),
+            plan_hash=revision.plan_hash,
+        )
+    if revision.mode != "partial":
+        raise CheckpointServiceConflict(
+            "CHECKPOINT_IMMUTABILITY_CONFLICT", "Revision mode is not executable"
+        )
+
+    canonical_invalidation = build_invalidation_plan(
+        contract.skill_code, set(revision.changed_constraints)
+    )
+    expected_execute = tuple(
+        step.key
+        for step in contract.steps
+        if step.key
+        in _canonical_execute_steps(
+            invalidation=canonical_invalidation, contract=contract
+        )
+    )
+    if tuple(revision.affected_steps) != expected_execute:
+        raise CheckpointServiceConflict(
+            "CHECKPOINT_IMMUTABILITY_CONFLICT", "Revision execution coverage is not canonical"
+        )
 
     requested_reuse = tuple(
-        step.key for step in contract.steps if step.key in set(revision.reused_steps)
+        step.key for step in contract.steps if step.key not in set(revision.affected_steps)
     )
     validated: list[
         tuple[
@@ -345,6 +401,12 @@ async def prepare_revision_execution(
                 reason="checkpoint_output_corrupt",
             )
         try:
+            _validate_json_column_size(
+                candidate.source_artifact_refs, label="artifact reference array"
+            )
+            _validate_json_column_size(
+                candidate.evidence_refs, label="evidence reference array"
+            )
             artifact_refs = tuple(
                 ArtifactRef.model_validate(item, strict=True)
                 for item in candidate.source_artifact_refs
@@ -550,6 +612,7 @@ async def record_completed_stage(
 ) -> CheckpointWriteResult:
     if not isinstance(draft, CompletedStageDraft):
         raise TypeError("draft must be a validated CompletedStageDraft DTO")
+    _require_registry_contract(contract)
     skill_run = await _validate_skill_scope(session, scope)
     if (
         skill_run.skill_code != contract.skill_code
@@ -602,6 +665,41 @@ async def record_completed_stage(
     manual_required = effect == "manual_reconciliation"
     effective_reuse_policy = "never" if manual_required else step.reuse_policy
     effective_side_effect_level = effect_level or step.side_effect_level
+    artifact_values = [item.model_dump(mode="json") for item in draft.artifact_refs]
+    evidence_values = [item.model_dump(mode="json") for item in draft.evidence_refs]
+    if draft.langgraph_checkpoint_id is not None:
+        semantic_existing = await session.scalar(
+            select(SkillStageCheckpoint)
+            .where(
+                SkillStageCheckpoint.skill_run_id == scope.skill_run_id,
+                SkillStageCheckpoint.step_key == step.key,
+                SkillStageCheckpoint.langgraph_checkpoint_id
+                == draft.langgraph_checkpoint_id,
+            )
+            .order_by(SkillStageCheckpoint.id)
+            .limit(1)
+            .with_for_update()
+        )
+        if semantic_existing is not None:
+            if _completed_fact_matches(
+                semantic_existing,
+                revision_id=revision_id,
+                draft=draft,
+                contract_hash=contract_hash,
+                input_hash=input_hash,
+                output_hash=output_hash,
+                artifact_values=artifact_values,
+                evidence_values=evidence_values,
+                reuse_policy=effective_reuse_policy,
+                side_effect_level=effective_side_effect_level,
+                manual_required=manual_required,
+            ):
+                return CheckpointWriteResult(
+                    checkpoint_id=semantic_existing.id, created=False
+                )
+            raise CheckpointServiceConflict(
+                "CHECKPOINT_IMMUTABILITY_CONFLICT", "Completed checkpoint replay differs"
+            )
     existing = await session.scalar(
         select(SkillStageCheckpoint)
         .where(
@@ -612,31 +710,22 @@ async def record_completed_stage(
         .limit(1)
         .with_for_update()
     )
-    artifact_values = [item.model_dump(mode="json") for item in draft.artifact_refs]
-    evidence_values = [item.model_dump(mode="json") for item in draft.evidence_refs]
     next_stage_revision = 1
     if existing is not None:
-        if (
-            existing.status == "completed"
-            and existing.stage_contract_hash == contract_hash
-            and existing.input_hash == input_hash
-            and existing.output_hash == output_hash
-            and existing.input_snapshot == draft.input.model_dump(mode="json")
-            and existing.output_snapshot == draft.output.model_dump(mode="json")
-            and existing.source_artifact_refs == artifact_values
-            and existing.evidence_refs == evidence_values
-            and existing.reuse_policy == effective_reuse_policy
-            and existing.side_effect_level == effective_side_effect_level
-            and existing.manual_reconciliation_required == manual_required
+        if _completed_fact_matches(
+            existing,
+            revision_id=revision_id,
+            draft=draft,
+            contract_hash=contract_hash,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            artifact_values=artifact_values,
+            evidence_values=evidence_values,
+            reuse_policy=effective_reuse_policy,
+            side_effect_level=effective_side_effect_level,
+            manual_required=manual_required,
         ):
             return CheckpointWriteResult(checkpoint_id=existing.id, created=False)
-        if (
-            draft.langgraph_checkpoint_id is not None
-            and draft.langgraph_checkpoint_id == existing.langgraph_checkpoint_id
-        ):
-            raise CheckpointServiceConflict(
-                "CHECKPOINT_IMMUTABILITY_CONFLICT", "Completed checkpoint replay differs"
-            )
         next_stage_revision = existing.stage_revision + 1
     db_now = await load_transaction_db_now(session)
     watermark_hash = None
@@ -699,26 +788,63 @@ async def record_completed_stage(
                 SkillStageCheckpoint.stage_revision == next_stage_revision,
             )
         )
-        if (
-            winner is not None
-            and winner.status == "completed"
-            and winner.stage_contract_hash == contract_hash
-            and winner.input_hash == input_hash
-            and winner.output_hash == output_hash
-            and winner.input_snapshot == draft.input.model_dump(mode="json")
-            and winner.output_snapshot == draft.output.model_dump(mode="json")
-            and winner.source_artifact_refs == artifact_values
-            and winner.evidence_refs == evidence_values
-            and winner.reuse_policy == effective_reuse_policy
-            and winner.side_effect_level == effective_side_effect_level
-            and winner.manual_reconciliation_required == manual_required
-            and winner.langgraph_checkpoint_id == draft.langgraph_checkpoint_id
+        if winner is not None and _completed_fact_matches(
+            winner,
+            revision_id=revision_id,
+            draft=draft,
+            contract_hash=contract_hash,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            artifact_values=artifact_values,
+            evidence_values=evidence_values,
+            reuse_policy=effective_reuse_policy,
+            side_effect_level=effective_side_effect_level,
+            manual_required=manual_required,
         ):
             return CheckpointWriteResult(checkpoint_id=winner.id, created=False)
+        if (
+            winner is not None
+            and draft.langgraph_checkpoint_id is not None
+            and winner.langgraph_checkpoint_id == draft.langgraph_checkpoint_id
+        ):
+            raise CheckpointServiceConflict(
+                "CHECKPOINT_IMMUTABILITY_CONFLICT", "Completed checkpoint replay differs"
+            ) from None
         raise CheckpointServiceConflict(
             "CHECKPOINT_WRITE_RACE", "Concurrent completed checkpoint differs"
         ) from None
     return CheckpointWriteResult(checkpoint_id=row.id, created=True)
+
+
+def _completed_fact_matches(
+    row: SkillStageCheckpoint,
+    *,
+    revision_id: int | None,
+    draft: CompletedStageDraft,
+    contract_hash: str,
+    input_hash: str,
+    output_hash: str,
+    artifact_values: list[dict],
+    evidence_values: list[dict],
+    reuse_policy: str,
+    side_effect_level: str,
+    manual_required: bool,
+) -> bool:
+    return (
+        row.status == "completed"
+        and row.run_revision_id == revision_id
+        and row.stage_contract_hash == contract_hash
+        and row.input_hash == input_hash
+        and row.output_hash == output_hash
+        and row.input_snapshot == draft.input.model_dump(mode="json")
+        and row.output_snapshot == draft.output.model_dump(mode="json")
+        and row.source_artifact_refs == artifact_values
+        and row.evidence_refs == evidence_values
+        and row.reuse_policy == reuse_policy
+        and row.side_effect_level == side_effect_level
+        and row.manual_reconciliation_required == manual_required
+        and row.langgraph_checkpoint_id == draft.langgraph_checkpoint_id
+    )
 
 
 async def load_latest_stage_output(

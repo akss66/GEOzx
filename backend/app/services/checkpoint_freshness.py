@@ -9,7 +9,15 @@ from typing import Literal, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Account, ContentItem, Deliverable
+from app.models import (
+    Account,
+    ContentItem,
+    DataArtifact,
+    DataConflict,
+    DataFieldObservation,
+    DataImportBatch,
+    Deliverable,
+)
 from app.orchestrator.checkpoint_graph_contracts import CheckpointStepSpec
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.schemas.run_revision import FreshnessStamp, StageDataEnvelope
@@ -88,6 +96,106 @@ class _AccountDatabaseFreshnessValidator:
                 )
             ).all()
         )
+        batch_rows = tuple(
+            (
+                await session.execute(
+                    select(
+                        DataImportBatch.id,
+                        DataImportBatch.source_kind,
+                        DataImportBatch.status,
+                        DataImportBatch.template_code,
+                        DataImportBatch.content_sha256,
+                        DataImportBatch.parser_version,
+                        DataImportBatch.sheet_name,
+                        DataImportBatch.dataset_ordinal,
+                        DataImportBatch.confirmed_sequence,
+                        DataImportBatch.period_start,
+                        DataImportBatch.period_end,
+                        DataImportBatch.row_count,
+                        DataImportBatch.committed_at,
+                        DataImportBatch.revoked_at,
+                        DataImportBatch.updated_at,
+                    )
+                    .where(
+                        DataImportBatch.org_id == scope.org_id,
+                        DataImportBatch.account_id == scope.account_id,
+                    )
+                    .order_by(DataImportBatch.id)
+                )
+            ).all()
+        )
+        artifact_rows = tuple(
+            (
+                await session.execute(
+                    select(
+                        DataArtifact.id,
+                        DataArtifact.batch_id,
+                        DataArtifact.filename,
+                        DataArtifact.content_type,
+                        DataArtifact.byte_size,
+                        DataArtifact.sha256,
+                        DataArtifact.storage_key,
+                        DataArtifact.updated_at,
+                    )
+                    .where(
+                        DataArtifact.org_id == scope.org_id,
+                        DataArtifact.account_id == scope.account_id,
+                    )
+                    .order_by(DataArtifact.id)
+                )
+            ).all()
+        )
+        observation_rows = tuple(
+            (
+                await session.execute(
+                    select(
+                        DataFieldObservation.id,
+                        DataFieldObservation.import_batch_id,
+                        DataFieldObservation.import_row_id,
+                        DataFieldObservation.domain,
+                        DataFieldObservation.entity_key,
+                        DataFieldObservation.stat_date,
+                        DataFieldObservation.field_name,
+                        DataFieldObservation.value,
+                        DataFieldObservation.source_kind,
+                        DataFieldObservation.source_priority,
+                        DataFieldObservation.confirmed_sequence,
+                        DataFieldObservation.active,
+                        DataFieldObservation.updated_at,
+                    )
+                    .where(
+                        DataFieldObservation.org_id == scope.org_id,
+                        DataFieldObservation.account_id == scope.account_id,
+                    )
+                    .order_by(DataFieldObservation.id)
+                )
+            ).all()
+        )
+        conflict_rows = tuple(
+            (
+                await session.execute(
+                    select(
+                        DataConflict.id,
+                        DataConflict.batch_id,
+                        DataConflict.row_number,
+                        DataConflict.status,
+                        DataConflict.field_name,
+                        DataConflict.conflict_code,
+                        DataConflict.existing_value,
+                        DataConflict.incoming_value,
+                        DataConflict.candidate_content_ids,
+                        DataConflict.resolved_by_id,
+                        DataConflict.resolved_at,
+                        DataConflict.updated_at,
+                    )
+                    .where(
+                        DataConflict.org_id == scope.org_id,
+                        DataConflict.account_id == scope.account_id,
+                    )
+                    .order_by(DataConflict.id)
+                )
+            ).all()
+        )
         watermark = canonical_json_sha256(
             domain="checkpoint-freshness-watermark/v1",
             value={
@@ -110,6 +218,74 @@ class _AccountDatabaseFreshnessValidator:
                     }
                     for row in deliverable_rows
                 ],
+                "import_batches": [
+                    {
+                        "id": row.id,
+                        "source_kind": row.source_kind.value,
+                        "status": row.status.value,
+                        "template_code": row.template_code,
+                        "content_sha256": row.content_sha256,
+                        "parser_version": row.parser_version,
+                        "sheet_name": row.sheet_name,
+                        "dataset_ordinal": row.dataset_ordinal,
+                        "confirmed_sequence": row.confirmed_sequence,
+                        "period_start": row.period_start,
+                        "period_end": row.period_end,
+                        "row_count": row.row_count,
+                        "committed_at": _optional_utc(row.committed_at),
+                        "revoked_at": _optional_utc(row.revoked_at),
+                        "updated_at": _as_utc(row.updated_at),
+                    }
+                    for row in batch_rows
+                ],
+                "data_artifacts": [
+                    {
+                        "id": row.id,
+                        "batch_id": row.batch_id,
+                        "filename": row.filename,
+                        "content_type": row.content_type,
+                        "byte_size": row.byte_size,
+                        "sha256": row.sha256,
+                        "storage_key": row.storage_key,
+                        "updated_at": _as_utc(row.updated_at),
+                    }
+                    for row in artifact_rows
+                ],
+                "field_observations": [
+                    {
+                        "id": row.id,
+                        "import_batch_id": row.import_batch_id,
+                        "import_row_id": row.import_row_id,
+                        "domain": row.domain,
+                        "entity_key": row.entity_key,
+                        "stat_date": row.stat_date,
+                        "field_name": row.field_name,
+                        "value": row.value,
+                        "source_kind": row.source_kind.value,
+                        "source_priority": row.source_priority,
+                        "confirmed_sequence": row.confirmed_sequence,
+                        "active": row.active,
+                        "updated_at": _as_utc(row.updated_at),
+                    }
+                    for row in observation_rows
+                ],
+                "data_conflicts": [
+                    {
+                        "id": row.id,
+                        "batch_id": row.batch_id,
+                        "row_number": row.row_number,
+                        "status": row.status.value,
+                        "field_name": row.field_name,
+                        "conflict_code": row.conflict_code,
+                        "existing_value": row.existing_value,
+                        "incoming_value": row.incoming_value,
+                        "candidate_content_ids": row.candidate_content_ids,
+                        "resolved_by_id": row.resolved_by_id,
+                        "resolved_at": _optional_utc(row.resolved_at),
+                        "updated_at": _as_utc(row.updated_at),
+                    }
+                    for row in conflict_rows
+                ],
                 "input": input.model_dump(mode="python"),
             },
         )
@@ -124,6 +300,10 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _optional_utc(value: datetime | None) -> datetime | None:
+    return _as_utc(value) if value is not None else None
 
 
 # Validators are deliberately server-owned and query only the current database transaction.

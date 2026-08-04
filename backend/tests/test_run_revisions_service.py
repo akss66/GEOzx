@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -180,12 +181,15 @@ def _resolution(mode: str) -> RevisionResolution:
     )
 
 
-@pytest.mark.parametrize("mode", ["partial", "full_recompute", "manual_reconciliation"])
+@pytest.mark.parametrize("mode", ["partial", "full_recompute"])
 async def test_create_revision_record_persists_strict_plan_without_commit(
     session, admin, monkeypatch, mode
 ) -> None:
     scopes = await _lineage(session, admin, suffix=mode)
-    invalidation = build_invalidation_plan("operation_iteration", {ConstraintPath.OFFER_TERMS})
+    invalidation = build_invalidation_plan(
+        "operation_iteration",
+        {ConstraintPath.OFFER_TERMS} if mode == "partial" else {"unknown_constraint"},
+    )
 
     async def _forbid_commit():
         raise AssertionError("service must not commit")
@@ -196,13 +200,15 @@ async def test_create_revision_record_persists_strict_plan_without_commit(
         source_scope=scopes.source,
         revision_scope=scopes.revision,
         invalidation=invalidation,
-        resolution=_resolution(mode),
     )
 
     assert revision.id is not None
     assert revision.mode == mode
     assert revision.status == "planned"
-    assert revision.changed_constraints == {"offer_terms": {"operation": "changed"}}
+    expected_constraint = "offer_terms" if mode == "partial" else "unknown_constraint"
+    assert revision.changed_constraints == {
+        expected_constraint: {"operation": "changed"}
+    }
 
 
 async def test_empty_diff_does_not_create_revision(session, admin) -> None:
@@ -217,6 +223,35 @@ async def test_empty_diff_does_not_create_revision(session, admin) -> None:
 
     assert isinstance(result, NoRevisionRequired)
     assert await session.scalar(select(func.count(RunRevision.id))) == 0
+
+
+async def test_revision_plan_uses_canonical_affected_never_and_downstream_coverage(
+    session, admin
+) -> None:
+    scopes = await _lineage(session, admin, suffix="canonical-coverage")
+    invalidation = build_invalidation_plan(
+        "operation_iteration", {ConstraintPath.OFFER_TERMS}
+    )
+
+    revision = await create_revision_record(
+        session,
+        source_scope=scopes.source,
+        revision_scope=scopes.revision,
+        invalidation=invalidation,
+    )
+
+    assert set(invalidation.affected_steps).issubset(revision.affected_steps)
+    assert {"quality_review", "publishing_preparation"}.issubset(
+        revision.affected_steps
+    )
+    assert revision.affected_steps == [
+        "script_generation",
+        "visual_brief_generation",
+        "quality_review",
+        "content_calendar_planning",
+        "publishing_preparation",
+    ]
+    assert revision.reused_steps == []
 
 
 async def test_revision_write_rejects_unvalidated_resolution_dict(session, admin) -> None:
@@ -234,6 +269,52 @@ async def test_revision_write_rejects_unvalidated_resolution_dict(session, admin
     assert await session.scalar(select(func.count(RunRevision.id))) == 0
 
 
+async def test_revision_write_rejects_semantically_forged_resolution(session, admin) -> None:
+    scopes = await _lineage(session, admin, suffix="forged-resolution")
+    forged = RevisionResolution(
+        mode="partial",
+        reason=None,
+        execute_steps=("topic_planning",),
+        reused_steps=(),
+        source_checkpoint_ids=(),
+        blocking_receipt_ids=(),
+        plan_hash="d" * 64,
+    )
+
+    with pytest.raises(RevisionStateConflict, match="server-owned|graph contract"):
+        await create_revision_record(
+            session,
+            source_scope=scopes.source,
+            revision_scope=scopes.revision,
+            invalidation=build_invalidation_plan(
+                "operation_iteration", {ConstraintPath.OFFER_TERMS}
+            ),
+            resolution=forged,
+        )
+    assert await session.scalar(select(func.count(RunRevision.id))) == 0
+
+
+async def test_revision_write_rejects_semantically_forged_invalidation(session, admin) -> None:
+    scopes = await _lineage(session, admin, suffix="forged-invalidation")
+    canonical = build_invalidation_plan(
+        "operation_iteration", {ConstraintPath.OFFER_TERMS}
+    )
+    forged = replace(
+        canonical,
+        affected_steps=("topic_planning",),
+        earliest_affected_step="topic_planning",
+    )
+
+    with pytest.raises(RevisionStateConflict, match="dependency planner"):
+        await create_revision_record(
+            session,
+            source_scope=scopes.source,
+            revision_scope=scopes.revision,
+            invalidation=forged,
+        )
+    assert await session.scalar(select(func.count(RunRevision.id))) == 0
+
+
 async def test_transitions_are_allowed_idempotent_and_transaction_neutral(
     session, admin, monkeypatch
 ) -> None:
@@ -243,7 +324,6 @@ async def test_transitions_are_allowed_idempotent_and_transaction_neutral(
         source_scope=scopes.source,
         revision_scope=scopes.revision,
         invalidation=build_invalidation_plan("operation_iteration", {ConstraintPath.OFFER_TERMS}),
-        resolution=_resolution("partial"),
     )
 
     async def _forbid_commit():
@@ -275,7 +355,6 @@ async def test_full_fallback_is_rejected_after_revision_starts(session, admin) -
         invalidation=build_invalidation_plan(
             "operation_iteration", {ConstraintPath.OFFER_TERMS}
         ),
-        resolution=_resolution("partial"),
     )
     await mark_revision_running(session, revision_id=revision.id)
 
@@ -294,14 +373,12 @@ async def test_fallback_and_manual_reconciliation_recompute_plan_hash(session, a
         source_scope=first.source,
         revision_scope=first.revision,
         invalidation=invalidation,
-        resolution=_resolution("partial"),
     )
     manual = await create_revision_record(
         session,
         source_scope=second.source,
         revision_scope=second.revision,
         invalidation=invalidation,
-        resolution=_resolution("partial"),
     )
 
     old_hash = fallback.plan_hash

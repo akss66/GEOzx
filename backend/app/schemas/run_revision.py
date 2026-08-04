@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from datetime import date, datetime
 from typing import Annotated, Any, Literal
@@ -23,6 +24,9 @@ _FORBIDDEN_KEYS = frozenset(
     {
         "secret",
         "password",
+        "token",
+        "auth",
+        "authorization",
         "access_token",
         "refresh_token",
         "api_key",
@@ -38,6 +42,19 @@ _FORBIDDEN_KEYS = frozenset(
     }
 )
 _MAX_ENVELOPE_BYTES = 256 * 1024
+
+
+def _normalized_persistence_key(key: str) -> str:
+    normalized = unicodedata.normalize("NFC", key)
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
+    return re.sub(r"[^0-9A-Za-z]+", "_", separated).strip("_").casefold()
+
+
+def _validate_json_column_size(value: Any, *, label: str) -> None:
+    from app.services.checkpoint_hashing import canonical_json_bytes
+
+    if len(canonical_json_bytes(value)) > _MAX_ENVELOPE_BYTES:
+        raise ValueError(f"{label} exceeds 256 KiB")
 
 
 def _validate_persistence_value(value: Any, *, path: str = "data") -> None:
@@ -66,8 +83,22 @@ def _validate_persistence_value(value: Any, *, path: str = "data") -> None:
             if normalized_key in normalized:
                 raise ValueError(f"{path} contains duplicate keys after NFC normalization")
             normalized.add(normalized_key)
-            safe_key = normalized_key.casefold().replace("-", "_")
-            if safe_key in _FORBIDDEN_KEYS or safe_key.endswith(("_secret", "_password")):
+            safe_key = _normalized_persistence_key(normalized_key)
+            key_parts = frozenset(part for part in safe_key.split("_") if part)
+            if safe_key in _FORBIDDEN_KEYS or key_parts.intersection(
+                {
+                    "secret",
+                    "password",
+                    "token",
+                    "auth",
+                    "authorization",
+                    "prompt",
+                    "sql",
+                    "path",
+                }
+            ) or safe_key.endswith(
+                ("_raw_response", "_api_key")
+            ):
                 raise ValueError(f"forbidden persistence key: {key}")
             _validate_persistence_value(item, path=f"{path}.{key}")
         return
@@ -92,10 +123,9 @@ class StageDataEnvelope(_StrictModel):
 
     @model_validator(mode="after")
     def _validate_encoded_size(self) -> StageDataEnvelope:
-        from app.services.checkpoint_hashing import canonical_json_bytes
-
-        if len(canonical_json_bytes(self.model_dump(mode="python"))) > _MAX_ENVELOPE_BYTES:
-            raise ValueError("stage data envelope exceeds 256 KiB")
+        _validate_json_column_size(
+            self.model_dump(mode="python"), label="stage data envelope"
+        )
         return self
 
 
@@ -135,6 +165,18 @@ class CompletedStageDraft(_StrictModel):
     artifact_refs: tuple[ArtifactRef, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = ()
     langgraph_checkpoint_id: Annotated[str, Field(min_length=1, max_length=160)] | None = None
+
+    @model_validator(mode="after")
+    def _validate_reference_sizes(self) -> CompletedStageDraft:
+        _validate_json_column_size(
+            [item.model_dump(mode="python") for item in self.artifact_refs],
+            label="artifact reference array",
+        )
+        _validate_json_column_size(
+            [item.model_dump(mode="python") for item in self.evidence_refs],
+            label="evidence reference array",
+        )
+        return self
 
 
 class StageReuseBinding(_StrictModel):
