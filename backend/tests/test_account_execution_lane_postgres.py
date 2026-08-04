@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from uuid import uuid4
@@ -9,7 +11,7 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import Account, AgentRun, BrainTask, Org, ToolExecutionAttempt, User
@@ -31,6 +33,38 @@ def _postgres_url() -> str:
     return os.environ["TEST_POSTGRES_URL"].replace(
         "postgresql+psycopg://", "postgresql+asyncpg://"
     ).replace("postgresql://", "postgresql+asyncpg://")
+
+
+@asynccontextmanager
+async def _isolated_postgres_sessions(
+    *,
+    server_settings: dict[str, str] | None = None,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    schema = f"account_lane_{uuid4().hex}"
+    admin_engine = create_async_engine(_postgres_url())
+    engine = None
+    try:
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_async_engine(
+            _postgres_url(),
+            connect_args={
+                "server_settings": {
+                    "search_path": schema,
+                    **(server_settings or {}),
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        yield sessions
+    finally:
+        if engine is not None:
+            await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
 
 
 async def _wait_for_account_advisory_wait(
@@ -112,20 +146,13 @@ async def _scope(sessions, *, suffix: str):
 )
 def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate() -> None:
     async def exercise() -> None:
-        engine = create_async_engine(
-            _postgres_url(),
-            connect_args={
-                "server_settings": {
-                    "lock_timeout": "10000",
-                    "statement_timeout": "20000",
-                }
-            },
-        )
-        sessions = async_sessionmaker(engine, expire_on_commit=False)
         suffix = uuid4().hex
-        try:
-            async with engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
+        async with _isolated_postgres_sessions(
+            server_settings={
+                "lock_timeout": "10000",
+                "statement_timeout": "20000",
+            }
+        ) as sessions:
             user_id, account_id, task_id, run_ids = await _scope(
                 sessions, suffix=suffix
             )
@@ -210,8 +237,6 @@ def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate()
                     and attempt.finished_at is not None
                     for attempt in attempts
                 )
-        finally:
-            await engine.dispose()
 
     asyncio.run(exercise())
 
@@ -222,13 +247,9 @@ def test_postgres_same_account_executor_claims_once_and_waits_on_advisory_gate()
 )
 def test_postgres_different_accounts_and_reads_bypass_an_occupied_lane() -> None:
     async def exercise() -> None:
-        engine = create_async_engine(_postgres_url())
-        sessions = async_sessionmaker(engine, expire_on_commit=False)
         first_suffix = uuid4().hex
         second_suffix = uuid4().hex
-        try:
-            async with engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
+        async with _isolated_postgres_sessions() as sessions:
             _, first_account, _, first_runs = await _scope(
                 sessions, suffix=first_suffix
             )
@@ -275,7 +296,5 @@ def test_postgres_different_accounts_and_reads_bypass_an_occupied_lane() -> None
                 assert read_guard is None
             release.set()
             await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
-        finally:
-            await engine.dispose()
 
     asyncio.run(exercise())
