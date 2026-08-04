@@ -320,6 +320,7 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
         ("flow-5", "制定 30 天策略", None),
         ("flow-6", "继续普通对话", None),
     ]
+    results = {}
     for client_message_id, message, requested_skill_code in requests:
         response = await client.post(
             f"/brain/conversations/{thread_id}/turns",
@@ -336,7 +337,7 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
         queued_run = await session.get(AgentRun, payload["run"]["id"])
         assert queued_turn is not None
         assert queued_run is not None
-        await execute_conversation_turn(
+        results[client_message_id] = await execute_conversation_turn(
             session,
             admin,
             queued_turn,
@@ -345,6 +346,9 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
                 client_message_id=client_message_id,
                 message=message,
                 requested_skill_code=requested_skill_code,
+            ),
+            execution_owner=(
+                "operation-worker" if client_message_id == "flow-5" else None
             ),
         )
 
@@ -366,9 +370,16 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
         )
     )
     strategy = await session.scalar(select(StrategyPlan).where(StrategyPlan.turn_id == turns[4].id))
+    strategy_count = await session.scalar(select(func.count(StrategyPlan.id)))
 
     assert len(turns) == 6
     assert [len(turn.agent_runs) for turn in turns] == [1, 1, 1, 1, 1, 1]
+    assert results["flow-1"].mode is TurnExecutionMode.ANSWER
+    assert results["flow-2"].mode is TurnExecutionMode.QUERY
+    assert results["flow-3"].mode is TurnExecutionMode.SKILL
+    assert results["flow-4"].mode is TurnExecutionMode.ANSWER
+    assert results["flow-5"].mode is TurnExecutionMode.TASK
+    assert results["flow-6"].mode is TurnExecutionMode.ANSWER
     assert turns[0].agent_runs[0].task_id is None
     assert turns[1].agent_runs[0].task_id is None
     assert inspection_artifact is not None
@@ -381,5 +392,7 @@ async def test_main_agent_v2_cross_intent_flow_preserves_turn_ownership(
     assert turns[3].agent_runs[0].task_id is None
     assert strategy is not None
     assert strategy.task_id == turns[4].agent_runs[0].task_id
+    assert strategy.run_id == turns[4].agent_runs[0].id
+    assert strategy_count == 1
     assert turns[5].agent_runs[0].task_id is None
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
