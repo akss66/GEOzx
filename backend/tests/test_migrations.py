@@ -1110,11 +1110,17 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                 "finalized_at": datetime.now(UTC),
             }
 
-            def assert_checkpoint_rejected(values: dict) -> None:
-                with pytest.raises(sa.exc.IntegrityError):
+            def assert_checkpoint_rejected(
+                values: dict,
+                *,
+                constraint_name: str | None = None,
+            ) -> None:
+                with pytest.raises(sa.exc.IntegrityError) as exc_info:
                     with session.begin_nested():
                         session.add(SkillStageCheckpoint(**values))
                         session.flush()
+                if constraint_name is not None:
+                    assert exc_info.value.orig.diag.constraint_name == constraint_name
 
             def reused_from(
                 source_checkpoint: SkillStageCheckpoint,
@@ -1143,39 +1149,256 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                 values.update(overrides)
                 return values
 
-            other_org = Org(name="other checkpoint migration org")
-            other_account = Account(
-                org_id=org.id,
-                platform=Platform.DOUYIN,
-                nickname="other checkpoint migration account",
-                status=AccountStatus.ACTIVE,
-            )
-            other_task = BrainTask(
-                org_id=org.id,
-                created_by_id=user.id,
-                title="other checkpoint migration task",
-                type=BrainTaskType.CONTENT_CREATION,
-                status=BrainTaskStatus.RUNNING,
-            )
-            other_thread = ConversationThread(
-                org_id=org.id,
-                created_by_id=user.id,
-                account_id=account.id,
-                title="other checkpoint migration thread",
-            )
-            session.add_all([other_org, other_account, other_task, other_thread])
-            session.flush()
+            def create_revision_scope(
+                label: str,
+                *,
+                scope_org: Org,
+                scope_user: User,
+                scope_account: Account | None = None,
+                scope_task: BrainTask | None = None,
+                scope_thread: ConversationThread | None = None,
+            ) -> dict:
+                if scope_account is None:
+                    scope_account = Account(
+                        org_id=scope_org.id,
+                        platform=Platform.DOUYIN,
+                        nickname=f"checkpoint-{label}",
+                        status=AccountStatus.ACTIVE,
+                    )
+                    session.add(scope_account)
+                    session.flush()
+                if scope_task is None:
+                    scope_task = BrainTask(
+                        org_id=scope_org.id,
+                        created_by_id=scope_user.id,
+                        title=f"checkpoint-{label}",
+                        type=BrainTaskType.CONTENT_CREATION,
+                        status=BrainTaskStatus.RUNNING,
+                    )
+                    session.add(scope_task)
+                    session.flush()
+                if scope_thread is None:
+                    scope_thread = ConversationThread(
+                        org_id=scope_org.id,
+                        created_by_id=scope_user.id,
+                        account_id=scope_account.id,
+                        title=f"checkpoint-{label}",
+                    )
+                    session.add(scope_thread)
+                    session.flush()
+                scoped_source_turn = ConversationTurn(
+                    thread_id=scope_thread.id,
+                    org_id=scope_org.id,
+                    created_by_id=scope_user.id,
+                    client_message_id=f"source-{label}-{uuid4().hex}",
+                    user_input="source",
+                )
+                session.add(scoped_source_turn)
+                session.flush()
+                scoped_revision_turn = ConversationTurn(
+                    thread_id=scope_thread.id,
+                    org_id=scope_org.id,
+                    created_by_id=scope_user.id,
+                    client_message_id=f"revision-{label}-{uuid4().hex}",
+                    user_input="revision",
+                    target_turn_id=scoped_source_turn.id,
+                    steering_mode="supplement",
+                )
+                session.add(scoped_revision_turn)
+                session.flush()
+                scoped_source_run = AgentRun(
+                    org_id=scope_org.id,
+                    requested_by_id=scope_user.id,
+                    task_id=scope_task.id,
+                    thread_id=scope_thread.id,
+                    turn_id=scoped_source_turn.id,
+                    client_message_id=f"source-{label}-{uuid4().hex}",
+                    status="completed",
+                    phase="completed",
+                    request_payload={},
+                    result_payload={},
+                )
+                scoped_revision_run = AgentRun(
+                    org_id=scope_org.id,
+                    requested_by_id=scope_user.id,
+                    task_id=scope_task.id,
+                    thread_id=scope_thread.id,
+                    turn_id=scoped_revision_turn.id,
+                    client_message_id=f"revision-{label}-{uuid4().hex}",
+                    status="waiting_predecessor",
+                    phase="waiting_predecessor",
+                    request_payload={},
+                    result_payload={},
+                )
+                session.add_all([scoped_source_run, scoped_revision_run])
+                session.flush()
+                scoped_source_skill = SkillRun(
+                    org_id=scope_org.id,
+                    thread_id=scope_thread.id,
+                    turn_id=scoped_source_turn.id,
+                    run_id=scoped_source_run.id,
+                    task_id=scope_task.id,
+                    idempotency_key=f"source-{label}-{uuid4().hex}",
+                    skill_code="operation_iteration",
+                    skill_version=1,
+                    status="completed",
+                    input_snapshot={},
+                    input_hash=hash_a,
+                    output_snapshot={},
+                )
+                scoped_revision_skill = SkillRun(
+                    org_id=scope_org.id,
+                    thread_id=scope_thread.id,
+                    turn_id=scoped_revision_turn.id,
+                    run_id=scoped_revision_run.id,
+                    task_id=scope_task.id,
+                    idempotency_key=f"revision-{label}-{uuid4().hex}",
+                    skill_code="operation_iteration",
+                    skill_version=1,
+                    status="running",
+                    input_snapshot={},
+                    input_hash=hash_a,
+                    output_snapshot={},
+                )
+                session.add_all([scoped_source_skill, scoped_revision_skill])
+                session.flush()
+                scoped_revision = RunRevision(
+                    org_id=scope_org.id,
+                    account_id=scope_account.id,
+                    thread_id=scope_thread.id,
+                    task_id=scope_task.id,
+                    source_turn_id=scoped_source_turn.id,
+                    source_run_id=scoped_source_run.id,
+                    source_skill_run_id=scoped_source_skill.id,
+                    revision_turn_id=scoped_revision_turn.id,
+                    revision_run_id=scoped_revision_run.id,
+                    revision_skill_run_id=scoped_revision_skill.id,
+                    mode="partial",
+                    status="planned",
+                    dependency_graph_version="operation-loop/v1",
+                    earliest_affected_step="script_generation",
+                    changed_constraints={},
+                    direct_affected_steps=["script_generation"],
+                    affected_steps=["script_generation"],
+                    reused_steps=[],
+                    plan_hash=hash_a,
+                )
+                session.add(scoped_revision)
+                session.flush()
+                scoped_checkpoint = SkillStageCheckpoint(
+                    org_id=scope_org.id,
+                    account_id=scope_account.id,
+                    thread_id=scope_thread.id,
+                    turn_id=scoped_source_turn.id,
+                    task_id=scope_task.id,
+                    run_id=scoped_source_run.id,
+                    skill_run_id=scoped_source_skill.id,
+                    step_key=source.step_key,
+                    stage_revision=1,
+                    status="completed",
+                    skill_code=source.skill_code,
+                    skill_version=source.skill_version,
+                    dependency_graph_version=source.dependency_graph_version,
+                    stage_contract_hash=source.stage_contract_hash,
+                    input_snapshot=source.input_snapshot,
+                    input_hash=source.input_hash,
+                    output_snapshot=source.output_snapshot,
+                    output_hash=source.output_hash,
+                    source_artifact_refs=[],
+                    evidence_refs=[],
+                    reuse_policy=source.reuse_policy,
+                    side_effect_level=source.side_effect_level,
+                    manual_reconciliation_required=False,
+                    finalized_at=datetime.now(UTC),
+                )
+                session.add(scoped_checkpoint)
+                session.flush()
+                return {
+                    "turn_ids": [scoped_source_turn.id, scoped_revision_turn.id],
+                    "run_ids": [scoped_source_run.id, scoped_revision_run.id],
+                    "skill_ids": [scoped_source_skill.id, scoped_revision_skill.id],
+                    "source_checkpoint": scoped_checkpoint,
+                }
 
-            for overrides in (
-                {"org_id": other_org.id},
-                {"account_id": other_account.id},
-                {"task_id": other_task.id},
-                {"thread_id": other_thread.id},
-                {"source_stage_checkpoint_id": 9_999_999},
-                {"input_hash": hash_a},
-            ):
+            other_org = Org(name="other checkpoint migration org")
+            other_user = User(
+                org=other_org,
+                email=f"other-checkpoint-{uuid4().hex}@example.com",
+                hashed_password="not-used-in-this-test",
+                display_name="Other checkpoint migration user",
+                role=UserRole.ADMIN,
+            )
+            session.add_all([other_org, other_user])
+            session.flush()
+            cross_org_scope = create_revision_scope(
+                "cross-org",
+                scope_org=other_org,
+                scope_user=other_user,
+            )
+            cross_account_scope = create_revision_scope(
+                "cross-account",
+                scope_org=org,
+                scope_user=user,
+                scope_task=task,
+            )
+            cross_task_scope = create_revision_scope(
+                "cross-task",
+                scope_org=org,
+                scope_user=user,
+                scope_account=account,
+                scope_thread=thread,
+            )
+            cross_thread_scope = create_revision_scope(
+                "cross-thread",
+                scope_org=org,
+                scope_user=user,
+                scope_account=account,
+                scope_task=task,
+            )
+            cross_source_scopes = (
+                cross_org_scope,
+                cross_account_scope,
+                cross_task_scope,
+                cross_thread_scope,
+            )
+            for cross_scope in cross_source_scopes:
                 assert_checkpoint_rejected(
-                    reused_values | {"stage_revision": 2} | overrides
+                    reused_values
+                    | {
+                        "stage_revision": 2,
+                        "source_stage_checkpoint_id": (
+                            cross_scope["source_checkpoint"].id
+                        ),
+                    },
+                    constraint_name="fk_stage_checkpoints_source_compatibility",
+                )
+
+            assert_checkpoint_rejected(
+                reused_values
+                | {
+                    "stage_revision": 2,
+                    "source_stage_checkpoint_id": 9_999_999,
+                }
+            )
+            assert_checkpoint_rejected(
+                reused_values | {"stage_revision": 2, "input_hash": hash_a}
+            )
+
+            for cross_scope in cross_source_scopes:
+                session.execute(
+                    sa.delete(SkillRun).where(
+                        SkillRun.id.in_(cross_scope["skill_ids"])
+                    )
+                )
+                session.execute(
+                    sa.delete(AgentRun).where(
+                        AgentRun.id.in_(cross_scope["run_ids"])
+                    )
+                )
+                session.execute(
+                    sa.delete(ConversationTurn).where(
+                        ConversationTurn.id.in_(cross_scope["turn_ids"])
+                    )
                 )
 
             completed_values = {
