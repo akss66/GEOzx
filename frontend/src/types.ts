@@ -962,6 +962,14 @@ export interface ResolveTurnInterruptResult {
   dispatch_message?: string | null;
 }
 
+export interface StopConversationTurnResult {
+  thread_id: number;
+  turn_id: number;
+  run_id: number;
+  stopped: boolean;
+  dispatch_deferred?: boolean;
+}
+
 export interface TurnSubmission {
   turn: ConversationTurn;
   run: ConversationAgentRun;

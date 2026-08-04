@@ -19,6 +19,7 @@ import {
   resolveTurnInterrupt,
   sendConversationTurn,
   stopBrainGeneration,
+  stopConversationTurn,
 } from "../api/brain";
 import {
   deleteConversationAttachment,
@@ -633,7 +634,28 @@ export default function BrainHome() {
   });
 
   const stopMutation = useMutation({
-    mutationFn: stopBrainGeneration,
+    mutationFn: (input:
+      | {
+          mode: "canonical";
+          threadId: number;
+          turnId: number;
+          idempotencyKey: string;
+        }
+      | {
+          mode: "legacy_optimistic";
+          clientMessageId: string;
+          taskId: number | null;
+        }
+    ) => input.mode === "canonical"
+      ? stopConversationTurn({
+          threadId: input.threadId,
+          turnId: input.turnId,
+          idempotencyKey: input.idempotencyKey,
+        }).then(() => undefined)
+      : stopBrainGeneration({
+          clientMessageId: input.clientMessageId,
+          taskId: input.taskId,
+        }).then(() => undefined),
     onSuccess: () => message.info("正在停止本轮生成"),
     onError: (error) => message.error(
       presentApiError(error, "停止生成失败，请稍后重试。").message,
@@ -1487,11 +1509,19 @@ export default function BrainHome() {
                 }
                 onSubmit={startWorkflow}
                 onStop={() => {
-                  if (
-                    !activeTurn?.client_message_id
-                    || stopMutation.isPending
-                  ) return;
+                  if (!activeTurn || stopMutation.isPending) return;
+                  if (activeTurn.id != null) {
+                    stopMutation.mutate({
+                      mode: "canonical",
+                      threadId: activeTurn.thread_id,
+                      turnId: activeTurn.id,
+                      idempotencyKey: createStopIdempotencyKey(activeTurn),
+                    });
+                    return;
+                  }
+                  if (!activeTurn.client_message_id) return;
                   stopMutation.mutate({
+                    mode: "legacy_optimistic",
                     clientMessageId: activeTurn.client_message_id,
                     taskId:
                       pendingTurn?.clientMessageId === activeTurn.client_message_id
@@ -1875,6 +1905,13 @@ function createInterruptIdempotencyKey(interrupt: TurnInterrupt) {
     ? globalThis.crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return `interrupt-${interrupt.id}-v${interrupt.version}-${nonce}`;
+}
+
+function createStopIdempotencyKey(turn: ConversationTurn) {
+  const nonce = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `stop-${turn.thread_id}-${turn.id}-${nonce}`;
 }
 
 function syncLabel(status: Account["data_sync_status"]) {

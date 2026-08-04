@@ -21,6 +21,7 @@ import {
   resolveTurnInterrupt,
   sendConversationTurn,
   stopBrainGeneration,
+  stopConversationTurn,
 } from "../api/brain";
 import {
   deleteConversationAttachment,
@@ -123,6 +124,13 @@ vi.mock("../api/brain", () => ({
   stopBrainGeneration: vi.fn(async () => ({
     client_message_id: "stopped",
     stop_requested: true,
+  })),
+  stopConversationTurn: vi.fn(async (input) => ({
+    thread_id: input.threadId,
+    turn_id: input.turnId,
+    run_id: 701,
+    stopped: true,
+    dispatch_deferred: false,
   })),
 }));
 
@@ -1396,6 +1404,7 @@ describe("BrainHome V3 conversation projection", () => {
       clientMessageId,
       taskId: null,
     }));
+    expect(stopConversationTurn).not.toHaveBeenCalled();
   });
 
   it("restores a waiting approval and its controls from durable conversation history", async () => {
@@ -1479,10 +1488,31 @@ describe("BrainHome V3 conversation projection", () => {
     expect(await screen.findByText("生成长报告")).toBeInTheDocument();
     expect(screen.getByLabelText("运营大脑消息")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
-    await waitFor(() => expect(vi.mocked(stopBrainGeneration).mock.calls[0]?.[0]).toEqual({
-      clientMessageId: "durable-running",
-      taskId: null,
-    }));
+    await waitFor(() => expect(stopConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: 81,
+      turnId: 501,
+      idempotencyKey: expect.stringContaining("stop-81-501-"),
+    })));
+    expect(stopBrainGeneration).not.toHaveBeenCalled();
+  });
+
+  it("stops the newest active persisted Turn and never an older active Turn", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "older-running", "Older task", null, "running"),
+      persistedTurn(502, "newest-running", "Newest task", null, "running"),
+    ]));
+
+    renderBrainHome();
+
+    expect(await screen.findByText("Newest task")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    await waitFor(() => expect(stopConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: 81,
+      turnId: 502,
+    })));
+    expect(stopConversationTurn).not.toHaveBeenCalledWith(expect.objectContaining({ turnId: 501 }));
+    expect(stopBrainGeneration).not.toHaveBeenCalled();
   });
 
   it("never restores the removed legacy Task runtime even when stale local storage exists", async () => {

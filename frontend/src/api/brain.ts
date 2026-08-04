@@ -23,6 +23,7 @@ import type {
   TurnSubmission,
   TurnInterrupt,
   ResolveTurnInterruptResult,
+  StopConversationTurnResult,
 } from "../types";
 
 export async function listConversationEvents(
@@ -260,6 +261,20 @@ export async function stopBrainGeneration(input: {
   }>(`/brain/generations/${encodeURIComponent(input.clientMessageId)}/stop`, {
     task_id: input.taskId ?? null,
   });
+  return data;
+}
+
+export async function stopConversationTurn(input: {
+  threadId: number;
+  turnId: number;
+  reason?: string;
+  idempotencyKey: string;
+}): Promise<StopConversationTurnResult> {
+  const { data } = await api.post<StopConversationTurnResult>(
+    `/brain/conversations/${input.threadId}/turns/${input.turnId}/stop`,
+    { reason: input.reason ?? null },
+    { headers: { "Idempotency-Key": input.idempotencyKey } },
+  );
   return data;
 }
 

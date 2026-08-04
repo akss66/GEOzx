@@ -34,6 +34,7 @@ import {
   sendConversationTurn,
   sendBrainMessage,
   stopBrainGeneration,
+  stopConversationTurn,
   verifyBrainExperienceCandidate,
 } from "./brain";
 import { api } from "./client";
@@ -609,6 +610,30 @@ describe("brain api", () => {
       2,
       "/brain/tasks/12/regenerate",
       { client_message_id: "turn-2" },
+    );
+  });
+
+  it("stops a persisted conversation Turn through the canonical scoped endpoint", async () => {
+    const stopped = {
+      thread_id: 81,
+      turn_id: 501,
+      run_id: 701,
+      stopped: true,
+      dispatch_deferred: false,
+    };
+    apiPost.mockResolvedValueOnce({ data: stopped });
+
+    await expect(stopConversationTurn({
+      threadId: 81,
+      turnId: 501,
+      reason: "Operator stopped this turn",
+      idempotencyKey: "stop-thread-81-turn-501",
+    })).resolves.toEqual(stopped);
+
+    expect(apiPost).toHaveBeenCalledWith(
+      "/brain/conversations/81/turns/501/stop",
+      { reason: "Operator stopped this turn" },
+      { headers: { "Idempotency-Key": "stop-thread-81-turn-501" } },
     );
   });
 
