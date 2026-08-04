@@ -69,16 +69,14 @@ async def test_operation_iteration_uses_confirmed_sources_and_only_builds_child_
         raise AssertionError("global isolated trace session factory must not be used")
 
     deterministic_harness = _Harness()
-
-    async def fake_execute(self, *args, **kwargs):
-        return await deterministic_harness.execute(*args, **kwargs)
+    harness = AgentHarness()
 
     monkeypatch.setitem(
         AgentHarness.execute_trace_isolated.__kwdefaults__,
         "session_factory",
         fail_global_session_factory,
     )
-    monkeypatch.setattr(AgentHarness, "execute", fake_execute)
+    monkeypatch.setattr(harness, "execute", deterministic_harness.execute)
 
     account, thread, turn, run = await _scope(
         session, admin, key="operation-iteration", message="根据复盘安排下周运营"
@@ -110,7 +108,7 @@ async def test_operation_iteration_uses_confirmed_sources_and_only_builds_child_
             "cycle_days": 7,
         },
     )
-    runtime = SkillRuntime(tool_executor=_Tools())
+    runtime = SkillRuntime(tool_executor=_Tools(), harness=harness)
 
     first = await runtime.execute(
         session,
