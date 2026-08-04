@@ -106,12 +106,12 @@ class AgentRun(Base, TimestampMixin):
         ForeignKey("brain_tasks.id", ondelete="CASCADE"), index=True, nullable=True
     )
     thread_id: Mapped[int | None] = mapped_column(
-        ForeignKey("conversation_threads.id", ondelete="SET NULL"),
+        ForeignKey("conversation_threads.id", ondelete="CASCADE"),
         index=True,
         nullable=True,
     )
     turn_id: Mapped[int | None] = mapped_column(
-        ForeignKey("conversation_turns.id", ondelete="SET NULL"),
+        ForeignKey("conversation_turns.id", ondelete="CASCADE"),
         index=True,
         nullable=True,
     )

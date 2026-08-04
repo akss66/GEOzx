@@ -1186,6 +1186,18 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
         message="体检这个账号",
         requested_skill_code="account_inspection",
     )
+    steering_turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="delete-history-steering",
+        user_input="supplement before permanent deletion",
+        target_turn_id=submitted.json()["turn"]["id"],
+        steering_mode="supplement",
+        status="completed",
+    )
+    session.add(steering_turn)
+    await session.flush()
     run = await session.get(AgentRun, submitted.json()["run"]["id"])
     assert run is not None
     assert run.task_id is not None
@@ -1348,7 +1360,7 @@ async def test_owner_can_permanently_delete_conversation_and_execution_logs(
     assert denied.status_code == 404
     assert deleted.status_code == 200
     deletion_summary = deleted.json()
-    assert deletion_summary["messages_deleted"] == 1
+    assert deletion_summary["messages_deleted"] == 2
     assert deletion_summary["events_deleted"] >= 2
     assert deletion_summary["llm_calls_deleted"] >= 1
     assert deletion_summary["attachments_deleted"] == 1

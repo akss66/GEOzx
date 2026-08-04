@@ -480,6 +480,10 @@ async def delete_conversation_thread(
             await session.execute(delete(SkillRun).where(SkillRun.id.in_(skill_run_ids)))
         if run_ids:
             await session.execute(delete(AgentRun).where(AgentRun.id.in_(run_ids)))
+        if turn_ids:
+            await session.execute(
+                delete(ConversationTurn).where(ConversationTurn.id.in_(turn_ids))
+            )
         await session.delete(thread)
         removed_attachment_objects = remove_attachment_objects(attachment_storage_keys)
         try:

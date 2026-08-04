@@ -24,7 +24,15 @@ class ConversationThread(Base, TimestampMixin):
     """A durable conversation scoped to the user's active account context."""
 
     __tablename__ = "conversation_threads"
-    __table_args__ = (UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),)
+    __table_args__ = (
+        UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),
+        UniqueConstraint(
+            "id",
+            "account_id",
+            "org_id",
+            name="uq_conversation_thread_id_account_org",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -48,10 +56,12 @@ class ConversationThread(Base, TimestampMixin):
         back_populates="thread",
         cascade="all, delete-orphan",
         foreign_keys="ConversationTurn.thread_id",
+        passive_deletes=True,
     )
     agent_runs: Mapped[list["AgentRun"]] = relationship(
         back_populates="thread",
         foreign_keys="AgentRun.thread_id",
+        passive_deletes=True,
     )
 
 
@@ -75,6 +85,13 @@ class ConversationTurn(Base, TimestampMixin):
             "id",
             "thread_id",
             name="uq_conversation_turn_id_thread",
+        ),
+        UniqueConstraint(
+            "id",
+            "target_turn_id",
+            "thread_id",
+            "org_id",
+            name="uq_conversation_turn_id_target_thread_org",
         ),
         ForeignKeyConstraint(
             ["thread_id", "org_id"],
@@ -182,4 +199,5 @@ class ConversationTurn(Base, TimestampMixin):
     agent_runs: Mapped[list["AgentRun"]] = relationship(
         back_populates="turn",
         foreign_keys="AgentRun.turn_id",
+        passive_deletes=True,
     )

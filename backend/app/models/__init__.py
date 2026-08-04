@@ -72,6 +72,7 @@ from app.models.metrics import AccountReviewGoal, MetricSnapshot
 from app.models.orchestration import AgentTask, Event, GateApproval
 from app.models.platform import PlatformAccountAuth, PlatformIntegration
 from app.models.publishing import PlatformPublishJob
+from app.models.run_revision import RunRevision, SkillStageCheckpoint
 from app.models.skill_runtime import SkillRun
 from app.models.workspace import Account, AccountGroup, Project
 
@@ -116,6 +117,8 @@ __all__ = [
     "MatrixDistributionItem",
     "BrainTask",
     "AgentRun",
+    "RunRevision",
+    "SkillStageCheckpoint",
     "SkillRun",
     "StrategyPlan",
     "DecisionTrace",

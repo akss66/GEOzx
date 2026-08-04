@@ -601,16 +601,534 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_turn_steering() -> None:
-    assert get_head_revision() == "20260804_0300"
+def test_migration_head_is_run_revision_stage_checkpoints() -> None:
+    assert get_head_revision() == "20260804_0400"
+
+
+def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0400_run_revision_stage_checkpoints"
+    )
+    assert migration.down_revision == "20260804_0300"
+    engine = sa.create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    metadata = sa.MetaData()
+    sa.Table(
+        "accounts",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+    )
+    sa.Table(
+        "conversation_threads",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("account_id", sa.Integer, nullable=False),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint("id", "org_id", name="uq_conversation_thread_id_org"),
+    )
+    sa.Table(
+        "conversation_turns",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("target_turn_id", sa.Integer, nullable=True),
+        sa.Column("thread_id", sa.Integer, nullable=False),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint("id", "thread_id", "org_id", name="uq_conversation_turn_id_thread_org"),
+    )
+    sa.Table(
+        "brain_tasks",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint("id", "org_id", name="uq_brain_tasks_id_org"),
+    )
+    sa.Table(
+        "agent_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("task_id", sa.Integer, nullable=False),
+        sa.Column("thread_id", sa.Integer, nullable=False),
+        sa.Column("turn_id", sa.Integer, nullable=False),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.ForeignKeyConstraint(
+            ["thread_id"],
+            ["conversation_threads.id"],
+            name="fk_agent_runs_thread_id_conversation_threads",
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["turn_id"],
+            ["conversation_turns.id"],
+            name="fk_agent_runs_turn_id_conversation_turns",
+            ondelete="SET NULL",
+        ),
+        sa.UniqueConstraint(
+            "id",
+            "task_id",
+            "thread_id",
+            "turn_id",
+            "org_id",
+            name="uq_agent_runs_id_task_thread_turn_org",
+        ),
+    )
+    sa.Table(
+        "skill_runs",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("task_id", sa.Integer, nullable=False),
+        sa.Column("run_id", sa.Integer, nullable=False),
+        sa.Column("thread_id", sa.Integer, nullable=False),
+        sa.Column("turn_id", sa.Integer, nullable=False),
+        sa.UniqueConstraint(
+            "id",
+            "task_id",
+            "run_id",
+            "thread_id",
+            "turn_id",
+            name="uq_skill_runs_id_task_run_thread_turn",
+        ),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        assert {"run_revisions", "skill_stage_checkpoints"} <= set(inspector.get_table_names())
+        assert "uq_accounts_id_org" in {
+            item["name"] for item in inspector.get_unique_constraints("accounts")
+        }
+        assert "uq_conversation_thread_id_account_org" in {
+            item["name"] for item in inspector.get_unique_constraints("conversation_threads")
+        }
+        assert "uq_conversation_turn_id_target_thread_org" in {
+            item["name"] for item in inspector.get_unique_constraints("conversation_turns")
+        }
+        agent_run_foreign_keys = {
+            item["name"]: item["options"].get("ondelete")
+            for item in inspector.get_foreign_keys("agent_runs")
+        }
+        assert agent_run_foreign_keys["fk_agent_runs_thread_id_conversation_threads"] == "CASCADE"
+        assert agent_run_foreign_keys["fk_agent_runs_turn_id_conversation_turns"] == "CASCADE"
+        revision_foreign_keys = {
+            item["name"]: item["options"].get("ondelete")
+            for item in inspector.get_foreign_keys("run_revisions")
+        }
+        assert revision_foreign_keys["fk_run_revisions_source_skill_scope"] == "CASCADE"
+        assert revision_foreign_keys["fk_run_revisions_revision_skill_scope"] == "CASCADE"
+        assert (
+            connection.scalar(
+                sa.text(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+                    "AND name = 'trg_skill_stage_checkpoints_no_update'"
+                )
+            )
+            == 1
+        )
+
+        migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert {"run_revisions", "skill_stage_checkpoints"}.isdisjoint(inspector.get_table_names())
+        assert "uq_accounts_id_org" not in {
+            item["name"] for item in inspector.get_unique_constraints("accounts")
+        }
+        assert {
+            item["name"]: item["options"].get("ondelete")
+            for item in inspector.get_foreign_keys("agent_runs")
+        }["fk_agent_runs_thread_id_conversation_threads"] == "SET NULL"
+        assert {
+            item["name"]: item["options"].get("ondelete")
+            for item in inspector.get_foreign_keys("agent_runs")
+        }["fk_agent_runs_turn_id_conversation_turns"] == "SET NULL"
+
+        migration.upgrade()
+        assert {"run_revisions", "skill_stage_checkpoints"} <= set(
+            sa.inspect(connection).get_table_names()
+        )
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the PostgreSQL migration gate",
+)
+def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from sqlalchemy.orm import Session
+
+    from app.models import (
+        Account,
+        AgentRun,
+        BrainTask,
+        ConversationThread,
+        ConversationTurn,
+        Org,
+        RunRevision,
+        SkillRun,
+        SkillStageCheckpoint,
+        User,
+    )
+    from app.models.enums import (
+        AccountStatus,
+        BrainTaskStatus,
+        BrainTaskType,
+        Platform,
+        UserRole,
+    )
+
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace("postgresql+psycopg://", "postgresql+asyncpg://").replace(
+        "postgresql://", "postgresql+asyncpg://"
+    )
+    sync_url = raw_url.replace("postgresql+asyncpg://", "postgresql+psycopg://").replace(
+        "postgresql://", "postgresql+psycopg://"
+    )
+    monkeypatch.setattr(settings, "database_url", async_url)
+    config = Config("alembic.ini")
+    engine = sa.create_engine(sync_url)
+    hash_a = "a" * 64
+    hash_b = "b" * 64
+    hash_c = "c" * 64
+
+    command.upgrade(config, "20260804_0400")
+    try:
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0400"
+            )
+            assert {"run_revisions", "skill_stage_checkpoints"} <= set(inspector.get_table_names())
+            agent_run_fks = {
+                item["name"]: item["options"].get("ondelete")
+                for item in inspector.get_foreign_keys("agent_runs")
+            }
+            assert agent_run_fks["fk_agent_runs_thread_id_conversation_threads"] == "CASCADE"
+            assert agent_run_fks["fk_agent_runs_turn_id_conversation_turns"] == "CASCADE"
+            assert (
+                connection.scalar(
+                    sa.text(
+                        "SELECT COUNT(*) FROM pg_trigger "
+                        "WHERE tgname = 'trg_skill_stage_checkpoints_no_update' "
+                        "AND NOT tgisinternal"
+                    )
+                )
+                == 1
+            )
+
+        with Session(engine) as session:
+            org = Org(name="checkpoint migration gate")
+            user = User(
+                org=org,
+                email=f"checkpoint-migration-{uuid4().hex}@example.com",
+                hashed_password="not-used-in-this-test",
+                display_name="Checkpoint migration gate",
+                role=UserRole.ADMIN,
+            )
+            session.add_all([org, user])
+            session.flush()
+            account = Account(
+                org_id=org.id,
+                platform=Platform.DOUYIN,
+                nickname="checkpoint-migration-gate",
+                status=AccountStatus.ACTIVE,
+            )
+            task = BrainTask(
+                org_id=org.id,
+                created_by_id=user.id,
+                title="checkpoint migration gate",
+                type=BrainTaskType.CONTENT_CREATION,
+                status=BrainTaskStatus.RUNNING,
+            )
+            session.add_all([account, task])
+            session.flush()
+            thread = ConversationThread(
+                org_id=org.id,
+                created_by_id=user.id,
+                account_id=account.id,
+                title="checkpoint migration gate",
+            )
+            session.add(thread)
+            session.flush()
+            source_turn = ConversationTurn(
+                thread_id=thread.id,
+                org_id=org.id,
+                created_by_id=user.id,
+                client_message_id=f"source-{uuid4().hex}",
+                user_input="source",
+            )
+            session.add(source_turn)
+            session.flush()
+            revision_turn = ConversationTurn(
+                thread_id=thread.id,
+                org_id=org.id,
+                created_by_id=user.id,
+                client_message_id=f"revision-{uuid4().hex}",
+                user_input="revision",
+                target_turn_id=source_turn.id,
+                steering_mode="supplement",
+            )
+            session.add(revision_turn)
+            session.flush()
+            source_run = AgentRun(
+                org_id=org.id,
+                requested_by_id=user.id,
+                task_id=task.id,
+                thread_id=thread.id,
+                turn_id=source_turn.id,
+                client_message_id=f"source-{uuid4().hex}",
+                status="completed",
+                phase="completed",
+                request_payload={},
+                result_payload={},
+            )
+            revision_run = AgentRun(
+                org_id=org.id,
+                requested_by_id=user.id,
+                task_id=task.id,
+                thread_id=thread.id,
+                turn_id=revision_turn.id,
+                client_message_id=f"revision-{uuid4().hex}",
+                status="waiting_predecessor",
+                phase="waiting_predecessor",
+                request_payload={},
+                result_payload={},
+            )
+            session.add_all([source_run, revision_run])
+            session.flush()
+            source_skill = SkillRun(
+                org_id=org.id,
+                thread_id=thread.id,
+                turn_id=source_turn.id,
+                run_id=source_run.id,
+                task_id=task.id,
+                idempotency_key=f"source-{uuid4().hex}",
+                skill_code="operation_iteration",
+                skill_version=1,
+                status="completed",
+                input_snapshot={},
+                input_hash=hash_a,
+                output_snapshot={},
+            )
+            revision_skill = SkillRun(
+                org_id=org.id,
+                thread_id=thread.id,
+                turn_id=revision_turn.id,
+                run_id=revision_run.id,
+                task_id=task.id,
+                idempotency_key=f"revision-{uuid4().hex}",
+                skill_code="operation_iteration",
+                skill_version=1,
+                status="running",
+                input_snapshot={},
+                input_hash=hash_a,
+                output_snapshot={},
+            )
+            session.add_all([source_skill, revision_skill])
+            session.flush()
+            revision = RunRevision(
+                org_id=org.id,
+                account_id=account.id,
+                thread_id=thread.id,
+                task_id=task.id,
+                source_turn_id=source_turn.id,
+                source_run_id=source_run.id,
+                source_skill_run_id=source_skill.id,
+                revision_turn_id=revision_turn.id,
+                revision_run_id=revision_run.id,
+                revision_skill_run_id=revision_skill.id,
+                mode="partial",
+                status="planned",
+                dependency_graph_version="operation-loop/v1",
+                earliest_affected_step="script_generation",
+                changed_constraints={},
+                direct_affected_steps=["script_generation"],
+                affected_steps=["script_generation"],
+                reused_steps=[],
+                plan_hash=hash_a,
+            )
+            session.add(revision)
+            session.flush()
+            source = SkillStageCheckpoint(
+                org_id=org.id,
+                account_id=account.id,
+                thread_id=thread.id,
+                turn_id=source_turn.id,
+                task_id=task.id,
+                run_id=source_run.id,
+                skill_run_id=source_skill.id,
+                step_key="script_generation",
+                stage_revision=1,
+                status="completed",
+                skill_code="operation_iteration",
+                skill_version=1,
+                dependency_graph_version="operation-loop/v1",
+                stage_contract_hash=hash_a,
+                input_snapshot={"schema_version": 1, "data": {}},
+                input_hash=hash_b,
+                output_snapshot={"schema_version": 1, "data": {}},
+                output_hash=hash_c,
+                source_artifact_refs=[],
+                evidence_refs=[],
+                reuse_policy="immutable",
+                side_effect_level="none",
+                manual_reconciliation_required=False,
+                finalized_at=datetime.now(UTC),
+            )
+            session.add(source)
+            session.flush()
+
+            reused_values = {
+                "org_id": org.id,
+                "account_id": account.id,
+                "thread_id": thread.id,
+                "turn_id": revision_turn.id,
+                "task_id": task.id,
+                "run_id": revision_run.id,
+                "skill_run_id": revision_skill.id,
+                "run_revision_id": revision.id,
+                "step_key": source.step_key,
+                "stage_revision": 1,
+                "status": "reused",
+                "skill_code": source.skill_code,
+                "skill_version": source.skill_version,
+                "dependency_graph_version": source.dependency_graph_version,
+                "stage_contract_hash": source.stage_contract_hash,
+                "input_snapshot": source.input_snapshot,
+                "input_hash": source.input_hash,
+                "output_snapshot": None,
+                "output_hash": source.output_hash,
+                "source_stage_checkpoint_id": source.id,
+                "source_stage_status": "completed",
+                "source_artifact_refs": [],
+                "evidence_refs": [],
+                "reuse_policy": "immutable",
+                "side_effect_level": "none",
+                "manual_reconciliation_required": False,
+                "finalized_at": datetime.now(UTC),
+            }
+            with pytest.raises(sa.exc.IntegrityError):
+                with session.begin_nested():
+                    session.add(SkillStageCheckpoint(**(reused_values | {"input_hash": hash_a})))
+                    session.flush()
+
+            reused = SkillStageCheckpoint(**reused_values)
+            session.add(reused)
+            session.commit()
+            checkpoint_id = source.id
+            org_id = org.id
+            thread_id = thread.id
+
+            with pytest.raises(sa.exc.DBAPIError, match="immutable"):
+                session.execute(
+                    sa.text(
+                        "UPDATE skill_stage_checkpoints SET output_hash = :hash "
+                        "WHERE id = :checkpoint_id"
+                    ),
+                    {"hash": hash_a, "checkpoint_id": checkpoint_id},
+                )
+            session.rollback()
+
+            deleted_skills = session.execute(
+                sa.delete(SkillRun).where(SkillRun.thread_id == thread_id)
+            )
+            deleted_runs = session.execute(
+                sa.delete(AgentRun).where(AgentRun.thread_id == thread_id)
+            )
+            deleted_turns = session.execute(
+                sa.delete(ConversationTurn).where(
+                    ConversationTurn.thread_id == thread_id
+                )
+            )
+            deleted_thread = session.execute(
+                sa.delete(ConversationThread).where(
+                    ConversationThread.id == thread_id
+                )
+            )
+            session.commit()
+            assert deleted_skills.rowcount == 2
+            assert deleted_runs.rowcount == 2
+            assert deleted_turns.rowcount == 2
+            assert deleted_thread.rowcount == 1
+            assert session.scalar(
+                sa.select(sa.func.count(ConversationTurn.id)).where(
+                    ConversationTurn.thread_id == thread_id
+                )
+            ) == 0
+            assert session.scalar(
+                sa.select(sa.func.count(SkillStageCheckpoint.id))
+            ) == 0
+            assert session.scalar(sa.select(sa.func.count(RunRevision.id))) == 0
+            assert session.scalar(
+                sa.select(sa.func.count(AgentRun.id)).where(
+                    AgentRun.thread_id == thread_id
+                )
+            ) == 0
+            assert session.scalar(
+                sa.select(sa.func.count(SkillRun.id)).where(
+                    SkillRun.thread_id == thread_id
+                )
+            ) == 0
+            assert session.get(ConversationThread, thread_id) is None
+
+            session.execute(sa.text("DELETE FROM orgs WHERE id = :id"), {"id": org_id})
+            session.commit()
+
+        command.downgrade(config, "20260804_0300")
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            assert {"run_revisions", "skill_stage_checkpoints"}.isdisjoint(
+                inspector.get_table_names()
+            )
+            assert (
+                connection.scalar(
+                    sa.text(
+                        "SELECT COUNT(*) FROM pg_proc "
+                        "WHERE proname = 'fn_skill_stage_checkpoints_no_update'"
+                    )
+                )
+                == 0
+            )
+            assert {
+                item["name"]: item["options"].get("ondelete")
+                for item in inspector.get_foreign_keys("agent_runs")
+            }["fk_agent_runs_thread_id_conversation_threads"] == "SET NULL"
+
+        command.upgrade(config, "20260804_0400")
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0400"
+            )
+            assert (
+                connection.scalar(
+                    sa.text(
+                        "SELECT COUNT(*) FROM pg_trigger "
+                        "WHERE tgname = 'trg_skill_stage_checkpoints_no_update' "
+                        "AND NOT tgisinternal"
+                    )
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()
 
 
 def test_turn_steering_migration_adds_scoped_lineage_and_is_reversible(
     monkeypatch,
 ) -> None:
-    migration = importlib.import_module(
-        "migrations.versions.20260804_0300_turn_steering"
-    )
+    migration = importlib.import_module("migrations.versions.20260804_0300_turn_steering")
     assert migration.down_revision == "20260804_0200"
     engine = sa.create_engine("sqlite://")
     metadata = sa.MetaData()

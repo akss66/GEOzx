@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Numeric, String, Text
+from sqlalchemy import ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -32,9 +32,7 @@ class Project(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    monthly_cost_budget_usd: Mapped[Decimal | None] = mapped_column(
-        Numeric(12, 4), nullable=True
-    )
+    monthly_cost_budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     status: Mapped[ProjectStatus] = mapped_column(
         pg_enum(ProjectStatus, "project_status"),
         default=ProjectStatus.ACTIVE,
@@ -83,6 +81,7 @@ class Account(Base, TimestampMixin):
     """矩阵账号（一等模型）。授权 Token 等存于 auth(JSONB)，后续加密。"""
 
     __tablename__ = "accounts"
+    __table_args__ = (UniqueConstraint("id", "org_id", name="uq_accounts_id_org"),)
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
