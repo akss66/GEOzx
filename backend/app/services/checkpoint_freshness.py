@@ -21,11 +21,12 @@ from app.models import (
     DataConflict,
     DataFieldObservation,
     DataImportBatch,
+    DataImportRow,
     Deliverable,
     MetricSnapshot,
     PlatformContentRecord,
 )
-from app.models.enums import MetricSource
+from app.models.enums import ImportBatchStatus, MetricSource
 from app.orchestrator.checkpoint_graph_contracts import CheckpointStepSpec
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.schemas.run_revision import FreshnessStamp, StageDataEnvelope
@@ -303,6 +304,53 @@ class _AccountDatabaseFreshnessValidator:
             if platform_content_ids
             else ()
         )
+        relevant_batch_ids: set[int] = set()
+        for metric_snapshot in metric_snapshots:
+            if metric_snapshot.import_batch_id is not None:
+                relevant_batch_ids.add(metric_snapshot.import_batch_id)
+        relevant_batch_ids.update(row.import_batch_id for row in account_snapshots)
+        relevant_batch_ids.update(row.import_batch_id for row in audience_snapshots)
+        relevant_batch_ids.update(row.import_batch_id for row in benchmark_snapshots)
+        relevant_batch_ids.update(
+            row.import_batch_id
+            for row in observation_rows
+            if row.active
+            and (
+                period_start is None
+                or period_end is None
+                or period_start <= row.stat_date <= period_end
+            )
+        )
+        import_rows = (
+            tuple(
+                (
+                    await session.scalars(
+                        select(DataImportRow)
+                        .join(
+                            DataImportBatch,
+                            DataImportBatch.id == DataImportRow.batch_id,
+                        )
+                        .where(
+                            DataImportRow.org_id == scope.org_id,
+                            DataImportRow.account_id == scope.account_id,
+                            DataImportRow.batch_id.in_(tuple(relevant_batch_ids)),
+                            DataImportBatch.org_id == scope.org_id,
+                            DataImportBatch.account_id == scope.account_id,
+                            DataImportBatch.status == ImportBatchStatus.COMMITTED,
+                            DataImportBatch.committed_at.is_not(None),
+                            DataImportBatch.revoked_at.is_(None),
+                        )
+                        .order_by(
+                            DataImportRow.batch_id,
+                            DataImportRow.row_number,
+                            DataImportRow.id,
+                        )
+                    )
+                ).all()
+            )
+            if relevant_batch_ids
+            else ()
+        )
         watermark = canonical_json_sha256(
             domain="checkpoint-freshness-watermark/v1",
             value={
@@ -410,6 +458,9 @@ class _AccountDatabaseFreshnessValidator:
                 ],
                 "platform_content_records": [
                     _model_watermark_projection(row) for row in platform_contents
+                ],
+                "data_import_rows": [
+                    _model_watermark_projection(row) for row in import_rows
                 ],
                 "input": input.model_dump(mode="python"),
             },

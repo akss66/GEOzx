@@ -16,6 +16,7 @@ from app.models import (
     DataConflict,
     DataFieldObservation,
     DataImportBatch,
+    DataImportRow,
     MetricSnapshot,
     PlatformContentRecord,
 )
@@ -25,6 +26,7 @@ from app.models.enums import (
     ContentIdentityConfidence,
     DataSourceKind,
     ImportBatchStatus,
+    ImportRowStatus,
     MetricSource,
     Platform,
 )
@@ -468,3 +470,144 @@ async def test_account_watermark_tracks_every_account_data_view_snapshot_source(
     benchmark.metric_value = 81.0
     await session.flush()
     await _assert_full_fallback(previous)
+
+
+async def test_account_watermark_tracks_only_participating_import_rows(
+    session, admin
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="freshness-import-rows",
+        status=AccountStatus.ACTIVE,
+    )
+    session.add(account)
+    await session.flush()
+
+    def _batch(content_hash: str) -> DataImportBatch:
+        return DataImportBatch(
+            org_id=admin.org_id,
+            account_id=account.id,
+            created_by_id=admin.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            status=ImportBatchStatus.COMMITTED,
+            template_code="douyin_work_list_v1",
+            content_sha256=content_hash,
+            parser_version=2,
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 31),
+            committed_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+    participating_batch = _batch("e" * 64)
+    unrelated_batch = _batch("f" * 64)
+    session.add_all([participating_batch, unrelated_batch])
+    await session.flush()
+    metric = MetricSnapshot(
+        org_id=admin.org_id,
+        account_id=account.id,
+        import_batch_id=participating_batch.id,
+        source=MetricSource.DOUYIN,
+        stat_date=date(2026, 7, 15),
+        title="Participating metric",
+        play=100,
+        exposure=200,
+        completion_rate=0.5,
+        like_rate=0.1,
+        comment_rate=0.02,
+        share_rate=0.01,
+        follower_delta=3,
+    )
+    session.add(metric)
+    await session.flush()
+    participating_row = DataImportRow(
+        org_id=admin.org_id,
+        account_id=account.id,
+        batch_id=participating_batch.id,
+        row_number=1,
+        status=ImportRowStatus.COMMITTED,
+        raw_values={"play": "100"},
+        normalized_values={"stat_date": "2026-07-15", "play": 100},
+        projected_target_ids=[{"kind": "metric_snapshot", "id": metric.id}],
+        weak_fingerprint="participating-v1",
+    )
+    unrelated_row = DataImportRow(
+        org_id=admin.org_id,
+        account_id=account.id,
+        batch_id=unrelated_batch.id,
+        row_number=1,
+        status=ImportRowStatus.COMMITTED,
+        raw_values={"play": "999"},
+        normalized_values={"stat_date": "2026-07-15", "play": 999},
+        projected_target_ids=[],
+        weak_fingerprint="unrelated-v1",
+    )
+    session.add_all([participating_row, unrelated_row])
+    await session.flush()
+    step = require_checkpoint_graph_contract("operation_iteration", 1).steps[0]
+    validator = require_freshness_validator(step.freshness_policy_key or "")
+    scope = RuntimeScope(
+        org_id=admin.org_id,
+        user_id=admin.id,
+        account_id=account.id,
+        thread_id=1,
+        turn_id=1,
+        run_id=1,
+        task_id=1,
+        skill_run_id=1,
+    )
+    input_value = StageDataEnvelope(
+        schema_version=step.input_schema_version,
+        data={"query_window": {"start": "2026-07-01", "end": "2026-07-31"}},
+    )
+    db_now = await load_transaction_db_now(session)
+
+    async def _stamp() -> FreshnessStamp:
+        return await validator.current_stamp(
+            session, scope=scope, step=step, input=input_value, db_now=db_now
+        )
+
+    async def _assert_full_fallback(previous: FreshnessStamp) -> FreshnessStamp:
+        current = await _stamp()
+        assert current.watermark_hash != previous.watermark_hash
+        verdict = await assess_checkpoint_freshness(
+            session,
+            scope=scope,
+            step=step,
+            input=input_value,
+            source_stamp=previous,
+        )
+        assert verdict.kind == "full_recompute"
+        assert verdict.reason == "freshness_watermark_changed"
+        return current
+
+    previous = await _stamp()
+    participating_row.normalized_values = {
+        "stat_date": "2026-07-15",
+        "play": 101,
+    }
+    await session.flush()
+    previous = await _assert_full_fallback(previous)
+
+    participating_row.projected_target_ids = [
+        {"kind": "metric_snapshot", "id": metric.id},
+        {"kind": "account_metric_snapshot", "id": 999},
+    ]
+    await session.flush()
+    previous = await _assert_full_fallback(previous)
+
+    participating_row.row_number = 2
+    participating_row.weak_fingerprint = "participating-v2"
+    await session.flush()
+    previous = await _assert_full_fallback(previous)
+
+    unrelated_row.normalized_values = {
+        "stat_date": "2026-07-15",
+        "play": 1000,
+    }
+    unrelated_row.projected_target_ids = [
+        {"kind": "metric_snapshot", "id": metric.id}
+    ]
+    await session.flush()
+    after_unrelated = await _stamp()
+    assert after_unrelated.watermark_hash == previous.watermark_hash
