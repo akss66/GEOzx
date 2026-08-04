@@ -13,6 +13,7 @@ export default defineConfig({
   use: {
     baseURL,
     trace: "retain-on-failure",
+    screenshot: "only-on-failure",
   },
   webServer: {
     command: `${packageManager} dev --host 127.0.0.1 --port ${testPort}`,

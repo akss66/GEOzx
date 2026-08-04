@@ -8,7 +8,7 @@ on:
 jobs:
   main-agent-v3-directed:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: backend
@@ -18,11 +18,15 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
       - name: Install deps
-        run: uv pip install --system ".[dev]"
+        run: uv sync --frozen --extra dev
+      - name: Complete operations worker contract
+        run: uv run pytest -q tests/test_main_agent_worker_contract.py
       - name: Capability, telemetry, safety, and budget contracts
         run: >-
-          pytest -q
+          uv run pytest -q
           tests/test_main_agent_v3_integration.py
           tests/test_main_agent_v3_performance.py
           tests/test_main_agent_performance_contract.py
@@ -45,20 +49,22 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
       - name: Install deps
-        run: uv pip install --system ".[dev]"
+        run: uv sync --frozen --extra dev
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
       - name: Format check (ruff)
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: python scripts/check_changed_python_format.py --base "$BASE_SHA"
+        run: uv run python scripts/check_changed_python_format.py --base "$BASE_SHA"
       - name: Tests (pytest)
-        run: pytest -q --durations=25
+        run: uv run pytest -q --durations=25
 
   migration-postgres:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
@@ -84,16 +90,17 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
       - name: Install deps
-        run: uv pip install --system ".[dev]"
-      - name: Upgrade from production revision to head
+        run: uv sync --frozen --extra dev
+      - name: PostgreSQL migration up, down, and up
         run: |
-          alembic upgrade 20260730_0500
-          alembic upgrade head
-      - name: Prove V3 revision is reversible online
-        run: |
-          alembic downgrade 20260730_0500
-          alembic upgrade head
+          uv run alembic upgrade head
+          uv run alembic downgrade 20260804_0450
+          uv run alembic upgrade head
+      - name: Real PostgreSQL account-lane barriers
+        run: uv run pytest -q tests/test_account_execution_lane_postgres.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -106,10 +113,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Enable pnpm
         run: corepack enable
       - name: Install deps
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
       - name: Lint (eslint)
         run: pnpm lint
       - name: Type check
@@ -131,7 +140,7 @@ jobs:
 
   main-agent-v3-playwright:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17-alpine
@@ -160,6 +169,7 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       ENVIRONMENT: test
       MAIN_AGENT_V2_ENABLED: "true"
+      MAIN_AGENT_TYPED_RUNTIME_ENABLED: "true"
       LLM_DETERMINISTIC_TEST_PROVIDER_ENABLED: "true"
       ADMIN_EMAIL: ci-admin@example.invalid
       ADMIN_PASSWORD: ci-main-agent-password
@@ -173,6 +183,8 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -184,17 +196,17 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install backend deps
         working-directory: backend
-        run: uv pip install --system ".[dev]"
+        run: uv sync --frozen --extra dev
       - name: Migrate and seed smoke database
         working-directory: backend
         run: |
-          alembic upgrade head
-          python -m app.seed
+          uv run alembic upgrade head
+          uv run python -m app.seed
       - name: Start backend and worker with deterministic test provider
         working-directory: backend
         run: |
-          uvicorn app.main:app --host 127.0.0.1 --port 8000 >/tmp/backend.log 2>&1 &
-          arq app.worker.WorkerSettings >/tmp/worker.log 2>&1 &
+          uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 >/tmp/backend.log 2>&1 &
+          uv run arq app.worker.WorkerSettings >/tmp/worker.log 2>&1 &
           for attempt in {1..60}; do
             if curl --fail --silent http://127.0.0.1:8000/health >/dev/null; then
               exit 0
@@ -205,12 +217,31 @@ jobs:
           exit 1
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Frontend Turn UI contracts
-        run: pnpm exec playwright test main-agent-v2.spec.ts
-      - name: Real backend greeting, query, and approval smoke
+      - name: Frontend smoke and reconnect contracts
+        run: >-
+          pnpm exec playwright test
+          main-agent-v2.spec.ts
+          main-agent-reconnect.spec.ts
+      - name: Real backend worker loop and API smoke
         env:
           REAL_BACKEND_SMOKE: "1"
+          REAL_WORKER_LOOP: "1"
           REAL_API_ORIGIN: http://127.0.0.1:8000
           REAL_SMOKE_EMAIL: ci-admin@example.invalid
           REAL_SMOKE_PASSWORD: ci-main-agent-password
-        run: pnpm exec playwright test main-agent-real-api.spec.ts
+        run: >-
+          pnpm exec playwright test
+          main-agent-worker-loop.spec.ts
+          main-agent-real-api.spec.ts
+      - name: Upload Playwright and service failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-agent-v3-playwright-failure
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            /tmp/backend.log
+            /tmp/worker.log
+            frontend/playwright-report
+            frontend/test-results
