@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 import pytest
 
 
@@ -10,10 +12,15 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _recent_stat_date(*, days_ago: int = 1) -> str:
+    return (date.today() - timedelta(days=days_ago)).isoformat()
+
+
 @pytest.mark.asyncio
 async def test_performance_snapshots_filter_by_account(client, admin):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
+    recent_stat_date = _recent_stat_date()
     account = (
         await client.post(
             "/accounts",
@@ -28,7 +35,7 @@ async def test_performance_snapshots_filter_by_account(client, admin):
         json={
             "account_id": account["id"],
             "source": "douyin",
-            "stat_date": "2026-07-06",
+            "stat_date": recent_stat_date,
             "title": "Matrix launch",
             "play": 12000,
             "exposure": 30000,
@@ -43,7 +50,7 @@ async def test_performance_snapshots_filter_by_account(client, admin):
         headers=headers,
         json={
             "account_id": account["id"] + 999,
-            "stat_date": "2026-07-06",
+            "stat_date": recent_stat_date,
             "title": "Other account",
             "play": 1,
         },
@@ -68,13 +75,14 @@ async def test_performance_snapshots_filter_by_account(client, admin):
 async def test_review_metrics_exclude_demo_source(client, admin):
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
+    recent_stat_date = _recent_stat_date()
 
     await client.post(
         "/metrics/ingest",
         headers=headers,
         json={
             "source": "douyin",
-            "stat_date": "2026-07-06",
+            "stat_date": recent_stat_date,
             "title": "Real douyin content",
             "play": 100,
             "exposure": 300,
@@ -88,7 +96,7 @@ async def test_review_metrics_exclude_demo_source(client, admin):
         headers=headers,
         json={
             "source": "demo",
-            "stat_date": "2026-07-06",
+            "stat_date": recent_stat_date,
             "title": "Demo content",
             "play": 9999,
             "exposure": 9999,
