@@ -46,6 +46,7 @@ from app.api import (
     search,
     skills,
     turn_events,
+    turn_interrupts,
     users,
     workspace_context,
     ws,
@@ -120,6 +121,7 @@ app.include_router(skills.router)
 app.include_router(brain.router)
 app.include_router(conversations.router)
 app.include_router(turn_events.router)
+app.include_router(turn_interrupts.router)
 app.include_router(experience_memories.router)
 app.include_router(costs.router)
 app.include_router(agents.router)

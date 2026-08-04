@@ -127,6 +127,11 @@ from app.services.skill_approvals import (
     SkillApprovalConflict,
     finalize_skill_finish_approval,
 )
+from app.services.turn_interrupts import (
+    request_interrupt,
+    request_stop,
+    resolve_interrupt,
+)
 
 router = APIRouter(prefix="/brain", tags=["brain"])
 log = logging.getLogger("dyflow.brain")
@@ -1000,9 +1005,29 @@ async def stop_brain_generation(
         client_message_id=client_message_id,
     )
     if run is not None:
-        await request_agent_run_cancel(session, run.id)
-        if settings.agent_runtime_async_enabled:
-            await abort_agent_runtime(run.id)
+        if run.thread_id is not None and run.turn_id is not None:
+            stopped = await request_stop(
+                session,
+                user=user,
+                run_id=run.id,
+                reason="Stopped from the legacy generation endpoint.",
+            )
+            await session.commit()
+            await publish_runtime_state_intents(session, stopped.publish_intents)
+            try:
+                await abort_agent_runtime(run.id)
+            except Exception:  # noqa: BLE001 - terminal DB state remains authoritative
+                log.warning(
+                    "Legacy stop worker abort deferred",
+                    extra={"run_id": run.id},
+                    exc_info=True,
+                )
+        else:
+            # Historical run rows predate conversation scope and retain the
+            # previous cancellation path until their data is retired.
+            await request_agent_run_cancel(session, run.id)
+            if settings.agent_runtime_async_enabled:
+                await abort_agent_runtime(run.id)
     await generation_control.request_stop(user.org_id, user.id, client_message_id)
     return StopBrainGenerationOut(
         client_message_id=client_message_id,
@@ -1678,6 +1703,78 @@ async def approve_tool_call(
         )
     task = await _load_task(session, tool_call.task_id, user.org_id)
     await require_task_approval_access(session, user, task)
+    scoped_skill = (
+        await session.get(SkillRun, tool_call.skill_run_id)
+        if tool_call.skill_run_id is not None
+        else None
+    )
+    scoped_run = (
+        await session.get(AgentRun, scoped_skill.run_id)
+        if scoped_skill is not None
+        else None
+    )
+    if (
+        scoped_skill is not None
+        and scoped_run is not None
+        and scoped_run.thread_id is not None
+        and scoped_run.turn_id is not None
+    ):
+        finish_lock = await lock_composite_finish_approval(
+            session,
+            tool_call=tool_call,
+        )
+        requested = await request_interrupt(
+            session,
+            user=user,
+            run_id=scoped_run.id,
+            kind="approval",
+            semantic_key=f"tool-approval:{tool_call.id}",
+            public_message=f"Confirm {tool_call.tool_name}.",
+            action_label="Confirm action",
+            response_schema={
+                "type": "object",
+                "required": ["approved"],
+                "properties": {"approved": {"type": "boolean"}},
+            },
+            skill_run_id=scoped_skill.id,
+            source_type="tool_call",
+            source_id=tool_call.id,
+            source_version=1,
+            prelocked=finish_lock.runtime_lock,
+        )
+        resolved = await resolve_interrupt(
+            session,
+            user=user,
+            interrupt_id=requested.interrupt.id,
+            expected_version=requested.interrupt.version,
+            idempotency_key=f"legacy-tool-approval:{tool_call.id}",
+            resolution={
+                "approved": body.approved,
+                "comment": body.comment or "",
+            },
+            prelocked=finish_lock.runtime_lock,
+        )
+        await session.commit()
+        await publish_runtime_state_intents(
+            session,
+            (*requested.publish_intents, *resolved.publish_intents),
+        )
+        if resolved.replay_runtime_events:
+            await replay_runtime_state_events(session, run_id=scoped_run.id)
+        if resolved.dispatch_intent is not None:
+            try:
+                await enqueue_agent_runtime(run_id=resolved.dispatch_intent.run_id)
+            except Exception:  # noqa: BLE001 - queued DB state is the durable outbox
+                log.warning(
+                    "Legacy approval resume dispatch deferred",
+                    extra={"run_id": scoped_run.id},
+                    exc_info=True,
+                )
+        await session.refresh(tool_call)
+        return AgentToolCallOut.model_validate(tool_call)
+
+    # Historical unscoped approval rows retain the previous path while current
+    # conversation-scoped executions use TurnInterrupt as their sole truth.
     finish_lock = await lock_composite_finish_approval(session, tool_call=tool_call)
     tool_call = finish_lock.tool_call
     if tool_call.status != "waiting_approval":

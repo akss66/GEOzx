@@ -15,6 +15,7 @@ from app.models import (
     ConversationTurn,
     Deliverable,
     SkillRun,
+    ToolExecutionAttempt,
 )
 from app.models.enums import BrainTaskStatus, DeliverableStatus
 from app.services.runtime_locking import (
@@ -56,7 +57,9 @@ async def _lock_composite_scope(
     *,
     parent_id: int,
     extra_artifact_ids: tuple[int, ...] = (),
+    invocation_ids: tuple[int, ...] = (),
     tool_call_ids: tuple[int, ...] = (),
+    attempt_ids: tuple[int, ...] = (),
     prelocked: RuntimeRootLock | None = None,
 ) -> tuple[SkillRun, list[SkillRun], list[Deliverable], RuntimeRootLock]:
     """Lock one composite graph in the protocol's global order.
@@ -98,7 +101,9 @@ async def _lock_composite_scope(
             root_skill_run_id=parent_id,
             child_skill_run_ids=child_ids,
             deliverable_ids=artifact_ids,
+            invocation_ids=invocation_ids,
             tool_call_ids=tool_call_ids,
+            attempt_ids=attempt_ids,
         )
     else:
         require_runtime_root_lock(
@@ -128,6 +133,13 @@ async def _lock_composite_scope(
                 run_id=discovered.run_id,
                 tool_call_id=tool_call_id,
             )
+        require_runtime_root_lock(
+            session,
+            prelocked,
+            run_id=discovered.run_id,
+            invocation_ids=invocation_ids,
+            attempt_ids=attempt_ids,
+        )
         runtime_lock = prelocked
     parent = await session.get(SkillRun, parent_id)
     if parent is None or parent.skill_code != "operation_iteration":
@@ -233,13 +245,28 @@ async def lock_composite_finish_approval(
         raise ValueError("SKILL_APPROVAL_RUNTIME_SCOPE_MISSING")
     artifact_id = dict(tool_call.meta or {}).get("artifact_id")
     deliverable_ids = (artifact_id,) if type(artifact_id) is int else ()
+    with session.no_autoflush:
+        invocation_ids = (
+            (tool_call.invocation_id,)
+            if tool_call.invocation_id is not None
+            else ()
+        )
+        attempt_ids = tuple(
+            await session.scalars(
+                select(ToolExecutionAttempt.id)
+                .where(ToolExecutionAttempt.tool_call_id == tool_call.id)
+                .order_by(ToolExecutionAttempt.id)
+            )
+        )
     parent_id = _parent_id(skill)
     if parent_id is not None:
         _parent, _children, _artifacts, runtime_lock = await _lock_composite_scope(
             session,
             parent_id=parent_id,
             extra_artifact_ids=deliverable_ids,
+            invocation_ids=invocation_ids,
             tool_call_ids=(tool_call.id,),
+            attempt_ids=attempt_ids,
         )
     else:
         with session.no_autoflush:
@@ -254,7 +281,9 @@ async def lock_composite_finish_approval(
             expected_content_item_id=task.content_item_id,
             root_skill_run_id=skill.id,
             deliverable_ids=deliverable_ids,
+            invocation_ids=invocation_ids,
             tool_call_ids=(tool_call.id,),
+            attempt_ids=attempt_ids,
         )
     locked = await session.get(AgentToolCall, tool_call.id)
     if locked is None:

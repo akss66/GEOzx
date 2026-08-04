@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -21,11 +24,21 @@ from app.models import (
     TurnInterrupt,
     User,
 )
-from app.services.runtime_locking import RuntimeRootLock, lock_runtime_root_scope
+from app.models.enums import BrainTaskStatus
+from app.services.composite_skill_runs import lock_composite_finish_approval
+from app.services.runtime_locking import (
+    RuntimeRootLock,
+    lock_runtime_root_scope,
+    require_runtime_root_lock,
+)
 from app.services.runtime_state import (
     RuntimePublishIntent,
     RuntimeStateScope,
     close_runtime_state,
+)
+from app.services.skill_approvals import (
+    SkillApprovalConflict,
+    finalize_skill_finish_approval,
 )
 
 _INTERRUPT_KINDS = frozenset({"clarification", "approval", "manual_pause"})
@@ -34,6 +47,29 @@ _INTERRUPT_KINDS = frozenset({"clarification", "approval", "manual_pause"})
 @dataclass(frozen=True)
 class InterruptRequestResult:
     interrupt: TurnInterrupt
+    publish_intents: tuple[RuntimePublishIntent, ...] = ()
+
+
+@dataclass(frozen=True)
+class InterruptDispatchIntent:
+    run_id: int
+
+
+@dataclass(frozen=True)
+class InterruptResolutionResult:
+    interrupt: TurnInterrupt
+    run: AgentRun
+    dispatch_intent: InterruptDispatchIntent | None
+    publish_intents: tuple[RuntimePublishIntent, ...] = ()
+    replay_runtime_events: bool = False
+
+
+@dataclass(frozen=True)
+class InterruptStopResult:
+    run_id: int
+    thread_id: int
+    turn_id: int
+    client_message_id: str
     publish_intents: tuple[RuntimePublishIntent, ...] = ()
 
 
@@ -48,6 +84,7 @@ class _DiscoveredRuntime:
     invocation_ids: tuple[int, ...]
     tool_call_ids: tuple[int, ...]
     attempt_ids: tuple[int, ...]
+    source_tool: AgentToolCall | None
 
 
 def _not_found() -> HTTPException:
@@ -75,6 +112,7 @@ async def request_interrupt(
     source_type: str | None = None,
     source_id: int | None = None,
     source_version: int | None = None,
+    prelocked: RuntimeRootLock | None = None,
 ) -> InterruptRequestResult:
     """Create one durable pause without committing the caller transaction."""
 
@@ -92,7 +130,7 @@ async def request_interrupt(
         source_id=source_id,
         source_version=source_version,
     )
-    runtime_lock = await lock_runtime_root_scope(
+    runtime_lock = prelocked or await lock_runtime_root_scope(
         session,
         run_id=discovered.run.id,
         expected_turn_id=discovered.turn.id,
@@ -100,6 +138,16 @@ async def request_interrupt(
         root_skill_run_id=discovered.root_skill_run_id,
         child_skill_run_ids=discovered.child_skill_run_ids,
         validate_child_parent=False,
+        invocation_ids=discovered.invocation_ids,
+        tool_call_ids=discovered.tool_call_ids,
+        attempt_ids=discovered.attempt_ids,
+    )
+    require_runtime_root_lock(
+        session,
+        runtime_lock,
+        run_id=discovered.run.id,
+        turn_id=discovered.turn.id,
+        task_id=discovered.run.task_id,
         invocation_ids=discovered.invocation_ids,
         tool_call_ids=discovered.tool_call_ids,
         attempt_ids=discovered.attempt_ids,
@@ -181,6 +229,280 @@ async def request_interrupt(
     )
     return InterruptRequestResult(
         interrupt=interrupt,
+        publish_intents=closure.publish_intents,
+    )
+
+
+async def resolve_interrupt(
+    session: AsyncSession,
+    *,
+    user: User,
+    interrupt_id: int,
+    expected_version: int,
+    idempotency_key: str,
+    resolution: dict,
+    prelocked: RuntimeRootLock | None = None,
+) -> InterruptResolutionResult:
+    """Resolve one pending interrupt and queue its original Run in-place."""
+
+    if not idempotency_key.strip():
+        raise ValueError("resolution idempotency key is required")
+    canonical_resolution, resolution_hash = _canonical_resolution(resolution)
+    with session.no_autoflush:
+        discovered_interrupt = await session.get(TurnInterrupt, interrupt_id)
+    if discovered_interrupt is None:
+        raise _not_found()
+    discovered = await _discover_runtime(
+        session,
+        user=user,
+        run_id=discovered_interrupt.run_id,
+        kind=discovered_interrupt.kind,
+        skill_run_id=discovered_interrupt.skill_run_id,
+        source_type=discovered_interrupt.source_type,
+        source_id=discovered_interrupt.source_id,
+        source_version=discovered_interrupt.source_version,
+    )
+    runtime_lock = prelocked
+    if runtime_lock is None and discovered_interrupt.kind == "approval":
+        if discovered.source_tool is None:
+            raise _not_found()
+        approval_lock = await lock_composite_finish_approval(
+            session,
+            tool_call=discovered.source_tool,
+        )
+        runtime_lock = approval_lock.runtime_lock
+    if runtime_lock is None:
+        runtime_lock = await lock_runtime_root_scope(
+            session,
+            run_id=discovered.run.id,
+            expected_turn_id=discovered.turn.id,
+            expected_task_id=discovered.run.task_id,
+            root_skill_run_id=discovered.root_skill_run_id,
+            child_skill_run_ids=discovered.child_skill_run_ids,
+            validate_child_parent=False,
+            invocation_ids=discovered.invocation_ids,
+            tool_call_ids=discovered.tool_call_ids,
+            attempt_ids=discovered.attempt_ids,
+        )
+    require_runtime_root_lock(
+        session,
+        runtime_lock,
+        run_id=discovered.run.id,
+        turn_id=discovered.turn.id,
+        task_id=discovered.run.task_id,
+        invocation_ids=discovered.invocation_ids,
+        tool_call_ids=discovered.tool_call_ids,
+        attempt_ids=discovered.attempt_ids,
+    )
+    _require_locked_source(runtime_lock, discovered)
+    interrupt = await session.scalar(
+        select(TurnInterrupt)
+        .where(TurnInterrupt.id == interrupt_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if interrupt is None or not _interrupt_matches_runtime(interrupt, discovered):
+        raise _not_found()
+    if interrupt.status == "resolved":
+        if (
+            interrupt.resolution_idempotency_key == idempotency_key
+            and interrupt.resolution_hash == resolution_hash
+            and dict(interrupt.resolution_payload or {}) == canonical_resolution
+        ):
+            run = await session.get(AgentRun, interrupt.run_id)
+            if run is None:
+                raise _not_found()
+            return InterruptResolutionResult(
+                interrupt=interrupt,
+                run=run,
+                dispatch_intent=(
+                    InterruptDispatchIntent(run_id=run.id)
+                    if run.status == "queued"
+                    else None
+                ),
+                replay_runtime_events=run.status != "queued",
+            )
+        raise _conflict(
+            "INTERRUPT_ALREADY_RESOLVED",
+            "This interrupt was resolved with another decision.",
+        )
+    if interrupt.status != "pending":
+        raise _conflict(
+            "INTERRUPT_NOT_PENDING",
+            "This interrupt can no longer be resolved.",
+        )
+    if interrupt.version != expected_version:
+        raise _conflict(
+            "INTERRUPT_VERSION_CONFLICT",
+            "The interrupt changed before this response was submitted.",
+        )
+
+    now = datetime.now(UTC)
+    finish_publish_intents: tuple[RuntimePublishIntent, ...] = ()
+    approval_handled = False
+    if interrupt.kind == "approval":
+        await _apply_approval_resolution(
+            session,
+            interrupt=interrupt,
+            resolution=canonical_resolution,
+            user=user,
+            now=now,
+        )
+        if discovered.source_tool is not None and discovered.task is not None:
+            try:
+                finish_result = await finalize_skill_finish_approval(
+                    session,
+                    tool_call=discovered.source_tool,
+                    task=discovered.task,
+                    approved=canonical_resolution.get("approved") is True,
+                    comment=str(canonical_resolution.get("comment") or ""),
+                    prelocked=runtime_lock,
+                )
+            except SkillApprovalConflict as exc:
+                raise _conflict("INTERRUPT_APPROVAL_CONFLICT", str(exc)) from exc
+            approval_handled = finish_result.handled
+            finish_publish_intents = finish_result.publish_intents
+    interrupt.status = "resolved"
+    interrupt.resolution_payload = canonical_resolution
+    interrupt.resolution_hash = resolution_hash
+    interrupt.resolution_idempotency_key = idempotency_key
+    interrupt.resolved_by_id = user.id
+    interrupt.resolved_at = now
+    interrupt.version += 1
+
+    run = await session.get(AgentRun, interrupt.run_id)
+    turn = await session.get(ConversationTurn, interrupt.turn_id)
+    task = await session.get(BrainTask, run.task_id) if run and run.task_id else None
+    if run is None or turn is None:
+        raise _not_found()
+    dispatch_intent = None
+    if not approval_handled:
+        run.status = "queued"
+        run.phase = "queued"
+        run.lease_owner = None
+        run.leased_until = None
+        run.heartbeat_at = None
+        run.next_retry_at = None
+        run.cancel_requested_at = None
+        run.finished_at = None
+        run.error_code = None
+        run.error_detail = None
+        run.request_payload = {
+            **dict(run.request_payload or {}),
+            "resume_interrupt": {
+                "interrupt_id": interrupt.id,
+                "kind": interrupt.kind,
+                "resolution": canonical_resolution,
+                "resolution_hash": resolution_hash,
+            },
+            **(
+                {
+                    "operation": "resume_permission",
+                    "tool_call_id": interrupt.source_id,
+                    "approved": canonical_resolution.get("approved") is True,
+                }
+                if interrupt.kind == "approval"
+                else {}
+            ),
+        }
+        turn.status = "queued"
+        if task is not None:
+            task.status = BrainTaskStatus.RUNNING
+            task.current_focus = "Resuming after operator input"
+        dispatch_intent = InterruptDispatchIntent(run_id=run.id)
+    await session.flush()
+    await session.refresh(interrupt)
+    return InterruptResolutionResult(
+        interrupt=interrupt,
+        run=run,
+        dispatch_intent=dispatch_intent,
+        publish_intents=finish_publish_intents,
+    )
+
+
+async def request_stop(
+    session: AsyncSession,
+    *,
+    user: User,
+    run_id: int,
+    reason: str | None = None,
+) -> InterruptStopResult:
+    """Stop one Run and cancel all pending interrupts without committing."""
+
+    discovered = await _discover_runtime(
+        session,
+        user=user,
+        run_id=run_id,
+        kind="manual_pause",
+        skill_run_id=None,
+        source_type=None,
+        source_id=None,
+        source_version=None,
+    )
+    runtime_lock = await lock_runtime_root_scope(
+        session,
+        run_id=discovered.run.id,
+        expected_turn_id=discovered.turn.id,
+        expected_task_id=discovered.run.task_id,
+        root_skill_run_id=discovered.root_skill_run_id,
+        child_skill_run_ids=discovered.child_skill_run_ids,
+        validate_child_parent=False,
+        include_run_revisions=True,
+    )
+    interrupts = list(
+        await session.scalars(
+            select(TurnInterrupt)
+            .where(TurnInterrupt.run_id == run_id)
+            .order_by(TurnInterrupt.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+    now = datetime.now(UTC)
+    for interrupt in interrupts:
+        if interrupt.status == "pending":
+            interrupt.status = "cancelled"
+            interrupt.version += 1
+    for skill_id in (
+        discovered.root_skill_run_id,
+        *discovered.child_skill_run_ids,
+    ):
+        if skill_id is None:
+            continue
+        skill = await session.get(SkillRun, skill_id)
+        if skill is not None and skill.status not in {
+            "completed",
+            "blocked",
+            "failed",
+            "cancelled",
+            "stopped",
+        }:
+            skill.status = "stopped"
+            skill.error_code = "RUN_STOPPED"
+    discovered.run.cancel_requested_at = now
+    closure = await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=discovered.run.id,
+            org_id=discovered.run.org_id,
+            account_id=discovered.thread.account_id,
+            project_id=discovered.thread.project_id,
+            thread_id=discovered.thread.id,
+            turn_id=discovered.turn.id,
+            task_id=discovered.run.task_id,
+            skill_run_id=discovered.root_skill_run_id,
+        ),
+        status="stopped",
+        message=(reason or "This task was stopped by the operator.").strip(),
+        error_code="RUN_STOPPED",
+        commit=False,
+        prelocked=runtime_lock,
+    )
+    return InterruptStopResult(
+        run_id=discovered.run.id,
+        thread_id=discovered.thread.id,
+        turn_id=discovered.turn.id,
+        client_message_id=discovered.run.client_message_id,
         publish_intents=closure.publish_intents,
     )
 
@@ -290,6 +612,7 @@ async def _discover_runtime(
         invocation_ids=((invocation.id,) if invocation is not None else ()),
         tool_call_ids=((tool.id,) if tool is not None else ()),
         attempt_ids=tuple(row.id for row in attempts),
+        source_tool=tool,
     )
 
 
@@ -318,4 +641,72 @@ def _request_identity(row: TurnInterrupt) -> tuple:
     )
 
 
-__all__ = ["InterruptRequestResult", "request_interrupt"]
+def _canonical_resolution(value: dict) -> tuple[dict, str]:
+    encoded = json.dumps(
+        dict(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    normalized = json.loads(encoded)
+    return normalized, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _interrupt_matches_runtime(
+    interrupt: TurnInterrupt,
+    discovered: _DiscoveredRuntime,
+) -> bool:
+    return (
+        interrupt.org_id == discovered.run.org_id
+        and interrupt.account_id == discovered.thread.account_id
+        and interrupt.thread_id == discovered.thread.id
+        and interrupt.turn_id == discovered.turn.id
+        and interrupt.run_id == discovered.run.id
+    )
+
+
+async def _apply_approval_resolution(
+    session: AsyncSession,
+    *,
+    interrupt: TurnInterrupt,
+    resolution: dict,
+    user: User,
+    now: datetime,
+) -> None:
+    approved = resolution.get("approved")
+    if type(approved) is not bool:
+        raise _conflict(
+            "INTERRUPT_RESOLUTION_INVALID",
+            "Approval responses must include an approved boolean.",
+        )
+    if interrupt.source_type != "tool_call" or interrupt.source_id is None:
+        raise _conflict(
+            "INTERRUPT_SOURCE_MISSING",
+            "The approval source is no longer available.",
+        )
+    tool = await session.get(AgentToolCall, interrupt.source_id)
+    if tool is None:
+        raise _not_found()
+    comment = str(resolution.get("comment") or "")
+    decision = {
+        "approved": approved,
+        "comment": comment,
+        "reviewed_by": user.id,
+        "reviewed_at": now.isoformat(),
+    }
+    tool.status = "success" if approved else "failed"
+    tool.error = None if approved else comment or "Operator rejected this action"
+    tool.meta = {**dict(tool.meta or {}), "decision": decision}
+    tool.finished_at = now
+
+
+__all__ = [
+    "InterruptDispatchIntent",
+    "InterruptRequestResult",
+    "InterruptResolutionResult",
+    "InterruptStopResult",
+    "request_interrupt",
+    "request_stop",
+    "resolve_interrupt",
+]

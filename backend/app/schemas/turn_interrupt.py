@@ -24,3 +24,26 @@ class TurnInterruptOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+
+class ResolveTurnInterruptRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    resolution: dict[str, Any]
+
+
+class ResolveTurnInterruptOut(BaseModel):
+    interrupt: TurnInterruptOut
+    run_id: int
+    dispatch_deferred: bool = False
+    dispatch_message: str | None = None
+
+
+class StopConversationTurnRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class StopConversationTurnOut(BaseModel):
+    thread_id: int
+    turn_id: int
+    run_id: int
+    stopped: bool = True
+    dispatch_deferred: bool = False
