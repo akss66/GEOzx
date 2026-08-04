@@ -746,6 +746,7 @@ async def _execute_brain_message(
     regeneration_source_event_id: int | None = None,
     force_inline: bool = False,
     user_message_recorded: bool = False,
+    execution_owner: str | None = None,
 ) -> BrainRuntimeOut:
     task = (
         await _load_task_for_user(session, body.task_id, user)
@@ -959,6 +960,7 @@ async def _execute_brain_message(
             client_message_id=body.client_message_id,
             agent_run_id=agent_run_id,
             agent_run_attempt=agent_run_attempt,
+            execution_owner=execution_owner,
         )
     except asyncio.CancelledError:
         if not body.client_message_id or not await generation_control.is_stop_requested(

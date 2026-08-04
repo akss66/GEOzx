@@ -119,6 +119,7 @@ class AgentHarness:
         step_key: str,
         attempt: int,
         upstream: dict,
+        execution_owner: str | None = None,
         session_factory: Any = async_session,
     ) -> AgentTraceResult:
         """Reload the complete scope and execute one trace in its own session."""
@@ -156,6 +157,7 @@ class AgentHarness:
                 upstream=dict(upstream),
                 scope=scope,
                 trace_only=True,
+                execution_owner=execution_owner,
             )
             return AgentTraceResult(
                 invocation_id=result.invocation.id,
@@ -182,6 +184,7 @@ class AgentHarness:
         turn_id: int | None = None,
         scope: RuntimeScope | None = None,
         trace_only: bool = False,
+        execution_owner: str | None = None,
     ) -> AgentHarnessResult:
         if task.org_id != user.org_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
@@ -384,9 +387,11 @@ class AgentHarness:
                 request=request,
                 project_id=project_id,
                 account_id=account.id,
+                run_id=run_id,
                 agent_code=code.value,
                 invocation_id=invocation.id,
                 scope=scope,
+                execution_owner=execution_owner,
             )
             if outcome.status != "success" or outcome.result is None:
                 raise SpecialistKernelBlocked(

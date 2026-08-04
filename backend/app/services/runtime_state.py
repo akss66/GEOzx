@@ -302,7 +302,10 @@ async def close_runtime_state(
                     skill_run.output_snapshot = scope.skill_output_snapshot
 
         if task is not None and not (preserve_terminal_skill and family == "active"):
-            task.status = brain_task_status(effective_status)
+            task.status = brain_task_status(
+                effective_status,
+                error_code=effective_error,
+            )
             task.current_focus = effective_message[:500]
             if task.status == BrainTaskStatus.COMPLETED:
                 task.progress = 100
@@ -561,13 +564,19 @@ def runtime_status_family(status: str) -> str:
     raise ValueError(f"unsupported runtime status: {status}")
 
 
-def brain_task_status(status: str) -> BrainTaskStatus:
+def brain_task_status(
+    status: str,
+    *,
+    error_code: str | None = None,
+) -> BrainTaskStatus:
     if status in {"claimed", "queued", "running", "retry_wait"}:
         return BrainTaskStatus.RUNNING
     if status.startswith("waiting_"):
         return BrainTaskStatus.PENDING_CONFIRMATION
     if status == "completed":
         return BrainTaskStatus.COMPLETED
+    if status == "stopped" and error_code == "TOOL_RESULT_AMBIGUOUS":
+        return BrainTaskStatus.PENDING_CONFIRMATION
     if status in {"blocked", "failed", "dead_letter", "cancelled", "stopped"}:
         return BrainTaskStatus.FAILED
     raise ValueError(f"unsupported BrainTask runtime status: {status}")

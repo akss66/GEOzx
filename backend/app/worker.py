@@ -176,6 +176,7 @@ async def execute_agent_run(
                     client_message_id=str(request.get("client_message_id") or ""),
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,
+                    execution_owner=worker_id,
                 )
             elif operation == "execute_revision":
                 revision_status = await execute_revision_task_run(
@@ -214,6 +215,7 @@ async def execute_agent_run(
                     regeneration_source_event_id=request.get("regeneration_source_event_id"),
                     force_inline=True,
                     user_message_recorded=bool(request.get("user_message_recorded")),
+                    execution_owner=worker_id,
                 )
             elif operation == "resume_decision":
                 await runtime_graph.resume_after_decision(
@@ -225,6 +227,7 @@ async def execute_agent_run(
                     record_selection=False,
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,
+                    execution_owner=worker_id,
                 )
             elif operation == "resume_permission":
                 tool_call = await session.scalar(
@@ -243,6 +246,7 @@ async def execute_agent_run(
                     bool(request.get("approved")),
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,
+                    execution_owner=worker_id,
                 )
             else:
                 raise ValueError(f"Unsupported AgentRun operation: {operation}")

@@ -121,6 +121,7 @@ class BrainRuntimeState(TypedDict, total=False):
     task_id: int
     agent_run_id: int | None
     agent_run_attempt: int
+    execution_owner: str
     thread_id: str
     status: str
     pending_permissions: list[int]
@@ -758,6 +759,7 @@ class BrainRuntimeGraph:
         client_message_id: str | None = None,
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
+        execution_owner: str | None = None,
     ) -> BrainTask:
         """Compatibility entry point for legacy intent-only callers."""
 
@@ -773,6 +775,7 @@ class BrainRuntimeGraph:
             client_message_id=client_message_id,
             agent_run_id=agent_run_id,
             agent_run_attempt=agent_run_attempt,
+            execution_owner=execution_owner,
         )
 
     async def start_routed(
@@ -785,6 +788,7 @@ class BrainRuntimeGraph:
         client_message_id: str | None = None,
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
+        execution_owner: str | None = None,
     ) -> BrainTask:
         """Start one turn through the graph selected by its persisted route."""
 
@@ -803,6 +807,7 @@ class BrainRuntimeGraph:
             client_message_id=client_message_id,
             agent_run_id=agent_run_id,
             agent_run_attempt=agent_run_attempt,
+            execution_owner=execution_owner,
         )
 
     async def _start_routed_with_intent(
@@ -815,6 +820,7 @@ class BrainRuntimeGraph:
         client_message_id: str | None = None,
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
+        execution_owner: str | None = None,
     ) -> BrainTask:
         """Execute a validated route while preserving the legacy response contract."""
 
@@ -921,6 +927,8 @@ class BrainRuntimeGraph:
             }
             if agent_run_id is not None:
                 state["agent_run_id"] = agent_run_id
+            if execution_owner is not None:
+                state["execution_owner"] = execution_owner
             if route_decision.mode is TurnExecutionMode.QUERY:
                 await self._query_graph.ainvoke(
                     state,
@@ -1010,6 +1018,7 @@ class BrainRuntimeGraph:
         *,
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
+        execution_owner: str | None = None,
     ) -> BrainTask:
         if not _is_runtime_mode(task.runtime_mode):
             return task
@@ -1024,6 +1033,7 @@ class BrainRuntimeGraph:
                 approved,
                 agent_run_id=agent_run_id,
                 agent_run_attempt=agent_run_attempt,
+                execution_owner=execution_owner,
             )
         finally:
             _runtime_event_identity.reset(runtime_identity_token)
@@ -1037,6 +1047,7 @@ class BrainRuntimeGraph:
         *,
         agent_run_id: int | None,
         agent_run_attempt: int,
+        execution_owner: str | None,
     ) -> BrainTask:
         task.thread_id = task.thread_id or self.thread_id_for(task.id)
         await self._record_event(
@@ -1071,6 +1082,7 @@ class BrainRuntimeGraph:
                         update={
                             "agent_run_id": agent_run_id,
                             "agent_run_attempt": agent_run_attempt,
+                            "execution_owner": execution_owner,
                         },
                         resume={
                             "kind": "permission",
@@ -1092,6 +1104,8 @@ class BrainRuntimeGraph:
                 }
                 if agent_run_id is not None:
                     resume_state["agent_run_id"] = agent_run_id
+                if execution_owner is not None:
+                    resume_state["execution_owner"] = execution_owner
                 await self._smart_resume_graph.ainvoke(
                     resume_state,
                     config=self.graph_config(task.thread_id),
@@ -1186,6 +1200,7 @@ class BrainRuntimeGraph:
         record_selection: bool = True,
         agent_run_id: int | None = None,
         agent_run_attempt: int = 0,
+        execution_owner: str | None = None,
     ) -> BrainTask:
         runtime_identity_token = _runtime_event_identity.set(
             await self._runtime_identity_for_run(session, task, agent_run_id)
@@ -1200,6 +1215,7 @@ class BrainRuntimeGraph:
                 record_selection=record_selection,
                 agent_run_id=agent_run_id,
                 agent_run_attempt=agent_run_attempt,
+                execution_owner=execution_owner,
             )
         finally:
             _runtime_event_identity.reset(runtime_identity_token)
@@ -1215,6 +1231,7 @@ class BrainRuntimeGraph:
         record_selection: bool,
         agent_run_id: int | None,
         agent_run_attempt: int,
+        execution_owner: str | None,
     ) -> BrainTask:
         if record_selection:
             await self.record_decision_selected(
@@ -1238,6 +1255,7 @@ class BrainRuntimeGraph:
                         update={
                             "agent_run_id": agent_run_id,
                             "agent_run_attempt": agent_run_attempt,
+                            "execution_owner": execution_owner,
                         },
                         resume={
                             "kind": "decision",
@@ -1263,6 +1281,7 @@ class BrainRuntimeGraph:
                         "task_id": task.id,
                         "agent_run_id": agent_run_id,
                         "agent_run_attempt": agent_run_attempt,
+                        "execution_owner": execution_owner,
                         "thread_id": thread_id,
                         "round_index": max(1, len(observations)),
                         "selected_experts": [],
@@ -1453,6 +1472,7 @@ class BrainRuntimeGraph:
                     run_id=state.get("agent_run_id"),
                     step_key=f"round-{round_index}:{agent_code.value}",
                     attempt=state.get("agent_run_attempt", 0),
+                    execution_owner=state.get("execution_owner"),
                 )
                 if result is not None:
                     if result.deliverable is None or result.acceptance is None:
@@ -1738,6 +1758,7 @@ class BrainRuntimeGraph:
                     project_id=project_id,
                     account_id=account_id,
                     scope=scope,
+                    execution_owner=state.get("execution_owner"),
                 )
                 if outcome.status == "waiting_approval":
                     continue
@@ -2051,6 +2072,8 @@ class BrainRuntimeGraph:
                     ),
                     project_id=task.brief.project_id if task.brief else None,
                     account_id=int(account_id),
+                    run_id=state.get("agent_run_id"),
+                    execution_owner=state.get("execution_owner"),
                 )
                 if outcome.status != "success" or outcome.result is None:
                     raise RuntimeError("account data-card query did not complete")

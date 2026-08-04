@@ -915,6 +915,7 @@ class SkillRuntime:
             project_id=thread.project_id,
             agent_code=AgentCode.DECISION.value,
             scope=scope,
+            execution_owner=lease_owner,
         )
         await self._heartbeat(session, run=run, lease_owner=lease_owner)
         if outcome.status != "success" or outcome.result is None:
@@ -1347,6 +1348,7 @@ class SkillRuntime:
                     project_id=thread.project_id,
                     agent_code=AgentCode.DECISION.value,
                     scope=scope,
+                    execution_owner=lease_owner,
                 )
             except Exception as exc:
                 raise _SkillStageFailure("read_data", attempt, exc) from exc
@@ -1415,6 +1417,7 @@ class SkillRuntime:
                     "attachment_contexts": attachment_contexts,
                     "expert_outputs": list(upstream_outputs),
                 },
+                lease_owner=lease_owner,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             for result in stage_results:
@@ -1673,6 +1676,7 @@ class SkillRuntime:
                     project_id=thread.project_id,
                     agent_code=AgentCode.DECISION.value,
                     scope=scope,
+                    execution_owner=lease_owner,
                 )
             except Exception as exc:
                 raise _SkillStageFailure(step_code, attempt, exc) from exc
@@ -1818,6 +1822,7 @@ class SkillRuntime:
                     "source_artifacts": source_artifacts,
                     "expert_outputs": list(upstream_outputs),
                 },
+                lease_owner=lease_owner,
             )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             for result in stage_results:
@@ -2125,6 +2130,7 @@ class SkillRuntime:
         evidence_refs: list[str],
         step_keys: dict[AgentCode, str],
         upstream: dict[str, Any],
+        lease_owner: str,
     ) -> list[_ExpertResult]:
         frozen_upstream = json.loads(json.dumps(upstream))
         if self._harness is not agent_harness:
@@ -2146,6 +2152,7 @@ class SkillRuntime:
                     upstream=json.loads(json.dumps(frozen_upstream)),
                     scope=scope,
                     trace_only=True,
+                    execution_owner=lease_owner,
                 )
                 results.append(
                     _ExpertResult(
@@ -2165,6 +2172,7 @@ class SkillRuntime:
                     step_key=step_keys[code],
                     attempt=0,
                     upstream=json.loads(json.dumps(frozen_upstream)),
+                    execution_owner=lease_owner,
                 )
             )
             for code in codes
