@@ -150,7 +150,11 @@ class _Tools:
                 "period": {"days": params.days},
                 "coverage": {"content_metrics": "available"},
                 "metrics": {"play": {"value": 1200}},
-                "sources": [{"batch_id": 7}],
+                "benchmark_count": 1,
+                "sources": [
+                    {"batch_id": 7, "data_domains": ["account_metrics"]},
+                    {"batch_id": 8, "data_domains": ["benchmarks"]},
+                ],
             }
 
         async def prepare_publish_package(
@@ -249,6 +253,140 @@ class _Harness:
             deliverable=None,
             output=output,
         )
+
+
+@pytest.mark.asyncio
+async def test_fresh_operation_reuses_one_audited_evidence_read_for_topic_planning(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="fresh-operation-evidence",
+        message="结合最近数据和对标内容，规划并制作下周抖音内容",
+    )
+    tools = _Tools()
+    harness = _Harness()
+    runtime = SkillRuntime(tool_executor=tools, harness=harness)
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={},
+        ),
+    )
+
+    assert result.status == "waiting_user"
+    assert result.report["cycle_days"] == 7
+    assert result.report["source_artifacts"] == [
+        {
+            "kind": "data_import_batch",
+            "id": 7,
+            "data_domains": ["account_metrics"],
+        },
+        {
+            "kind": "data_import_batch",
+            "id": 8,
+            "data_domains": ["benchmarks"],
+        },
+    ]
+    assert sum(call.tool_code == "account.data_context" for call in tools.calls) == 1
+    root_run = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "operation_iteration",
+        )
+    )
+    assert root_run is not None
+    data_call = await session.scalar(
+        select(AgentToolCall).where(
+            AgentToolCall.skill_run_id == root_run.id,
+            AgentToolCall.tool_code == "account.data_context",
+        )
+    )
+    topic_run = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "topic_planning",
+        )
+    )
+    assert data_call is not None and topic_run is not None
+    assert data_call.skill_run_id == root_run.id
+    server_context = topic_run.input_snapshot["_server_context"]
+    assert server_context["tool_audit_refs"]["account.data_context"] == {
+        "tool_call_id": data_call.id,
+        "source_skill_run_id": root_run.id,
+    }
+    assert server_context["preloaded_tool_results"]["account.data_context"]["sources"] == [
+        {"batch_id": 7, "data_domains": ["account_metrics"]},
+        {"batch_id": 8, "data_domains": ["benchmarks"]},
+    ]
+    preloaded_upstream = next(
+        item
+        for item in harness.upstreams[0]["tool_results"]["items"]
+        if item["tool_code"] == "account.data_context"
+    )
+    assert preloaded_upstream == {
+        "tool_code": "account.data_context",
+        "result": server_context["preloaded_tool_results"]["account.data_context"],
+    }
+
+    script_node = next(
+        node
+        for node in result.report["child_skill_graph"]
+        if node["skill_code"] == "script_generation"
+    )
+    await accept_artifact(session, admin, artifact_id=script_node["artifact_id"])
+    await session.refresh(run)
+    await session.refresh(root_run)
+    claimed = await acquire_agent_run(
+        session,
+        run.id,
+        worker_id="fresh-operation-recovery",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+    await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=claimed,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=claimed,
+            skill_code="operation_iteration",
+            structured_input={},
+        ),
+        lease_owner="fresh-operation-recovery",
+        resume_skill_run=root_run,
+    )
+    assert sum(call.tool_code == "account.data_context" for call in tools.calls) == 1
+    assert (
+        await session.scalar(
+            select(func.count(AgentToolCall.id)).where(
+                AgentToolCall.skill_run_id == root_run.id,
+                AgentToolCall.tool_code == "account.data_context",
+            )
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -673,6 +811,14 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
             )
 
     runtime = ObservedRuntime()
+    price_constraint = {
+        "constraint_type": "OFFER_TERMS",
+        "raw_requirement": "第一条不要讲价格",
+        "target_scope": {
+            "kind": "content_item_indexes",
+            "item_indexes": [1],
+        },
+    }
 
     async def external_counts() -> dict[str, int]:
         return {
@@ -717,6 +863,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
                 "cycle_days": 7,
                 "topic_count": 4,
                 "script_duration_seconds": 30,
+                "constraints": [price_constraint],
             },
         ),
     )
@@ -749,12 +896,24 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
     assert isinstance(topic_node["artifact_id"], int)
     assert isinstance(script_node["artifact_id"], int)
     requests = {
-        request.requested_skill_code: request.structured_input
+        request.requested_skill_code: {
+            "structured_input": request.structured_input,
+            "constraints": request.constraints,
+        }
         for request in runtime.child_requests
     }
     assert requests == {
-        "topic_planning": {"days": 7, "topic_count": 4},
-        "script_generation": {"duration_seconds": 30},
+        "topic_planning": {
+            "structured_input": {"days": 7, "topic_count": 4},
+            "constraints": [],
+        },
+        "script_generation": {
+            "structured_input": {"duration_seconds": 30},
+            "constraints": [
+                '{"constraint_type":"OFFER_TERMS","raw_requirement":"第一条不要讲价格",'
+                '"target_scope":{"item_indexes":[1],"kind":"content_item_indexes"}}'
+            ],
+        },
     }
     child_runs = {
         row.skill_code: row
@@ -774,6 +933,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
         "account_id": account.id,
         "duration_seconds": 30,
         "presentation_format": "storyboard",
+        "_server_request_constraints": requests["script_generation"]["constraints"],
     }
     assert all(row.status == "completed" for row in child_runs.values())
     data_context = next(
@@ -786,6 +946,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
             "account_id": account.id,
             "duration_seconds": 30,
             "presentation_format": "storyboard",
+            "_server_request_constraints": requests["script_generation"]["constraints"],
         },
     ]
     visual_node = nodes["visual_brief_generation"]
@@ -838,6 +999,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
                 "cycle_days": 7,
                 "topic_count": 4,
                 "script_duration_seconds": 30,
+                "constraints": [price_constraint],
             },
         ),
     )
@@ -890,6 +1052,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
                 "cycle_days": 7,
                 "topic_count": 4,
                 "script_duration_seconds": 30,
+                "constraints": [price_constraint],
             },
         ),
         lease_owner="operation-test-worker",
@@ -965,6 +1128,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
                 "cycle_days": 7,
                 "topic_count": 4,
                 "script_duration_seconds": 30,
+                "constraints": [price_constraint],
             },
         ),
         lease_owner="operation-test-worker",
@@ -1028,6 +1192,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
                 "cycle_days": 7,
                 "topic_count": 4,
                 "script_duration_seconds": 30,
+                "constraints": [price_constraint],
             },
         ),
         lease_owner="operation-test-worker",
@@ -1133,6 +1298,7 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
                 "cycle_days": 7,
                 "topic_count": 4,
                 "script_duration_seconds": 30,
+                "constraints": [price_constraint],
             },
         ),
         lease_owner="operation-test-worker",
@@ -1685,7 +1851,22 @@ async def test_nested_finish_rejection_commits_once_then_replays_stable_events(
     )
     durable_ids = [event.id for event in durable_runtime_events]
     assert durable_ids
-    assert published == durable_ids
+    published_events = list(
+        await session.scalars(
+            select(Event).where(Event.id.in_(published)).order_by(Event.id)
+        )
+    )
+    pending_ids = [
+        event.id for event in published_events if event.type == "pending_work.updated"
+    ]
+    assert pending_ids
+    assert set(published) == {*durable_ids, *pending_ids}
+    assert all(
+        event.type.startswith("brain.runtime.")
+        or event.type == "pending_work.updated"
+        for event in published_events
+    )
+    first_publish = list(published)
     event_count = await session.scalar(
         select(func.count(Event.id)).where(Event.turn_id == turn.id)
     )
@@ -1701,7 +1882,9 @@ async def test_nested_finish_rejection_commits_once_then_replays_stable_events(
 
     assert duplicate.status_code == 200
     assert opposite.status_code == 409
-    assert published == durable_ids + durable_ids
+    # Replays preserve the durable event set; separate runtime and account
+    # listeners may publish their categories in a different safe order.
+    assert sorted(published) == sorted(first_publish + first_publish)
     assert await session.scalar(
         select(func.count(Event.id)).where(Event.turn_id == turn.id)
     ) == event_count

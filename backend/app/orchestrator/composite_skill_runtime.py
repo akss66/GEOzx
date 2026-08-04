@@ -24,6 +24,7 @@ class CompositeSkillRuntime:
         cycle_days: int,
         topic_count: int | None = None,
         script_duration_seconds: int | None = None,
+        constraints: list[dict[str, Any]] | None = None,
         source_artifacts: list[dict[str, Any]],
         previous_graph: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -64,6 +65,9 @@ class CompositeSkillRuntime:
                         cycle_days=cycle_days,
                         topic_count=topic_count,
                         script_duration_seconds=script_duration_seconds,
+                    ),
+                    "constraints": (
+                        deepcopy(constraints or []) if skill_code == "script_generation" else []
                     ),
                 }
             )

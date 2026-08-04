@@ -116,6 +116,14 @@ class RevisionExecutorBoundaryMap:
         return any(boundary is None for boundary in self.logical_boundaries.values())
 
 
+@dataclass(frozen=True)
+class _ServerSkillContext:
+    """Internal-only child context; never populated from structured client input."""
+
+    preloaded_tool_results: dict[str, dict[str, Any]]
+    tool_audit_refs: dict[str, dict[str, int]]
+
+
 def resolve_revision_executor_boundaries(
     contract: CheckpointGraphContract,
 ) -> RevisionExecutorBoundaryMap:
@@ -319,6 +327,53 @@ def _capability_attachment_snapshot(
     }
 
 
+def _capability_constraint_snapshot(
+    capability_request: CapabilityRequest,
+) -> dict[str, Any]:
+    constraints = [item.strip() for item in capability_request.constraints if item.strip()]
+    if not constraints:
+        return {}
+    return {"_server_request_constraints": constraints}
+
+
+def _server_skill_context_snapshot(
+    context: _ServerSkillContext | None,
+) -> dict[str, Any]:
+    if context is None:
+        return {}
+    return {
+        "_server_context": {
+            "preloaded_tool_results": context.preloaded_tool_results,
+            "tool_audit_refs": context.tool_audit_refs,
+        }
+    }
+
+
+def _server_skill_context_from_snapshot(value: object) -> _ServerSkillContext | None:
+    if not isinstance(value, dict):
+        return None
+    preloaded = value.get("preloaded_tool_results")
+    audit_refs = value.get("tool_audit_refs")
+    if not isinstance(preloaded, dict) or not isinstance(audit_refs, dict):
+        return None
+    return _ServerSkillContext(
+        preloaded_tool_results={
+            str(code): dict(result)
+            for code, result in preloaded.items()
+            if isinstance(result, dict)
+        },
+        tool_audit_refs={
+            str(code): {
+                str(key): int(identifier)
+                for key, identifier in ref.items()
+                if isinstance(identifier, int)
+            }
+            for code, ref in audit_refs.items()
+            if isinstance(ref, dict)
+        },
+    )
+
+
 @dataclass(frozen=True)
 class SkillExecutionResult:
     status: str
@@ -398,6 +453,7 @@ class SkillRuntime:
         lease_owner: str | None = None,
         resume_skill_run: SkillRun | None = None,
         parent_skill_run_id: int | None = None,
+        server_context: _ServerSkillContext | None = None,
     ) -> SkillExecutionResult:
         self._require_scope(user, thread, turn, run)
         if capability_request is not None:
@@ -449,6 +505,8 @@ class SkillRuntime:
                     "account_id": thread.account_id,
                     **requested_input.model_dump(mode="json"),
                     **_capability_attachment_snapshot(capability_request),
+                    **_capability_constraint_snapshot(capability_request),
+                    **_server_skill_context_snapshot(server_context),
                 }
                 if requested_snapshot != frozen_snapshot:
                     raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
@@ -468,6 +526,12 @@ class SkillRuntime:
                     if capability_request is not None
                     else {}
                 ),
+                **(
+                    _capability_constraint_snapshot(capability_request)
+                    if capability_request is not None
+                    else {}
+                ),
+                **_server_skill_context_snapshot(server_context),
             }
         idempotency_key = f"skill:{definition.code}"
         lease_owner = lease_owner or f"skill-run:{run_id}:{uuid4().hex}"
@@ -998,39 +1062,165 @@ class SkillRuntime:
     ) -> SkillExecutionResult:
         """Persist a child-Skill DAG without impersonating its specialists."""
 
-        review_id = int(frozen_input["confirmed_review_artifact_id"])
+        review_value = frozen_input.get("confirmed_review_artifact_id")
         positioning_id = frozen_input.get("positioning_artifact_id")
-        artifact_ids = [review_id]
-        if positioning_id is not None:
-            artifact_ids.append(int(positioning_id))
-        sources = await _confirmed_source_artifacts(
-            session,
-            account_id=thread.account_id,
-            artifact_ids=artifact_ids,
-        )
-        by_id = {int(item["artifact_id"]): item for item in sources}
-        if by_id[review_id]["artifact_type"] != DeliverableType.REVIEW_REPORT.value:
-            raise PermissionError("OPERATION_ITERATION_REVIEW_ARTIFACT_INVALID")
-        if positioning_id is not None and (
-            by_id[int(positioning_id)]["artifact_type"]
-            != DeliverableType.POSITIONING_STRATEGY.value
-        ):
-            raise PermissionError("OPERATION_ITERATION_POSITIONING_ARTIFACT_INVALID")
         attempt = max(1, run.attempt)
+        source_refs: list[dict[str, Any]]
+        fresh_server_context: _ServerSkillContext | None = None
+        if review_value is not None:
+            review_id = int(review_value)
+            artifact_ids = [review_id]
+            if positioning_id is not None:
+                artifact_ids.append(int(positioning_id))
+            sources = await _confirmed_source_artifacts(
+                session,
+                account_id=thread.account_id,
+                artifact_ids=artifact_ids,
+            )
+            by_id = {int(item["artifact_id"]): item for item in sources}
+            if by_id[review_id]["artifact_type"] != DeliverableType.REVIEW_REPORT.value:
+                raise PermissionError("OPERATION_ITERATION_REVIEW_ARTIFACT_INVALID")
+            if positioning_id is not None and (
+                by_id[int(positioning_id)]["artifact_type"]
+                != DeliverableType.POSITIONING_STRATEGY.value
+            ):
+                raise PermissionError("OPERATION_ITERATION_POSITIONING_ARTIFACT_INVALID")
+            source_refs = [
+                {
+                    "artifact_id": item["artifact_id"],
+                    "artifact_type": item["artifact_type"],
+                    "version": item["version"],
+                }
+                for item in sources
+            ]
+        else:
+            fresh_server_context = _server_skill_context_from_snapshot(
+                dict(skill_run.output_snapshot or {}).get("_server_context")
+            )
+            if fresh_server_context is None:
+                await _start_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="read_data",
+                    attempt=attempt,
+                )
+                tool_executor = self._tool_executor or DurableToolExecutor(
+                    build_runtime_tool_adapter()
+                )
+                outcome = await tool_executor.execute(
+                    task=task,
+                    user=user,
+                    request=RuntimeToolCall(
+                        tool_code="account.data_context",
+                        arguments={"days": int(frozen_input.get("cycle_days") or 7)},
+                        purpose="运营迭代：预检账号数据与对标证据",
+                        idempotency_key=f"{skill_run.id}:account.data_context",
+                    ),
+                    project_id=thread.project_id,
+                    agent_code=AgentCode.DECISION.value,
+                    scope=scope,
+                    execution_owner=lease_owner,
+                )
+                if outcome.status != "success" or outcome.result is None:
+                    return await self._pause_for_tool(
+                        session,
+                        thread=thread,
+                        turn=turn,
+                        run=run,
+                        skill_run=skill_run,
+                        task=task,
+                        status=outcome.status,
+                        skill_name="运营迭代证据预检",
+                        artifact_type="operation_execution_plan",
+                    )
+                self._require_tool_scope(outcome.result, thread.account_id)
+                fresh_server_context = _ServerSkillContext(
+                    preloaded_tool_results={"account.data_context": dict(outcome.result)},
+                    tool_audit_refs={
+                        "account.data_context": {
+                            "tool_call_id": outcome.tool_call.id,
+                            "source_skill_run_id": skill_run.id,
+                        }
+                    },
+                )
+                await _complete_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="read_data",
+                    attempt=attempt,
+                    commit=True,
+                )
+            data_context = fresh_server_context.preloaded_tool_results["account.data_context"]
+            source_refs, missing_domains = _operation_evidence_sources(data_context)
+            if missing_domains:
+                report = OperationIterationPlan.model_validate(
+                    composite_skill_runtime.build(
+                        account_id=thread.account_id,
+                        cycle_days=int(frozen_input.get("cycle_days") or 7),
+                        topic_count=int(frozen_input.get("topic_count") or 5),
+                        script_duration_seconds=(
+                            int(frozen_input["script_duration_seconds"])
+                            if frozen_input.get("script_duration_seconds") is not None
+                            else None
+                        ),
+                        constraints=list(frozen_input.get("constraints") or []),
+                        source_artifacts=source_refs,
+                    )
+                ).model_dump(mode="json")
+                report["interrupt"] = {
+                    "kind": "operation_evidence_required",
+                    "missing_domains": missing_domains,
+                }
+                response = (
+                    "开始下周内容规划前还缺少可审计的数据："
+                    + "、".join(_operation_evidence_domain_label(item) for item in missing_domains)
+                    + "。请先补录并确认对应数据后重新发起。"
+                )
+                output = {
+                    "status": "waiting_user",
+                    "task_id": task.id,
+                    "artifact_id": None,
+                    "artifact_type": "operation_execution_plan",
+                    "report": report,
+                    "response": response,
+                    "error_code": "OPERATION_EVIDENCE_REQUIRED",
+                    **_server_skill_context_snapshot(fresh_server_context),
+                }
+                await self._close_skill_state(
+                    session,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    status="waiting_user",
+                    response=response,
+                    output_snapshot=output,
+                    error_code="OPERATION_EVIDENCE_REQUIRED",
+                )
+                return self._existing_result(skill_run)
+            if positioning_id is not None:
+                positioning_sources = await _confirmed_source_artifacts(
+                    session,
+                    account_id=thread.account_id,
+                    artifact_ids=[int(positioning_id)],
+                )
+                positioning = positioning_sources[0]
+                if positioning["artifact_type"] != DeliverableType.POSITIONING_STRATEGY.value:
+                    raise PermissionError("OPERATION_ITERATION_POSITIONING_ARTIFACT_INVALID")
+                source_refs.append(
+                    {
+                        "artifact_id": positioning["artifact_id"],
+                        "artifact_type": positioning["artifact_type"],
+                        "version": positioning["version"],
+                    }
+                )
         await _start_skill_stage(
             session,
             scope=scope,
             step_code="prepare_deliverable",
             attempt=attempt,
         )
-        source_refs = [
-            {
-                "artifact_id": item["artifact_id"],
-                "artifact_type": item["artifact_type"],
-                "version": item["version"],
-            }
-            for item in sources
-        ]
         previous_graph = (
             dict(skill_run.output_snapshot or {}).get("report", {}).get("child_skill_graph")
             if isinstance(dict(skill_run.output_snapshot or {}).get("report"), dict)
@@ -1051,6 +1241,7 @@ class SkillRuntime:
                     else None
                 ),
                 source_artifacts=source_refs,
+                constraints=list(frozen_input.get("constraints") or []),
                 previous_graph=previous_graph,
             )
         ).model_dump(mode="json")
@@ -1125,6 +1316,16 @@ class SkillRuntime:
                     structured_input["days"] = int(frozen_input.get("cycle_days") or 7)
             elif skill_code == "publishing_preparation":
                 structured_input["content_item_id"] = content.id
+            child_constraints = [
+                json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for item in node.get("constraints") or []
+                if isinstance(item, dict)
+            ]
             child_result = await self._execute_child_skill(
                 session,
                 user=user,
@@ -1144,8 +1345,10 @@ class SkillRuntime:
                     requested_skill_code=skill_code,
                     execution_preference="FORMAL_TASK",
                     structured_input=structured_input,
+                    constraints=child_constraints,
                 ),
                 lease_owner=lease_owner,
+                server_context=(fresh_server_context if skill_code == "topic_planning" else None),
             )
             node["status"] = child_result.status
             node["artifact_id"] = child_result.artifact_id
@@ -1245,6 +1448,7 @@ class SkillRuntime:
             "artifact_type": "operation_execution_plan",
             "report": report,
             "response": response,
+            **_server_skill_context_snapshot(fresh_server_context),
         }
         await _complete_skill_stage(
             session,
@@ -1278,6 +1482,7 @@ class SkillRuntime:
         skill_code: str,
         capability_request: CapabilityRequest,
         lease_owner: str,
+        server_context: _ServerSkillContext | None = None,
     ) -> SkillExecutionResult:
         """Execute one child through the complete audited SkillRuntime boundary."""
 
@@ -1291,6 +1496,7 @@ class SkillRuntime:
             capability_request=capability_request,
             lease_owner=lease_owner,
             parent_skill_run_id=parent_skill_run.id,
+            server_context=server_context,
         )
         child_skill_run = await session.get(SkillRun, result.skill_run_id)
         if child_skill_run is None:
@@ -1649,6 +1855,30 @@ class SkillRuntime:
         attempt = max(1, run.attempt)
         tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
         tool_results: dict[str, dict[str, Any]] = {}
+        server_context = _server_skill_context_from_snapshot(frozen_input.get("_server_context"))
+        if server_context is not None:
+            for tool_code, result in server_context.preloaded_tool_results.items():
+                audit_ref = server_context.tool_audit_refs.get(tool_code) or {}
+                tool_call_id = audit_ref.get("tool_call_id")
+                source_skill_run_id = audit_ref.get("source_skill_run_id")
+                tool_call = (
+                    await session.get(AgentToolCall, tool_call_id)
+                    if isinstance(tool_call_id, int)
+                    else None
+                )
+                if (
+                    tool_call is None
+                    or tool_call.status != "success"
+                    or tool_call.tool_code != tool_code
+                    or tool_call.skill_run_id != source_skill_run_id
+                    or tool_call.task_id != task.id
+                    or tool_call.thread_id != thread.id
+                    or tool_call.turn_id != turn.id
+                    or dict((tool_call.meta or {}).get("result") or {}) != result
+                ):
+                    raise SkillRecoveryConflict("PRELOADED_TOOL_AUDIT_MISMATCH")
+                self._require_tool_scope(result, thread.account_id)
+                tool_results[tool_code] = dict(result)
         tool_plan = build_skill_tool_plan(definition)
 
         async def execute_tool(
@@ -1717,6 +1947,8 @@ class SkillRuntime:
                 attempt=attempt,
             )
             for step in read_steps:
+                if step.tool_code in tool_results:
+                    continue
                 paused = await execute_tool(step.tool_code, step_code="read_data")
                 if paused is not None:
                     return paused
@@ -1801,7 +2033,14 @@ class SkillRuntime:
                 codes=tuple(AgentCode(code) for code in stage),
                 purpose=(
                     f"完成“{definition.name}”：{turn.user_input}。"
-                    "必须遵守当前账号范围，不得编造数据或声称已经发布。"
+                    + (
+                        "必须遵守结构化要求："
+                        + "；".join(frozen_input["_server_request_constraints"])
+                        + "。"
+                        if frozen_input.get("_server_request_constraints")
+                        else ""
+                    )
+                    + "必须遵守当前账号范围，不得编造数据或声称已经发布。"
                 ),
                 evidence_refs=[_evidence_label(item) for item in evidence_refs],
                 step_keys={
@@ -3393,6 +3632,49 @@ def _evidence_refs(data_context: dict[str, Any]) -> list[dict[str, Any]]:
                 seen.add(key)
                 refs.append({"kind": key[0], "id": key[1]})
     return refs
+
+
+def _operation_evidence_sources(
+    data_context: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    refs: list[dict[str, Any]] = []
+    available_domains: set[str] = set()
+    seen_batches: set[int] = set()
+    for source in data_context.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        batch_id = source.get("batch_id")
+        domains = sorted(
+            {
+                str(domain)
+                for domain in source.get("data_domains") or []
+                if isinstance(domain, str) and domain
+            }
+        )
+        if not isinstance(batch_id, int) or not domains or batch_id in seen_batches:
+            continue
+        seen_batches.add(batch_id)
+        available_domains.update(domains)
+        refs.append(
+            {
+                "kind": "data_import_batch",
+                "id": batch_id,
+                "data_domains": domains,
+            }
+        )
+    missing: list[str] = []
+    if not available_domains.intersection({"account_metrics", "content_metrics"}):
+        missing.append("account_or_content_data")
+    if "benchmarks" not in available_domains:
+        missing.append("benchmarks")
+    return refs, missing
+
+
+def _operation_evidence_domain_label(domain: str) -> str:
+    return {
+        "account_or_content_data": "账号或内容表现数据",
+        "benchmarks": "对标数据",
+    }.get(domain, domain)
 
 
 def _evidence_label(ref: dict[str, Any]) -> str:

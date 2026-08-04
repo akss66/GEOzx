@@ -283,6 +283,20 @@ def test_migrated_operation_intents_route_to_typed_skills(
     assert decision.skill_code == expected_skill
 
 
+def test_weekly_content_production_routes_to_fresh_operation_iteration() -> None:
+    decision = capability_router.route_deterministic_request(
+        "结合最近数据和对标内容，规划并制作下周抖音内容",
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == "operation_iteration"
+    assert decision.requires_operation_task is True
+
+
 @pytest.mark.parametrize(
     ("message", "expected_skill", "missing_field"),
     [

@@ -28,6 +28,36 @@ def test_unsupported_goal_supplements_are_rejected_before_revision_lineage(
     assert captured.value.detail["code"] == "UNSUPPORTED_OPERATION_ITERATION_GOAL"
 
 
+def test_price_supplement_is_normalized_as_auditable_offer_terms_constraint() -> None:
+    changed, merged = _normalized_supplement_input(
+        "第一条不要讲价格",
+        source_input={"cycle_days": 7, "topic_count": 5},
+    )
+
+    assert changed == {"offer_terms"}
+    assert merged == {
+        "cycle_days": 7,
+        "topic_count": 5,
+        "constraints": [
+            {
+                "constraint_type": "OFFER_TERMS",
+                "raw_requirement": "第一条不要讲价格",
+                "target_scope": {
+                    "kind": "content_item_indexes",
+                    "item_indexes": [1],
+                },
+            }
+        ],
+    }
+
+    replay_changed, replay_merged = _normalized_supplement_input(
+        "第一条不要讲价格",
+        source_input=merged,
+    )
+    assert replay_changed == set()
+    assert replay_merged == merged
+
+
 @pytest.mark.parametrize(
     ("message", "expected_mode", "expected_target"),
     [

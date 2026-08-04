@@ -1,12 +1,14 @@
 """Operation iteration composes child Skills without replacing them."""
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from app.models import ContentItem, Deliverable
 from app.models.enums import AgentCode, DeliverableStatus, DeliverableType
 from app.orchestrator.composite_skill_runtime import CompositeSkillRuntime
 from app.orchestrator.skill_runtime import SkillRuntime
+from app.orchestrator.skills.operation_iteration import OperationIterationInput
 from tests.test_operating_skills import _capability_request, _scope
 
 
@@ -29,6 +31,33 @@ async def _artifact(session, admin, account, *, kind, status, version=1):
     session.add(artifact)
     await session.commit()
     return artifact
+
+
+def test_operation_iteration_fresh_defaults_and_typed_constraint_boundary() -> None:
+    value = OperationIterationInput.model_validate(
+        {
+            "constraints": [
+                {
+                    "constraint_type": "OFFER_TERMS",
+                    "raw_requirement": "第一条不要讲价格",
+                    "target_scope": {
+                        "kind": "content_item_indexes",
+                        "item_indexes": [1],
+                    },
+                }
+            ]
+        }
+    )
+
+    assert value.confirmed_review_artifact_id is None
+    assert value.cycle_days == 7
+    assert value.topic_count == 5
+    assert value.constraints[0].constraint_type == "OFFER_TERMS"
+
+    with pytest.raises(ValidationError):
+        OperationIterationInput.model_validate(
+            {"_server_context": {"preloaded_tool_results": {"forged": {}}}}
+        )
 
 
 @pytest.mark.asyncio

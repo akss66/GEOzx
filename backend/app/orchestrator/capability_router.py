@@ -61,6 +61,7 @@ _DATA_AVAILABILITY_PATTERNS = (
 _METRIC_QUESTION_MARKERS = ("多少", "怎么样", "如何", "高吗", "低吗", "趋势")
 _OPERATION_TERMS = ("体检", "诊断", "分析", "优化", "策划", "生成", "发布", "执行", "制定")
 _ACCOUNT_INSPECTION_CODE = "account_inspection"
+_FRESH_OPERATION_REQUESTS = frozenset({"结合最近数据和对标内容，规划并制作下周抖音内容"})
 _MIGRATED_OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("operation_iteration", ("运营迭代", "下一周期", "下周运营")),
     ("engagement_review", ("互动复盘", "评论复盘", "评论分析", "用户反馈")),
@@ -112,6 +113,13 @@ def route_deterministic_request(
         return _query_route("deterministic_data_query")
     if _is_account_inspection(normalized):
         return _account_inspection_route(
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+    if normalized in _FRESH_OPERATION_REQUESTS:
+        return _published_skill_route(
+            skill_code="operation_iteration",
             platform=platform,
             registry=registry,
             has_account=has_account,

@@ -150,6 +150,12 @@ async def test_weekly_request_reaches_real_operation_worker_without_hidden_sourc
     assert turn is not None and turn.intent["skill_code"] == "operation_iteration"
     assert root is not None
     assert root.input_snapshot["account_id"] == account["id"]
+    assert root.input_snapshot["cycle_days"] == 7
+    assert root.input_snapshot["topic_count"] == 5
+    assert root.output_snapshot["report"]["interrupt"] == {
+        "kind": "operation_evidence_required",
+        "missing_domains": ["account_or_content_data", "benchmarks"],
+    }
 
 
 @pytest.mark.asyncio
@@ -242,6 +248,17 @@ async def test_price_steering_creates_partial_revision_from_scripts_forward(
     ]
     assert "read_account_data" not in revision.affected_steps
     assert "benchmark_analysis" not in revision.affected_steps
+    revision_run = await session.get(AgentRun, revision.revision_run_id)
+    assert revision_run is not None
+    constraint = revision_run.request_payload["structured_input"]["constraints"][0]
+    assert constraint == {
+        "constraint_type": "OFFER_TERMS",
+        "raw_requirement": PRICE_STEERING,
+        "target_scope": {
+            "kind": "content_item_indexes",
+            "item_indexes": [1],
+        },
+    }
     assert (
         await session.scalar(
             select(func.count(RunRevision.id)).where(RunRevision.source_run_id == source_run.id)

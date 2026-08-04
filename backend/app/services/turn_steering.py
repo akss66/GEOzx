@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -332,6 +333,27 @@ def _normalized_supplement_input(
         )
     merged_input = dict(source_input)
     mapped: set[ConstraintPath | str] = set()
+    offer_terms = _offer_terms_constraint(message)
+    if offer_terms is not None:
+        raw_constraints = merged_input.get("constraints")
+        existing_constraints = list(raw_constraints) if isinstance(raw_constraints, list) else []
+        semantic_key = (
+            offer_terms["constraint_type"],
+            tuple(offer_terms["target_scope"]["item_indexes"]),
+        )
+        has_equivalent = any(
+            isinstance(item, dict)
+            and (
+                item.get("constraint_type"),
+                tuple((item.get("target_scope") or {}).get("item_indexes") or []),
+            )
+            == semantic_key
+            for item in existing_constraints
+        )
+        if not has_equivalent:
+            existing_constraints.append(offer_terms)
+            merged_input["constraints"] = existing_constraints
+            mapped.add(ConstraintPath.OFFER_TERMS)
     if "days" in extracted:
         cycle_days = int(extracted["days"])
         if merged_input.get("cycle_days") != cycle_days:
@@ -349,9 +371,26 @@ def _normalized_supplement_input(
         merged_input["script_duration_seconds"] = duration_seconds
     # Unknown free text must never be guessed into a concrete field. A stable
     # unknown marker makes the dependency planner choose safe full recompute.
-    if not extracted:
+    if not extracted and offer_terms is None:
         mapped.add("unmapped_supplement")
     return mapped, merged_input
+
+
+def _offer_terms_constraint(message: str) -> dict[str, Any] | None:
+    normalized = "".join(message.strip().split())
+    if not (
+        normalized.startswith("第一条")
+        and any(marker in normalized for marker in ("不要讲价格", "别讲价格", "不能讲价格"))
+    ):
+        return None
+    return {
+        "constraint_type": "OFFER_TERMS",
+        "raw_requirement": message.strip(),
+        "target_scope": {
+            "kind": "content_item_indexes",
+            "item_indexes": [1],
+        },
+    }
 
 
 async def _create_supplement_revision(
