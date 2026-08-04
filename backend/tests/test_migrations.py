@@ -605,8 +605,8 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_turn_interrupts() -> None:
-    assert get_head_revision() == "20260804_0500"
+def test_migration_head_is_manual_publish_followup() -> None:
+    assert get_head_revision() == "20260805_0100"
 
 
 def test_turn_interrupts_sqlite_upgrade_and_downgrade(monkeypatch) -> None:

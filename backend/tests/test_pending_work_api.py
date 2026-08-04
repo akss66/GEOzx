@@ -7,15 +7,23 @@ from sqlalchemy import select, text
 
 from app.core.security import create_access_token
 from app.models import (
+    AccountMetricSnapshot,
     AgentRun,
+    BenchmarkSnapshot,
     ContentScheduleEntry,
+    DataImportBatch,
     Event,
     ProjectMembership,
     ShootTask,
     TurnInterrupt,
     User,
 )
-from app.models.enums import DeliverableType, WorkspaceRole
+from app.models.enums import (
+    DataSourceKind,
+    DeliverableType,
+    ImportBatchStatus,
+    WorkspaceRole,
+)
 from tests.test_artifacts_api import _seed_artifact, _video_script_payload
 
 
@@ -345,6 +353,298 @@ async def test_pending_work_completion_is_ownership_safe_idempotent_and_disappea
     assert {event.payload["resource_kind"] for event in lifecycle_events} == {
         "shoot_task",
         "schedule_entry",
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_publish_projects_one_stable_source_linked_data_follow_up(
+    client, session, admin, member
+) -> None:
+    project, account, content, thread, turn, _, _, artifact = await _seed_pending_sources(
+        session,
+        admin,
+        account_name="manual-publish-follow-up",
+    )
+    schedule = ContentScheduleEntry(
+        org_id=admin.org_id,
+        account_id=account.id,
+        content_item_id=content.id,
+        source_artifact_id=artifact.id,
+        source_artifact_version=artifact.version,
+        created_by_id=admin.id,
+        scheduled_at=datetime.now(UTC),
+        timezone="Asia/Shanghai",
+        status="planned",
+    )
+    session.add(schedule)
+    await session.commit()
+
+    first = await client.post(
+        f"/accounts/{account.id}/pending-work/schedule-entries/{schedule.id}/publish",
+        headers=_headers(admin),
+    )
+    await session.refresh(schedule)
+    published_at = schedule.published_at
+    replay = await client.post(
+        f"/accounts/{account.id}/pending-work/schedule-entries/{schedule.id}/publish",
+        headers=_headers(admin),
+    )
+    await session.refresh(schedule)
+
+    assert first.status_code == 200
+    assert replay.json() == first.json()
+    assert published_at is not None
+    assert schedule.published_at == published_at
+    response = await client.get(
+        f"/accounts/{account.id}/pending-work",
+        headers=_headers(admin),
+    )
+    account_data = next(
+        group for group in response.json()["groups"] if group["kind"] == "account_data"
+    )
+    follow_ups = [
+        item
+        for item in account_data["items"]
+        if item["id"] == f"account_data:publication:{schedule.id}"
+    ]
+    assert follow_ups == [
+        {
+            "id": f"account_data:publication:{schedule.id}",
+            "kind": "account_data",
+            "action_label": "补录发布后数据",
+            "account_id": account.id,
+            "thread_id": thread.id,
+            "turn_id": turn.id,
+            "due_at": (published_at + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
+            "reason": "记录已发布作品的后续表现数据。",
+            "next_step_after_completion": "数据确认后，运营大脑会复盘本次发布效果。",
+            "target": {"type": "account_data"},
+        }
+    ]
+
+    session.add(
+        ProjectMembership(
+            project_id=project.id,
+            user_id=member.id,
+            role=WorkspaceRole.OPERATOR,
+        )
+    )
+    member_schedule = ContentScheduleEntry(
+        org_id=admin.org_id,
+        account_id=account.id,
+        content_item_id=content.id,
+        source_artifact_id=artifact.id,
+        source_artifact_version=artifact.version,
+        created_by_id=member.id,
+        scheduled_at=datetime.now(UTC),
+        timezone="Asia/Shanghai",
+        status="planned",
+    )
+    session.add(member_schedule)
+    await session.commit()
+    member_publish = await client.post(
+        f"/accounts/{account.id}/pending-work/schedule-entries/{member_schedule.id}/publish",
+        headers=_headers(member),
+    )
+    assert member_publish.status_code == 200
+
+    admin_after_member_publish = await client.get(
+        f"/accounts/{account.id}/pending-work",
+        headers=_headers(admin),
+    )
+    member_after_publish = await client.get(
+        f"/accounts/{account.id}/pending-work",
+        headers=_headers(member),
+    )
+    member_follow_up_id = f"account_data:publication:{member_schedule.id}"
+    assert member_follow_up_id not in {
+        item["id"]
+        for group in admin_after_member_publish.json()["groups"]
+        for item in group["items"]
+    }
+    assert member_follow_up_id in {
+        item["id"]
+        for group in member_after_publish.json()["groups"]
+        for item in group["items"]
+    }
+
+
+def _committed_batch(
+    *,
+    owner: User,
+    account_id: int,
+    committed_at: datetime,
+    period_start,
+    period_end,
+    identity: str,
+) -> DataImportBatch:
+    return DataImportBatch(
+        org_id=owner.org_id,
+        account_id=account_id,
+        created_by_id=owner.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="test_follow_up",
+        content_sha256=identity.ljust(64, "0")[:64],
+        period_start=period_start,
+        period_end=period_end,
+        row_count=1,
+        committed_at=committed_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_publication_follow_up_closes_only_for_relevant_post_publish_metrics(
+    client, session, admin
+) -> None:
+    _, account, content, _, _, _, _, artifact = await _seed_pending_sources(
+        session,
+        admin,
+        account_name="publication-import-closure",
+    )
+    _, other_account, *_ = await _seed_pending_sources(
+        session,
+        admin,
+        account_name="publication-import-wrong-account",
+    )
+    schedule = ContentScheduleEntry(
+        org_id=admin.org_id,
+        account_id=account.id,
+        content_item_id=content.id,
+        source_artifact_id=artifact.id,
+        source_artifact_version=artifact.version,
+        created_by_id=admin.id,
+        scheduled_at=datetime.now(UTC),
+        timezone="Asia/Shanghai",
+        status="planned",
+    )
+    session.add(schedule)
+    await session.commit()
+    published = await client.post(
+        f"/accounts/{account.id}/pending-work/schedule-entries/{schedule.id}/publish",
+        headers=_headers(admin),
+    )
+    assert published.status_code == 200
+    await session.refresh(schedule)
+    assert schedule.published_at is not None
+    publication_date = schedule.published_at.date()
+
+    old_batch = _committed_batch(
+        owner=admin,
+        account_id=account.id,
+        committed_at=schedule.published_at - timedelta(hours=1),
+        period_start=publication_date,
+        period_end=publication_date,
+        identity="old",
+    )
+    benchmark_batch = _committed_batch(
+        owner=admin,
+        account_id=account.id,
+        committed_at=schedule.published_at + timedelta(hours=1),
+        period_start=publication_date,
+        period_end=publication_date,
+        identity="benchmark",
+    )
+    uncovered_batch = _committed_batch(
+        owner=admin,
+        account_id=account.id,
+        committed_at=schedule.published_at + timedelta(hours=1),
+        period_start=publication_date + timedelta(days=1),
+        period_end=publication_date + timedelta(days=1),
+        identity="uncovered",
+    )
+    wrong_account_batch = _committed_batch(
+        owner=admin,
+        account_id=other_account.id,
+        committed_at=schedule.published_at + timedelta(hours=1),
+        period_start=publication_date,
+        period_end=publication_date,
+        identity="wrong-account",
+    )
+    session.add_all([old_batch, benchmark_batch, uncovered_batch, wrong_account_batch])
+    await session.flush()
+    session.add_all(
+        [
+            AccountMetricSnapshot(
+                org_id=admin.org_id,
+                account_id=account.id,
+                import_batch_id=old_batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=publication_date,
+                total_play=100,
+            ),
+            BenchmarkSnapshot(
+                org_id=admin.org_id,
+                account_id=account.id,
+                import_batch_id=benchmark_batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=publication_date,
+                benchmark_code="peer",
+                metric_code="play",
+                metric_value=100,
+                meta={},
+            ),
+            AccountMetricSnapshot(
+                org_id=admin.org_id,
+                account_id=account.id,
+                import_batch_id=uncovered_batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=publication_date + timedelta(days=1),
+                total_play=200,
+            ),
+            AccountMetricSnapshot(
+                org_id=admin.org_id,
+                account_id=other_account.id,
+                import_batch_id=wrong_account_batch.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                stat_date=publication_date,
+                total_play=300,
+            ),
+        ]
+    )
+    await session.commit()
+
+    still_pending = await client.get(
+        f"/accounts/{account.id}/pending-work",
+        headers=_headers(admin),
+    )
+    follow_up_id = f"account_data:publication:{schedule.id}"
+    assert follow_up_id in {
+        item["id"]
+        for group in still_pending.json()["groups"]
+        for item in group["items"]
+    }
+
+    covered_batch = _committed_batch(
+        owner=admin,
+        account_id=account.id,
+        committed_at=schedule.published_at + timedelta(hours=2),
+        period_start=publication_date,
+        period_end=publication_date,
+        identity="covered",
+    )
+    session.add(covered_batch)
+    await session.flush()
+    session.add(
+        AccountMetricSnapshot(
+            org_id=admin.org_id,
+            account_id=account.id,
+            import_batch_id=covered_batch.id,
+            source_kind=DataSourceKind.PLATFORM_EXPORT,
+            stat_date=publication_date,
+            total_play=400,
+        )
+    )
+    await session.commit()
+
+    completed = await client.get(
+        f"/accounts/{account.id}/pending-work",
+        headers=_headers(admin),
+    )
+    assert follow_up_id not in {
+        item["id"]
+        for group in completed.json()["groups"]
+        for item in group["items"]
     }
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import and_, or_, select
@@ -11,16 +12,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workspace_access import require_account_access
 from app.models import (
+    AccountMetricSnapshot,
     AgentRun,
     ContentScheduleEntry,
     ConversationThread,
+    DataImportBatch,
     Deliverable,
     Event,
+    MetricSnapshot,
+    PlatformContentRecord,
     ShootTask,
     TurnInterrupt,
     User,
 )
-from app.models.enums import UserRole, WorkspaceRole
+from app.models.enums import ImportBatchStatus, UserRole, WorkspaceRole
 from app.schemas.pending_work import (
     AccountDataTarget,
     ConversationTurnTarget,
@@ -213,23 +218,80 @@ async def list_pending_work(
             )
         )
 
+    can_operate_account_data = await _can_operate_account_data(
+        session,
+        user=user,
+        account_id=account_id,
+    )
+    if can_operate_account_data:
+        publication_rows = list(
+            (
+                await session.execute(
+                    select(ContentScheduleEntry, ConversationThread.id, Deliverable.turn_id)
+                    .outerjoin(
+                        Deliverable,
+                        Deliverable.id == ContentScheduleEntry.source_artifact_id,
+                    )
+                    .outerjoin(
+                        ConversationThread,
+                        and_(
+                            ConversationThread.id == Deliverable.thread_id,
+                            ConversationThread.org_id == user.org_id,
+                            ConversationThread.account_id == account_id,
+                        ),
+                    )
+                    .where(
+                        ContentScheduleEntry.org_id == user.org_id,
+                        ContentScheduleEntry.account_id == account_id,
+                        ContentScheduleEntry.created_by_id == user.id,
+                        ContentScheduleEntry.status == "published",
+                        ContentScheduleEntry.published_at.is_not(None),
+                    )
+                    .order_by(
+                        ContentScheduleEntry.published_at.asc(),
+                        ContentScheduleEntry.id.asc(),
+                    )
+                )
+            ).all()
+        )
+        completed_publications = await _completed_publication_follow_up_ids(
+            session,
+            org_id=user.org_id,
+            account_id=account_id,
+            schedules=[row[0] for row in publication_rows],
+        )
+        for schedule, thread_id, turn_id in publication_rows:
+            if schedule.id in completed_publications or schedule.published_at is None:
+                continue
+            has_source = thread_id is not None and turn_id is not None
+            grouped["account_data"].append(
+                PendingWorkItem(
+                    id=f"account_data:publication:{schedule.id}",
+                    kind="account_data",
+                    action_label="补录发布后数据",
+                    account_id=account_id,
+                    thread_id=thread_id if has_source else None,
+                    turn_id=turn_id if has_source else None,
+                    due_at=schedule.published_at + timedelta(hours=24),
+                    reason="记录已发布作品的后续表现数据。",
+                    next_step_after_completion="数据确认后，运营大脑会复盘本次发布效果。",
+                    target=AccountDataTarget(),
+                )
+            )
+
     summary = await account_status_summary(
         session,
         org_id=user.org_id,
         account_id=account_id,
     )
-    inventory = summary.get("dataset_inventory", [])
+    inventory_value = summary.get("dataset_inventory", [])
+    inventory = inventory_value if isinstance(inventory_value, list) else []
     incomplete = [
         row
         for row in inventory
-        if isinstance(row, dict)
-        and row.get("status") in {"not_imported", "stale", "failed"}
+        if isinstance(row, dict) and row.get("status") in {"not_imported", "stale", "failed"}
     ]
-    if incomplete and await _can_operate_account_data(
-        session,
-        user=user,
-        account_id=account_id,
-    ):
+    if incomplete and can_operate_account_data:
         descriptions = [
             f"{_DATA_DOMAIN_LABELS.get(str(row.get('data_domain')), '账号数据')}"
             f"{_DATA_STATUS_LABELS.get(str(row.get('status')), '需要处理')}"
@@ -259,6 +321,106 @@ async def list_pending_work(
             for kind, label in _GROUPS
         ],
     )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+async def _completed_publication_follow_up_ids(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    schedules: list[ContentScheduleEntry],
+) -> set[int]:
+    """Find published entries covered by a later confirmed account/content import."""
+
+    publication_times = [row.published_at for row in schedules if row.published_at is not None]
+    if not publication_times:
+        return set()
+    earliest_publication = min(_as_utc(value) for value in publication_times)
+    batches = list(
+        await session.scalars(
+            select(DataImportBatch).where(
+                DataImportBatch.org_id == org_id,
+                DataImportBatch.account_id == account_id,
+                DataImportBatch.status == ImportBatchStatus.COMMITTED,
+                DataImportBatch.committed_at.is_not(None),
+                DataImportBatch.committed_at > earliest_publication,
+                DataImportBatch.revoked_at.is_(None),
+            )
+        )
+    )
+    batch_ids = [batch.id for batch in batches]
+    if not batch_ids:
+        return set()
+
+    projected_dates: dict[int, set[date]] = {}
+    account_rows = (
+        await session.execute(
+            select(AccountMetricSnapshot.import_batch_id, AccountMetricSnapshot.stat_date).where(
+                AccountMetricSnapshot.org_id == org_id,
+                AccountMetricSnapshot.account_id == account_id,
+                AccountMetricSnapshot.import_batch_id.in_(batch_ids),
+            )
+        )
+    ).all()
+    content_rows = (
+        await session.execute(
+            select(MetricSnapshot.import_batch_id, MetricSnapshot.stat_date).where(
+                MetricSnapshot.org_id == org_id,
+                MetricSnapshot.account_id == account_id,
+                MetricSnapshot.import_batch_id.in_(batch_ids),
+            )
+        )
+    ).all()
+    platform_rows = (
+        await session.execute(
+            select(
+                PlatformContentRecord.canonical_import_batch_id,
+                PlatformContentRecord.published_at,
+            ).where(
+                PlatformContentRecord.org_id == org_id,
+                PlatformContentRecord.account_id == account_id,
+                PlatformContentRecord.canonical_import_batch_id.in_(batch_ids),
+            )
+        )
+    ).all()
+    for batch_id, stat_date in account_rows:
+        projected_dates.setdefault(batch_id, set()).add(stat_date)
+    for batch_id, stat_date in content_rows:
+        if batch_id is not None:
+            projected_dates.setdefault(batch_id, set()).add(stat_date)
+    for batch_id, published_at in platform_rows:
+        if batch_id is None:
+            continue
+        dates = projected_dates.setdefault(batch_id, set())
+        if published_at is not None:
+            dates.add(_as_utc(published_at).date())
+
+    completed: set[int] = set()
+    for schedule in schedules:
+        if schedule.published_at is None:
+            continue
+        published_at = _as_utc(schedule.published_at)
+        published_date = published_at.date()
+        for batch in batches:
+            if batch.id not in projected_dates or batch.committed_at is None:
+                continue
+            if _as_utc(batch.committed_at) <= published_at:
+                continue
+            period_covers = (
+                batch.period_start is not None
+                and batch.period_end is not None
+                and batch.period_start <= published_date <= batch.period_end
+            )
+            if period_covers or published_date in projected_dates[batch.id]:
+                completed.add(schedule.id)
+                break
+    return completed
 
 
 async def _can_operate_account_data(
@@ -352,7 +514,13 @@ async def publish_schedule_entry(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="待处理事项不存在")
     if row.status not in {"planned", "published"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前排期无法记录发布")
-    row.status = "published"
+    if row.status == "planned":
+        row.status = "published"
+        row.published_at = datetime.now(UTC)
+    elif row.published_at is None:
+        # Historical published rows predate the persisted timestamp. The first
+        # post-migration replay establishes a stable best-known completion time.
+        row.published_at = datetime.now(UTC)
     event = await _lifecycle_event(
         session,
         user=user,

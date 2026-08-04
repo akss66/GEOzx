@@ -100,4 +100,4 @@ class ContentScheduleEntry(Base, TimestampMixin):
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="planned", nullable=False)
-
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
