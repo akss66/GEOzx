@@ -733,6 +733,65 @@ async def test_stream_never_exposes_revision_hashes_or_snapshots(session, admin)
 
 
 @pytest.mark.asyncio
+async def test_stream_replays_interrupt_identity_without_private_contracts(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run, _scope = await _event_scope(
+        session,
+        admin,
+        key="interrupt-stream-sanitize",
+    )
+    session.add(
+        Event(
+            type="turn.interrupt_requested",
+            org_id=admin.org_id,
+            account_id=account.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+            sequence=1,
+            payload={
+                "interrupt_id": 23,
+                "kind": "approval",
+                "status": "pending",
+                "message": "Confirm publishing.",
+                "action_label": "Confirm",
+                "version": 1,
+                "response_schema": {"secret": "must not leak"},
+                "tool_arguments": {"token": "must not leak"},
+            },
+            idempotency_key="interrupt-stream-sanitize",
+        )
+    )
+    await session.commit()
+    tracker = _SessionTracker()
+    stream = _stream_generator(
+        scope=_stream_scope(account, thread),
+        after_id=0,
+        request=_ConnectedRequest(),
+        session_factory=_tracked_session_factory(session, tracker),
+        redis_client=_FakeRedis(_FakePubSub(tracker=tracker)),
+        poll_seconds=60,
+        heartbeat_seconds=60,
+    )
+
+    frame = await anext(stream)
+    await stream.aclose()
+
+    assert "event: turn.interrupt_requested" in frame
+    payload = json.loads(frame.splitlines()[2].removeprefix("data: "))["payload"]
+    assert payload == {
+        "interrupt_id": 23,
+        "kind": "approval",
+        "status": "pending",
+        "message": "Confirm publishing.",
+        "action_label": "Confirm",
+        "version": 1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_contains_bad_legacy_rows_and_returns_later_valid_event_safely(
     client,
     session,

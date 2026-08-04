@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from app.schemas.turn_interrupt import (
     TurnInterruptOut,
 )
 from app.services.agent_runs import abort_agent_runtime, enqueue_agent_runtime
+from app.services.conversations import get_conversation_thread
 from app.services.runtime_state import (
     publish_runtime_state_intents,
     replay_runtime_state_events,
@@ -34,6 +35,38 @@ IdempotencyKey = Annotated[
 ]
 log = logging.getLogger(__name__)
 _DISPATCH_DEFERRED = "Your response was saved. The task will resume automatically."
+
+
+@router.get(
+    "/brain/conversations/{thread_id}/turn-interrupts",
+    response_model=list[TurnInterruptOut],
+)
+async def list_conversation_turn_interrupts(
+    thread_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    interrupt_status: Literal[
+        "pending",
+        "resolved",
+        "cancelled",
+        "expired",
+        "superseded",
+    ] = Query(default="pending", alias="status"),
+) -> list[TurnInterruptOut]:
+    thread = await get_conversation_thread(session, user, thread_id)
+    rows = list(
+        await session.scalars(
+            select(TurnInterrupt)
+            .where(
+                TurnInterrupt.org_id == user.org_id,
+                TurnInterrupt.account_id == thread.account_id,
+                TurnInterrupt.thread_id == thread.id,
+                TurnInterrupt.status == interrupt_status,
+            )
+            .order_by(TurnInterrupt.id)
+        )
+    )
+    return [TurnInterruptOut.model_validate(row) for row in rows]
 
 
 @router.get("/turn-interrupts/{interrupt_id}", response_model=TurnInterruptOut)

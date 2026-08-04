@@ -89,6 +89,16 @@ _REVISION_FIELDS = frozenset(
         "metadata",
     }
 )
+_INTERRUPT_FIELDS = frozenset(
+    {
+        "interrupt_id",
+        "kind",
+        "status",
+        "message",
+        "action_label",
+        "version",
+    }
+)
 
 _METADATA_FIELDS = frozenset(
     {
@@ -132,6 +142,10 @@ PUBLIC_EVENT_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "turn.received": _TURN_FIELDS,
     "turn.steered": _STEERING_FIELDS,
     "turn.paused": _PAUSED_TURN_FIELDS,
+    "turn.interrupt_requested": _INTERRUPT_FIELDS,
+    "turn.interrupt_resolved": _INTERRUPT_FIELDS,
+    "turn.interrupt_cancelled": _INTERRUPT_FIELDS,
+    "turn.resuming": _INTERRUPT_FIELDS,
     "turn.completed": _TURN_FIELDS,
     "turn.failed": _TURN_FIELDS,
     "turn.blocked": _TURN_FIELDS,

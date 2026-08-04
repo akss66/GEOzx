@@ -20,6 +20,7 @@ from app.models import (
     Deliverable,
     SkillRun,
     ToolExecutionAttempt,
+    TurnInterrupt,
 )
 from app.schemas.conversation import (
     ConversationAgentRunOut,
@@ -35,6 +36,7 @@ from app.schemas.conversation import (
     TurnSubmissionOut,
     sanitize_conversation_projection,
 )
+from app.schemas.turn_interrupt import TurnInterruptOut
 from app.services.agent_runs import enqueue_agent_runtime
 from app.services.attachments import resolve_attachment_contexts
 from app.services.conversation_submission import prepare_conversation_turn_submission
@@ -60,6 +62,7 @@ def _require_v2_rollout_access(user: CurrentUser) -> None:
 def _turn_out(
     turn: ConversationTurn,
     projections: list[dict] | None = None,
+    pending_interrupt: TurnInterrupt | None = None,
 ) -> ConversationTurnOut:
     return ConversationTurnOut.model_validate(
         {
@@ -80,6 +83,11 @@ def _turn_out(
             "total_ms": turn.total_ms,
             "model_call_count": turn.model_call_count,
             "tool_call_count": turn.tool_call_count,
+            "pending_interrupt": (
+                TurnInterruptOut.model_validate(pending_interrupt)
+                if pending_interrupt is not None
+                else None
+            ),
             "projections": _bind_projections_to_turn(turn.id, projections),
             "created_at": turn.created_at,
             "updated_at": turn.updated_at,
@@ -106,6 +114,10 @@ async def _thread_out(
     thread: ConversationThread,
     turns: list[ConversationTurn],
 ) -> ConversationThreadOut:
+    pending_by_turn = await _pending_interrupts_by_turn(
+        session,
+        tuple(turn.id for turn in turns),
+    )
     return ConversationThreadOut(
         id=thread.id,
         org_id=thread.org_id,
@@ -114,10 +126,36 @@ async def _thread_out(
         project_id=thread.project_id,
         account_id=thread.account_id,
         title=thread.title,
-        turns=[_turn_out(turn, await _turn_projections(session, turn)) for turn in turns],
+        turns=[
+            _turn_out(
+                turn,
+                await _turn_projections(session, turn),
+                pending_by_turn.get(turn.id),
+            )
+            for turn in turns
+        ],
         created_at=thread.created_at,
         updated_at=thread.updated_at,
     )
+
+
+async def _pending_interrupts_by_turn(
+    session: AsyncSession,
+    turn_ids: tuple[int, ...],
+) -> dict[int, TurnInterrupt]:
+    if not turn_ids:
+        return {}
+    rows = list(
+        await session.scalars(
+            select(TurnInterrupt)
+            .where(
+                TurnInterrupt.turn_id.in_(turn_ids),
+                TurnInterrupt.status == "pending",
+            )
+            .order_by(TurnInterrupt.id)
+        )
+    )
+    return {row.turn_id: row for row in rows}
 
 
 async def _turn_projections(
@@ -590,4 +628,9 @@ async def get_turn(
             detail="Conversation turn not found",
         )
     await get_conversation_thread(session, user, turn.thread_id)
-    return _turn_out(turn, await _turn_projections(session, turn))
+    pending = await _pending_interrupts_by_turn(session, (turn.id,))
+    return _turn_out(
+        turn,
+        await _turn_projections(session, turn),
+        pending.get(turn.id),
+    )

@@ -40,6 +40,7 @@ from app.services.skill_approvals import (
     SkillApprovalConflict,
     finalize_skill_finish_approval,
 )
+from app.services.turn_events import TurnEventScope, append_turn_event
 
 _INTERRUPT_KINDS = frozenset({"clarification", "approval", "manual_pause"})
 
@@ -227,6 +228,13 @@ async def request_interrupt(
         commit=False,
         prelocked=runtime_lock,
     )
+    await append_turn_event(
+        session,
+        _interrupt_event_scope(discovered, interrupt),
+        "turn.interrupt_requested",
+        _interrupt_event_payload(interrupt),
+        f"interrupt:{interrupt.id}:requested",
+    )
     return InterruptRequestResult(
         interrupt=interrupt,
         publish_intents=closure.publish_intents,
@@ -348,20 +356,6 @@ async def resolve_interrupt(
             user=user,
             now=now,
         )
-        if discovered.source_tool is not None and discovered.task is not None:
-            try:
-                finish_result = await finalize_skill_finish_approval(
-                    session,
-                    tool_call=discovered.source_tool,
-                    task=discovered.task,
-                    approved=canonical_resolution.get("approved") is True,
-                    comment=str(canonical_resolution.get("comment") or ""),
-                    prelocked=runtime_lock,
-                )
-            except SkillApprovalConflict as exc:
-                raise _conflict("INTERRUPT_APPROVAL_CONFLICT", str(exc)) from exc
-            approval_handled = finish_result.handled
-            finish_publish_intents = finish_result.publish_intents
     interrupt.status = "resolved"
     interrupt.resolution_payload = canonical_resolution
     interrupt.resolution_hash = resolution_hash
@@ -369,6 +363,31 @@ async def resolve_interrupt(
     interrupt.resolved_by_id = user.id
     interrupt.resolved_at = now
     interrupt.version += 1
+    await append_turn_event(
+        session,
+        _interrupt_event_scope(discovered, interrupt),
+        "turn.interrupt_resolved",
+        _interrupt_event_payload(interrupt),
+        f"interrupt:{interrupt.id}:resolved",
+    )
+    if (
+        interrupt.kind == "approval"
+        and discovered.source_tool is not None
+        and discovered.task is not None
+    ):
+        try:
+            finish_result = await finalize_skill_finish_approval(
+                session,
+                tool_call=discovered.source_tool,
+                task=discovered.task,
+                approved=canonical_resolution.get("approved") is True,
+                comment=str(canonical_resolution.get("comment") or ""),
+                prelocked=runtime_lock,
+            )
+        except SkillApprovalConflict as exc:
+            raise _conflict("INTERRUPT_APPROVAL_CONFLICT", str(exc)) from exc
+        approval_handled = finish_result.handled
+        finish_publish_intents = finish_result.publish_intents
 
     run = await session.get(AgentRun, interrupt.run_id)
     turn = await session.get(ConversationTurn, interrupt.turn_id)
@@ -410,6 +429,13 @@ async def resolve_interrupt(
             task.status = BrainTaskStatus.RUNNING
             task.current_focus = "Resuming after operator input"
         dispatch_intent = InterruptDispatchIntent(run_id=run.id)
+        await append_turn_event(
+            session,
+            _interrupt_event_scope(discovered, interrupt),
+            "turn.resuming",
+            _interrupt_event_payload(interrupt),
+            f"interrupt:{interrupt.id}:resuming",
+        )
     await session.flush()
     await session.refresh(interrupt)
     return InterruptResolutionResult(
@@ -463,6 +489,13 @@ async def request_stop(
         if interrupt.status == "pending":
             interrupt.status = "cancelled"
             interrupt.version += 1
+            await append_turn_event(
+                session,
+                _interrupt_event_scope(discovered, interrupt),
+                "turn.interrupt_cancelled",
+                _interrupt_event_payload(interrupt),
+                f"interrupt:{interrupt.id}:cancelled",
+            )
     for skill_id in (
         discovered.root_skill_run_id,
         *discovered.child_skill_run_ids,
@@ -626,6 +659,31 @@ def _require_locked_source(
         raise RuntimeError("interrupt source tool was not prelocked")
     if not set(discovered.attempt_ids).issubset(token.attempt_ids):
         raise RuntimeError("interrupt source attempts were not prelocked")
+
+
+def _interrupt_event_scope(
+    discovered: _DiscoveredRuntime,
+    interrupt: TurnInterrupt,
+) -> TurnEventScope:
+    return TurnEventScope(
+        org_id=discovered.run.org_id,
+        account_id=discovered.thread.account_id,
+        thread_id=discovered.thread.id,
+        turn_id=discovered.turn.id,
+        run_id=discovered.run.id,
+        skill_run_id=interrupt.skill_run_id,
+    )
+
+
+def _interrupt_event_payload(interrupt: TurnInterrupt) -> dict[str, object]:
+    return {
+        "interrupt_id": interrupt.id,
+        "kind": interrupt.kind,
+        "status": interrupt.status,
+        "message": interrupt.public_message,
+        "action_label": interrupt.action_label,
+        "version": interrupt.version,
+    }
 
 
 def _request_identity(row: TurnInterrupt) -> tuple:

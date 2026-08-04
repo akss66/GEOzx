@@ -28,6 +28,7 @@ from app.models import (
     RunRevision,
     SkillRun,
     ToolExecutionAttempt,
+    TurnInterrupt,
     User,
 )
 from app.models.enums import AgentInvocationStatus, DeliverableStatus
@@ -570,6 +571,24 @@ async def delete_conversation_thread(
             if tool_call_ids
             else []
         )
+        interrupt_scope = [TurnInterrupt.thread_id == thread.id]
+        if turns:
+            interrupt_scope.append(
+                TurnInterrupt.turn_id.in_([row.id for row in turns])
+            )
+        if run_ids:
+            interrupt_scope.append(TurnInterrupt.run_id.in_(run_ids))
+        interrupts = list(
+            await session.scalars(
+                select(TurnInterrupt)
+                .where(or_(*interrupt_scope))
+                .order_by(TurnInterrupt.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        if any(row.status == "pending" for row in interrupts):
+            raise _active_delete_conflict()
 
         task_ids = (
             {row.task_id for row in runs if row.task_id is not None}
@@ -784,6 +803,12 @@ async def delete_conversation_thread(
                     ToolExecutionAttempt.id.in_([row.id for row in attempts])
                 )
             )
+        if interrupts:
+            await session.execute(
+                delete(TurnInterrupt).where(
+                    TurnInterrupt.id.in_([row.id for row in interrupts])
+                )
+            )
         if tool_call_ids:
             await session.execute(
                 delete(AgentToolCall).where(
@@ -816,6 +841,7 @@ async def delete_conversation_thread(
             llm_calls_deleted=len(scoped_llm_calls),
             attachments_deleted=len(attachment_rows),
             draft_artifacts_deleted=len(draft_deliverable_ids),
+            interrupts_deleted=len(interrupts),
             retained_audit_categories=retained_audit_categories,
         )
     except HTTPException:

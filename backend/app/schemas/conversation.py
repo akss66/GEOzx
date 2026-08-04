@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
+from app.schemas.turn_interrupt import TurnInterruptOut
+
 
 class CreateConversationThreadRequest(BaseModel):
     account_id: int = Field(gt=0)
@@ -248,6 +250,7 @@ class ConversationTurnOut(BaseModel):
     total_ms: int | None = Field(default=None, ge=0)
     model_call_count: int | None = Field(default=None, ge=0)
     tool_call_count: int | None = Field(default=None, ge=0)
+    pending_interrupt: TurnInterruptOut | None = None
     projections: list[ConversationProjectionOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -290,6 +293,7 @@ class ConversationDeletionSummary(BaseModel):
     llm_calls_deleted: int = Field(ge=0)
     attachments_deleted: int = Field(ge=0)
     draft_artifacts_deleted: int = Field(ge=0)
+    interrupts_deleted: int = Field(default=0, ge=0)
     retained_audit_categories: list[str] = Field(default_factory=list)
 
 

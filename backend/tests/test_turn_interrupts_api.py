@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from app.config import settings
 from app.core.security import create_access_token
 from app.models import (
     Account,
@@ -15,6 +16,7 @@ from app.models import (
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    Event,
     SkillRun,
     ToolExecutionAttempt,
     TurnInterrupt,
@@ -30,6 +32,12 @@ from app.models.enums import (
     Platform,
 )
 from app.services.turn_interrupts import request_interrupt, resolve_interrupt
+
+
+@pytest.fixture(autouse=True)
+def _enable_conversation_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "main_agent_typed_runtime_enabled", True)
 
 
 def _auth(user) -> dict[str, str]:
@@ -267,6 +275,12 @@ def test_0500_migration_parent_and_model_contract() -> None:
         "fk_turn_interrupts_run_thread_turn_org",
         "fk_turn_interrupts_skill_run_scope",
     }
+    lifecycle = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "ck_turn_interrupts_resolution_lifecycle"
+    )
+    assert "resolved_by_id IS NOT NULL" not in str(lifecycle.sqltext)
 
 
 @pytest.mark.asyncio
@@ -829,3 +843,227 @@ async def test_legacy_stop_delegates_to_scoped_stop(
     assert run.status == "stopped"
     assert turn.status == "stopped"
     assert aborted == [run.id]
+    event_types = list(
+        await session.scalars(
+            select(Event.type)
+            .where(Event.turn_id == turn.id)
+            .order_by(Event.sequence)
+        )
+    )
+    assert "turn.interrupt_cancelled" in event_types
+    assert event_types[-1] == "turn.stopped"
+
+
+@pytest.mark.asyncio
+async def test_pending_interrupt_is_in_snapshot_list_and_public_event_replay(
+    client,
+    session,
+    admin,
+) -> None:
+    _account, thread, _turn, run, *_ = await _runtime_context(
+        session,
+        admin,
+        key="interrupt-snapshot",
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="clarification",
+        semantic_key="snapshot-question",
+        public_message="Which product should this plan promote?",
+        action_label="Provide product",
+        response_schema={
+            "type": "object",
+            "properties": {"secret_prompt": {"type": "string"}},
+        },
+    )
+    await session.commit()
+
+    snapshot = await client.get(
+        f"/brain/conversations/{thread.id}",
+        headers=_auth(admin),
+    )
+    pending = await client.get(
+        f"/brain/conversations/{thread.id}/turn-interrupts",
+        headers=_auth(admin),
+        params={"status": "pending"},
+    )
+    events = await client.get(
+        f"/conversation-threads/{thread.id}/events",
+        headers=_auth(admin),
+        params={"after_id": 0},
+    )
+
+    assert snapshot.status_code == pending.status_code == events.status_code == 200
+    snapshot_interrupt = snapshot.json()["turns"][0]["pending_interrupt"]
+    assert snapshot_interrupt["id"] == requested.interrupt.id
+    assert snapshot_interrupt["response_schema"] == requested.interrupt.response_schema
+    assert [row["id"] for row in pending.json()] == [requested.interrupt.id]
+    requested_event = next(
+        row for row in events.json()["data"] if row["type"] == "turn.interrupt_requested"
+    )
+    assert requested_event["payload"] == {
+        "interrupt_id": requested.interrupt.id,
+        "kind": "clarification",
+        "status": "pending",
+        "message": "Which product should this plan promote?",
+        "action_label": "Provide product",
+        "version": 1,
+    }
+    assert "response_schema" not in requested_event["payload"]
+    assert "secret_prompt" not in str(requested_event["payload"])
+
+
+@pytest.mark.asyncio
+async def test_resolve_projects_no_pending_interrupt_and_safe_events(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, thread, _turn, run, *_ = await _runtime_context(
+        session,
+        admin,
+        key="interrupt-resolved-events",
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="manual_pause",
+        semantic_key="operator-pause",
+        public_message="Paused for operator direction.",
+        response_schema={"type": "object"},
+    )
+    interrupt_id = requested.interrupt.id
+    await session.commit()
+
+    async def capture_enqueue(*, run_id: int) -> bool:
+        return run_id == run.id
+
+    monkeypatch.setattr(
+        "app.api.turn_interrupts.enqueue_agent_runtime",
+        capture_enqueue,
+    )
+    resolved = await client.post(
+        f"/turn-interrupts/{interrupt_id}/resolve",
+        headers={**_auth(admin), "Idempotency-Key": "safe-events-key"},
+        json={
+            "expected_version": 1,
+            "resolution": {"private_direction": "Do not expose this"},
+        },
+    )
+    snapshot = await client.get(
+        f"/brain/conversations/{thread.id}",
+        headers=_auth(admin),
+    )
+    events = await client.get(
+        f"/conversation-threads/{thread.id}/events",
+        headers=_auth(admin),
+        params={"after_id": 0},
+    )
+
+    assert resolved.status_code == snapshot.status_code == events.status_code == 200
+    assert snapshot.json()["turns"][0]["pending_interrupt"] is None
+    public_events = {
+        row["type"]: row["payload"]
+        for row in events.json()["data"]
+        if row["type"] in {"turn.interrupt_resolved", "turn.resuming"}
+    }
+    assert set(public_events) == {"turn.interrupt_resolved", "turn.resuming"}
+    assert "private_direction" not in str(public_events)
+    assert "resolution" not in str(public_events)
+
+
+@pytest.mark.asyncio
+async def test_pending_interrupt_blocks_thread_delete_even_if_runtime_is_terminal(
+    client,
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run, task, *_ = await _runtime_context(
+        session,
+        admin,
+        key="interrupt-delete-pending",
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="clarification",
+        semantic_key="delete-pending",
+        public_message="Need one answer.",
+        response_schema={"type": "object"},
+    )
+    interrupt_id = requested.interrupt.id
+    run.status = "completed"
+    run.phase = "completed"
+    turn.status = "completed"
+    task.status = BrainTaskStatus.COMPLETED
+    await session.commit()
+
+    response = await client.delete(
+        f"/brain/conversations/{thread.id}",
+        headers=_auth(admin),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "CONVERSATION_DELETE_BLOCKED"
+    assert await session.get(TurnInterrupt, interrupt_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_terminal_interrupt_is_deleted_with_private_runtime_trace(
+    client,
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, thread, turn, run, task, *_ = await _runtime_context(
+        session,
+        admin,
+        key="interrupt-delete-terminal",
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="clarification",
+        semantic_key="delete-terminal",
+        public_message="Need one answer.",
+        response_schema={"type": "object"},
+    )
+    interrupt_id = requested.interrupt.id
+    await session.commit()
+
+    async def capture_enqueue(*, run_id: int) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "app.api.turn_interrupts.enqueue_agent_runtime",
+        capture_enqueue,
+    )
+    resolved = await client.post(
+        f"/turn-interrupts/{interrupt_id}/resolve",
+        headers={**_auth(admin), "Idempotency-Key": "delete-terminal-key"},
+        json={"expected_version": 1, "resolution": {"answer": "ready"}},
+    )
+    assert resolved.status_code == 200
+    run.status = "completed"
+    run.phase = "completed"
+    turn.status = "completed"
+    task.status = BrainTaskStatus.COMPLETED
+    await session.commit()
+
+    response = await client.delete(
+        f"/brain/conversations/{thread.id}",
+        headers=_auth(admin),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["interrupts_deleted"] == 1
+    assert await session.get(TurnInterrupt, interrupt_id) is None
+    assert await session.scalar(
+        select(func.count(Event.id)).where(Event.thread_id == thread.id)
+    ) == 0

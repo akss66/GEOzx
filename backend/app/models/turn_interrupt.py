@@ -54,7 +54,7 @@ class TurnInterrupt(Base, TimestampMixin):
         CheckConstraint(
             "(status = 'resolved' AND resolution_payload IS NOT NULL "
             "AND resolution_hash IS NOT NULL AND resolution_idempotency_key IS NOT NULL "
-            "AND resolved_by_id IS NOT NULL AND resolved_at IS NOT NULL) OR "
+            "AND resolved_at IS NOT NULL) OR "
             "(status <> 'resolved' AND resolution_payload IS NULL "
             "AND resolution_hash IS NULL AND resolution_idempotency_key IS NULL "
             "AND resolved_by_id IS NULL AND resolved_at IS NULL)",
@@ -176,4 +176,3 @@ class TurnInterrupt(Base, TimestampMixin):
     resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-

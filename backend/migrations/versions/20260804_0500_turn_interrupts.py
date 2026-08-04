@@ -72,7 +72,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(status = 'resolved' AND resolution_payload IS NOT NULL "
             "AND resolution_hash IS NOT NULL AND resolution_idempotency_key IS NOT NULL "
-            "AND resolved_by_id IS NOT NULL AND resolved_at IS NOT NULL) OR "
+            "AND resolved_at IS NOT NULL) OR "
             "(status <> 'resolved' AND resolution_payload IS NULL "
             "AND resolution_hash IS NULL AND resolution_idempotency_key IS NULL "
             "AND resolved_by_id IS NULL AND resolved_at IS NULL)",
@@ -167,4 +167,3 @@ def downgrade() -> None:
     op.drop_index("ix_turn_interrupts_scope_status", table_name="turn_interrupts")
     op.drop_index("uq_turn_interrupts_effective_pending", table_name="turn_interrupts")
     op.drop_table("turn_interrupts")
-
