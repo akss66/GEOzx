@@ -327,7 +327,17 @@ def test_postgres_accept_content_lock_and_deletion_forest_do_not_deadlock(
                         "presentation_format": "storyboard",
                     },
                 )
-                setup.add(artifact)
+                runless = Deliverable(
+                    content_item_id=content.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    agent_code="runless-delete-collision",
+                    type=DeliverableType.VIDEO_SCRIPT,
+                    version=2,
+                    status=DeliverableStatus.DRAFT,
+                    payload={"title": "Runless collision"},
+                )
+                setup.add_all([artifact, runless])
                 await setup.commit()
                 ids = {
                     "admin": admin.id,
@@ -335,6 +345,7 @@ def test_postgres_accept_content_lock_and_deletion_forest_do_not_deadlock(
                     "run": run.id,
                     "content": content.id,
                     "artifact": artifact.id,
+                    "runless": runless.id,
                 }
 
             accept_holds_content = asyncio.Event()
@@ -415,6 +426,7 @@ def test_postgres_accept_content_lock_and_deletion_forest_do_not_deadlock(
                 assert retained.status == DeliverableStatus.APPROVED
                 assert retained.run_id is None
                 assert retained.thread_id is None
+                assert await verify.get(Deliverable, ids["runless"]) is None
                 assert await verify.get(ContentItem, ids["content"]) is not None
         finally:
             await engine.dispose()

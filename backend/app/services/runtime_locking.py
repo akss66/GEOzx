@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,6 +116,62 @@ class RuntimeRootLock:
         raise AttributeError("RuntimeRootLock is immutable")
 
 
+class RuntimeForestLock(Sequence[RuntimeRootLock]):
+    """Session-bound proof for Run tokens plus explicitly allowed runless rows."""
+
+    _session_identity: int
+    _transaction_identity: object
+    run_tokens: tuple[RuntimeRootLock, ...]
+    extra_content_item_ids: tuple[int, ...]
+    extra_deliverable_ids: tuple[int, ...]
+
+    __slots__ = (
+        "_session_identity",
+        "_transaction_identity",
+        "run_tokens",
+        "extra_content_item_ids",
+        "extra_deliverable_ids",
+    )
+
+    def __init__(
+        self,
+        *,
+        _seal: object,
+        session_identity: int,
+        transaction_identity: object,
+        run_tokens: tuple[RuntimeRootLock, ...],
+        extra_content_item_ids: tuple[int, ...] = (),
+        extra_deliverable_ids: tuple[int, ...] = (),
+    ) -> None:
+        if _seal is not _TOKEN_SEAL:
+            raise TypeError("RuntimeForestLock proofs are created only by the lock helper")
+        object.__setattr__(self, "_session_identity", session_identity)
+        object.__setattr__(self, "_transaction_identity", transaction_identity)
+        object.__setattr__(self, "run_tokens", run_tokens)
+        object.__setattr__(
+            self,
+            "extra_content_item_ids",
+            tuple(sorted(set(extra_content_item_ids))),
+        )
+        object.__setattr__(
+            self,
+            "extra_deliverable_ids",
+            tuple(sorted(set(extra_deliverable_ids))),
+        )
+
+    def __len__(self) -> int:
+        return len(self.run_tokens)
+
+    def __getitem__(self, index):
+        return self.run_tokens[index]
+
+    def __iter__(self) -> Iterator[RuntimeRootLock]:
+        return iter(self.run_tokens)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("RuntimeForestLock is immutable")
+
+
 def _session_identity(session: AsyncSession) -> int:
     return id(session.sync_session)
 
@@ -170,13 +228,19 @@ async def lock_runtime_root_forest(
     *,
     run_ids: tuple[int, ...],
     extra_deliverable_ids: tuple[int, ...] = (),
-) -> tuple[RuntimeRootLock, ...]:
+    allow_runless_extras: bool = False,
+) -> RuntimeForestLock:
     """Lock a multi-Run forest by family, never as per-Run bundles."""
 
     requested_run_ids = tuple(sorted(set(run_ids)))
     extra_deliverable_ids = tuple(sorted(set(extra_deliverable_ids)))
     if not requested_run_ids and not extra_deliverable_ids:
-        return ()
+        return RuntimeForestLock(
+            _seal=_TOKEN_SEAL,
+            session_identity=_session_identity(session),
+            transaction_identity=_transaction_identity(session),
+            run_tokens=(),
+        )
     with session.no_autoflush:
         run_id_set = set(requested_run_ids)
         revisions: list[RunRevision] = []
@@ -300,18 +364,15 @@ async def lock_runtime_root_forest(
     invocation_rows = [await session.get(AgentInvocation, row_id) for row_id in invocation_ids]
     tool_rows = [await session.get(AgentToolCall, row_id) for row_id in tool_ids]
     attempt_rows = [await session.get(ToolExecutionAttempt, row_id) for row_id in attempt_ids]
-    forest_thread_ids = {run.thread_id for run in runs if run.thread_id is not None}
-    forest_turn_ids = {run.turn_id for run in runs if run.turn_id is not None}
     if len(discovered_deliverables) != len(deliverable_ids) or any(
         (row.run_id is not None and row.run_id not in set(run_ids))
-        or (
-            row.run_id is None
-            and bool(run_ids)
-            and row.thread_id not in forest_thread_ids
-            and row.turn_id not in forest_turn_ids
-        )
         for row in deliverable_rows
     ):
+        raise RuntimeLockConflict("runtime Deliverable lineage mismatch")
+    runless_deliverables = tuple(
+        row for row in deliverable_rows if row.run_id is None
+    )
+    if runless_deliverables and not allow_runless_extras:
         raise RuntimeLockConflict("runtime Deliverable lineage mismatch")
     rebuilt_content_ids = {
         task.content_item_id
@@ -397,7 +458,16 @@ async def lock_runtime_root_forest(
             pending_object_ids_at_acquire=_pending_object_ids(session),
             )
         )
-    return tuple(tokens)
+    return RuntimeForestLock(
+        _seal=_TOKEN_SEAL,
+        session_identity=_session_identity(session),
+        transaction_identity=_transaction_identity(session),
+        run_tokens=tuple(tokens),
+        extra_content_item_ids=tuple(
+            row.content_item_id for row in runless_deliverables
+        ),
+        extra_deliverable_ids=tuple(row.id for row in runless_deliverables),
+    )
 
 
 async def discover_runtime_skill_lock_ids(
@@ -825,7 +895,33 @@ def require_runtime_root_lock(
             raise RuntimeLockConflict(f"runtime {label} was not prelocked")
 
 
+def require_runtime_forest_lock(
+    session: AsyncSession,
+    proof: RuntimeForestLock,
+    *,
+    run_ids: tuple[int, ...] = (),
+    extra_content_item_ids: tuple[int, ...] = (),
+    extra_deliverable_ids: tuple[int, ...] = (),
+) -> None:
+    """Reject forged, cross-transaction, or incomplete forest proofs."""
+
+    if not isinstance(proof, RuntimeForestLock) or (
+        proof._session_identity != _session_identity(session)
+    ):
+        raise RuntimeLockConflict("runtime forest proof does not belong to this session")
+    if proof._transaction_identity is not _transaction_identity(session):
+        raise RuntimeLockConflict("runtime forest proof belongs to another transaction")
+    locked_run_ids = {token.run_id for token in proof.run_tokens}
+    if not set(run_ids).issubset(locked_run_ids):
+        raise RuntimeLockConflict("runtime forest AgentRun was not prelocked")
+    if not set(extra_content_item_ids).issubset(proof.extra_content_item_ids):
+        raise RuntimeLockConflict("runtime extra ContentItem was not prelocked")
+    if not set(extra_deliverable_ids).issubset(proof.extra_deliverable_ids):
+        raise RuntimeLockConflict("runtime extra Deliverable was not prelocked")
+
+
 __all__ = [
+    "RuntimeForestLock",
     "RuntimeLockConflict",
     "RuntimeRootLock",
     "discover_runtime_skill_lock_ids",
@@ -833,5 +929,6 @@ __all__ = [
     "lock_runtime_root_scope",
     "lock_runtime_root_forest",
     "lock_runtime_run_headers",
+    "require_runtime_forest_lock",
     "require_runtime_root_lock",
 ]

@@ -64,10 +64,12 @@ from app.services.agent_runs import (
     request_agent_run_cancel,
 )
 from app.services.runtime_locking import (
+    RuntimeForestLock,
     RuntimeLockConflict,
     RuntimeRootLock,
     lock_runtime_root_forest,
     lock_runtime_root_scope,
+    require_runtime_forest_lock,
     require_runtime_root_lock,
 )
 from app.services.runtime_state import (
@@ -762,6 +764,88 @@ async def test_runtime_forest_locks_task_and_deliverable_content_before_delivera
             run_id=run.id,
             content_item_ids=(999_999,),
         )
+
+
+@pytest.mark.asyncio
+async def test_runtime_forest_proof_binds_runless_extras_to_session_and_transaction(
+    session, admin
+) -> None:
+    account, _thread, _turn, run, _task, _skill = await _four_ledger_context(
+        session, admin, key="runtime-forest-proof"
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="Runless proof content",
+    )
+    session.add(content)
+    await session.flush()
+    runless = Deliverable(
+        content_item_id=content.id,
+        agent_code="runless-proof",
+        type=DeliverableType.VIDEO_SCRIPT,
+        payload={"title": "Runless proof"},
+    )
+    session.add(runless)
+    await session.commit()
+
+    with pytest.raises(TypeError, match="created only by the lock helper"):
+        RuntimeForestLock(
+            _seal=object(),
+            session_identity=id(session.sync_session),
+            transaction_identity=object(),
+            run_tokens=(),
+        )
+
+    forest = await lock_runtime_root_forest(
+        session,
+        run_ids=(run.id,),
+        extra_deliverable_ids=(runless.id,),
+        allow_runless_extras=True,
+    )
+
+    assert isinstance(forest, RuntimeForestLock)
+    (run_token,) = forest
+    assert runless.id not in run_token.deliverable_ids
+    assert content.id not in run_token.content_item_ids
+    assert forest.extra_deliverable_ids == (runless.id,)
+    assert forest.extra_content_item_ids == (content.id,)
+    require_runtime_forest_lock(
+        session,
+        forest,
+        run_ids=(run.id,),
+        extra_deliverable_ids=(runless.id,),
+        extra_content_item_ids=(content.id,),
+    )
+    with pytest.raises(RuntimeLockConflict, match="extra Deliverable was not prelocked"):
+        require_runtime_forest_lock(
+            session,
+            forest,
+            run_ids=(run.id,),
+            extra_deliverable_ids=(999_999,),
+        )
+    with pytest.raises(RuntimeLockConflict, match="extra ContentItem was not prelocked"):
+        require_runtime_forest_lock(
+            session,
+            forest,
+            run_ids=(run.id,),
+            extra_content_item_ids=(999_999,),
+        )
+
+    maker = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with maker() as other_session:
+        await other_session.execute(select(AgentRun.id).where(AgentRun.id == run.id))
+        with pytest.raises(RuntimeLockConflict, match="does not belong to this session"):
+            require_runtime_forest_lock(
+                other_session,
+                forest,
+                run_ids=(run.id,),
+            )
+
+    await session.commit()
+    await session.execute(select(AgentRun.id).where(AgentRun.id == run.id))
+    with pytest.raises(RuntimeLockConflict, match="another transaction"):
+        require_runtime_forest_lock(session, forest, run_ids=(run.id,))
 
 
 @pytest.mark.asyncio

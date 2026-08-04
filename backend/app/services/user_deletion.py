@@ -29,6 +29,7 @@ from app.models import (
     ComplianceCheck,
     ContentItem,
     ConversationThread,
+    ConversationTurn,
     DataImportBatch,
     Deliverable,
     DeliverableAcceptance,
@@ -57,9 +58,11 @@ from app.models import (
 from app.models.enums import UserRole
 from app.services.admin_security import verify_secondary_password
 from app.services.runtime_locking import (
+    RuntimeForestLock,
     RuntimeLockConflict,
     RuntimeRootLock,
     lock_runtime_root_forest,
+    require_runtime_forest_lock,
 )
 
 PREVIEW_TTL_MINUTES = 5
@@ -131,6 +134,7 @@ class RuntimeDeletionFootprint:
     invocation_ids: tuple[int, ...]
     tool_call_ids: tuple[int, ...]
     attempt_ids: tuple[int, ...]
+    extra_content_item_ids: tuple[int, ...]
     extra_deliverable_ids: tuple[int, ...]
 
 
@@ -912,7 +916,39 @@ async def _discover_runtime_deletion_footprint(
         if any(run.org_id != organization_id for run in runs):
             raise RuntimeLockConflict("runtime deletion crosses organization boundary")
 
-        thread_ids = tuple(sorted({run.thread_id for run in runs if run.thread_id is not None}))
+        turn_ids = tuple(
+            sorted(
+                {run.turn_id for run in runs if run.turn_id is not None}
+                | {
+                    row.turn_id
+                    for row in impacted_deliverables
+                    if row.turn_id is not None
+                }
+            )
+        )
+        turns = {
+            row.id: row
+            for row in await session.scalars(
+                select(ConversationTurn)
+                .where(ConversationTurn.id.in_(turn_ids))
+                .order_by(ConversationTurn.id)
+            )
+        }
+        if len(turns) != len(turn_ids) or any(
+            turn.org_id != organization_id for turn in turns.values()
+        ):
+            raise RuntimeLockConflict("runtime deletion Turn boundary mismatch")
+        thread_ids = tuple(
+            sorted(
+                {run.thread_id for run in runs if run.thread_id is not None}
+                | {
+                    row.thread_id
+                    for row in impacted_deliverables
+                    if row.thread_id is not None
+                }
+                | {turn.thread_id for turn in turns.values()}
+            )
+        )
         threads = {
             row.id: row
             for row in await session.scalars(
@@ -927,7 +963,7 @@ async def _discover_runtime_deletion_footprint(
             raise RuntimeLockConflict("runtime deletion Thread boundary mismatch")
         run_by_id = {run.id: run for run in runs}
         content_ids = tuple(
-            sorted({row.content_item_id for row in impacted_deliverables if row.run_id is not None})
+            sorted({row.content_item_id for row in impacted_deliverables})
         )
         contents = {
             row.id: row
@@ -962,13 +998,35 @@ async def _discover_runtime_deletion_footprint(
         ):
             raise RuntimeLockConflict("runtime deletion Content boundary mismatch")
         for deliverable in impacted_deliverables:
-            if deliverable.run_id is None:
-                continue
-            run = run_by_id.get(deliverable.run_id)
             content = contents.get(deliverable.content_item_id)
-            if run is None or content is None:
+            run = (
+                run_by_id.get(deliverable.run_id)
+                if deliverable.run_id is not None
+                else None
+            )
+            if content is None or (deliverable.run_id is not None and run is None):
                 raise RuntimeLockConflict("runtime deletion Deliverable lineage mismatch")
-            thread = threads.get(run.thread_id) if run.thread_id is not None else None
+            turn = (
+                turns.get(deliverable.turn_id)
+                if deliverable.turn_id is not None
+                else None
+            )
+            if (
+                turn is not None
+                and deliverable.thread_id is not None
+                and turn.thread_id != deliverable.thread_id
+            ):
+                raise RuntimeLockConflict("runtime deletion Deliverable Turn mismatch")
+            thread_id = (
+                deliverable.thread_id
+                if deliverable.thread_id is not None
+                else (
+                    turn.thread_id
+                    if turn is not None
+                    else (run.thread_id if run is not None else None)
+                )
+            )
+            thread = threads.get(thread_id) if thread_id is not None else None
             if (
                 thread is not None
                 and content.account_id is not None
@@ -1024,14 +1082,34 @@ async def _discover_runtime_deletion_footprint(
         invocation_ids=invocation_ids,
         tool_call_ids=tool_ids,
         attempt_ids=attempt_ids,
-        extra_deliverable_ids=tuple(sorted(impacted_deliverable_ids)),
+        extra_content_item_ids=tuple(
+            sorted(
+                {
+                    row.content_item_id
+                    for row in impacted_deliverables
+                    if row.run_id is None
+                }
+            )
+        ),
+        extra_deliverable_ids=tuple(
+            sorted(row.id for row in impacted_deliverables if row.run_id is None)
+        ),
     )
 
 
 def _validate_runtime_deletion_forest(
+    session: AsyncSession,
     footprint: RuntimeDeletionFootprint,
-    tokens: tuple[RuntimeRootLock, ...],
+    forest: RuntimeForestLock,
 ) -> None:
+    require_runtime_forest_lock(
+        session,
+        forest,
+        run_ids=footprint.run_ids,
+        extra_content_item_ids=footprint.extra_content_item_ids,
+        extra_deliverable_ids=footprint.extra_deliverable_ids,
+    )
+    tokens: tuple[RuntimeRootLock, ...] = forest.run_tokens
     if tuple(token.run_id for token in tokens) != footprint.run_ids:
         raise RuntimeLockConflict("runtime deletion forest roots changed")
     locked_skill_ids = {
@@ -1246,6 +1324,7 @@ async def execute_permanent_deletion(
             session,
             run_ids=discovered_footprint.run_ids,
             extra_deliverable_ids=discovered_footprint.extra_deliverable_ids,
+            allow_runless_extras=True,
         )
         await _reserve_preview(
             session,
@@ -1304,7 +1383,7 @@ async def execute_permanent_deletion(
                 "USER_DELETION_PREVIEW_STALE",
                 "Deletion runtime changed; create a new preview",
             )
-        _validate_runtime_deletion_forest(locked_footprint, forest)
+        _validate_runtime_deletion_forest(session, locked_footprint, forest)
         await _delete_owned_records(session, impact)
         deleted_at = datetime.now(UTC)
         session.add(

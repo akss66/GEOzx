@@ -37,7 +37,12 @@ from app.schemas.conversation import (
     CreateConversationTurnRequest,
 )
 from app.services.attachments import remove_attachment_objects, restore_attachment_objects
-from app.services.runtime_locking import RuntimeRootLock, lock_runtime_root_forest
+from app.services.runtime_locking import (
+    RuntimeForestLock,
+    RuntimeRootLock,
+    lock_runtime_root_forest,
+    require_runtime_forest_lock,
+)
 from app.services.runtime_state import runtime_status_family
 
 _TERMINAL_INVOCATION_STATUSES = {
@@ -194,11 +199,12 @@ async def _discover_conversation_runtime_roots(
 
 def _validate_locked_conversation_runtime(
     *,
+    session: AsyncSession,
     thread: ConversationThread,
     discovered_run_ids: tuple[int, ...],
     discovered_deliverable_ids: tuple[int, ...],
     discovered_content_ids: tuple[int, ...],
-    tokens: tuple[RuntimeRootLock, ...],
+    forest: RuntimeForestLock | None,
     runs: list[AgentRun],
     tasks: list[BrainTask],
     contents: list[ContentItem],
@@ -209,6 +215,9 @@ def _validate_locked_conversation_runtime(
     tools: list[AgentToolCall],
     attempts: list[ToolExecutionAttempt],
 ) -> None:
+    tokens: tuple[RuntimeRootLock, ...] = (
+        forest.run_tokens if forest is not None else ()
+    )
     locked_run_ids = {token.run_id for token in tokens}
     post_run_ids = {
         *(row.id for row in runs),
@@ -288,6 +297,19 @@ def _validate_locked_conversation_runtime(
         content_by_id
     ) != set(discovered_content_ids):
         raise _active_delete_conflict()
+    runless_deliverables = [row for row in deliverables if row.run_id is None]
+    if runless_deliverables:
+        if forest is None:
+            raise _active_delete_conflict()
+        require_runtime_forest_lock(
+            session,
+            forest,
+            run_ids=discovered_run_ids,
+            extra_deliverable_ids=tuple(row.id for row in runless_deliverables),
+            extra_content_item_ids=tuple(
+                row.content_item_id for row in runless_deliverables
+            ),
+        )
     runtime_content_ids = {
         row.content_item_id
         for row in tasks
@@ -455,12 +477,13 @@ async def delete_conversation_thread(
                 thread_id=thread_id,
             )
         )
-        runtime_tokens: tuple[RuntimeRootLock, ...] = ()
+        runtime_forest: RuntimeForestLock | None = None
         if discovered_run_ids or discovered_deliverable_ids:
-            runtime_tokens = await lock_runtime_root_forest(
+            runtime_forest = await lock_runtime_root_forest(
                 session,
                 run_ids=discovered_run_ids,
                 extra_deliverable_ids=discovered_deliverable_ids,
+                allow_runless_extras=True,
             )
         thread = await session.scalar(
             select(ConversationThread)
@@ -696,11 +719,12 @@ async def delete_conversation_thread(
             else []
         )
         _validate_locked_conversation_runtime(
+            session=session,
             thread=thread,
             discovered_run_ids=discovered_run_ids,
             discovered_deliverable_ids=discovered_deliverable_ids,
             discovered_content_ids=discovered_content_ids,
-            tokens=runtime_tokens,
+            forest=runtime_forest,
             runs=runs,
             tasks=tasks,
             contents=scoped_contents,

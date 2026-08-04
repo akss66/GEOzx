@@ -403,6 +403,102 @@ async def test_permanent_delete_locks_cross_task_deliverable_run_before_mutation
 
 
 @pytest.mark.asyncio
+async def test_permanent_delete_accepts_owned_mixed_run_and_runless_deliverables(
+    client, session, admin
+):
+    target = await _target(session, admin, "mixed-runtime-owned")
+    content, _shared_task, run, linked = await _cross_task_runtime_deliverable(
+        session, admin, target, key="mixed-runtime-owned"
+    )
+    runless = Deliverable(
+        content_item_id=content.id,
+        agent_code="mixed-runless-owner",
+        type=DeliverableType.VIDEO_SCRIPT,
+        version=2,
+        payload={"title": "Owned runless"},
+    )
+    session.add(runless)
+    await session.commit()
+    ids = {
+        "target": target.id,
+        "content": content.id,
+        "run": run.id,
+        "linked": linked.id,
+        "runless": runless.id,
+    }
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 200, response.text
+    session.expire_all()
+    assert await session.get(User, ids["target"]) is None
+    assert await session.get(ContentItem, ids["content"]) is None
+    assert await session.get(Deliverable, ids["linked"]) is None
+    assert await session.get(Deliverable, ids["runless"]) is None
+    assert await session.get(AgentRun, ids["run"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_rejects_cross_account_runless_extra_without_partial_delete(
+    client, session, admin
+):
+    target = await _target(session, admin, "mixed-runless-cross-account")
+    owned_content, _shared_task, _run, linked = await _cross_task_runtime_deliverable(
+        session, admin, target, key="mixed-runless-cross-account"
+    )
+    other_account = Account(
+        org_id=admin.org_id,
+        project_id=owned_content.project_id,
+        platform=Platform.DOUYIN,
+        nickname="mixed-runless-other-account",
+    )
+    session.add(other_account)
+    await session.flush()
+    other_content = ContentItem(
+        project_id=owned_content.project_id,
+        account_id=other_account.id,
+        created_by_id=target.id,
+        title="Cross-account runless content",
+    )
+    session.add(other_content)
+    await session.flush()
+    runless = Deliverable(
+        content_item_id=other_content.id,
+        thread_id=linked.thread_id,
+        turn_id=linked.turn_id,
+        agent_code="mixed-runless-cross-account",
+        type=DeliverableType.VIDEO_SCRIPT,
+        payload={"title": "Cross-account runless"},
+    )
+    session.add(runless)
+    await session.commit()
+    ids = {
+        "target": target.id,
+        "owned_content": owned_content.id,
+        "other_content": other_content.id,
+        "linked": linked.id,
+        "runless": runless.id,
+    }
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 409
+    assert _code(response) == "USER_DELETION_PREVIEW_STALE"
+    session.expire_all()
+    assert await session.get(User, ids["target"]) is not None
+    assert await session.get(ContentItem, ids["owned_content"]) is not None
+    assert await session.get(ContentItem, ids["other_content"]) is not None
+    assert await session.get(Deliverable, ids["linked"]) is not None
+    assert await session.get(Deliverable, ids["runless"]) is not None
+
+
+@pytest.mark.asyncio
 async def test_permanent_delete_rejects_runtime_family_growth_after_forest(
     client, session, admin, monkeypatch
 ):
