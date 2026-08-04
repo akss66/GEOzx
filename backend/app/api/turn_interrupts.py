@@ -114,7 +114,9 @@ async def resolve_turn_interrupt(
     await publish_runtime_state_intents(session, result.publish_intents)
     if result.replay_runtime_events:
         await replay_runtime_state_events(session, run_id=run_id)
-    await session.commit()  # close the post-commit read transaction before dispatch
+    # Event publication performs post-commit reads. Close only that read
+    # transaction; the interrupt transition itself has exactly one commit.
+    await session.rollback()
     dispatch_deferred = False
     if result.dispatch_intent is not None:
         try:
@@ -167,7 +169,7 @@ async def stop_conversation_turn(
     publish_intents = result.publish_intents
     await session.commit()
     await publish_runtime_state_intents(session, publish_intents)
-    await session.commit()  # close the post-commit read transaction before dispatch
+    await session.rollback()
     dispatch_deferred = False
     try:
         await abort_agent_runtime(result.run_id)

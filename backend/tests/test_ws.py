@@ -144,8 +144,14 @@ async def test_ws_events_filters_scoped_or_public_turn_messages_but_keeps_legacy
 
 def test_legacy_event_stream_does_not_forward_account_scoped_pending_work() -> None:
     pending_work = '{"type":"pending_work.updated","payload":{"account_id":81}}'
+    future_account_event = (
+        '{"type":"future.account.signal","payload":{"account_id":81,"value":1}}'
+    )
+    top_level_account_event = '{"type":"future.account.signal","account_id":81}'
 
     assert ws_api._should_forward_legacy_event(pending_work) is False
+    assert ws_api._should_forward_legacy_event(future_account_event) is False
+    assert ws_api._should_forward_legacy_event(top_level_account_event) is False
 
 
 @pytest.mark.asyncio

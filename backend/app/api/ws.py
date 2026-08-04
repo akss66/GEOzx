@@ -55,6 +55,11 @@ def _should_forward_legacy_event(data: str) -> bool:
         return not _looks_like_private_turn_event(data)
     if not isinstance(parsed, Mapping):
         return True
+    # The legacy stream is unauthenticated. Suppress every account-scoped
+    # envelope generically so future event types cannot leak merely because a
+    # blocklist was not updated.
+    if "account_id" in parsed:
+        return False
     event_type = parsed.get("type")
     if event_type in _ACCOUNT_EVENT_TYPES:
         return False
@@ -68,6 +73,8 @@ def _should_forward_legacy_event(data: str) -> bool:
     if "thread_id" in parsed or "turn_id" in parsed:
         return False
     payload = parsed.get("payload")
+    if isinstance(payload, Mapping) and "account_id" in payload:
+        return False
     return not isinstance(payload, Mapping) or (
         "thread_id" not in payload and "turn_id" not in payload
     )
