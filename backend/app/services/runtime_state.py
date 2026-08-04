@@ -97,6 +97,15 @@ class RuntimeStateScope:
 
 
 @dataclass(frozen=True)
+class RuntimePublishIntent:
+    """A durable Event that may be published only after its owner commits."""
+
+    event_id: int
+    event_type: str
+    turn_id: int | None
+
+
+@dataclass(frozen=True)
 class RuntimeStateClosure:
     """The effective persisted state after first-terminal-wins convergence."""
 
@@ -105,6 +114,7 @@ class RuntimeStateClosure:
     run: AgentRun
     skill_run: SkillRun | None
     task: BrainTask | None
+    publish_intents: tuple[RuntimePublishIntent, ...] = ()
 
 
 async def close_runtime_state(
@@ -126,6 +136,14 @@ async def close_runtime_state(
     broadcasts: list[tuple[Event, str]] = []
     try:
         with session.no_autoflush:
+            if scope.content_item_id is not None:
+                content_id = await session.scalar(
+                    select(ContentItem.id)
+                    .where(ContentItem.id == scope.content_item_id)
+                    .with_for_update()
+                )
+                if content_id is None:
+                    raise ValueError(f"ContentItem not found: {scope.content_item_id}")
             run = await session.scalar(
                 select(AgentRun)
                 .where(AgentRun.id == scope.run_id)
@@ -157,16 +175,6 @@ async def close_runtime_state(
                 if task_id is not None
                 else None
             )
-            if scope.content_item_id is not None:
-                content_id = await session.scalar(
-                    select(ContentItem.id)
-                    .where(ContentItem.id == scope.content_item_id)
-                    .with_for_update()
-                )
-                if content_id is None:
-                    raise ValueError(
-                        f"ContentItem not found: {scope.content_item_id}"
-                    )
             skill_run = (
                 await session.scalar(
                     select(SkillRun)
@@ -276,12 +284,7 @@ async def close_runtime_state(
                     skill_run.output_snapshot = scope.skill_output_snapshot
 
         if task is not None and not (preserve_terminal_skill and family == "active"):
-            task.status = (
-                BrainTaskStatus.PENDING_CONFIRMATION
-                if effective_status == "stopped"
-                and effective_error == "TOOL_RESULT_AMBIGUOUS"
-                else brain_task_status(effective_status)
-            )
+            task.status = brain_task_status(effective_status)
             task.current_focus = effective_message[:500]
             if task.status == BrainTaskStatus.COMPLETED:
                 task.progress = 100
@@ -396,6 +399,14 @@ async def close_runtime_state(
             await session.rollback()
         raise
 
+    publish_intents = tuple(
+        RuntimePublishIntent(
+            event_id=event.id,
+            event_type=event_type,
+            turn_id=event.turn_id,
+        )
+        for event, event_type in broadcasts
+    )
     if commit:
         await _publish_delivery_events(
             broadcasts,
@@ -408,6 +419,61 @@ async def close_runtime_state(
         run=run,
         skill_run=skill_run,
         task=task,
+        publish_intents=publish_intents,
+    )
+
+
+async def publish_runtime_state_closure(
+    session: AsyncSession,
+    closure: RuntimeStateClosure,
+) -> None:
+    """Publish only Event rows that survived the caller-owned commit."""
+
+    await publish_runtime_state_intents(session, closure.publish_intents)
+
+
+async def publish_runtime_state_intents(
+    session: AsyncSession,
+    intents: tuple[RuntimePublishIntent, ...],
+) -> None:
+    """Resolve scalar-only post-commit envelopes to their exact durable Events."""
+
+    broadcasts: list[tuple[Event, str]] = []
+    for intent in intents:
+        event = await session.scalar(
+            select(Event).where(
+                Event.id == intent.event_id,
+                Event.type == intent.event_type,
+                (
+                    Event.turn_id == intent.turn_id
+                    if intent.turn_id is not None
+                    else Event.turn_id.is_(None)
+                ),
+            )
+        )
+        if event is not None:
+            broadcasts.append((event, intent.event_type))
+    await _publish_delivery_events(
+        broadcasts,
+        message="",
+        response_streamed=False,
+    )
+
+
+async def replay_runtime_state_events(session: AsyncSession, *, run_id: int) -> None:
+    """Replay durable runtime events by stable Event id after a reconnect."""
+
+    events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.run_id == run_id, Event.type.like("brain.runtime.%"))
+            .order_by(Event.id)
+        )
+    )
+    await _publish_delivery_events(
+        [(event, event.type) for event in events],
+        message="",
+        response_streamed=False,
     )
 
 

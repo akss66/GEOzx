@@ -1066,14 +1066,15 @@ async def test_operation_iteration_real_runtime_child_lifecycle_retry_gate(
     approval_call.status = "success"
     approval_commit_spy = AsyncMock(wraps=session.commit)
     monkeypatch.setattr(session, "commit", approval_commit_spy)
-    handled = await finalize_skill_finish_approval(
+    finish_result = await finalize_skill_finish_approval(
         session,
         tool_call=approval_call,
         task=task,
         approved=True,
         comment="approved",
     )
-    assert handled is True
+    assert finish_result.handled is True
+    assert finish_result.publish_intents == ()
     approval_commit_spy.assert_not_awaited()
     await session.commit()
     assert approval_commit_spy.await_count == 1
@@ -1459,6 +1460,258 @@ async def test_publishing_preparation_executes_declared_prepare_tool(session, ad
         "status": "waiting_permission",
         "message": paused_events[0].payload["message"],
     }
+
+
+async def _nested_finish_approval_scope(session, admin, *, key: str):
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key=key,
+        message="Prepare the nested publishing package",
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title=f"content-{key}",
+        current_stage=ContentStage.OPERATION,
+        status=ContentStatus.IN_PROGRESS,
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title=f"task-{key}",
+        status=BrainTaskStatus.PENDING_CONFIRMATION,
+        progress=90,
+        current_focus="Waiting for nested publishing approval",
+        runtime_mode="skill",
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    run.status = "waiting_permission"
+    run.phase = "waiting_permission"
+    turn.status = "waiting_permission"
+    parent = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=f"{key}:parent",
+        skill_code="operation_iteration",
+        skill_version=1,
+        status="waiting_permission",
+        input_snapshot={},
+        output_snapshot={
+            "status": "waiting_permission",
+            "report": {
+                "required_children_completed": False,
+                "child_skill_graph": [
+                    {
+                        "skill_code": "publishing_preparation",
+                        "status": "waiting_permission",
+                    }
+                ],
+                "interrupt": {
+                    "kind": "child_skill_paused",
+                    "skill_code": "publishing_preparation",
+                    "source_artifact_ids": [],
+                },
+            },
+        },
+    )
+    session.add(parent)
+    await session.flush()
+    child = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key=f"{key}:child",
+        skill_code="publishing_preparation",
+        skill_version=1,
+        status="waiting_permission",
+        input_snapshot={},
+        output_snapshot={
+            "status": "waiting_permission",
+            "artifact_type": "publish_package",
+            "report": {"summary": "Ready for approval"},
+            "composite_parent_skill_run_id": parent.id,
+        },
+    )
+    session.add(child)
+    await session.flush()
+    artifact = Deliverable(
+        content_item_id=content.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        skill_run_id=child.id,
+        agent_code=AgentCode.OPERATOR.value,
+        type=DeliverableType.REVIEW_REPORT,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "Ready for approval"},
+    )
+    session.add(artifact)
+    await session.flush()
+    call = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        skill_run_id=child.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        tool_code="nested_finish_approval",
+        tool_name="Nested finish approval",
+        idempotency_key=f"{key}:approval",
+        side_effect_level="read",
+        status="waiting_approval",
+        permission_mode="confirm",
+        requires_human_confirmation=True,
+        meta={"approval_stage": "before_finish", "artifact_id": artifact.id},
+    )
+    session.add(call)
+    await session.commit()
+    return turn, run, task, parent, child, artifact, call
+
+
+@pytest.mark.asyncio
+async def test_nested_finish_rejection_commits_once_then_replays_stable_events(
+    client, session, admin, monkeypatch
+) -> None:
+    turn, run, task, parent, child, artifact, call = await _nested_finish_approval_scope(
+        session, admin, key="nested-reject-transaction"
+    )
+    published: list[int] = []
+
+    async def capture_publish(_event_type, _payload, **kwargs) -> None:
+        published.append(kwargs["event_id"])
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event", capture_publish
+    )
+    login = await client.post(
+        "/auth/login",
+        json={"email": "admin@test.com", "password": "admin-pw-123"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    payload = {"approved": False, "comment": "Reject the required child"}
+
+    first = await client.post(
+        f"/brain/tool-calls/{call.id}/approve", headers=headers, json=payload
+    )
+
+    assert first.status_code == 200
+    await session.refresh(run)
+    await session.refresh(turn)
+    await session.refresh(task)
+    await session.refresh(parent)
+    await session.refresh(child)
+    await session.refresh(artifact)
+    await session.refresh(call)
+    assert (run.status, turn.status, task.status) == (
+        "blocked",
+        "blocked",
+        BrainTaskStatus.FAILED,
+    )
+    assert (parent.status, child.status) == ("blocked", "blocked")
+    assert artifact.status is DeliverableStatus.REJECTED
+    assert call.status == "failed"
+    durable_runtime_events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.turn_id == turn.id, Event.type.like("brain.runtime.%"))
+            .order_by(Event.id)
+        )
+    )
+    durable_ids = [event.id for event in durable_runtime_events]
+    assert durable_ids
+    assert published == durable_ids
+    event_count = await session.scalar(
+        select(func.count(Event.id)).where(Event.turn_id == turn.id)
+    )
+
+    duplicate = await client.post(
+        f"/brain/tool-calls/{call.id}/approve", headers=headers, json=payload
+    )
+    opposite = await client.post(
+        f"/brain/tool-calls/{call.id}/approve",
+        headers=headers,
+        json={"approved": True, "comment": "Conflicting retry"},
+    )
+
+    assert duplicate.status_code == 200
+    assert opposite.status_code == 409
+    assert published == durable_ids + durable_ids
+    assert await session.scalar(
+        select(func.count(Event.id)).where(Event.turn_id == turn.id)
+    ) == event_count
+
+
+@pytest.mark.asyncio
+async def test_nested_finish_rejection_rollback_publishes_nothing(
+    session, admin, monkeypatch
+) -> None:
+    from app.services.composite_skill_runs import lock_composite_finish_approval
+    from app.services.runtime_state import publish_runtime_state_intents
+
+    turn, run, task, parent, child, artifact, call = await _nested_finish_approval_scope(
+        session, admin, key="nested-reject-rollback"
+    )
+    published: list[int] = []
+
+    async def capture_publish(_event_type, _payload, **kwargs) -> None:
+        published.append(kwargs["event_id"])
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event", capture_publish
+    )
+    locked_call = await lock_composite_finish_approval(session, tool_call=call)
+    locked_call.status = "failed"
+    locked_call.meta = {
+        **dict(locked_call.meta or {}),
+        "decision": {"approved": False, "comment": "crash before commit"},
+    }
+    result = await finalize_skill_finish_approval(
+        session,
+        tool_call=locked_call,
+        task=task,
+        approved=False,
+        comment="crash before commit",
+    )
+
+    assert result.handled is True
+    assert result.publish_intents
+    assert all(
+        isinstance(intent.event_id, int)
+        and isinstance(intent.event_type, str)
+        and (intent.turn_id is None or isinstance(intent.turn_id, int))
+        for intent in result.publish_intents
+    )
+    assert published == []
+    await session.rollback()
+    for row in (run, turn, task, parent, child, artifact, call):
+        await session.refresh(row)
+    assert (run.status, turn.status, task.status) == (
+        "waiting_permission",
+        "waiting_permission",
+        BrainTaskStatus.PENDING_CONFIRMATION,
+    )
+    assert (parent.status, child.status) == (
+        "waiting_permission",
+        "waiting_permission",
+    )
+    assert artifact.status is DeliverableStatus.PENDING_REVIEW
+    assert call.status == "waiting_approval"
+    await publish_runtime_state_intents(session, result.publish_intents)
+    assert published == []
+    assert await session.scalar(
+        select(func.count(Event.id)).where(Event.turn_id == turn.id)
+    ) == 0
 
 
 @pytest.mark.parametrize(

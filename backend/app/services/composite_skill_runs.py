@@ -16,7 +16,11 @@ from app.models import (
     SkillRun,
 )
 from app.models.enums import BrainTaskStatus, DeliverableStatus
-from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.runtime_state import (
+    RuntimeStateClosure,
+    RuntimeStateScope,
+    close_runtime_state,
+)
 
 _ACTIVE_CHILD_STATUSES = {
     "running",
@@ -56,6 +60,22 @@ async def _lock_composite_scope(
         discovered = await session.get(SkillRun, parent_id)
     if discovered is None:
         raise ValueError("COMPOSITE_PARENT_SKILL_RUN_MISSING")
+    with session.no_autoflush:
+        discovered_task = (
+            await session.get(BrainTask, discovered.task_id)
+            if discovered.task_id is not None
+            else None
+        )
+    if discovered_task is None:
+        raise ValueError("COMPOSITE_PARENT_RUNTIME_SCOPE_MISSING")
+    if discovered_task.content_item_id is not None:
+        content_id = await session.scalar(
+            select(ContentItem.id)
+            .where(ContentItem.id == discovered_task.content_item_id)
+            .with_for_update()
+        )
+        if content_id is None:
+            raise ValueError("COMPOSITE_PARENT_CONTENT_SCOPE_MISSING")
     run = await session.scalar(
         select(AgentRun).where(AgentRun.id == discovered.run_id).with_for_update()
     )
@@ -73,14 +93,6 @@ async def _lock_composite_scope(
     )
     if run is None or turn is None or task is None:
         raise ValueError("COMPOSITE_PARENT_RUNTIME_SCOPE_MISSING")
-    if task.content_item_id is not None:
-        content_id = await session.scalar(
-            select(ContentItem.id)
-            .where(ContentItem.id == task.content_item_id)
-            .with_for_update()
-        )
-        if content_id is None:
-            raise ValueError("COMPOSITE_PARENT_CONTENT_SCOPE_MISSING")
     parent = await session.scalar(
         select(SkillRun)
         .where(SkillRun.id == parent_id)
@@ -187,7 +199,14 @@ def resolve_composite_recovery_root(skill_runs: list[SkillRun]) -> SkillRun | No
     roots = [item for item in skill_runs if _parent_id(item) is None]
     linked = [item for item in skill_runs if _parent_id(item) is not None]
     active = [item for item in skill_runs if item.status in _ACTIVE_CHILD_STATUSES]
+    composite_intent = bool(linked) or any(
+        item.skill_code == "operation_iteration" for item in skill_runs
+    )
     if not linked:
+        if composite_intent:
+            if len(roots) != 1 or roots[0].skill_code != "operation_iteration":
+                raise ValueError("COMPOSITE_RECOVERY_GRAPH_INVALID:multiple_roots")
+            return roots[0]
         if len(active) > 1 or (len(roots) > 1 and active):
             raise ValueError("COMPOSITE_RECOVERY_GRAPH_INVALID:multiple_roots")
         return active[0] if active else (roots[0] if len(roots) == 1 else None)
@@ -366,15 +385,24 @@ async def block_composite_parent_from_child(
     *,
     child_skill_run: SkillRun,
     error_code: str,
-) -> None:
+) -> RuntimeStateClosure | None:
     """Fail closed when a required nested child is rejected."""
 
     parent_id = dict(child_skill_run.output_snapshot or {}).get(
         "composite_parent_skill_run_id"
     )
     if type(parent_id) is not int:
-        return
-    parent = await session.get(SkillRun, parent_id)
+        return None
+    parent, children, _artifacts = await _lock_composite_scope(
+        session,
+        parent_id=parent_id,
+    )
+    locked_child = next(
+        (item for item in children if item.id == child_skill_run.id), None
+    )
+    if locked_child is None:
+        raise ValueError("COMPOSITE_CHILD_SKILL_RUN_MISSING")
+    child_skill_run = locked_child
     run = await session.get(AgentRun, child_skill_run.run_id)
     turn = await session.get(ConversationTurn, child_skill_run.turn_id)
     thread = await session.get(ConversationThread, child_skill_run.thread_id)
@@ -420,7 +448,7 @@ async def block_composite_parent_from_child(
             "response": response,
         }
     )
-    await close_runtime_state(
+    return await close_runtime_state(
         session,
         scope=RuntimeStateScope(
             run_id=run.id,

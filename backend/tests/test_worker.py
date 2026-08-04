@@ -118,6 +118,174 @@ def test_composite_recovery_tree_rejects_invalid_or_ambiguous_graph(rows) -> Non
         resolve_composite_recovery_root(rows)
 
 
+def test_composite_recovery_rejects_terminal_multi_root_intent() -> None:
+    from app.services.composite_skill_runs import resolve_composite_recovery_root
+
+    rows = [
+        _composite_row(1, code="operation_iteration", status="completed"),
+        _composite_row(2, code="performance_review", status="completed"),
+    ]
+    with pytest.raises(ValueError, match="COMPOSITE_RECOVERY_GRAPH_INVALID"):
+        resolve_composite_recovery_root(rows)
+
+
+def test_non_composite_terminal_history_keeps_legacy_no_recovery_semantics() -> None:
+    from app.services.composite_skill_runs import resolve_composite_recovery_root
+
+    rows = [
+        _composite_row(1, code="account_inspection", status="completed"),
+        _composite_row(2, code="performance_review", status="completed"),
+    ]
+    assert resolve_composite_recovery_root(rows) is None
+
+
+@pytest.mark.asyncio
+async def test_worker_fails_closed_before_execution_for_terminal_composite_multi_root(
+    session, admin, monkeypatch
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Corrupt composite worker account",
+        platform=Platform.DOUYIN,
+    )
+    session.add(account)
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Corrupt composite worker thread",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="corrupt-composite-worker",
+        user_input="Resume the operation iteration",
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="Corrupt composite worker content",
+    )
+    session.add_all([turn, content])
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="Corrupt composite worker task",
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="skill",
+    )
+    session.add(task)
+    await session.flush()
+    expired_at = datetime.now(UTC) - timedelta(seconds=1)
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        task_id=task.id,
+        client_message_id=turn.client_message_id,
+        status="running",
+        phase="skill_runtime",
+        lease_owner="expired-worker",
+        leased_until=expired_at,
+        heartbeat_at=expired_at,
+        request_payload={
+            "client_message_id": turn.client_message_id,
+            "message": turn.user_input,
+            "execution_preference": "FORMAL_TASK",
+            "requested_skill_code": "operation_iteration",
+        },
+    )
+    session.add(run)
+    await session.flush()
+    operation_snapshot = {"status": "completed", "report": {"summary": "done"}}
+    unrelated_snapshot = {"status": "completed", "report": {"summary": "other"}}
+    operation = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="corrupt-composite:operation",
+        skill_code="operation_iteration",
+        skill_version=1,
+        status="completed",
+        input_snapshot={},
+        output_snapshot=operation_snapshot,
+    )
+    unrelated = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="corrupt-composite:unrelated",
+        skill_code="performance_review",
+        skill_version=1,
+        status="completed",
+        input_snapshot={},
+        output_snapshot=unrelated_snapshot,
+    )
+    session.add_all([operation, unrelated])
+    await session.flush()
+    receipt = AgentToolCall(
+        org_id=admin.org_id,
+        task_id=task.id,
+        skill_run_id=unrelated.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        tool_code="corrupt-composite-terminal-receipt",
+        tool_name="Terminal receipt",
+        idempotency_key="corrupt-composite:terminal-receipt",
+        side_effect_level="read",
+        status="completed",
+        output_summary="Persisted terminal receipt",
+    )
+    session.add(receipt)
+    await session.commit()
+    execution_called = False
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    async def reject_execution(*_args, **_kwargs):
+        nonlocal execution_called
+        execution_called = True
+        raise AssertionError("corrupt composite graph reached Skill execution")
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr("app.worker.execute_conversation_turn", reject_execution)
+
+    result = await execute_agent_run({"worker_id": "recovery-worker"}, run.id)
+
+    await session.refresh(run)
+    await session.refresh(operation)
+    await session.refresh(unrelated)
+    await session.refresh(receipt)
+    assert result is None
+    assert execution_called is False
+    assert (run.status, run.error_code) == ("failed", "runtime.terminal")
+    assert (operation.status, operation.output_snapshot) == (
+        "completed",
+        operation_snapshot,
+    )
+    assert (unrelated.status, unrelated.output_snapshot) == (
+        "completed",
+        unrelated_snapshot,
+    )
+    assert (receipt.status, receipt.output_summary) == (
+        "completed",
+        "Persisted terminal receipt",
+    )
+
+
 @pytest.mark.asyncio
 async def test_worker_executes_a_task_free_conversation_before_legacy_task_lookup(
     session,

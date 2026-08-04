@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,11 +21,21 @@ from app.services.composite_skill_runs import (
     block_composite_parent_from_child,
     resume_composite_parent,
 )
-from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.runtime_state import (
+    RuntimePublishIntent,
+    RuntimeStateScope,
+    close_runtime_state,
+)
 
 
 class SkillApprovalConflict(RuntimeError):
     """Persisted Skill approval provenance cannot be safely reconciled."""
+
+
+@dataclass(frozen=True)
+class SkillFinishApprovalResult:
+    handled: bool
+    publish_intents: tuple[RuntimePublishIntent, ...] = ()
 
 
 async def finalize_skill_finish_approval(
@@ -33,14 +45,14 @@ async def finalize_skill_finish_approval(
     task: BrainTask,
     approved: bool,
     comment: str | None,
-) -> bool:
-    """Close a typed `before_finish` Skill; return False for legacy calls."""
+) -> SkillFinishApprovalResult:
+    """Close a typed `before_finish` Skill without owning an outer commit."""
 
     if tool_call.skill_run_id is None:
-        return False
+        return SkillFinishApprovalResult(handled=False)
     meta = dict(tool_call.meta or {})
     if meta.get("approval_stage") != "before_finish":
-        return False
+        return SkillFinishApprovalResult(handled=False)
 
     skill_run = await session.get(SkillRun, tool_call.skill_run_id)
     if skill_run is None:
@@ -112,7 +124,7 @@ async def finalize_skill_finish_approval(
         "composite_parent_skill_run_id"
     )
     nested_child = type(nested_parent_id) is int
-    await close_runtime_state(
+    child_closure = await close_runtime_state(
         session,
         scope=RuntimeStateScope(
             run_id=run.id,
@@ -153,9 +165,18 @@ async def finalize_skill_finish_approval(
         await resume_composite_parent(session, child_skill_run=skill_run)
     elif nested_child:
         await session.refresh(skill_run)
-        await block_composite_parent_from_child(
+        parent_closure = await block_composite_parent_from_child(
             session,
             child_skill_run=skill_run,
             error_code="SKILL_APPROVAL_REJECTED",
         )
-    return True
+        return SkillFinishApprovalResult(
+            handled=True,
+            publish_intents=(
+                parent_closure.publish_intents if parent_closure is not None else ()
+            ),
+        )
+    return SkillFinishApprovalResult(
+        handled=True,
+        publish_intents=(child_closure.publish_intents if nested_child else ()),
+    )

@@ -1,6 +1,131 @@
 # Task 4C Implementer Report
 
-## Review fix round 3 (latest)
+## Review fix round 4 (latest; supersedes round-3 lock order and Task 6 mapping)
+
+### Outcome
+
+- **One global lock order:** all affected runtime transitions now use
+  `ContentItem -> AgentRun -> ConversationTurn -> BrainTask -> parent SkillRun -> child SkillRuns by id -> RunRevision -> Deliverables by id -> AgentToolCalls by id`.
+  Discovery is read-only under `no_autoflush`; mutation begins only after the required locks.
+  A close scope with no content may legally start at `AgentRun`, but never requests a
+  `ContentItem` later in the same transaction.
+- **Terminal-ledger immutability:** cancellation and worker failure convergence bind only
+  active SkillRuns. If every SkillRun is terminal, the outer AgentRun/RunRevision may
+  converge without selecting a completed child. Completed snapshots and completed
+  AgentToolCall receipts remain byte-for-byte/status-for-status unchanged across first and
+  duplicate cancellation and corrupt-worker recovery.
+- **Composite-intent recovery:** an `operation_iteration` root or any durable parent link
+  activates strict composite validation. Terminal multi-root, disjoint, cyclic, missing-parent,
+  wrong-lineage, and multiple-active-branch graphs fail closed before Skill execution. Multiple
+  terminal roots without composite intent retain the legacy `None` recovery result.
+- **Nested reject transaction:** finish approval prelocks the entire composite graph and exact
+  artifact/tool call. Child rejection, deliverable rejection, parent/run/turn/task blocking,
+  approval audit, and durable runtime events commit once in the API-owned transaction.
+  Transaction-neutral helpers return scalar-only durable publish envelopes; publication reads
+  committed Events and performs no DB commit/write. Event ID, type, and turn must all match, so
+  a stale or forged scalar envelope is ignored. Rollback publishes nothing. Same-decision
+  retries replay the same durable event IDs for client dedupe; opposite decisions remain 409.
+- **Task 6 boundary restored:** the round-3 special-case mapping
+  `stopped + TOOL_RESULT_AMBIGUOUS -> BrainTaskStatus.PENDING_CONFIRMATION` was removed from
+  the 4C diff. `close_runtime_state` again uses the baseline `brain_task_status(stopped)` mapping.
+  The known expectation mismatch belongs to Task 6 and is deliberately not fixed here.
+
+### RED -> GREEN evidence
+
+- Content close initially acquired `Run -> Turn -> Task -> Content -> Skill`; the lock-order
+  gate now observes `Content -> Run -> Turn -> Task -> Skill`.
+- All-terminal cancel initially changed a completed child to `cancelled`; all-terminal, mixed,
+  and duplicate gates now preserve terminal child snapshots and receipts.
+- Terminal composite intent with two roots initially returned no recovery owner; resolver and
+  real worker gates now fail closed before `execute_conversation_turn`.
+- The first real worker gate exposed a second terminal fallback: failure convergence changed the
+  newest completed unrelated root to `failed`. Active-only implicit binding fixed it, and the
+  gate now proves both terminal snapshots plus the completed receipt are immutable.
+- Caller-owned close initially had no publish envelope. The API now publishes only after its
+  outer commit; a rollback followed by attempted publication emits nothing.
+- Same-decision approval replay initially exposed a production `NameError` because the new API
+  branch had not imported `SkillRun`; the import and replay gate are now green.
+
+### Focused and real PostgreSQL evidence
+
+Core lock/recovery/approval/cancel focused matrix, including ordinary approved/rejected finish
+approval compatibility:
+
+```text
+6 passed in 2.75s
+```
+
+Nested reject API commit/replay and crash-before-commit rollback:
+
+```text
+2 passed in 1.43s
+```
+
+PostgreSQL 16 used two independent `AsyncSession`s, a five-second server lock timeout, and a
+15-second overall timeout. The child side performs the real
+`write_runtime_deliverable -> close_runtime_state` sequence while its competitor performs accept,
+pause, or cancel:
+
+```text
+backend/tests/test_composite_skill_runs_postgres.py::test_postgres_child_finish_follows_global_lock_order[accept]
+backend/tests/test_composite_skill_runs_postgres.py::test_postgres_child_finish_follows_global_lock_order[pause]
+backend/tests/test_composite_skill_runs_postgres.py::test_postgres_child_finish_follows_global_lock_order[cancel]
+3 passed in 3.39s
+```
+
+Fresh combined run with the existing accept-first/pause-first lost-wakeup gate:
+
+```text
+5 passed in 2.81s
+```
+
+No schema reset was required. Root deleted the isolated `geozx-task4c-pg-round4` container after
+verification.
+
+### Expanded regression and the owned baseline boundary
+
+Unfiltered expanded run:
+
+```text
+197 passed, 1 failed in 99.66s
+```
+
+The only failure is the intentionally restored Task 6 baseline mismatch:
+
+```text
+tests/test_worker.py::test_worker_recovers_expired_v2_skill_without_replaying_side_effects[running-True-True-stopped-TOOL_RESULT_AMBIGUOUS]
+```
+
+The runtime correctly persists `AgentRun=stopped`, `SkillRun=stopped`,
+`AgentToolCall=ambiguous`, and `error_code=TOOL_RESULT_AMBIGUOUS`. The remaining assertion expects
+`BrainTaskStatus.PENDING_CONFIRMATION`, while the restored shared baseline maps `stopped` to
+`BrainTaskStatus.FAILED`. That semantic aggregation is Task 6 ownership, not a 4C locking,
+recovery, cancellation, or transaction concern.
+
+Fresh expanded run with only that exact parameter node deselected:
+
+```text
+197 passed, 1 deselected in 96.20s
+```
+
+### Static and diff verification
+
+```text
+ruff check <all round-4 changed production/test files>: All checks passed
+python -m compileall -q <round-4 production/test files>: passed
+```
+
+Targeted mypy follows imports and reports 15 existing diagnostics in nine files. The diagnostics
+are in `deterministic_test.py` (4), `data_import/templates.py` (1),
+`schemas/conversation.py` (1), `account_data_view.py` (1), `turn_events.py` (1),
+`tool_executor.py` (1), `agent_harness.py` (1), the pre-existing optional `TurnEventScope`
+arguments in `runtime_state.py` (4), and `brain_runtime.py` (1). No round-4 symbol, syntax, or
+lint diagnostic was introduced. `git diff --check` is run again immediately before commit.
+
+Round 4 is committed separately from rounds 1-3. The invalid round-4 lock-map generated against
+the wrong checkout is excluded from this commit.
+
+## Review fix round 3 (superseded by round 4 where noted)
 
 ### Outcome
 

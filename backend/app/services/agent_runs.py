@@ -9,7 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition
-from app.models import AgentRun, BrainTask, ConversationThread, SkillRun
+from app.models import (
+    AgentRun,
+    BrainTask,
+    ContentItem,
+    ConversationThread,
+    ConversationTurn,
+    RunRevision,
+    SkillRun,
+)
 from app.services.run_revisions import cancel_revision_for_run
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 
@@ -362,24 +370,34 @@ async def acquire_agent_run(
     worker_id: str,
     lease_seconds: int,
 ) -> AgentRun | None:
-    run = await session.scalar(
-        select(AgentRun)
-        .where(AgentRun.id == run_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
+    run = await _lock_agent_run_scope(
+        session,
+        run_id,
+        include_cancellation_ledgers=False,
     )
     if run is None:
         return None
 
     now = utc_now()
     if run.cancel_requested_at is not None:
+        run = await _lock_agent_run_scope(
+            session,
+            run_id,
+            include_cancellation_ledgers=True,
+        )
+        if run is None:
+            return None
         active_root_id = await _active_root_skill_run_id(session, run.id)
         await cancel_revision_for_run(session, revision_run_id=run.id)
         await _cancel_active_skill_run_records(session, run.id)
         await close_runtime_state(
             session,
             scope=await _runtime_state_scope(
-                session, run, preferred_skill_run_id=active_root_id
+                session,
+                run,
+                preferred_skill_run_id=active_root_id,
+                bind_latest_skill_run=False,
+                include_content_item=True,
             ),
             status="cancelled",
             message="本轮执行已取消。",
@@ -402,7 +420,7 @@ async def acquire_agent_run(
     run.next_retry_at = None
     closure = await close_runtime_state(
         session,
-        scope=await _runtime_state_scope(session, run),
+        scope=await _runtime_state_scope(session, run, include_content_item=True),
         status="running",
         message="AgentRun acquired by worker.",
     )
@@ -442,7 +460,11 @@ async def release_agent_run_failure(
     recovery_action: str | None = None,
 ) -> tuple[bool, int]:
     await session.rollback()
-    run = await session.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
+    run = await _lock_agent_run_scope(
+        session,
+        run_id,
+        include_cancellation_ledgers=False,
+    )
     if run is None:
         return False, 0
     if run.status in {"failed", "dead_letter", "cancelled", "completed"}:
@@ -466,6 +488,7 @@ async def release_agent_run_failure(
                         or "请检查任务配置、权限和可用资源后重新提交。",
                     },
                     error_detail=error_detail[:4000],
+                    include_content_item=True,
                 )
             ),
             status="failed",
@@ -487,6 +510,7 @@ async def release_agent_run_failure(
                         "error_code": error_code[:120],
                     },
                     error_detail=error_detail[:4000],
+                    include_content_item=True,
                 )
             ),
             status="dead_letter",
@@ -503,6 +527,7 @@ async def release_agent_run_failure(
             session,
             run,
             error_detail=error_detail[:4000],
+            include_content_item=True,
         ),
         status="retry_wait",
         message=user_message or "任务暂时失败，系统稍后自动重试。",
@@ -549,7 +574,11 @@ async def request_agent_run_cancel_record(
 
 async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
     await session.rollback()
-    run = await session.get(AgentRun, run_id)
+    run = await _lock_agent_run_scope(
+        session,
+        run_id,
+        include_cancellation_ledgers=True,
+    )
     if run is None:
         return
     active_root_id = await _active_root_skill_run_id(session, run.id)
@@ -558,7 +587,11 @@ async def cancel_agent_run(session: AsyncSession, run_id: int) -> None:
     await close_runtime_state(
         session,
         scope=await _runtime_state_scope(
-            session, run, preferred_skill_run_id=active_root_id
+            session,
+            run,
+            preferred_skill_run_id=active_root_id,
+            bind_latest_skill_run=False,
+            include_content_item=True,
         ),
         status="cancelled",
         message="本轮执行已取消。",
@@ -585,6 +618,64 @@ async def _cancel_active_skill_run_records(session: AsyncSession, run_id: int) -
             "error_code": "RUN_CANCELLED",
         }
     await session.flush()
+
+
+async def _lock_agent_run_scope(
+    session: AsyncSession,
+    run_id: int,
+    *,
+    include_cancellation_ledgers: bool,
+) -> AgentRun | None:
+    """Acquire runtime rows content-first, optionally including cancel ledgers."""
+
+    with session.no_autoflush:
+        discovered = await session.get(AgentRun, run_id)
+        discovered_task = (
+            await session.get(BrainTask, discovered.task_id)
+            if discovered is not None and discovered.task_id is not None
+            else None
+        )
+    if discovered is None:
+        return None
+    if discovered_task is not None and discovered_task.content_item_id is not None:
+        content_id = await session.scalar(
+            select(ContentItem.id)
+            .where(ContentItem.id == discovered_task.content_item_id)
+            .with_for_update()
+        )
+        if content_id is None:
+            raise ValueError("AgentRun BrainTask ContentItem ownership is missing")
+    run = await session.scalar(
+        select(AgentRun)
+        .where(AgentRun.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if run is None:
+        return None
+    if run.turn_id is not None:
+        await session.scalar(
+            select(ConversationTurn.id)
+            .where(ConversationTurn.id == run.turn_id)
+            .with_for_update()
+        )
+    if run.task_id is not None:
+        await session.scalar(
+            select(BrainTask.id).where(BrainTask.id == run.task_id).with_for_update()
+        )
+    if include_cancellation_ledgers:
+        await session.scalars(
+            select(SkillRun)
+            .where(SkillRun.run_id == run.id)
+            .order_by(SkillRun.id)
+            .with_for_update()
+        )
+        await session.scalar(
+            select(RunRevision.id)
+            .where(RunRevision.revision_run_id == run.id)
+            .with_for_update()
+        )
+    return run
 
 
 async def _active_root_skill_run_id(session: AsyncSession, run_id: int) -> int | None:
@@ -642,7 +733,11 @@ async def complete_agent_run(
 
 async def fail_agent_run(session: AsyncSession, run_id: int, exc: Exception) -> None:
     await session.rollback()
-    run = await session.get(AgentRun, run_id)
+    run = await _lock_agent_run_scope(
+        session,
+        run_id,
+        include_cancellation_ledgers=False,
+    )
     if run is None:
         return
     await close_runtime_state(
@@ -651,6 +746,7 @@ async def fail_agent_run(session: AsyncSession, run_id: int, exc: Exception) -> 
             session,
             run,
             error_detail=str(exc)[:4000],
+            include_content_item=True,
         ),
         status="failed",
         message="任务未能继续执行，请检查配置后重试。",
@@ -665,12 +761,19 @@ async def _runtime_state_scope(
     result_payload: dict | None = None,
     error_detail: str | None = None,
     preferred_skill_run_id: int | None = None,
+    bind_latest_skill_run: bool = True,
+    include_content_item: bool = False,
 ) -> RuntimeStateScope:
     skill_run_id = preferred_skill_run_id
-    if skill_run_id is None:
+    if skill_run_id is None and bind_latest_skill_run:
         skill_run_id = await session.scalar(
             select(SkillRun.id)
-            .where(SkillRun.run_id == run.id)
+            .where(
+                SkillRun.run_id == run.id,
+                SkillRun.status.not_in(
+                    {"completed", "blocked", "failed", "cancelled", "stopped"}
+                ),
+            )
             .order_by(SkillRun.id.desc())
             .limit(1)
         )
@@ -683,6 +786,7 @@ async def _runtime_state_scope(
         raise ValueError("AgentRun ConversationThread ownership is missing")
     if thread is not None and thread.org_id != run.org_id:
         raise ValueError("AgentRun ConversationThread ownership does not match")
+    task = await session.get(BrainTask, run.task_id) if run.task_id is not None else None
     return RuntimeStateScope(
         run_id=run.id,
         org_id=run.org_id,
@@ -692,6 +796,9 @@ async def _runtime_state_scope(
         task_id=run.task_id,
         account_id=thread.account_id if thread is not None else None,
         project_id=thread.project_id if thread is not None else None,
+        content_item_id=(
+            task.content_item_id if include_content_item and task is not None else None
+        ),
         result_payload=result_payload,
         error_detail=error_detail,
     )

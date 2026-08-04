@@ -46,6 +46,7 @@ from app.models import (
     MatrixDistributionPlan,
     OrchestrationPlan,
     ReflectionRecord,
+    SkillRun,
     StrategyPlan,
     TaskBrief,
 )
@@ -118,6 +119,10 @@ from app.services.agent_runs import (
 from app.services.ai_coo_learning import ai_coo_learning_service
 from app.services.composite_skill_runs import lock_composite_finish_approval
 from app.services.publishing import sync_publish_jobs_after_approval
+from app.services.runtime_state import (
+    publish_runtime_state_intents,
+    replay_runtime_state_events,
+)
 from app.services.skill_approvals import (
     SkillApprovalConflict,
     finalize_skill_finish_approval,
@@ -1674,6 +1679,16 @@ async def approve_tool_call(
     task = await _load_task(session, tool_call.task_id, user.org_id)
     await require_task_approval_access(session, user, task)
     if tool_call.status != "waiting_approval":
+        prior_decision = dict(tool_call.meta or {}).get("decision")
+        if (
+            isinstance(prior_decision, dict)
+            and prior_decision.get("approved") is body.approved
+            and tool_call.skill_run_id is not None
+        ):
+            decided_skill = await session.get(SkillRun, tool_call.skill_run_id)
+            if decided_skill is not None:
+                await replay_runtime_state_events(session, run_id=decided_skill.run_id)
+            return AgentToolCallOut.model_validate(tool_call)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="该工具调用已经完成审批",
@@ -1718,7 +1733,7 @@ async def approve_tool_call(
         comment=body.comment,
     )
     try:
-        skill_finish_handled = await finalize_skill_finish_approval(
+        skill_finish_result = await finalize_skill_finish_approval(
             session,
             tool_call=tool_call,
             task=task,
@@ -1732,8 +1747,9 @@ async def approve_tool_call(
             detail=str(exc),
         ) from exc
     await session.commit()
+    await publish_runtime_state_intents(session, skill_finish_result.publish_intents)
     await session.refresh(tool_call)
-    if skill_finish_handled:
+    if skill_finish_result.handled:
         return AgentToolCallOut.model_validate(tool_call)
     remaining_permission = await session.scalar(
         select(AgentToolCall.id).where(

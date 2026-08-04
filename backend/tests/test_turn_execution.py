@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, select
 
 from app.models import (
@@ -60,7 +61,10 @@ from app.services.agent_runs import (
     complete_agent_run,
     request_agent_run_cancel,
 )
-from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.runtime_state import (
+    RuntimeStateScope,
+    close_runtime_state,
+)
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
 
@@ -435,6 +439,198 @@ async def test_running_revision_cancelled_error_hook_is_idempotent_and_never_com
             Event.type == "run.revision_completed",
         )
     ) == 0
+
+
+@pytest.mark.asyncio
+async def test_all_terminal_revision_cancel_never_rebinds_completed_skill_or_receipt(
+    session, admin
+) -> None:
+    _account, _thread, _turn, run, task, root, revision = (
+        await _revision_execution_context(session, admin, key="all-terminal-cancel")
+    )
+    content = ContentItem(
+        created_by_id=admin.id,
+        title="all-terminal-cancel-content",
+    )
+    session.add(content)
+    await session.flush()
+    task.content_item_id = content.id
+    root_snapshot = {"status": "completed", "report": {"fact": "root immutable"}}
+    root.status = "completed"
+    root.output_snapshot = root_snapshot
+    child_snapshot = {
+        "status": "completed",
+        "report": {"fact": "child immutable"},
+        "composite_parent_skill_run_id": root.id,
+    }
+    child = SkillRun(
+        org_id=run.org_id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        idempotency_key="all-terminal-child",
+        skill_code="script_generation",
+        skill_version=1,
+        status="completed",
+        input_snapshot={},
+        output_snapshot=child_snapshot,
+    )
+    session.add(child)
+    await session.flush()
+    receipt = AgentToolCall(
+        org_id=run.org_id,
+        task_id=run.task_id,
+        skill_run_id=child.id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        tool_code="terminal-receipt",
+        tool_name="Terminal receipt",
+        idempotency_key="all-terminal-receipt",
+        side_effect_level="read",
+        status="completed",
+    )
+    session.add(receipt)
+    run.status = "running"
+    run.phase = "running"
+    revision.status = "completed"
+    revision.finished_at = datetime.now(UTC)
+    await session.commit()
+
+    await cancel_agent_run(session, run.id)
+    await cancel_agent_run(session, run.id)
+    await session.refresh(root)
+    await session.refresh(child)
+    await session.refresh(receipt)
+    await session.refresh(revision)
+
+    assert run.status == "cancelled"
+    assert (root.status, root.output_snapshot) == ("completed", root_snapshot)
+    assert (child.status, child.output_snapshot) == ("completed", child_snapshot)
+    assert receipt.status == "completed"
+    assert revision.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_state_locks_content_before_runtime_rows(session, admin) -> None:
+    account, thread, turn, run, task, skill = await _four_ledger_context(
+        session, admin, key="content-first-close"
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="content-first-close",
+    )
+    session.add(content)
+    await session.flush()
+    task.content_item_id = content.id
+    await session.commit()
+    locked_tables: list[str] = []
+
+    def capture_for_update(_conn, clauseelement, *_args, **_kwargs) -> None:
+        if getattr(clauseelement, "_for_update_arg", None) is not None:
+            sql = str(clauseelement)
+            for table in (
+                "content_items",
+                "agent_runs",
+                "conversation_turns",
+                "brain_tasks",
+                "skill_runs",
+            ):
+                if f"FROM {table}" in sql:
+                    locked_tables.append(table)
+                    break
+
+    sqlalchemy_event.listen(session.bind.sync_engine, "before_execute", capture_for_update)
+    try:
+        await close_runtime_state(
+            session,
+            scope=RuntimeStateScope(
+                run_id=run.id,
+                org_id=admin.org_id,
+                account_id=account.id,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                task_id=task.id,
+                skill_run_id=skill.id,
+                content_item_id=content.id,
+            ),
+            status="retry_wait",
+            message="retry later",
+        )
+    finally:
+        sqlalchemy_event.remove(
+            session.bind.sync_engine, "before_execute", capture_for_update
+        )
+
+    assert locked_tables[:5] == [
+        "content_items",
+        "agent_runs",
+        "conversation_turns",
+        "brain_tasks",
+        "skill_runs",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_caller_owned_runtime_closure_publishes_only_after_outer_commit(
+    session, admin, monkeypatch
+) -> None:
+    from app.services.runtime_state import (
+        RuntimePublishIntent,
+        publish_runtime_state_closure,
+        publish_runtime_state_intents,
+    )
+
+    account, thread, turn, run, task, skill = await _four_ledger_context(
+        session, admin, key="caller-owned-publish"
+    )
+    published: list[int] = []
+
+    async def capture_publish(_event_type, _payload, **kwargs) -> None:
+        published.append(kwargs["event_id"])
+
+    monkeypatch.setattr(
+        "app.orchestrator.brain_runtime.publish_realtime_event", capture_publish
+    )
+    closure = await close_runtime_state(
+        session,
+        scope=RuntimeStateScope(
+            run_id=run.id,
+            org_id=admin.org_id,
+            account_id=account.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            task_id=task.id,
+            skill_run_id=skill.id,
+        ),
+        status="blocked",
+        message="nested child rejected",
+        error_code="SKILL_APPROVAL_REJECTED",
+        commit=False,
+    )
+    assert published == []
+    assert closure.publish_intents
+    await session.commit()
+    await publish_runtime_state_closure(session, closure)
+    assert published == [intent.event_id for intent in closure.publish_intents]
+    first = closure.publish_intents[0]
+    await publish_runtime_state_intents(
+        session,
+        (
+            RuntimePublishIntent(
+                event_id=first.event_id,
+                event_type="brain.runtime.mismatched",
+                turn_id=first.turn_id,
+            ),
+            RuntimePublishIntent(
+                event_id=first.event_id,
+                event_type=first.event_type,
+                turn_id=(first.turn_id or 0) + 1,
+            ),
+        ),
+    )
+    assert published == [intent.event_id for intent in closure.publish_intents]
 
 
 @pytest.mark.asyncio

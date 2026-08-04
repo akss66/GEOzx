@@ -5,15 +5,40 @@ import os
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.models import BrainTask, SkillRun, User
-from app.models.enums import BrainTaskStatus, DeliverableStatus, DeliverableType, UserRole
+from app.models import (
+    AgentRun,
+    BrainTask,
+    ContentItem,
+    ConversationThread,
+    Deliverable,
+    SkillRun,
+    User,
+)
+from app.models.enums import (
+    AgentCode,
+    BrainTaskStatus,
+    DeliverableStatus,
+    DeliverableType,
+    UserRole,
+)
+from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.skill_runtime import SkillRuntime
+from app.services.agent_runs import cancel_agent_run
 from app.services.artifacts import accept_artifact
 from app.services.composite_skill_runs import pause_composite_parent_for_artifacts
-from tests.test_operating_skills import _capability_request, _Harness, _scope, _Tools
+from app.services.runtime_deliverables import write_runtime_deliverable
+from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from tests.test_operating_skills import (
+    _capability_request,
+    _Harness,
+    _nested_finish_approval_scope,
+    _scope,
+    _Tools,
+)
 from tests.test_operation_iteration_skill import _artifact
 
 
@@ -173,6 +198,179 @@ def test_postgres_accept_pause_interleavings_never_lose_wakeup(ordering: str) ->
                 assert locked_run.status == (
                     "queued" if ordering == "pause_first" else "running"
                 )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the child-finish lock-order gate",
+)
+@pytest.mark.parametrize("competing_action", ["accept", "pause", "cancel"])
+def test_postgres_child_finish_follows_global_lock_order(
+    competing_action: str,
+) -> None:
+    """A real child writer must not deadlock with composite/cancel transitions."""
+
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+
+    async def exercise() -> None:
+        engine = create_async_engine(
+            async_url,
+            connect_args={
+                "server_settings": {
+                    "lock_timeout": "5000",
+                    "statement_timeout": "15000",
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with sessions() as setup:
+                from app.models import Org
+
+                org = Org(name=f"child-finish-lock-{suffix}")
+                admin = User(
+                    org=org,
+                    email=f"child-finish-lock-{suffix}@test.invalid",
+                    hashed_password="unused",
+                    display_name="Child finish lock gate",
+                    role=UserRole.ADMIN,
+                )
+                setup.add(admin)
+                await setup.commit()
+                turn, run, task, parent, child, artifact, _call = (
+                    await _nested_finish_approval_scope(
+                        setup,
+                        admin,
+                        key=f"child-finish-lock-{suffix}",
+                    )
+                )
+                thread = await setup.get(ConversationThread, turn.thread_id)
+                assert thread is not None
+                ids = {
+                    "admin": admin.id,
+                    "account": thread.account_id,
+                    "thread": turn.thread_id,
+                    "turn": turn.id,
+                    "run": run.id,
+                    "task": task.id,
+                    "content": task.content_item_id,
+                    "parent": parent.id,
+                    "child": child.id,
+                    "artifact": artifact.id,
+                }
+
+            start = asyncio.Event()
+
+            async def finish_child() -> None:
+                await start.wait()
+                async with sessions() as child_session:
+                    await child_session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    actor = await child_session.get(User, ids["admin"])
+                    content = await child_session.get(ContentItem, ids["content"])
+                    child_row = await child_session.get(SkillRun, ids["child"])
+                    assert actor is not None and content is not None and child_row is not None
+                    runtime_scope = RuntimeScope(
+                        org_id=actor.org_id,
+                        user_id=actor.id,
+                        account_id=ids["account"],
+                        thread_id=ids["thread"],
+                        turn_id=ids["turn"],
+                        run_id=ids["run"],
+                        task_id=ids["task"],
+                        skill_run_id=ids["child"],
+                    )
+                    await write_runtime_deliverable(
+                        child_session,
+                        scope=runtime_scope,
+                        content=content,
+                        agent_code=AgentCode.VIDEO_CREATOR.value,
+                        deliverable_type=DeliverableType.VIDEO_ASSET,
+                        status=DeliverableStatus.DRAFT,
+                        payload={"source": "child-finish-lock-gate"},
+                    )
+                    child_output = {
+                        **dict(child_row.output_snapshot or {}),
+                        "status": "completed",
+                    }
+                    await close_runtime_state(
+                        child_session,
+                        scope=RuntimeStateScope(
+                            run_id=ids["run"],
+                            org_id=actor.org_id,
+                            account_id=ids["account"],
+                            thread_id=ids["thread"],
+                            turn_id=ids["turn"],
+                            task_id=ids["task"],
+                            skill_run_id=ids["child"],
+                            content_item_id=ids["content"],
+                            skill_output_snapshot=child_output,
+                            nested_skill=True,
+                        ),
+                        status="completed",
+                        message="Nested child completed",
+                        commit=False,
+                    )
+                    await child_session.commit()
+
+            async def run_competing_action() -> None:
+                await start.wait()
+                async with sessions() as competing_session:
+                    await competing_session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    if competing_action == "accept":
+                        actor = await competing_session.get(User, ids["admin"])
+                        assert actor is not None
+                        await accept_artifact(
+                            competing_session,
+                            actor,
+                            artifact_id=ids["artifact"],
+                        )
+                    elif competing_action == "pause":
+                        parent_row = await competing_session.get(SkillRun, ids["parent"])
+                        assert parent_row is not None
+                        should_pause = await pause_composite_parent_for_artifacts(
+                            competing_session,
+                            parent_skill_run=parent_row,
+                            source_artifact_ids=[ids["artifact"]],
+                        )
+                        if should_pause:
+                            parent_row.status = "waiting_permission"
+                        await competing_session.commit()
+                    else:
+                        await cancel_agent_run(competing_session, ids["run"])
+
+            child_task = asyncio.create_task(finish_child())
+            competing_task = asyncio.create_task(run_competing_action())
+            start.set()
+            await asyncio.wait_for(
+                asyncio.gather(child_task, competing_task),
+                timeout=15,
+            )
+
+            async with sessions() as verify:
+                child_row = await verify.get(SkillRun, ids["child"])
+                parent_row = await verify.get(SkillRun, ids["parent"])
+                assert child_row is not None and parent_row is not None
+                assert child_row.status in {"completed", "cancelled"}
+                assert await verify.scalar(
+                    select(func.count(Deliverable.id)).where(
+                        Deliverable.skill_run_id == ids["child"],
+                        Deliverable.type == DeliverableType.VIDEO_ASSET,
+                    )
+                ) == 1
+                if competing_action == "cancel":
+                    locked_run = await verify.get(AgentRun, ids["run"])
+                    assert locked_run is not None and locked_run.status == "cancelled"
+                    assert parent_row.status == "cancelled"
         finally:
             await engine.dispose()
 
