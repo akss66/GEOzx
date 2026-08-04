@@ -1,5 +1,72 @@
 # 运营大脑 V3 发布与回滚手册
 
+## 实时事件投影发布门禁（2026-08-04）
+
+本节仅准备实时事件投影的发布条件，**不授权生产发布**。负责人为当班发布负责人（应用）与当班值守负责人（数据与安全）；开始灰度前必须在变更单中记录两人的姓名、时间和回滚负责人。
+
+### 开关、范围和到期清理
+
+- 主开关：`MAIN_AGENT_TYPED_RUNTIME_ENABLED`。它是当前类型化主 Agent 和实时投影的 kill switch；保持 `MAIN_AGENT_V2_ENABLED=true`，将本开关设为 `false` 并重启 API，即可停止创建新的类型化实时投影。
+- 灰度前先以 `MAIN_AGENT_TYPED_RUNTIME_ENABLED=false` 部署；不得把开关默认打开后再观察。
+- 该临时灰度门禁和日志看板的清理/复审日期为 **2026-09-04**。届时由发布负责人决定将其产品化为独立投影开关，或删除临时灰度规则。
+- 回滚优先关闭上述类型化实时投影入口；保留已持久化的 `events` 记录，绝不删除或篡改它们。
+
+### 发布顺序
+
+1. 部署应用与加法迁移，但保持 `MAIN_AGENT_TYPED_RUNTIME_ENABLED=false`；先请求 `GET /health/ready`，确认 API、数据库和 Redis 就绪。需要额外验证进程存活时，再补查 `GET /health`。
+2. 对一个内部组织、一个内部账号、一个新会话打开开关。完成一条运行中 WorkTurn 的“断开流 → HTTP recovery → 恢复流”烟囱测试。
+3. 内部单账号至少观察 24 小时；通过后按稳定组织哈希放量到 5%、25%、50%、100%。每档至少观察 60 分钟，禁止同一线程跨版本。
+4. 每次扩大前记录当前基线、百分位和异常计数；没有足够样本时保持当前档，不以“没有报错”代替通过。
+
+### 首次检查与查询
+
+1. 健康检查：`GET /health/ready` 返回成功；如需补充确认进程存活，再检查 `GET /health`。在内部账号打开会话，页面只出现一个 WorkTurn，断流后不刷新页面即可补齐步骤与成果。
+2. 在受控日志中按结构化字段查询（时间范围为最近 15 分钟）：
+
+```text
+metric_name in (
+  "turn_event_publish_ms", "turn_event_delivery_lag_ms",
+  "turn_event_sequence_gap_total", "turn_event_duplicate_total",
+  "turn_stream_reconnect_total"
+)
+```
+
+日志字段必须是 `metric_name`、`metric_value` 和 `metric_dimensions`；不得把 prompt、原始事件 payload、token、账号/线程/用户 ID 用作 metric label。
+
+3. 数据库作用域检查（结果必须为 0）：
+
+```sql
+SELECT count(*) AS scoped_event_mismatches
+FROM events e
+JOIN conversation_threads t ON t.id = e.thread_id
+WHERE e.org_id <> t.org_id OR e.account_id <> t.account_id;
+```
+
+4. 运行事件有序性检查（结果必须为空）：
+
+```sql
+SELECT turn_id, sequence, count(*) AS duplicate_sequence
+FROM events
+WHERE turn_id IS NOT NULL AND sequence IS NOT NULL
+GROUP BY turn_id, sequence
+HAVING count(*) > 1;
+```
+
+### 24 小时通过、暂停与回滚阈值
+
+内部单账号 24 小时通过条件：跨账号泄漏 = 0、重复副作用 = 0、重复 Turn/重复前端投影 = 0；`turn_event_delivery_lag_ms` P95 < 1 秒；从断流到 HTTP recovery 后恢复投影 P95 < 2 秒。
+
+- `turn_event_sequence_gap_total` 的基线应为 0。任一未知 gap 先暂停扩大；同一小时出现 2 次或以上，立即回滚并调查持久化顺序与 recovery cursor。
+- `turn_stream_reconnect_total` 是用户网络恢复信号，必须按活跃流连接数归一化后与发布前基线比较。5 分钟窗口超过基线 3 倍且不少于 5 次，暂停扩大；持续 15 分钟或伴随投影遗漏时回滚。
+- 任何跨账号泄漏、重复副作用、重复投影、delivery P95 >= 1 秒、recovery P95 >= 2 秒，或无法查询上述指标，均为 hold；跨账号泄漏或重复副作用直接回滚。
+
+### 回滚步骤
+
+1. 将 `MAIN_AGENT_TYPED_RUNTIME_ENABLED=false`，重启 API，并确认新的实时投影不再创建。
+2. 保留 durable DB `events`，不自动重放任何副作用 ToolCall；发布、评论、外部写入等任务必须重新由人工审批。
+3. 不降级加法数据库迁移。应用回滚到上一稳定版本后，执行健康检查、内部账号只读会话和作用域 SQL。
+4. 记录版本、受影响组织/账号/线程/Turn/Run ID 与 correlation ID；不得在变更单复制 prompt、token、payload 或模型响应。
+
 ## Typed runtime release gate（2026-08-03）
 
 类型化主 Agent 运行时由两个后端环境变量共同控制：

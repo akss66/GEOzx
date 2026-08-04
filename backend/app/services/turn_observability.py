@@ -6,8 +6,10 @@ Provider payloads, prompts, credentials, and tool inputs never enter it.
 
 from __future__ import annotations
 
+import logging
+import math
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,6 +37,123 @@ class _SystemClock:
 
 
 SYSTEM_TURN_CLOCK: TurnClock = _SystemClock()
+METRICS_LOGGER = logging.getLogger("dyflow.turn_metrics")
+
+_TURN_METRIC_DIMENSIONS = {
+    "turn_event_publish_ms": frozenset({"event_type", "outcome"}),
+    "turn_event_delivery_lag_ms": frozenset({"event_type", "transport"}),
+    "turn_event_sequence_gap_total": frozenset({"event_type", "transport"}),
+    "turn_event_duplicate_total": frozenset({"event_type", "transport"}),
+    "turn_stream_reconnect_total": frozenset({"transport", "reason"}),
+}
+_PUBLIC_EVENT_TYPES = frozenset(
+    {
+        "turn.received",
+        "turn.completed",
+        "turn.failed",
+        "turn.blocked",
+        "turn.cancelled",
+        "turn.stopped",
+        "step.started",
+        "step.completed",
+        "step.failed",
+        "deliverable.updated",
+    }
+)
+_METRIC_DIMENSION_VALUES = {
+    "event_type": _PUBLIC_EVENT_TYPES,
+    "outcome": frozenset({"appended"}),
+    "transport": frozenset({"durable", "sse"}),
+    "reason": frozenset({"resume"}),
+}
+
+
+def emit_turn_metric(
+    metric_name: str,
+    metric_value: int | float,
+    *,
+    dimensions: Mapping[str, str],
+) -> None:
+    """Emit a bounded structured record without allowing telemetry to fail a Turn."""
+
+    allowed_dimensions = _TURN_METRIC_DIMENSIONS.get(metric_name)
+    if allowed_dimensions is None:
+        return
+    if not isinstance(metric_value, (int, float)) or not math.isfinite(metric_value):
+        return
+    safe_dimensions = {
+        key: value
+        for key, value in dimensions.items()
+        if (
+            key in allowed_dimensions
+            and isinstance(value, str)
+            and value in _METRIC_DIMENSION_VALUES[key]
+        )
+    }
+    if set(safe_dimensions) != allowed_dimensions:
+        return
+    try:
+        METRICS_LOGGER.info(
+            "turn_metric",
+            extra={
+                "metric_name": metric_name,
+                "metric_value": max(0, metric_value),
+                "metric_dimensions": safe_dimensions,
+            },
+        )
+    except Exception:  # noqa: BLE001 - observability cannot fail a user-visible stream
+        return
+
+
+def record_turn_event_publish(
+    started_monotonic: float,
+    *,
+    event_type: str,
+    outcome: str,
+) -> None:
+    emit_turn_metric(
+        "turn_event_publish_ms",
+        round(max(0.0, time.monotonic() - started_monotonic) * 1000),
+        dimensions={"event_type": event_type, "outcome": outcome},
+    )
+
+
+def record_turn_event_delivery_lag(
+    created_at: datetime,
+    *,
+    event_type: str,
+) -> None:
+    emit_turn_metric(
+        "turn_event_delivery_lag_ms",
+        _elapsed_since_created(created_at, datetime.now(UTC)),
+        dimensions={"event_type": event_type, "transport": "sse"},
+    )
+
+
+def record_turn_event_sequence_gap(*, event_type: str) -> None:
+    emit_turn_metric(
+        "turn_event_sequence_gap_total",
+        1,
+        dimensions={"event_type": event_type, "transport": "sse"},
+    )
+
+
+def record_turn_event_duplicate(*, event_type: str) -> None:
+    emit_turn_metric(
+        "turn_event_duplicate_total",
+        1,
+        dimensions={"event_type": event_type, "transport": "durable"},
+    )
+
+
+def record_turn_stream_reconnect(*, after_id: int) -> None:
+    if after_id <= 0:
+        return
+    emit_turn_metric(
+        "turn_stream_reconnect_total",
+        1,
+        dimensions={"transport": "sse", "reason": "resume"},
+    )
 
 
 @dataclass

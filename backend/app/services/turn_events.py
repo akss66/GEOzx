@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
@@ -11,6 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.events import TurnEventPayload, turn_event_idempotency_key
 from app.models import Account, AgentRun, ConversationThread, ConversationTurn, Event, SkillRun
+from app.services.turn_observability import (
+    record_turn_event_duplicate,
+    record_turn_event_publish,
+)
 
 MAX_LIST_LIMIT = 500
 
@@ -144,6 +149,7 @@ async def append_turn_event(
 ) -> Event:
     """Append one public Turn event without committing the caller's transaction."""
 
+    publish_started = time.monotonic()
     public_payload = _public_payload(event_type, payload)
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise ValueError("turn event idempotency key must not be empty")
@@ -164,6 +170,7 @@ async def append_turn_event(
             event_type,
             allow_terminal_replay=allow_terminal_replay,
         )
+        record_turn_event_duplicate(event_type=event_type)
         return existing
 
     # Python's sqlite3 legacy transaction mode does not start a physical
@@ -205,7 +212,13 @@ async def append_turn_event(
             allow_terminal_replay=allow_terminal_replay,
         ):
             raise
+        record_turn_event_duplicate(event_type=event_type)
         return existing
+    record_turn_event_publish(
+        publish_started,
+        event_type=event_type,
+        outcome="appended",
+    )
     return event
 
 

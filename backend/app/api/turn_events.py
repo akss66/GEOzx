@@ -9,11 +9,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.events import EVENTS_CHANNEL
 from app.db import async_session, get_redis, get_session
+from app.models import Event
 from app.schemas.turn_events import (
     ConversationTurnEventListOut,
     ConversationTurnEventOut,
@@ -21,9 +23,15 @@ from app.schemas.turn_events import (
 from app.services.conversations import get_conversation_thread
 from app.services.turn_events import (
     MAX_LIST_LIMIT,
+    PUBLIC_EVENT_PAYLOAD_FIELDS,
     ThreadEventScope,
     list_thread_events,
     public_turn_event_payload,
+)
+from app.services.turn_observability import (
+    record_turn_event_delivery_lag,
+    record_turn_event_sequence_gap,
+    record_turn_stream_reconnect,
 )
 
 router = APIRouter(prefix="/conversation-threads", tags=["conversation-turn-events"])
@@ -99,6 +107,43 @@ async def _load_thread_event_page(
         ]
 
 
+async def _load_turn_sequence_seed(
+    session_factory: Callable,
+    *,
+    scope: ThreadEventScope,
+    after_id: int,
+) -> dict[int, int]:
+    if after_id <= 0:
+        return {}
+    async with session_factory() as session:
+        latest_ids = (
+            select(
+                Event.turn_id.label("turn_id"),
+                func.max(Event.id).label("event_id"),
+            )
+            .where(
+                Event.org_id == scope.org_id,
+                Event.account_id == scope.account_id,
+                Event.thread_id == scope.thread_id,
+                Event.id <= after_id,
+                Event.type.in_(PUBLIC_EVENT_PAYLOAD_FIELDS),
+                Event.sequence > 0,
+                Event.turn_id.is_not(None),
+            )
+            .group_by(Event.turn_id)
+            .subquery()
+        )
+        rows = await session.execute(
+            select(Event.turn_id, Event.sequence)
+            .join(latest_ids, latest_ids.c.event_id == Event.id)
+        )
+        return {
+            int(turn_id): int(sequence)
+            for turn_id, sequence in rows
+            if turn_id is not None and sequence is not None
+        }
+
+
 async def _close_pubsub(pubsub) -> None:
     try:
         await pubsub.unsubscribe(EVENTS_CHANNEL)
@@ -128,6 +173,13 @@ async def stream_authorized_thread_events(
     cursor = after_id
     last_heartbeat = monotonic()
     candidate_pubsub = None
+    seen_sequences = await _load_turn_sequence_seed(
+        factory,
+        scope=scope,
+        after_id=after_id,
+    )
+    reported_gaps: set[tuple[int, int, int]] = set()
+    record_turn_stream_reconnect(after_id=after_id)
     try:
         candidate_pubsub = redis.pubsub()
         await candidate_pubsub.subscribe(EVENTS_CHANNEL)
@@ -156,6 +208,28 @@ async def stream_authorized_thread_events(
                 if await request.is_disconnected():
                     return
                 cursor = event.event.id
+                previous_sequence = seen_sequences.get(event.event.turn_id)
+                if (
+                    previous_sequence is not None
+                    and event.event.sequence > previous_sequence + 1
+                ):
+                    gap = (
+                        event.event.turn_id,
+                        previous_sequence,
+                        event.event.sequence,
+                    )
+                    if gap not in reported_gaps:
+                        reported_gaps.add(gap)
+                        record_turn_event_sequence_gap(event_type=event.event.type)
+                if (
+                    previous_sequence is None
+                    or event.event.sequence >= previous_sequence
+                ):
+                    seen_sequences[event.event.turn_id] = event.event.sequence
+                record_turn_event_delivery_lag(
+                    event.event.created_at,
+                    event_type=event.event.type,
+                )
                 yield _sse_event_frame(event)
             cursor = max(cursor, page_high_watermark)
             if len(events) == MAX_LIST_LIMIT:
