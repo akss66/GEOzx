@@ -10,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config import settings
 from app.core.events import EVENTS_CHANNEL
 from app.core.security import decode_token
+from app.core.workspace_access import require_account_access
 from app.db import async_session
 from app.models import User
 from app.services.conversations import get_conversation_thread
@@ -40,6 +41,10 @@ _THREAD_RUNTIME_EVENT_TYPES = frozenset(
     }
 )
 
+_ACCOUNT_EVENT_TYPES = frozenset(
+    {"pending_work.updated", "account_data.import_job.progress"}
+)
+
 
 def _should_forward_legacy_event(data: str) -> bool:
     """Keep unscoped legacy events available, never broadcast Turn-scoped data."""
@@ -51,6 +56,8 @@ def _should_forward_legacy_event(data: str) -> bool:
     if not isinstance(parsed, Mapping):
         return True
     event_type = parsed.get("type")
+    if event_type in _ACCOUNT_EVENT_TYPES:
+        return False
     if isinstance(event_type, str) and (
         event_type in _PUBLIC_TURN_EVENT_TYPES
         or event_type.startswith("turn.")
@@ -162,6 +169,44 @@ async def _authenticate_runtime_thread(ws: WebSocket) -> int | None:
         return None
 
 
+async def _authenticate_account_event_scope(ws: WebSocket) -> int | None:
+    """Authorize one account without placing a bearer token in the URL."""
+
+    try:
+        hello = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        if not isinstance(hello, Mapping) or hello.get("type") != "authenticate":
+            return None
+        token = hello.get("token")
+        account_id = hello.get("account_id")
+        if not isinstance(token, str) or not isinstance(account_id, int) or account_id <= 0:
+            return None
+        payload = decode_token(token)
+        subject = payload.get("sub")
+        if not subject:
+            return None
+        async with async_session() as session:
+            user = await session.get(User, int(subject))
+            if user is None or not user.is_active:
+                return None
+            await require_account_access(session, user, account_id)
+        return account_id
+    except Exception:  # noqa: BLE001 - all handshake failures use one close policy
+        return None
+
+
+def _account_event_for_scope(data: str, account_id: int) -> bool:
+    """Admit only allowlisted events for the authenticated account."""
+
+    try:
+        parsed = json.loads(data)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(parsed, Mapping) or parsed.get("type") not in _ACCOUNT_EVENT_TYPES:
+        return False
+    payload = parsed.get("payload")
+    return isinstance(payload, Mapping) and payload.get("account_id") == account_id
+
+
 @router.websocket("/ws/events")
 async def ws_events(ws: WebSocket) -> None:
     await ws.accept()
@@ -185,6 +230,48 @@ async def ws_events(ws: WebSocket) -> None:
         await pubsub.unsubscribe(EVENTS_CHANNEL)
         await pubsub.aclose()
         await redis.aclose()
+
+
+@router.websocket("/ws/account-events")
+async def account_events(ws: WebSocket) -> None:
+    """Authenticated durable events for exactly one authorized account."""
+
+    await ws.accept()
+    account_id = await _authenticate_account_event_scope(ws)
+    if account_id is None:
+        await ws.close(code=4401)
+        return
+
+    redis = None
+    pubsub = None
+    try:
+        redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(EVENTS_CHANNEL)
+        acknowledgement = json.dumps(
+            {"type": "authenticated", "account_id": account_id},
+            separators=(",", ":"),
+        )
+        await ws.send_text(acknowledgement)
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            if not _account_event_for_scope(message["data"], account_id):
+                continue
+            try:
+                await ws.send_text(message["data"])
+            except RuntimeError as exc:
+                if not _is_closed_transport_error(exc):
+                    raise
+                break
+    except WebSocketDisconnect:
+        pass
+    except (asyncio.CancelledError, SystemExit):
+        raise
+    except Exception:  # noqa: BLE001 - setup and stream failures share one safe close policy
+        await _close_runtime_server_error(ws)
+    finally:
+        await _close_runtime_resources(pubsub, redis)
 
 
 @router.websocket("/ws/conversation-runtime")

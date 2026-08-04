@@ -3,7 +3,11 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useConversationRuntimeStream, useEventStream } from "./useEventStream";
+import {
+  useAccountEventStream,
+  useConversationRuntimeStream,
+  useEventStream,
+} from "./useEventStream";
 import { TOKEN_KEY } from "../api/client";
 
 class FakeWebSocket {
@@ -174,6 +178,67 @@ describe("useEventStream", () => {
       3,
       expect.objectContaining({ id: 71, type: "brain.runtime.message_done" }),
     );
+  });
+
+  it("authenticates an account event socket without putting the token in its URL", () => {
+    localStorage.setItem(TOKEN_KEY, "account-token");
+    const onEvent = vi.fn();
+    const { result } = renderHook(() => useAccountEventStream({
+      accountId: 81,
+      onEvent,
+    }));
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.open());
+    expect(socket.url).toContain("/ws/account-events");
+    expect(socket.url).not.toContain("account-token");
+    expect(JSON.parse(socket.sent[0])).toEqual({
+      type: "authenticate",
+      token: "account-token",
+      account_id: 81,
+    });
+    expect(result.current.connectionState).toBe("connecting");
+
+    act(() => socket.emit({ type: "authenticated", account_id: 81 }));
+    expect(result.current.connectionState).toBe("connected");
+    act(() => socket.emit({
+      type: "pending_work.updated",
+      payload: { account_id: 82 },
+    }));
+    act(() => socket.emit({
+      type: "pending_work.updated",
+      payload: { account_id: 81 },
+    }));
+
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      payload: { account_id: 81 },
+    }));
+  });
+
+  it("reauthenticates after reconnect and announces recovery after acknowledgement", () => {
+    localStorage.setItem(TOKEN_KEY, "account-token");
+    const onReconnect = vi.fn();
+    renderHook(() => useAccountEventStream({ accountId: 81, onReconnect }));
+
+    const first = FakeWebSocket.instances[0];
+    act(() => first.open());
+    act(() => first.emit({ type: "authenticated", account_id: 81 }));
+    expect(onReconnect).not.toHaveBeenCalled();
+    act(() => first.serverClose());
+    act(() => vi.advanceTimersByTime(500));
+
+    const second = FakeWebSocket.instances[1];
+    act(() => second.open());
+    expect(JSON.parse(second.sent[0])).toEqual({
+      type: "authenticate",
+      token: "account-token",
+      account_id: 81,
+    });
+    expect(onReconnect).not.toHaveBeenCalled();
+    act(() => second.emit({ type: "authenticated", account_id: 81 }));
+
+    expect(onReconnect).toHaveBeenCalledOnce();
   });
 
   it("authenticates a thread-scoped transient socket and ignores another Thread", () => {

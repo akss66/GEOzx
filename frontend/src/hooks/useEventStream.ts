@@ -26,6 +26,12 @@ export interface ConversationRuntimeStreamOptions {
   onEvent?: (event: DyEvent) => void;
 }
 
+export interface AccountEventStreamOptions {
+  accountId: number | null | undefined;
+  onEvent?: (event: DyEvent) => void;
+  onReconnect?: () => void;
+}
+
 const RECONNECT_DELAYS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const MAX_SEEN_DURABLE_EVENTS = 2_000;
 
@@ -171,6 +177,128 @@ export function useEventStream(
   };
 }
 
+/** Subscribe to durable events for one server-authorized account. */
+export function useAccountEventStream({
+  accountId,
+  onEvent,
+  onReconnect,
+}: AccountEventStreamOptions) {
+  const [connectionState, setConnectionState] =
+    useState<EventStreamConnectionState>("disconnected");
+  const lastRef = useRef<DyEvent | null>(null);
+  const handlerRef = useRef(onEvent);
+  const reconnectHandlerRef = useRef(onReconnect);
+  const scopeEpochRef = useRef(0);
+  handlerRef.current = onEvent;
+  reconnectHandlerRef.current = onReconnect;
+
+  useEffect(() => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const epoch = scopeEpochRef.current + 1;
+    scopeEpochRef.current = epoch;
+    if (accountId == null || !token) {
+      setConnectionState("disconnected");
+      return;
+    }
+
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let hasAuthenticated = false;
+    const seenEventIds = new Set<number>();
+    const seenEventOrder: number[] = [];
+    const clearReconnectTimer = () => {
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+    const owns = (candidate: WebSocket) => (
+      !disposed && scopeEpochRef.current === epoch && socket === candidate
+    );
+    const connect = () => {
+      if (disposed || scopeEpochRef.current !== epoch) return;
+      clearReconnectTimer();
+      setConnectionState(reconnectAttempt === 0 ? "connecting" : "reconnecting");
+      const proto = window.location.protocol === "https:" ? "wss" : "ws";
+      const nextSocket = new WebSocket(`${proto}://${window.location.host}/ws/account-events`);
+      socket = nextSocket;
+      nextSocket.onopen = () => {
+        if (!owns(nextSocket)) return;
+        nextSocket.send(JSON.stringify({
+          type: "authenticate",
+          token,
+          account_id: accountId,
+        }));
+      };
+      nextSocket.onmessage = (message) => {
+        if (!owns(nextSocket)) return;
+        try {
+          const event = JSON.parse(message.data) as DyEvent;
+          if (isAccountAuthenticationAcknowledgement(event, accountId)) {
+            const recovered = hasAuthenticated;
+            hasAuthenticated = true;
+            reconnectAttempt = 0;
+            setConnectionState("connected");
+            if (recovered) reconnectHandlerRef.current?.();
+            return;
+          }
+          if (!isAccountScopedEvent(event, accountId)) return;
+          if (typeof event.id === "number" && Number.isFinite(event.id)) {
+            if (seenEventIds.has(event.id)) return;
+            seenEventIds.add(event.id);
+            seenEventOrder.push(event.id);
+            if (seenEventOrder.length > MAX_SEEN_DURABLE_EVENTS) {
+              const expiredId = seenEventOrder.shift();
+              if (expiredId !== undefined) seenEventIds.delete(expiredId);
+            }
+          }
+          lastRef.current = event;
+          handlerRef.current?.(event);
+        } catch {
+          // Ignore malformed frames. Reconnect invalidates durable account state.
+        }
+      };
+      nextSocket.onclose = (event) => {
+        if (!owns(nextSocket)) return;
+        socket = null;
+        if (event.code === 4401) {
+          clearReconnectTimer();
+          setConnectionState("disconnected");
+          return;
+        }
+        setConnectionState("reconnecting");
+        const delay = RECONNECT_DELAYS[
+          Math.min(reconnectAttempt, RECONNECT_DELAYS.length - 1)
+        ];
+        reconnectAttempt += 1;
+        reconnectTimer = setTimeout(connect, delay);
+      };
+      nextSocket.onerror = () => {
+        if (nextSocket.readyState !== WebSocket.CLOSED) nextSocket.close();
+      };
+    };
+    connect();
+
+    return () => {
+      disposed = true;
+      clearReconnectTimer();
+      if (socket) {
+        socket.onclose = null;
+        socket.close();
+      }
+      socket = null;
+    };
+  }, [accountId]);
+
+  return {
+    connected: connectionState === "connected",
+    connectionState,
+    last: lastRef.current,
+  };
+}
+
 /** Subscribe to one authorized Thread's short-lived text stream. */
 export function useConversationRuntimeStream({
   accountId,
@@ -281,4 +409,17 @@ function isThreadRuntimeEvent(event: DyEvent, threadId: number) {
 
 function isRuntimeAuthenticationAcknowledgement(event: DyEvent, threadId: number) {
   return event.type === "authenticated" && (event as { thread_id?: unknown }).thread_id === threadId;
+}
+
+function isAccountAuthenticationAcknowledgement(event: DyEvent, accountId: number) {
+  return event.type === "authenticated"
+    && (event as { account_id?: unknown }).account_id === accountId;
+}
+
+function isAccountScopedEvent(event: DyEvent, accountId: number) {
+  if (!["pending_work.updated", "account_data.import_job.progress"].includes(event.type)) {
+    return false;
+  }
+  if (typeof event.payload !== "object" || event.payload == null) return false;
+  return (event.payload as Record<string, unknown>).account_id === accountId;
 }

@@ -73,6 +73,11 @@ class _HandshakeWebSocket(_RecordingWebSocket):
         return {"type": "authenticate", "token": "token", "thread_id": 81}
 
 
+class _AccountHandshakeWebSocket(_HandshakeWebSocket):
+    async def receive_json(self):
+        return {"type": "authenticate", "token": "token", "account_id": 81}
+
+
 @pytest.mark.asyncio
 async def test_ws_events_treats_closed_transport_as_normal_disconnect(
     monkeypatch: pytest.MonkeyPatch,
@@ -135,6 +140,90 @@ async def test_ws_events_filters_scoped_or_public_turn_messages_but_keeps_legacy
     await ws_api.ws_events(websocket)  # type: ignore[arg-type]
 
     assert websocket.sent == [legacy_event]
+
+
+def test_legacy_event_stream_does_not_forward_account_scoped_pending_work() -> None:
+    pending_work = '{"type":"pending_work.updated","payload":{"account_id":81}}'
+
+    assert ws_api._should_forward_legacy_event(pending_work) is False
+
+
+@pytest.mark.asyncio
+async def test_account_event_channel_rejects_unauthorized_before_subscribing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = _AccountHandshakeWebSocket()
+    monkeypatch.setattr(ws_api, "_authenticate_account_event_scope", lambda _ws: _none())
+    monkeypatch.setattr(ws_api.aioredis, "from_url", pytest.fail)
+
+    await ws_api.account_events(websocket)  # type: ignore[arg-type]
+
+    assert websocket.closed_code == 4401
+
+
+@pytest.mark.asyncio
+async def test_account_event_handshake_checks_real_account_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Session:
+        async def get(self, _model, user_id: int):
+            assert user_id == 7
+            return SimpleNamespace(is_active=True)
+
+    class _SessionContext:
+        exited = False
+
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            self.exited = True
+
+    context = _SessionContext()
+
+    async def authorize_account(session, user, account_id: int):
+        assert user.is_active is True
+        assert account_id == 81
+        return SimpleNamespace(id=81, org_id=3)
+
+    monkeypatch.setattr(ws_api, "async_session", lambda: context)
+    monkeypatch.setattr(ws_api, "decode_token", lambda _token: {"sub": "7"})
+    monkeypatch.setattr(ws_api, "require_account_access", authorize_account)
+
+    account_id = await ws_api._authenticate_account_event_scope(
+        _AccountHandshakeWebSocket()
+    )
+
+    assert account_id == 81
+    assert context.exited is True
+
+
+@pytest.mark.asyncio
+async def test_account_event_channel_forwards_only_the_authorized_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrong_account = '{"type":"pending_work.updated","payload":{"account_id":82}}'
+    authorized_account = '{"type":"pending_work.updated","payload":{"account_id":81}}'
+    unrelated = '{"type":"content.updated","payload":{"account_id":81}}'
+    pubsub = _FakePubSub([wrong_account, unrelated, authorized_account])
+    redis = _FakeRedis(pubsub)
+    websocket = _AccountHandshakeWebSocket()
+
+    async def authenticated(_ws) -> int:
+        return 81
+
+    monkeypatch.setattr(ws_api, "_authenticate_account_event_scope", authenticated)
+    monkeypatch.setattr(ws_api.aioredis, "from_url", lambda *_args, **_kwargs: redis)
+
+    await ws_api.account_events(websocket)  # type: ignore[arg-type]
+
+    assert websocket.sent == [
+        '{"type":"authenticated","account_id":81}',
+        authorized_account,
+    ]
+    assert pubsub.unsubscribed is True
+    assert pubsub.closed is True
+    assert redis.closed is True
 
 
 def test_thread_runtime_filter_only_admits_the_scoped_ephemeral_message_events() -> None:

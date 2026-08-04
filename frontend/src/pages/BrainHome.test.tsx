@@ -162,12 +162,20 @@ vi.mock("../api/pendingWork", async (importOriginal) => {
 });
 
 vi.mock("../hooks/useEventStream", () => ({
-  useEventStream: vi.fn((
+  useEventStream: vi.fn(() => ({
+    connected: true,
+    connectionState: "connected",
+    last: null,
+  })),
+  useAccountEventStream: vi.fn(({
     onEvent,
-    options?: { onReconnect?: () => void },
-  ) => {
-    mocks.accountEvents.handler = onEvent;
-    mocks.accountEvents.onReconnect = options?.onReconnect ?? null;
+    onReconnect,
+  }: {
+    onEvent?: (event: { type: string; payload?: unknown }) => void;
+    onReconnect?: () => void;
+  }) => {
+    mocks.accountEvents.handler = onEvent ?? null;
+    mocks.accountEvents.onReconnect = onReconnect ?? null;
     return { connected: true, connectionState: "connected", last: null };
   }),
   useConversationRuntimeStream: vi.fn(({ onEvent }) => {

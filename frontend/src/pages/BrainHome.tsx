@@ -48,7 +48,11 @@ import {
 } from "../components/brain/conversationTurnProjection";
 import { OperationalState } from "../components/ui";
 import { useConversationTurnEvents } from "../hooks/useConversationTurnEvents";
-import { useConversationRuntimeStream, useEventStream, type DyEvent } from "../hooks/useEventStream";
+import {
+  useAccountEventStream,
+  useConversationRuntimeStream,
+  type DyEvent,
+} from "../hooks/useEventStream";
 import {
   clearActiveBrainTaskId,
   clearActiveConversationThreadId,
@@ -419,16 +423,16 @@ export default function BrainHome() {
     if (accountId == null) return;
     void qc.invalidateQueries({ queryKey: pendingWorkQueryKey(accountId) });
   }, [qc]);
-  useEventStream(useCallback((event: DyEvent) => {
-    if (![
-      "pending_work.updated",
-      "account_data.import_job.progress",
-    ].includes(event.type)) return;
-    const payload = asRuntimePayload(event.payload);
-    const accountId = effectiveAccountIdRef.current;
-    if (accountId == null || Number(payload?.account_id) !== accountId) return;
-    invalidatePendingWork();
-  }, [invalidatePendingWork]), { onReconnect: invalidatePendingWork });
+  useAccountEventStream({
+    accountId: effectiveAccountId,
+    onEvent: useCallback((event: DyEvent) => {
+      const payload = asRuntimePayload(event.payload);
+      const accountId = effectiveAccountIdRef.current;
+      if (accountId == null || Number(payload?.account_id) !== accountId) return;
+      invalidatePendingWork();
+    }, [invalidatePendingWork]),
+    onReconnect: invalidatePendingWork,
+  });
   const accountReady = Boolean(
     effectiveAccount
     && (
