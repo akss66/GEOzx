@@ -193,6 +193,11 @@ export function applyConversationTurnEvent(
     runtime_overlay: nextOverlay,
     ...(status ? { status } : {}),
     ...(message ? { assistant_response: message } : {}),
+    ...(
+      ["turn.interrupt_resolved", "turn.interrupt_cancelled", "turn.resuming"].includes(event.type)
+        ? { pending_interrupt: null }
+        : {}
+    ),
   };
   return {
     ...thread,
@@ -369,6 +374,12 @@ function publicTurnPhase(value: unknown): TurnPhase | null {
 }
 
 function eventStatus(type: string, payload: Record<string, unknown>) {
+  if (type === "turn.resuming") return "queued";
+  if ([
+    "turn.interrupt_requested",
+    "turn.interrupt_resolved",
+    "turn.interrupt_cancelled",
+  ].includes(type)) return null;
   const explicit = stringValue(payload.status);
   if (explicit) return explicit;
   if (type === "brain.runtime.completed") return "completed";

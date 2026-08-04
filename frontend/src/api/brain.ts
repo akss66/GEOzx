@@ -21,6 +21,8 @@ import type {
   Platform,
   SendConversationTurnInput,
   TurnSubmission,
+  TurnInterrupt,
+  ResolveTurnInterruptResult,
 } from "../types";
 
 export async function listConversationEvents(
@@ -84,6 +86,33 @@ export async function deleteConversation(
 ): Promise<ConversationDeletionSummary> {
   const { data } = await api.delete<ConversationDeletionSummary>(
     `/brain/conversations/${threadId}`,
+  );
+  return data;
+}
+
+export async function listConversationTurnInterrupts(
+  threadId: number,
+): Promise<TurnInterrupt[]> {
+  const { data } = await api.get<TurnInterrupt[]>(
+    `/brain/conversations/${threadId}/turn-interrupts`,
+    { params: { status: "pending" } },
+  );
+  return data;
+}
+
+export async function resolveTurnInterrupt(input: {
+  interruptId: number;
+  expectedVersion: number;
+  resolution: Record<string, unknown>;
+  idempotencyKey: string;
+}): Promise<ResolveTurnInterruptResult> {
+  const { data } = await api.post<ResolveTurnInterruptResult>(
+    `/turn-interrupts/${input.interruptId}/resolve`,
+    {
+      expected_version: input.expectedVersion,
+      resolution: input.resolution,
+    },
+    { headers: { "Idempotency-Key": input.idempotencyKey } },
   );
   return data;
 }

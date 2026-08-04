@@ -1,10 +1,12 @@
 import { Button, Input } from "antd";
+import { useEffect, useState } from "react";
 
 import type {
   Artifact,
   ConversationApproval,
   ConversationThread,
   ConversationTurn,
+  TurnInterrupt,
   TurnProjection,
 } from "../../types";
 import type { ArtifactAction } from "./ArtifactCard";
@@ -19,6 +21,8 @@ export function TurnStream({
   approvalComment = "",
   onApprovalCommentChange,
   onApprove,
+  resolvingInterruptId = null,
+  onResolveInterrupt,
   onArtifactAction,
   revisingArtifactId = null,
   actionPendingArtifactId = null,
@@ -31,6 +35,8 @@ export function TurnStream({
   approvalComment?: string;
   onApprovalCommentChange?: (value: string) => void;
   onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
+  resolvingInterruptId?: number | null;
+  onResolveInterrupt?: (interrupt: TurnInterrupt, resolution: Record<string, unknown>) => void;
   onArtifactAction?: (action: ArtifactAction) => void;
   revisingArtifactId?: number | null;
   actionPendingArtifactId?: number | null;
@@ -69,6 +75,8 @@ export function TurnStream({
               approvalComment,
               onApprovalCommentChange,
               onApprove,
+              resolvingInterruptId,
+              onResolveInterrupt,
             })}
           />
         );
@@ -129,13 +137,20 @@ function renderBusinessActions({
   approvalComment,
   onApprovalCommentChange,
   onApprove,
+  resolvingInterruptId,
+  onResolveInterrupt,
 }: {
   turn: ConversationTurn;
   approvingToolCallId: number | null;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
   onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
+  resolvingInterruptId: number | null;
+  onResolveInterrupt?: (interrupt: TurnInterrupt, resolution: Record<string, unknown>) => void;
 }) {
+  const interrupt = turn.pending_interrupt?.status === "pending"
+    ? turn.pending_interrupt
+    : null;
   const projections = projectionsForTurn(turn);
   const approval = projections.find((projection) => projection.type === "approval");
   const blocked = projections.find((projection) => projection.type === "execution_blocked");
@@ -143,7 +158,13 @@ function renderBusinessActions({
 
   return (
     <>
-      {approval?.type === "approval" ? (
+      {interrupt ? (
+        <InterruptAction
+          interrupt={interrupt}
+          resolving={resolvingInterruptId === interrupt.id}
+          onResolve={onResolveInterrupt}
+        />
+      ) : approval?.type === "approval" ? (
         <ApprovalAction
           approval={approval.approval}
           approving={approvingToolCallId === approval.approval.id}
@@ -157,6 +178,75 @@ function renderBusinessActions({
       ) : null}
       {unknown ? <p>本轮有一条新进展，请刷新后查看。</p> : null}
     </>
+  );
+}
+
+function InterruptAction({
+  interrupt,
+  resolving,
+  onResolve,
+}: {
+  interrupt: TurnInterrupt;
+  resolving: boolean;
+  onResolve?: (interrupt: TurnInterrupt, resolution: Record<string, unknown>) => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  useEffect(() => setAnswer(""), [interrupt.id]);
+  const actionLabel = interrupt.action_label
+    ?? (interrupt.kind === "approval" ? "允许" : "继续");
+
+  if (!onResolve) return null;
+  if (interrupt.kind === "clarification") {
+    return (
+      <section aria-label="Input required">
+        <Input.TextArea
+          aria-label="Your answer"
+          value={answer}
+          maxLength={2000}
+          autoSize={{ minRows: 2, maxRows: 6 }}
+          onChange={(event) => setAnswer(event.target.value)}
+        />
+        <Button
+          type="primary"
+          loading={resolving}
+          disabled={!answer.trim()}
+          onClick={() => onResolve(interrupt, { answer: answer.trim() })}
+        >
+          {actionLabel}
+        </Button>
+      </section>
+    );
+  }
+  if (interrupt.kind === "approval") {
+    return (
+      <section aria-label="Approval required">
+        <Button
+          type="primary"
+          loading={resolving}
+          onClick={() => onResolve(interrupt, { approved: true })}
+        >
+          {actionLabel}
+        </Button>
+        <Button
+          danger
+          disabled={resolving}
+          onClick={() => onResolve(interrupt, { approved: false })}
+        >
+          拒绝
+        </Button>
+      </section>
+    );
+  }
+  return (
+    <section aria-label="Paused task">
+      <Button
+        type="primary"
+        loading={resolving}
+        onClick={() => onResolve(interrupt, { continue: true })}
+      >
+        {actionLabel}
+      </Button>
+    </section>
   );
 }
 

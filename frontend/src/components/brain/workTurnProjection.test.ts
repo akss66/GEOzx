@@ -41,6 +41,45 @@ const executionSummary: Extract<TurnProjection, { type: "execution_summary" }> =
 
 describe("projectWorkTurn", () => {
   it.each([
+    ["clarification", "needs_input"],
+    ["approval", "needs_approval"],
+    ["manual_pause", "paused"],
+  ] as const)("projects a pending %s interrupt without flattening it", (kind, expected) => {
+    const model = projectWorkTurn(turn({
+      status: "waiting_permission",
+      turn_phase: "waiting_approval",
+      pending_interrupt: {
+        id: 71,
+        account_id: 11,
+        thread_id: 81,
+        turn_id: 101,
+        run_id: 4,
+        kind,
+        status: "pending",
+        public_message: "Please confirm the next step.",
+        action_label: "Continue",
+        response_schema: {},
+        version: 1,
+        resolved_at: null,
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:00Z",
+      },
+    }));
+
+    expect(model).toMatchObject({
+      status: expected,
+      currentActivity: "Please confirm the next step.",
+    });
+  });
+
+  it("keeps the legacy waiting fallback only when a snapshot has no pending interrupt", () => {
+    expect(projectWorkTurn(turn({
+      status: "waiting_permission",
+      turn_phase: "waiting_approval",
+    })).status).toBe("waiting_user");
+  });
+
+  it.each([
     ["supplement", "已补充要求"],
     ["stop", "已请求停止"],
     ["replace_goal", "已换目标"],

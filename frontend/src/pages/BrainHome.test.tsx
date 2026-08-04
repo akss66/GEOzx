@@ -18,6 +18,7 @@ import {
   listBrainTasks,
   listComposerSkills,
   listConversations,
+  resolveTurnInterrupt,
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
@@ -118,6 +119,7 @@ vi.mock("../api/brain", () => ({
     updated_at: "2026-07-28T00:02:00Z",
   }]),
   sendConversationTurn: vi.fn(),
+  resolveTurnInterrupt: vi.fn(),
   stopBrainGeneration: vi.fn(async () => ({
     client_message_id: "stopped",
     stop_requested: true,
@@ -171,6 +173,25 @@ describe("BrainHome V3 conversation projection", () => {
     vi.mocked(sendConversationTurn).mockResolvedValue(
       submission(persistedTurn(201, "default-client", "默认消息", "默认回复")),
     );
+    vi.mocked(resolveTurnInterrupt).mockImplementation(async (input) => ({
+      interrupt: {
+        id: input.interruptId,
+        account_id: 3,
+        thread_id: 81,
+        turn_id: 501,
+        run_id: 701,
+        kind: "approval",
+        status: "resolved",
+        public_message: "Publish this draft?",
+        action_label: "Publish now",
+        response_schema: {},
+        version: input.expectedVersion + 1,
+        resolved_at: "2026-08-04T00:00:02Z",
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:02Z",
+      },
+      run_id: 701,
+    }));
     vi.mocked(uploadConversationAttachments).mockResolvedValue([{
       id: 91,
       account_id: 3,
@@ -1405,6 +1426,46 @@ describe("BrainHome V3 conversation projection", () => {
       approved: true,
       comment: undefined,
     }));
+  });
+
+  it("resolves a canonical pending interrupt instead of calling the legacy approval route", async () => {
+    const waiting = {
+      ...persistedTurn(501, "interrupt-client", "Prepare publishing", null, "waiting_permission"),
+      pending_interrupt: {
+        id: 71,
+        account_id: 3,
+        thread_id: 81,
+        turn_id: 501,
+        run_id: 701,
+        kind: "approval" as const,
+        status: "pending" as const,
+        public_message: "Publish this draft?",
+        action_label: "Publish now",
+        response_schema: {},
+        version: 2,
+        resolved_at: null,
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:00Z",
+      },
+      projections: [{
+        type: "approval" as const,
+        turn_id: 501,
+        approval: pendingApproval(901),
+      }],
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [waiting]));
+
+    renderBrainHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish now" }));
+    await waitFor(() => expect(resolveTurnInterrupt).toHaveBeenCalledWith(expect.objectContaining({
+      interruptId: 71,
+      expectedVersion: 2,
+      resolution: { approved: true },
+      idempotencyKey: expect.stringContaining("interrupt-71-v2-"),
+    })));
+    expect(approveToolCall).not.toHaveBeenCalled();
   });
 
   it("uses a durable active Turn to disable input and stop after reload", async () => {

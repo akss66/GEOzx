@@ -41,14 +41,16 @@ const FAILED_STEP_STATUSES = new Set([
 export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
   const projections = projectionsForTurn(turn);
   const steps = overlayRuntimeSteps(projectSteps(projections), turn);
-  const status = projectStatus(turn.status, turn.turn_phase);
+  const status = projectStatus(turn.status, turn.turn_phase, turn.pending_interrupt);
 
   return {
     key: workTurnKey(turn),
     turnId: turn.id,
     userMessage: turn.user_input,
     status,
-    currentActivity: projectCurrentActivity(status, turn.turn_phase, turn.status, steps),
+    currentActivity: turn.pending_interrupt?.status === "pending"
+      ? turn.pending_interrupt.public_message
+      : projectCurrentActivity(status, turn.turn_phase, turn.status, steps),
     assistantText: turn.assistant_response ?? latestAnswer(projections),
     steeringNotice: projectSteeringNotice(turn),
     steps,
@@ -163,9 +165,18 @@ function projectionsForTurn(turn: ConversationTurn) {
   );
 }
 
-function projectStatus(status: string, phase: TurnPhase | undefined): WorkTurnStatus {
+function projectStatus(
+  status: string,
+  phase: TurnPhase | undefined,
+  interrupt: ConversationTurn["pending_interrupt"],
+): WorkTurnStatus {
   const terminalStatus = TERMINAL_WORK_TURN_STATUSES[status];
   if (terminalStatus) return terminalStatus;
+  if (interrupt?.status === "pending") {
+    if (interrupt.kind === "clarification") return "needs_input";
+    if (interrupt.kind === "approval") return "needs_approval";
+    return "paused";
+  }
   if (PAUSED_WORK_TURN_STATUSES.has(status)) return "waiting_user";
   if (phase === "waiting_approval") return "waiting_user";
   if (phase === "failed") return "failed";

@@ -803,6 +803,7 @@ export interface ConversationTurn {
     terminal: boolean;
   };
   runtime_overlay?: ConversationTurnRuntimeOverlay;
+  pending_interrupt?: TurnInterrupt | null;
   created_at: string;
   updated_at: string;
 }
@@ -853,6 +854,9 @@ export type TurnPhase =
 
 export type WorkTurnStatus =
   | "working"
+  | "needs_input"
+  | "needs_approval"
+  | "paused"
   | "waiting_user"
   | "completed"
   | "blocked"
@@ -924,6 +928,38 @@ export interface ConversationTurnEvent {
   run_id: number | null;
   skill_run_id: number | null;
   created_at: string;
+}
+
+export type TurnInterruptKind = "clarification" | "approval" | "manual_pause";
+export type TurnInterruptStatus =
+  | "pending"
+  | "resolved"
+  | "cancelled"
+  | "expired"
+  | "superseded";
+
+export interface TurnInterrupt {
+  id: number;
+  account_id: number;
+  thread_id: number;
+  turn_id: number;
+  run_id: number;
+  kind: TurnInterruptKind;
+  status: TurnInterruptStatus;
+  public_message: string;
+  action_label: string | null;
+  response_schema: Record<string, unknown>;
+  version: number;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResolveTurnInterruptResult {
+  interrupt: TurnInterrupt;
+  run_id: number;
+  dispatch_deferred?: boolean;
+  dispatch_message?: string | null;
 }
 
 export interface TurnSubmission {

@@ -20,12 +20,14 @@ import {
   listConversationEvents,
   listDeliverableAcceptances,
   listPendingToolCallApprovals,
+  listConversationTurnInterrupts,
   listTaskInvocations,
   listTaskToolCalls,
   rejudgeDeliverableAcceptance,
   rejectDeliverableAcceptance,
   reviseBrainDecision,
   regenerateBrainMessage,
+  resolveTurnInterrupt,
   refreshBrainObservation,
   reviseArtifact,
   selectBrainDecision,
@@ -508,6 +510,45 @@ describe("brain api", () => {
       approved: true,
       comment: "通过",
     });
+  });
+
+  it("lists and resolves canonical turn interrupts with optimistic versioning", async () => {
+    const interrupt = {
+      id: 71,
+      account_id: 3,
+      thread_id: 81,
+      turn_id: 101,
+      run_id: 31,
+      kind: "approval",
+      status: "pending",
+      public_message: "Publish this draft?",
+      action_label: "Publish",
+      response_schema: {},
+      version: 2,
+      resolved_at: null,
+      created_at: "2026-08-04T00:00:00Z",
+      updated_at: "2026-08-04T00:00:00Z",
+    };
+    apiGet.mockResolvedValueOnce({ data: [interrupt] });
+    apiPost.mockResolvedValueOnce({ data: { interrupt: { ...interrupt, status: "resolved" }, run_id: 31 } });
+
+    await expect(listConversationTurnInterrupts(81)).resolves.toEqual([interrupt]);
+    await resolveTurnInterrupt({
+      interruptId: 71,
+      expectedVersion: 2,
+      resolution: { approved: true },
+      idempotencyKey: "interrupt-71-approve",
+    });
+
+    expect(apiGet).toHaveBeenCalledWith(
+      "/brain/conversations/81/turn-interrupts",
+      { params: { status: "pending" } },
+    );
+    expect(apiPost).toHaveBeenCalledWith(
+      "/turn-interrupts/71/resolve",
+      { expected_version: 2, resolution: { approved: true } },
+      { headers: { "Idempotency-Key": "interrupt-71-approve" } },
+    );
   });
 
   it("routes messages and strategy decisions through the smart runtime API", async () => {

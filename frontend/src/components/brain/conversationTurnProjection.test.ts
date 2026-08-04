@@ -78,6 +78,41 @@ function turnEvent(
 }
 
 describe("conversation Turn projection", () => {
+  it("clears the pending interrupt when the durable turn resumes", () => {
+    const persisted = {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        id: 101,
+        status: "waiting_user",
+        pending_interrupt: {
+          id: 71,
+          account_id: 3,
+          thread_id: 81,
+          turn_id: 101,
+          run_id: 3,
+          kind: "clarification" as const,
+          status: "pending" as const,
+          public_message: "Which audience should I use?",
+          action_label: "Continue",
+          response_schema: {},
+          version: 1,
+          resolved_at: null,
+          created_at: "2026-08-04T00:00:00Z",
+          updated_at: "2026-08-04T00:00:00Z",
+        },
+      }],
+    };
+
+    const resumed = applyConversationTurnEvent(
+      persisted,
+      turnEvent("turn.resuming", 9, 9, { status: "resolved", interrupt_id: 71 }),
+    );
+
+    expect(resumed.turns[0]).toMatchObject({ status: "queued" });
+    expect(resumed.turns[0].pending_interrupt).toBeNull();
+  });
+
   it("projects durable Turn events by top-level thread and Turn identity without client-message data", () => {
     const persisted = { ...thread, turns: [{ ...thread.turns[0], id: 101, status: "running" }] };
     const received = applyConversationTurnEvent(persisted, turnEvent("turn.received", 1, 1));

@@ -6,6 +6,9 @@ import { ProcessDisclosure } from "./ProcessDisclosure";
 import { WorkTurnProgress } from "./WorkTurnProgress";
 
 const STATUS_COPY: Record<Exclude<WorkTurnStatus, "working">, string> = {
+  needs_input: "等待你补充信息",
+  needs_approval: "等待你的确认",
+  paused: "已暂停",
   waiting_user: "等待你的确认",
   completed: "已完成",
   blocked: "需要处理",

@@ -335,6 +335,88 @@ describe("TurnStream", () => {
     expect(onApprove).toHaveBeenCalledWith(expect.objectContaining({ id: 9001 }), true);
   });
 
+  it("renders the canonical pending interrupt instead of a legacy approval projection", () => {
+    const onResolveInterrupt = vi.fn();
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        status: "waiting_permission",
+        pending_interrupt: {
+          id: 71,
+          account_id: 3,
+          thread_id: 81,
+          turn_id: 101,
+          run_id: 31,
+          kind: "approval",
+          status: "pending",
+          public_message: "Publish the approved draft now?",
+          action_label: "Publish",
+          response_schema: {},
+          version: 2,
+          resolved_at: null,
+          created_at: "2026-08-04T00:00:00Z",
+          updated_at: "2026-08-04T00:00:00Z",
+        },
+        projections: [{
+          type: "approval",
+          turn_id: 101,
+          approval: {
+            id: 9001,
+            task_id: 21,
+            tool_name: "Legacy approval",
+            tool_code: "legacy",
+            status: "waiting_approval",
+            permission_mode: "confirm",
+            requires_human_confirmation: true,
+          },
+        }],
+      }],
+    }} onResolveInterrupt={onResolveInterrupt} />);
+
+    expect(screen.getByText("Publish the approved draft now?")).toBeVisible();
+    expect(screen.queryByText(/Legacy approval/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    expect(onResolveInterrupt).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 71, version: 2 }),
+      { approved: true },
+    );
+  });
+
+  it("submits a clarification answer through its canonical interrupt callback", () => {
+    const onResolveInterrupt = vi.fn();
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        status: "waiting_user",
+        pending_interrupt: {
+          id: 72,
+          account_id: 3,
+          thread_id: 81,
+          turn_id: 101,
+          run_id: 31,
+          kind: "clarification",
+          status: "pending",
+          public_message: "Who is the primary audience?",
+          action_label: "Continue",
+          response_schema: {},
+          version: 1,
+          resolved_at: null,
+          created_at: "2026-08-04T00:00:00Z",
+          updated_at: "2026-08-04T00:00:00Z",
+        },
+      }],
+    }} onResolveInterrupt={onResolveInterrupt} />);
+
+    fireEvent.change(screen.getByLabelText("Your answer"), { target: { value: "New parents" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onResolveInterrupt).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 72 }),
+      { answer: "New parents" },
+    );
+  });
+
   it("keeps the server order and durable projection identity", () => {
     const { container } = render(<TurnStream thread={{
       ...thread,

@@ -16,6 +16,7 @@ import {
   getArtifact,
   getConversation,
   listComposerSkills,
+  resolveTurnInterrupt,
   sendConversationTurn,
   stopBrainGeneration,
 } from "../api/brain";
@@ -64,6 +65,7 @@ import type {
   ConversationThread,
   ConversationTurn,
   ConversationTurnEvent,
+  TurnInterrupt,
 } from "../types";
 
 interface PendingTurn {
@@ -516,7 +518,9 @@ export default function BrainHome() {
     [activeConversation],
   );
   const pendingPermission = useMemo(
-    () => findLatestPendingApproval(activeConversation),
+    () => findLatestPendingInterrupt(activeConversation) == null
+      ? findLatestPendingApproval(activeConversation)
+      : null,
     [activeConversation],
   );
 
@@ -656,6 +660,43 @@ export default function BrainHome() {
     },
     onError: (error) => message.error(
       presentApiError(error, "工具权限处理失败，请稍后重试。").message,
+    ),
+  });
+
+  const interruptMutation = useMutation({
+    mutationFn: (input: {
+      interrupt: TurnInterrupt;
+      resolution: Record<string, unknown>;
+      idempotencyKey: string;
+    }) => resolveTurnInterrupt({
+      interruptId: input.interrupt.id,
+      expectedVersion: input.interrupt.version,
+      resolution: input.resolution,
+      idempotencyKey: input.idempotencyKey,
+    }),
+    onSuccess: (result) => {
+      if (activeConversationThreadId != null) {
+        qc.setQueryData<ConversationThread>(
+          ["brain-conversation", activeConversationThreadId],
+          (current) => current == null ? current : {
+            ...current,
+            turns: current.turns.map((turn) =>
+              turn.pending_interrupt?.id === result.interrupt.id
+                ? { ...turn, pending_interrupt: null }
+                : turn
+            ),
+          },
+        );
+        void qc.invalidateQueries({
+          queryKey: ["brain-conversation", activeConversationThreadId],
+        });
+      }
+      if (result.dispatch_deferred) {
+        message.info(result.dispatch_message ?? "你的回复已保存，任务会自动继续。");
+      }
+    },
+    onError: (error) => message.error(
+      presentApiError(error, "处理失败，请重试。").message,
     ),
   });
 
@@ -1370,6 +1411,18 @@ export default function BrainHome() {
                         comment,
                       })
                     }
+                    resolvingInterruptId={
+                      interruptMutation.isPending
+                        ? interruptMutation.variables?.interrupt.id ?? null
+                        : null
+                    }
+                    onResolveInterrupt={(interrupt, resolution) =>
+                      interruptMutation.mutate({
+                        interrupt,
+                        resolution,
+                        idempotencyKey: createInterruptIdempotencyKey(interrupt),
+                      })
+                    }
                     onArtifactAction={(action) => handleArtifactAction(action, deliverableActionMutation.mutate)}
                   />
                   {!isGenerating && !pendingPermission ? (
@@ -1695,6 +1748,9 @@ function durableDeliverableId(event: ConversationTurnEvent) {
 
 function isProjectionRecoveryEvent(event: ConversationTurnEvent) {
   return event.type === "turn.paused"
+    || event.type === "turn.interrupt_requested"
+    || event.type === "turn.interrupt_resolved"
+    || event.type === "turn.interrupt_cancelled"
     || (event.type === "deliverable.updated" && durableDeliverableId(event) != null);
 }
 
@@ -1702,7 +1758,12 @@ function needsConversationProjectionRecovery(
   thread: ConversationThread,
   event: ConversationTurnEvent,
 ) {
-  if (event.type === "turn.paused") return true;
+  if (
+    event.type === "turn.paused"
+    || event.type === "turn.interrupt_requested"
+    || event.type === "turn.interrupt_resolved"
+    || event.type === "turn.interrupt_cancelled"
+  ) return true;
   const deliverableId = durableDeliverableId(event);
   if (event.type !== "deliverable.updated" || deliverableId == null) return false;
   const turn = thread.turns.find((candidate) => candidate.id === event.turn_id);
@@ -1715,6 +1776,12 @@ function isConversationProjectionRequirementSatisfied(
 ) {
   const turn = thread.turns.find((candidate) => candidate.id === event.turn_id);
   if (!turn) return false;
+  if (event.type === "turn.interrupt_requested") {
+    return turn.pending_interrupt?.id === Number(event.payload.interrupt_id);
+  }
+  if (event.type === "turn.interrupt_resolved" || event.type === "turn.interrupt_cancelled") {
+    return turn.pending_interrupt == null;
+  }
   if (event.type === "turn.paused") {
     const pausedStatus = typeof event.payload.status === "string"
       ? event.payload.status
@@ -1790,6 +1857,24 @@ function findLatestPendingApproval(
     }
   }
   return null;
+}
+
+function findLatestPendingInterrupt(
+  conversation: ConversationThread | null,
+): TurnInterrupt | null {
+  if (!conversation) return null;
+  for (let index = conversation.turns.length - 1; index >= 0; index -= 1) {
+    const interrupt = conversation.turns[index].pending_interrupt;
+    if (interrupt?.status === "pending") return interrupt;
+  }
+  return null;
+}
+
+function createInterruptIdempotencyKey(interrupt: TurnInterrupt) {
+  const nonce = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `interrupt-${interrupt.id}-v${interrupt.version}-${nonce}`;
 }
 
 function syncLabel(status: Account["data_sync_status"]) {
