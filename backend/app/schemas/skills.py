@@ -31,6 +31,8 @@ class SkillDefinition:
     artifact_type: str | None
     expert_stages: tuple[tuple[str, ...], ...] = ()
     critic_policy: Literal["none", "required"] = "none"
+    checkpoint_graph_key: str | None = None
+    checkpoint_graph_version: str | None = None
 
     def __post_init__(self) -> None:
         if not _SKILL_CODE_PATTERN.fullmatch(self.code):
@@ -47,6 +49,12 @@ class SkillDefinition:
         if flattened != self.expert_codes:
             raise ValueError("expert_stages must flatten to expert_codes in definition order")
         object.__setattr__(self, "expert_stages", stages)
+        from app.orchestrator.checkpoint_graph_contracts import get_checkpoint_graph_contract
+
+        contract = get_checkpoint_graph_contract(self.code, self.version)
+        if contract is not None:
+            object.__setattr__(self, "checkpoint_graph_key", contract.skill_code)
+            object.__setattr__(self, "checkpoint_graph_version", contract.graph_version)
 
 
 class SkillCatalogItem(BaseModel):

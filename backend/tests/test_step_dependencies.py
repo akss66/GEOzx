@@ -41,6 +41,12 @@ def _step(
         produces_outputs=frozenset(produces),
         reuse_policy="immutable",
         side_effect_level="none",
+        input_schema_version="test-input/v1",
+        output_schema_version="test-output/v1",
+        input_projection_key="test-projection/v1",
+        freshness_policy_key=None,
+        executor_owner="manual",
+        executor_boundary_key=f"test:{key}",
     )
 
 
@@ -230,9 +236,7 @@ def test_direct_and_transitive_reasons_are_stable_and_auditable() -> None:
         {ConstraintPath.OFFER_TERMS, ConstraintPath.SCRIPT_REQUIREMENTS},
     )
 
-    assert tuple(
-        (reason.step_key, reason.kind, reason.causes) for reason in plan.reasons
-    ) == (
+    assert tuple((reason.step_key, reason.kind, reason.causes) for reason in plan.reasons) == (
         (
             "script_generation",
             "direct",

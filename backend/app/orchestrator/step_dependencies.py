@@ -6,44 +6,19 @@ This module describes work; it never executes or skips a Skill.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Literal
 
+from app.orchestrator.checkpoint_graph_contracts import (
+    CheckpointStepSpec,
+    ConstraintPath,
+    require_checkpoint_graph_contract,
+)
 
-class ConstraintPath(StrEnum):
-    GOAL = "goal"
-    AUDIENCE = "audience"
-    BRAND_CONSTRAINTS = "brand_constraints"
-    PRODUCT_FACTS = "product_facts"
-    OFFER_TERMS = "offer_terms"
-    TOPIC_REQUIREMENTS = "topic_requirements"
-    SCRIPT_REQUIREMENTS = "script_requirements"
-    VISUAL_REQUIREMENTS = "visual_requirements"
-    SCHEDULE_REQUIREMENTS = "schedule_requirements"
-    DATA_PERIOD = "data_period"
-    SOURCE_ARTIFACTS = "source_artifacts"
-    PUBLISH_PARAMETERS = "publish_parameters"
-
-
-ReusePolicy = Literal["immutable", "freshness_bound", "never"]
-SideEffectLevel = Literal[
-    "none",
-    "read",
-    "idempotent_write",
-    "non_idempotent_write",
-]
 InvalidationKind = Literal["direct", "transitive", "fallback"]
 InvalidationMode = Literal["partial", "full_recompute"]
 
 
-@dataclass(frozen=True)
-class StepSpec:
-    key: str
-    consumes_constraints: frozenset[ConstraintPath]
-    consumes_outputs: frozenset[str]
-    produces_outputs: frozenset[str]
-    reuse_policy: ReusePolicy
-    side_effect_level: SideEffectLevel
+StepSpec = CheckpointStepSpec
 
 
 @dataclass(frozen=True)
@@ -83,101 +58,11 @@ class DependencyGraphError(ValueError):
 OPERATION_LOOP_SKILL_CODE = "operation_iteration"
 
 
-def _spec(
-    key: str,
-    *,
-    constraints: tuple[ConstraintPath, ...] = (),
-    inputs: tuple[str, ...] = (),
-    outputs: tuple[str, ...] = (),
-    reuse_policy: ReusePolicy = "immutable",
-    side_effect_level: SideEffectLevel = "none",
-) -> StepSpec:
-    return StepSpec(
-        key=key,
-        consumes_constraints=frozenset(constraints),
-        consumes_outputs=frozenset(inputs),
-        produces_outputs=frozenset(outputs),
-        reuse_policy=reuse_policy,
-        side_effect_level=side_effect_level,
-    )
-
-
+_OPERATION_LOOP_CONTRACT = require_checkpoint_graph_contract(OPERATION_LOOP_SKILL_CODE, 1)
 OPERATION_LOOP_GRAPH = OperationLoopGraph(
-    skill_code=OPERATION_LOOP_SKILL_CODE,
-    version="operation-loop/v1",
-    steps=(
-        _spec(
-            "read_account_data",
-            constraints=(ConstraintPath.DATA_PERIOD,),
-            outputs=("account_snapshot",),
-            reuse_policy="freshness_bound",
-            side_effect_level="read",
-        ),
-        _spec(
-            "benchmark_analysis",
-            constraints=(ConstraintPath.SOURCE_ARTIFACTS,),
-            inputs=("account_snapshot",),
-            outputs=("benchmark_findings",),
-            reuse_policy="freshness_bound",
-            side_effect_level="read",
-        ),
-        _spec(
-            "topic_planning",
-            constraints=(
-                ConstraintPath.GOAL,
-                ConstraintPath.AUDIENCE,
-                ConstraintPath.BRAND_CONSTRAINTS,
-                ConstraintPath.PRODUCT_FACTS,
-                ConstraintPath.TOPIC_REQUIREMENTS,
-            ),
-            inputs=("account_snapshot", "benchmark_findings"),
-            outputs=("topic_plan",),
-        ),
-        _spec(
-            "script_generation",
-            constraints=(
-                ConstraintPath.BRAND_CONSTRAINTS,
-                ConstraintPath.PRODUCT_FACTS,
-                ConstraintPath.OFFER_TERMS,
-                ConstraintPath.SCRIPT_REQUIREMENTS,
-            ),
-            inputs=("topic_plan",),
-            outputs=("scripts",),
-        ),
-        _spec(
-            "visual_brief_generation",
-            constraints=(
-                ConstraintPath.BRAND_CONSTRAINTS,
-                ConstraintPath.VISUAL_REQUIREMENTS,
-            ),
-            inputs=("scripts",),
-            outputs=("visual_briefs",),
-        ),
-        _spec(
-            "quality_review",
-            constraints=(ConstraintPath.BRAND_CONSTRAINTS,),
-            inputs=("topic_plan", "scripts", "visual_briefs"),
-            outputs=("quality_result",),
-            reuse_policy="never",
-        ),
-        _spec(
-            "content_calendar_planning",
-            constraints=(ConstraintPath.SCHEDULE_REQUIREMENTS,),
-            inputs=("topic_plan", "scripts", "visual_briefs"),
-            outputs=("content_calendar",),
-        ),
-        _spec(
-            "publishing_preparation",
-            constraints=(
-                ConstraintPath.SOURCE_ARTIFACTS,
-                ConstraintPath.PUBLISH_PARAMETERS,
-            ),
-            inputs=("quality_result", "content_calendar"),
-            outputs=("publish_package",),
-            reuse_policy="never",
-            side_effect_level="idempotent_write",
-        ),
-    ),
+    skill_code=_OPERATION_LOOP_CONTRACT.skill_code,
+    version=_OPERATION_LOOP_CONTRACT.graph_version,
+    steps=_OPERATION_LOOP_CONTRACT.steps,
 )
 
 
@@ -276,9 +161,7 @@ def build_invalidation_plan(
     }
 
     direct = {
-        step.key
-        for step in graph.steps
-        if step.consumes_constraints.intersection(normalized)
+        step.key for step in graph.steps if step.consumes_constraints.intersection(normalized)
     }
     affected = set(direct)
     for step_key in order:
@@ -318,9 +201,7 @@ def build_invalidation_plan(
     return InvalidationPlan(
         skill_code=skill_code,
         graph_version=graph.version,
-        changed_constraints=tuple(
-            path.value for path in ConstraintPath if path in normalized
-        ),
+        changed_constraints=tuple(path.value for path in ConstraintPath if path in normalized),
         direct_steps=direct_steps,
         transitive_steps=transitive_steps,
         affected_steps=ordered_affected,
@@ -354,8 +235,7 @@ def _full_recompute_plan(
         earliest_affected_step=step_order[0] if step_order else None,
         mode="full_recompute",
         reasons=tuple(
-            InvalidationReason(step_key, "fallback", (fallback_reason,))
-            for step_key in step_order
+            InvalidationReason(step_key, "fallback", (fallback_reason,)) for step_key in step_order
         ),
         fallback_reason=fallback_reason,
     )
