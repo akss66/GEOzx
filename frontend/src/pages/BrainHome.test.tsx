@@ -27,6 +27,7 @@ import {
   deleteConversationAttachment,
   uploadConversationAttachments,
 } from "../api/attachments";
+import { getAccountPendingWork } from "../api/pendingWork";
 import type {
   Account,
   Artifact,
@@ -79,7 +80,14 @@ const mocks = vi.hoisted(() => {
     handler: null as ((event: import("../types").ConversationTurnEvent) => void) | null,
     onRecover: null as (() => void) | null,
   };
-  return { account, secondaryAccount, workspace, event, turnEvents };
+  const accountEvents = {
+    handler: null as ((event: {
+      id?: number;
+      type: string;
+      payload?: unknown;
+    }) => void) | null,
+  };
+  return { account, secondaryAccount, workspace, event, turnEvents, accountEvents };
 });
 
 vi.mock("../api/shell", () => ({
@@ -139,7 +147,24 @@ vi.mock("../api/attachments", () => ({
   uploadConversationAttachments: vi.fn(),
 }));
 
+vi.mock("../api/pendingWork", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/pendingWork")>();
+  return {
+    ...actual,
+    getAccountPendingWork: vi.fn(async (accountId: number) => ({
+      account_id: accountId,
+      groups: [],
+    })),
+    completePendingShootTask: vi.fn(),
+    publishPendingScheduleEntry: vi.fn(),
+  };
+});
+
 vi.mock("../hooks/useEventStream", () => ({
+  useEventStream: vi.fn((onEvent) => {
+    mocks.accountEvents.handler = onEvent;
+    return { connected: true, connectionState: "connected", last: null };
+  }),
   useConversationRuntimeStream: vi.fn(({ onEvent }) => {
     mocks.event.handler = onEvent;
     return { connected: true, connectionState: "connected" };
@@ -175,7 +200,12 @@ describe("BrainHome V3 conversation projection", () => {
     mocks.event.options = null;
     mocks.turnEvents.handler = null;
     mocks.turnEvents.onRecover = null;
+    mocks.accountEvents.handler = null;
     vi.mocked(listComposerSkills).mockResolvedValue([]);
+    vi.mocked(getAccountPendingWork).mockImplementation(async (accountId) => ({
+      account_id: accountId,
+      groups: [],
+    }));
     vi.mocked(createConversation).mockResolvedValue(thread(82, []));
     vi.mocked(getConversation).mockImplementation(async (threadId) => thread(threadId, []));
     vi.mocked(sendConversationTurn).mockResolvedValue(
@@ -229,7 +259,7 @@ describe("BrainHome V3 conversation projection", () => {
     expect(await screen.findByRole("region", { name: "方案与内容" })).toBeInTheDocument();
   });
 
-  it("exposes four real top-level workspace entries and navigates to account data and pending approvals", async () => {
+  it("renders pending work as a third real workspace tab instead of an approvals redirect", async () => {
     renderBrainHome();
 
     await screen.findByRole("heading", { name: "今天，想推进什么？" });
@@ -245,10 +275,82 @@ describe("BrainHome V3 conversation projection", () => {
     expect(screen.getByRole("tabpanel", { name: "方案与内容" })).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("tab", { name: "方案与内容" }), { key: "ArrowLeft" });
     await waitFor(() => expect(screen.getByRole("tab", { name: "对话" })).toHaveAttribute("aria-selected", "true"));
+    fireEvent.click(screen.getByRole("tab", { name: "待处理" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "待处理" }))
+      .toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByRole("tabpanel", { name: "待处理" })).toBeInTheDocument();
+    expect(await screen.findByText("当前没有需要你处理的事项")).toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent("/");
     fireEvent.click(screen.getByRole("button", { name: "抖音数据" }));
     expect(await screen.findByTestId("location")).toHaveTextContent("/accounts/3/data");
-    fireEvent.click(screen.getByRole("button", { name: "待处理" }));
-    expect(await screen.findByTestId("location")).toHaveTextContent("/approvals");
+  });
+
+  it("opens pending work in its exact source WorkTurn", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "pending-source", "需要确认的任务", "请确认后继续"),
+    ]));
+    vi.mocked(getAccountPendingWork).mockResolvedValue({
+      account_id: 3,
+      groups: [{
+        kind: "clarification",
+        label: "待补充资料",
+        count: 1,
+        items: [{
+          id: "interrupt:71",
+          kind: "clarification",
+          action_label: "补充资料",
+          account_id: 3,
+          thread_id: 81,
+          turn_id: 501,
+          due_at: null,
+          reason: "请补充本轮目标",
+          next_step_after_completion: "运营大脑会继续执行。",
+          target: { type: "conversation_turn", thread_id: 81, turn_id: 501 },
+        }],
+      }],
+    });
+
+    renderBrainHome();
+    fireEvent.click(await screen.findByRole("tab", { name: "待处理" }));
+    fireEvent.click(await screen.findByRole("button", { name: "补充资料" }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "对话" }))
+      .toHaveAttribute("aria-selected", "true"));
+    const sourceTurn = await screen.findByTestId("work-turn");
+    expect(sourceTurn).toHaveAttribute("data-turn-id", "501");
+  });
+
+  it("refreshes only the selected account pending-work query from durable events", async () => {
+    const view = renderBrainHome();
+    fireEvent.click(await screen.findByRole("tab", { name: "待处理" }));
+    await screen.findByText("当前没有需要你处理的事项");
+    const invalidate = vi.spyOn(view.queryClient, "invalidateQueries");
+
+    act(() => mocks.accountEvents.handler?.({
+      type: "pending_work.updated",
+      payload: { account_id: 3 },
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["account-pending-work", 3] });
+
+    invalidate.mockClear();
+    act(() => mocks.accountEvents.handler?.({
+      type: "pending_work.updated",
+      payload: { account_id: 4 },
+    }));
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("changes the pending-work query key with the selected account", async () => {
+    renderBrainHome();
+    fireEvent.click(await screen.findByRole("tab", { name: "待处理" }));
+    await waitFor(() => expect(getAccountPendingWork).toHaveBeenCalledWith(3));
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
+    fireEvent.click(screen.getByRole("tab", { name: "待处理" }));
+
+    await waitFor(() => expect(getAccountPendingWork).toHaveBeenCalledWith(4));
   });
 
   it("keeps a preloaded next-account plans cache while removing the prior account cache", async () => {

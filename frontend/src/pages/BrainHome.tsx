@@ -26,6 +26,7 @@ import {
   uploadConversationAttachments,
 } from "../api/attachments";
 import { presentApiError } from "../api/errors";
+import { pendingWorkQueryKey } from "../api/pendingWork";
 import { getWorkspaceContext } from "../api/shell";
 import { AgentAvatar } from "../components/agents/AgentAvatar";
 import { ArtifactCard, type ArtifactAction } from "../components/brain/ArtifactCard";
@@ -33,6 +34,7 @@ import { ArtifactCenter } from "../components/brain/ArtifactCenter";
 import { BrainComposer } from "../components/brain/BrainComposer";
 import type { DraftAttachment } from "../components/brain/AttachmentTray";
 import { ConversationHistoryDrawer } from "../components/brain/ConversationHistoryDrawer";
+import { PendingWork } from "../components/brain/PendingWork";
 import { TurnStream } from "../components/brain/TurnStream";
 import { presentDeliverable } from "../components/brain/deliverablePresentation";
 import {
@@ -46,7 +48,7 @@ import {
 } from "../components/brain/conversationTurnProjection";
 import { OperationalState } from "../components/ui";
 import { useConversationTurnEvents } from "../hooks/useConversationTurnEvents";
-import { useConversationRuntimeStream, type DyEvent } from "../hooks/useEventStream";
+import { useConversationRuntimeStream, useEventStream, type DyEvent } from "../hooks/useEventStream";
 import {
   clearActiveBrainTaskId,
   clearActiveConversationThreadId,
@@ -108,6 +110,8 @@ interface ProjectionRecoveryRequirements {
   followUpUsed: boolean;
 }
 
+type WorkspaceMode = "conversation" | "results" | "pending";
+
 function isQueuedDurableEventForScope(
   pending: PendingDurableTurnEvent,
   accountId: number,
@@ -155,7 +159,7 @@ export default function BrainHome() {
   const [artifactSourceOverrides, setArtifactSourceOverrides] = useState<Record<number, Artifact>>({});
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const [workspaceMode, setWorkspaceMode] = useState<"conversation" | "results">("conversation");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("conversation");
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [sourceReturnTarget, setSourceReturnTarget] = useState<SourceReturnTarget | null>(null);
   const [sourceReturnError, setSourceReturnError] = useState<string | null>(null);
@@ -288,6 +292,13 @@ export default function BrainHome() {
   const projectDurableTurnEvent = useCallback((event: ConversationTurnEvent) => {
     const currentThreadId = activeConversationThreadIdRef.current;
     const accountId = effectiveAccountIdRef.current;
+    if (accountId != null && [
+      "turn.interrupt_requested",
+      "turn.interrupt_resolved",
+      "turn.interrupt_cancelled",
+    ].includes(event.type)) {
+      void qc.invalidateQueries({ queryKey: pendingWorkQueryKey(accountId) });
+    }
     if (currentThreadId == null || accountId == null || event.thread_id !== currentThreadId) return;
     const epoch = conversationScopeEpochRef.current;
     const current = qc.getQueryData<ConversationThread>(["brain-conversation", currentThreadId]);
@@ -403,6 +414,16 @@ export default function BrainHome() {
     onEvent: projectDurableTurnEvent,
     onRecover: recoverConversationProjection,
   });
+  useEventStream(useCallback((event: DyEvent) => {
+    if (![
+      "pending_work.updated",
+      "account_data.import_job.progress",
+    ].includes(event.type)) return;
+    const payload = asRuntimePayload(event.payload);
+    const accountId = effectiveAccountIdRef.current;
+    if (accountId == null || Number(payload?.account_id) !== accountId) return;
+    void qc.invalidateQueries({ queryKey: pendingWorkQueryKey(accountId) });
+  }, [qc]));
   const accountReady = Boolean(
     effectiveAccount
     && (
@@ -425,7 +446,10 @@ export default function BrainHome() {
     setPendingTurn(null);
     pendingClientMessageId.current = null;
     if (accountChanged) setGoal("");
-    if (accountChanged) qc.removeQueries({ queryKey: ["account-artifacts", previousAccountId] });
+    if (previousAccountId != null && previousAccountId !== nextAccountId) {
+      qc.removeQueries({ queryKey: ["account-artifacts", previousAccountId] });
+      qc.removeQueries({ queryKey: pendingWorkQueryKey(previousAccountId) });
+    }
     setDraftAttachments([]);
     setSelectedArtifact(null);
     setSourceReturnTarget(null);
@@ -716,6 +740,7 @@ export default function BrainHome() {
       if (result.dispatch_deferred) {
         message.info(result.dispatch_message ?? "你的回复已保存，任务会自动继续。");
       }
+      void qc.invalidateQueries({ queryKey: pendingWorkQueryKey(result.interrupt.account_id) });
     },
     onError: (error) => message.error(
       presentApiError(error, "处理失败，请重试。").message,
@@ -1159,11 +1184,7 @@ export default function BrainHome() {
       threadId: selectedArtifact.thread_id,
       turnId: selectedArtifact.turn_id,
     };
-    setSourceReturnError(null);
-    persistActiveConversationThreadId(effectiveAccount.id, target.threadId);
-    conversationScopeEpochRef.current += 1;
-    activeConversationThreadIdRef.current = target.threadId;
-    setActiveConversationThreadId(target.threadId);
+    activateSourceTurn(target);
     if (retry) {
       void qc.fetchQuery({
         queryKey: ["brain-conversation", target.threadId],
@@ -1180,6 +1201,31 @@ export default function BrainHome() {
       return;
     }
     setSourceReturnTarget(target);
+  };
+
+  const activateSourceTurn = (target: SourceReturnTarget) => {
+    if (!effectiveAccount || target.accountId !== effectiveAccount.id) return;
+    setSourceReturnError(null);
+    persistActiveConversationThreadId(effectiveAccount.id, target.threadId);
+    conversationScopeEpochRef.current += 1;
+    activeConversationThreadIdRef.current = target.threadId;
+    setActiveConversationThreadId(target.threadId);
+    setDraftAttachments([]);
+    setPendingTurn(null);
+    pendingClientMessageId.current = null;
+    setWorkspaceMode("conversation");
+    setSourceReturnTarget(target);
+    followLatestMessage.current = false;
+    setShowJumpToLatest(false);
+  };
+
+  const openPendingSource = (target: { threadId: number; turnId: number }) => {
+    if (!effectiveAccount) return;
+    activateSourceTurn({
+      accountId: effectiveAccount.id,
+      threadId: target.threadId,
+      turnId: target.turnId,
+    });
   };
 
   useEffect(() => {
@@ -1227,7 +1273,7 @@ export default function BrainHome() {
     );
     if (!node) return;
     node.setAttribute("tabindex", "-1");
-    node.scrollIntoView({ block: "center" });
+    node.scrollIntoView?.({ block: "center" });
     node.focus({ preventScroll: true });
     setSourceReturnTarget(null);
   }, [activeConversation, sourceReturnTarget, workspaceMode]);
@@ -1285,7 +1331,7 @@ export default function BrainHome() {
   };
 
   return (
-    <div className={`tz-brain-page${hasConversation ? " has-conversation" : " is-empty"}${workspaceMode === "results" ? " is-results" : ""}`}>
+    <div className={`tz-brain-page${hasConversation ? " has-conversation" : " is-empty"}${workspaceMode === "results" ? " is-results" : ""}${workspaceMode === "pending" ? " is-pending" : ""}`}>
       {hasConversation ? (
         <header className="tz-brain-toolbar">
           <div className="tz-brain-identity">
@@ -1338,13 +1384,18 @@ export default function BrainHome() {
             <section
               ref={conversationRef}
               className="dy-brain-conversation"
-              id={workspaceMode === "conversation" ? "brain-conversation-panel" : "brain-plans-panel"}
+              id={workspacePanelId(workspaceMode)}
               role="tabpanel"
-              aria-labelledby={workspaceMode === "conversation" ? "brain-conversation-tab" : "brain-plans-tab"}
-              aria-label={workspaceMode === "conversation" ? "对话" : "方案与内容"}
+              aria-labelledby={workspaceTabId(workspaceMode)}
+              aria-label={workspaceModeLabel(workspaceMode)}
               onScroll={handleConversationScroll}
             >
-              {workspaceMode === "results" ? (
+              {workspaceMode === "pending" ? (
+                <PendingWork
+                  accountId={effectiveAccount?.id ?? null}
+                  onOpenSource={openPendingSource}
+                />
+              ) : workspaceMode === "results" ? (
                 <div className="tz-artifact-center-panel">
                   <ArtifactCenter
                     key={effectiveAccount?.id ?? "unavailable-account"}
@@ -1555,8 +1606,8 @@ function ContextStrip({
 }: {
   account: Account | null;
   loading: boolean;
-  workspaceMode: "conversation" | "results";
-  onWorkspaceModeChange: (mode: "conversation" | "results") => void;
+  workspaceMode: WorkspaceMode;
+  onWorkspaceModeChange: (mode: WorkspaceMode) => void;
 }) {
   const navigate = useNavigate();
   return (
@@ -1597,6 +1648,19 @@ function ContextStrip({
           >
             方案与内容
           </Button>
+          <Button
+            type={workspaceMode === "pending" ? "primary" : "text"}
+            size="small"
+            role="tab"
+            id="brain-pending-tab"
+            aria-label="待处理"
+            aria-selected={workspaceMode === "pending"}
+            aria-controls="brain-pending-panel"
+            onKeyDown={(event) => handleWorkspaceTabKey(event, workspaceMode, onWorkspaceModeChange)}
+            onClick={() => onWorkspaceModeChange("pending")}
+          >
+            待处理
+          </Button>
         </div>
         <nav aria-label="运营相关导航">
           <Button
@@ -1606,7 +1670,6 @@ function ContextStrip({
           >
             抖音数据
           </Button>
-          <Button size="small" onClick={() => navigate("/approvals")}>待处理</Button>
         </nav>
         {!account ? <small>请先选择账号后查看抖音数据</small> : null}
         <Tag style={{ marginInlineEnd: 0 }}>抖音</Tag>
@@ -1622,16 +1685,42 @@ function ContextStrip({
 
 function handleWorkspaceTabKey(
   event: KeyboardEvent<HTMLElement>,
-  mode: "conversation" | "results",
-  onChange: (mode: "conversation" | "results") => void,
+  mode: WorkspaceMode,
+  onChange: (mode: WorkspaceMode) => void,
 ) {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   event.preventDefault();
-  const nextMode = mode === "conversation" ? "results" : "conversation";
+  const modes: WorkspaceMode[] = ["conversation", "results", "pending"];
+  const direction = event.key === "ArrowRight" ? 1 : -1;
+  const nextMode = modes[(modes.indexOf(mode) + direction + modes.length) % modes.length];
   onChange(nextMode);
   window.requestAnimationFrame(() => document.getElementById(
-    nextMode === "conversation" ? "brain-conversation-tab" : "brain-plans-tab",
+    workspaceTabId(nextMode),
   )?.focus());
+}
+
+function workspaceTabId(mode: WorkspaceMode) {
+  return {
+    conversation: "brain-conversation-tab",
+    results: "brain-plans-tab",
+    pending: "brain-pending-tab",
+  }[mode];
+}
+
+function workspacePanelId(mode: WorkspaceMode) {
+  return {
+    conversation: "brain-conversation-panel",
+    results: "brain-plans-panel",
+    pending: "brain-pending-panel",
+  }[mode];
+}
+
+function workspaceModeLabel(mode: WorkspaceMode) {
+  return {
+    conversation: "对话",
+    results: "方案与内容",
+    pending: "待处理",
+  }[mode];
 }
 
 function ConversationEmpty({

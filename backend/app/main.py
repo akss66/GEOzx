@@ -39,6 +39,7 @@ from app.api import (
     model_providers,
     notifications,
     orchestrator,
+    pending_work,
     platform_integrations,
     projects,
     publishing,
@@ -129,6 +130,7 @@ app.include_router(llm.router)
 app.include_router(ws.router)
 app.include_router(feedback.router)
 app.include_router(orchestrator.router)
+app.include_router(pending_work.router)
 app.include_router(projects.router)
 app.include_router(accounts.router)
 app.include_router(account_data.router)
