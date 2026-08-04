@@ -90,6 +90,7 @@ _BUSINESS_ARTIFACT_DATABASE_TYPES: dict[str, frozenset[DeliverableType]] = {
     "edited_video": frozenset({DeliverableType.EDITED_VIDEO}),
     "content_calendar": frozenset({DeliverableType.PUBLISH_CALENDAR}),
     "publish_calendar": frozenset({DeliverableType.PUBLISH_CALENDAR}),
+    "publish_package": frozenset({DeliverableType.PUBLISH_PACKAGE}),
     "platform_publish_receipt": frozenset({DeliverableType.PUBLISH_CALENDAR}),
     "review_report": frozenset({DeliverableType.REVIEW_REPORT}),
     "engagement_review": frozenset({DeliverableType.REVIEW_REPORT}),
@@ -892,6 +893,13 @@ def _artifact_presentation(
         type_label = "内容排期表"
         completion_label = f"已安排 {count} 条内容发布顺序"
         detail_action_label = f"查看 {count} 条发布安排"
+    elif artifact_type == DeliverableType.PUBLISH_PACKAGE.value:
+        package = payload.get("package")
+        scripts = package.get("scripts") if isinstance(package, dict) else None
+        count = len(scripts) if isinstance(scripts, list) else 0
+        type_label = "周运营发布包"
+        completion_label = f"已准备 {count} 条待拍摄发布内容"
+        detail_action_label = "查看完整运营包"
     else:
         type_label, completion_label, detail_action_label = _FIXED_PRESENTATIONS.get(
             artifact_type,

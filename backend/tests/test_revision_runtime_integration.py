@@ -18,11 +18,11 @@ def test_operation_iteration_maps_only_real_native_or_child_boundaries() -> None
         "topic_planning": "child_skill:topic_planning",
         "script_generation": "child_skill:script_generation",
         "visual_brief_generation": "child_skill:visual_brief_generation",
-        "quality_review": None,
+        "quality_review": "native_runtime:prepare_deliverable",
         "content_calendar_planning": "child_skill:content_calendar_planning",
         "publishing_preparation": "child_skill:publishing_preparation",
     }
-    assert mapping.requires_full_recompute is True
+    assert mapping.requires_full_recompute is False
 
 
 def test_logical_graph_cannot_claim_a_fabricated_native_stage() -> None:

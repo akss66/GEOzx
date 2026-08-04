@@ -69,6 +69,7 @@ _DELIVERABLE_TITLE = {
     DeliverableType.POSITIONING_STRATEGY: "定位策略",
     DeliverableType.TOPIC_PLAN: "选题计划",
     DeliverableType.PUBLISH_CALENDAR: "发布日历",
+    DeliverableType.PUBLISH_PACKAGE: "周运营发布包",
     DeliverableType.VIDEO_SCRIPT: "短视频脚本包",
     DeliverableType.ART_PROMPT: "美术提示词",
     DeliverableType.VIDEO_ASSET: "视频素材",

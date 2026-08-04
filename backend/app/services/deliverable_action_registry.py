@@ -28,7 +28,9 @@ class DeliverableActionDefinition:
     requires_thread: bool = False
 
 
-ACTIONABLE_STATUSES = frozenset({"ready_for_review", "accepted"})
+ACTIONABLE_STATUSES: frozenset[ArtifactStatus] = frozenset(
+    {"ready_for_review", "accepted"}
+)
 REVISION_DELIVERABLE_TYPES = frozenset(
     item for item in DeliverableType if get_schema(item) is not None
 )
@@ -45,6 +47,7 @@ REVISION_ARTIFACT_TYPES = frozenset(
         "edited_video",
         "content_calendar",
         "publish_calendar",
+        "publish_package",
         "platform_publish_receipt",
         "review_report",
         "engagement_review",

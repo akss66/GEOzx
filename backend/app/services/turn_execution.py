@@ -44,6 +44,7 @@ from app.orchestrator.capability_router import (
     route_migrated_operation_request,
 )
 from app.orchestrator.checkpoint_graph_contracts import require_checkpoint_graph_contract
+from app.orchestrator.operation_lineage import resolve_operation_revision_bridge
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_runtime import (
@@ -263,15 +264,44 @@ async def execute_revision_task_run(
             revision_id=revision.id,
             reason="invalid_graph:executor_boundary_missing",
         )
-    verdict = await prepare_revision_execution(
+    operation_bridge = await resolve_operation_revision_bridge(
         session,
-        revision_scope=scope,
-        revision_id=revision.id,
-        contract=contract,
-        # Free text never guesses a projection. Until a concrete server-owned
-        # projection exists, the checkpoint service safely falls back to full.
-        expected_inputs=ExpectedStageInputs(values={}),
+        scope=scope,
+        current_parent_skill_run_id=revision_skill.id,
     )
+    verdict = None
+    if operation_bridge is None:
+        verdict = await prepare_revision_execution(
+            session,
+            revision_scope=scope,
+            revision_id=revision.id,
+            contract=contract,
+            # Free text never guesses a projection. Until a concrete server-owned
+            # projection exists, the checkpoint service safely falls back to full.
+            expected_inputs=ExpectedStageInputs(values={}),
+        )
+    else:
+        revision.reused_steps = list(operation_bridge.reused_steps)
+        for step_key in operation_bridge.reused_steps:
+            await append_turn_event(
+                session,
+                event_scope,
+                "step.reused",
+                {
+                    "revision_id": revision.id,
+                    "revision_run_id": run.id,
+                    "task_id": task.id,
+                    "step": step_key,
+                    "step_key": step_key,
+                    "status": "reused",
+                    "source_id": (
+                        operation_bridge.topic_ref.artifact_id
+                        if step_key == "topic_planning"
+                        else operation_bridge.source_parent_skill_run_id
+                    ),
+                },
+                f"revision:{revision.id}:reused:{step_key}",
+            )
     for step_key in revision.affected_steps:
         await append_turn_event(
             session,
@@ -341,7 +371,7 @@ async def execute_revision_task_run(
                 },
                 f"revision:{revision.id}:reused:{binding.step_key}",
             )
-    else:
+    elif verdict is not None:
         await append_turn_event(
             session,
             event_scope,
@@ -359,6 +389,18 @@ async def execute_revision_task_run(
     run.request_payload = {
         **dict(run.request_payload or {}),
         "hydrated_outputs_by_step_key": hydrated_outputs,
+        **(
+            {
+                "operation_revision_bridge": {
+                    "revision_id": operation_bridge.revision_id,
+                    "source_skill_run_id": operation_bridge.source_parent_skill_run_id,
+                    "topic_artifact_id": operation_bridge.topic_ref.artifact_id,
+                    "topic_artifact_version": operation_bridge.topic_ref.version,
+                }
+            }
+            if operation_bridge is not None
+            else {}
+        ),
     }
     await mark_revision_running(session, revision_id=revision.id)
     # This commit is the one-way barrier: no expert/tool/provider/deliverable

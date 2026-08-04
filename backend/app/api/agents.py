@@ -112,7 +112,11 @@ AGENT_PROFILES: list[dict] = [
         "one_liner": "负责发布计划、评论观察和复盘建议。",
         "tools": ["发布日历", "指标回流", "复盘看板"],
         "typical_tasks": ["发布计划", "复盘报告", "下一轮建议"],
-        "standard_outputs": [DeliverableType.PUBLISH_CALENDAR, DeliverableType.REVIEW_REPORT],
+        "standard_outputs": [
+            DeliverableType.PUBLISH_CALENDAR,
+            DeliverableType.PUBLISH_PACKAGE,
+            DeliverableType.REVIEW_REPORT,
+        ],
     },
     {
         "code": AgentCode.ADVERTISER,

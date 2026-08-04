@@ -52,6 +52,7 @@ const BUSINESS_GROUPS: Array<{ key: BusinessGroup; label: string; artifactTypes:
     label: "发布安排",
     artifactTypes: [
       "publish_calendar",
+      "publish_package",
       "content_calendar",
       "platform_publish_receipt",
       "operation_execution_plan",

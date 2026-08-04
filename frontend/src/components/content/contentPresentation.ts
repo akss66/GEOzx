@@ -34,6 +34,7 @@ const DELIVERABLE_LABELS: Record<DeliverableType, string> = {
   positioning_strategy: "账号定位",
   topic_plan: "选题方案",
   publish_calendar: "发布日历",
+  publish_package: "周运营发布包",
   video_script: "视频脚本",
   art_prompt: "视觉方案",
   video_asset: "视频素材",

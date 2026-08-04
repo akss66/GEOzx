@@ -69,6 +69,7 @@ def _step(
     reuse_policy: ReusePolicy = "immutable",
     side_effect_level: SideEffectLevel = "none",
     freshness_policy_key: str | None = None,
+    executor_owner: ExecutorOwner = "child_skill",
     executor_boundary_key: str,
 ) -> CheckpointStepSpec:
     return CheckpointStepSpec(
@@ -82,7 +83,7 @@ def _step(
         output_schema_version=f"{key}-output/v1",
         input_projection_key=f"operation-iteration/{key}/v1",
         freshness_policy_key=freshness_policy_key,
-        executor_owner="child_skill",
+        executor_owner=executor_owner,
         executor_boundary_key=executor_boundary_key,
     )
 
@@ -152,7 +153,8 @@ _OPERATION_ITERATION = CheckpointGraphContract(
             inputs=("topic_plan", "scripts", "visual_briefs"),
             outputs=("quality_result",),
             reuse_policy="never",
-            executor_boundary_key="child_skill:quality_review",
+            executor_owner="native_runtime",
+            executor_boundary_key="native_runtime:prepare_deliverable",
         ),
         _step(
             "content_calendar_planning",

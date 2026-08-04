@@ -20,9 +20,10 @@ from app.models import (
     ConversationTurn,
     Deliverable,
     Event,
+    RunRevision,
     SkillRun,
 )
-from app.models.enums import DeliverableStatus
+from app.models.enums import DeliverableStatus, DeliverableType
 from app.orchestrator.skills.operating_tasks import WeeklyOperationPackage
 from app.services.composite_skill_runs import (
     block_composite_parent_from_child,
@@ -295,6 +296,13 @@ async def _create_manual_schedule_entries_for_package(
         if slot.scheduled_at is not None
     )
 
+    revision_source = await _lock_revision_source_schedule_entries(
+        session,
+        task=task,
+        thread=thread,
+        deliverable=deliverable,
+    )
+
     def require_exact_schedule(rows: list[ContentScheduleEntry]) -> None:
         actual_signatures = sorted(
             _schedule_signature(
@@ -349,6 +357,13 @@ async def _create_manual_schedule_entries_for_package(
             require_exact_schedule(concurrent)
             rows = concurrent
 
+    if revision_source is not None:
+        source_rows, source_artifact = revision_source
+        for row in source_rows:
+            row.status = "superseded"
+        source_artifact.status = DeliverableStatus.SUPERSEDED
+        await session.flush()
+
     raw_key = (
         f"operation-schedule-v1:{task.org_id}:{deliverable.id}:{deliverable.version}:{tool_call.id}"
     )
@@ -378,3 +393,156 @@ async def _create_manual_schedule_entries_for_package(
             turn_id=None,
         ),
     )
+
+
+async def _lock_revision_source_schedule_entries(
+    session: AsyncSession,
+    *,
+    task: BrainTask,
+    thread: ConversationThread,
+    deliverable: Deliverable,
+) -> tuple[list[ContentScheduleEntry], Deliverable] | None:
+    """Lock and validate the source package schedules for one exact revision."""
+
+    if deliverable.run_id is None or deliverable.skill_run_id is None:
+        return None
+    revision = await session.scalar(
+        select(RunRevision).where(RunRevision.revision_run_id == deliverable.run_id)
+    )
+    if revision is None:
+        return None
+    current_child = await session.get(SkillRun, deliverable.skill_run_id)
+    current_parent_id = (
+        dict(current_child.output_snapshot or {}).get("composite_parent_skill_run_id")
+        if current_child is not None
+        else None
+    )
+    if (
+        revision.mode != "partial"
+        or revision.org_id != task.org_id
+        or revision.account_id != thread.account_id
+        or revision.thread_id != thread.id
+        or revision.task_id != task.id
+        or revision.revision_turn_id != deliverable.turn_id
+        or revision.revision_skill_run_id != current_parent_id
+        or revision.source_skill_run_id is None
+        or current_child is None
+        or current_child.skill_code != "publishing_preparation"
+        or current_child.run_id != deliverable.run_id
+        or current_child.turn_id != deliverable.turn_id
+        or current_child.task_id != task.id
+        or deliverable.type != DeliverableType.PUBLISH_PACKAGE
+    ):
+        raise SkillApprovalConflict("SKILL_APPROVAL_REVISION_SCOPE_CONFLICT")
+
+    source_parent = await session.get(SkillRun, revision.source_skill_run_id)
+    source_report = (
+        dict(source_parent.output_snapshot or {}).get("report")
+        if source_parent is not None
+        else None
+    )
+    source_graph = (
+        source_report.get("child_skill_graph") if isinstance(source_report, dict) else None
+    )
+    publishing_nodes = [
+        node
+        for node in source_graph or []
+        if isinstance(node, dict) and node.get("skill_code") == "publishing_preparation"
+    ]
+    source_artifact_id = (
+        publishing_nodes[0].get("artifact_id") if len(publishing_nodes) == 1 else None
+    )
+    source_artifact = (
+        await session.get(Deliverable, source_artifact_id)
+        if type(source_artifact_id) is int
+        else None
+    )
+    source_child = (
+        await session.get(SkillRun, source_artifact.skill_run_id)
+        if source_artifact is not None and source_artifact.skill_run_id is not None
+        else None
+    )
+    if (
+        source_parent is None
+        or source_parent.id != revision.source_skill_run_id
+        or source_parent.skill_code != "operation_iteration"
+        or source_parent.run_id != revision.source_run_id
+        or source_parent.turn_id != revision.source_turn_id
+        or source_parent.thread_id != thread.id
+        or source_parent.task_id != task.id
+        or source_artifact is None
+        or source_artifact.type != DeliverableType.PUBLISH_PACKAGE
+        or source_artifact.status
+        not in {DeliverableStatus.APPROVED, DeliverableStatus.SUPERSEDED}
+        or source_artifact.content_item_id != deliverable.content_item_id
+        or source_artifact.thread_id != thread.id
+        or source_artifact.turn_id != revision.source_turn_id
+        or source_artifact.run_id != revision.source_run_id
+        or source_child is None
+        or source_child.skill_code != "publishing_preparation"
+        or source_child.run_id != revision.source_run_id
+        or source_child.turn_id != revision.source_turn_id
+        or source_child.task_id != task.id
+        or dict(source_child.output_snapshot or {}).get("composite_parent_skill_run_id")
+        != source_parent.id
+    ):
+        raise SkillApprovalConflict("SKILL_APPROVAL_REVISION_SOURCE_CONFLICT")
+
+    source_state = source_artifact.status
+    try:
+        source_package = WeeklyOperationPackage.model_validate(
+            dict(source_artifact.payload or {}).get("package")
+        )
+    except ValueError as exc:
+        raise SkillApprovalConflict("SKILL_APPROVAL_REVISION_SOURCE_CONFLICT") from exc
+    source_slots = [item for item in source_package.calendar_slots if item.slot_type == "publish"]
+    expected = sorted(
+        _schedule_signature(
+            scheduled_at=slot.scheduled_at,
+            timezone=slot.timezone,
+            content_item_id=source_artifact.content_item_id,
+            created_by_id=task.created_by_id,
+        )
+        for slot in source_slots
+        if slot.scheduled_at is not None and task.created_by_id is not None
+    )
+    source_rows = list(
+        await session.scalars(
+            select(ContentScheduleEntry)
+            .where(
+                ContentScheduleEntry.org_id == task.org_id,
+                ContentScheduleEntry.account_id == thread.account_id,
+                ContentScheduleEntry.source_artifact_id == source_artifact.id,
+                ContentScheduleEntry.source_artifact_version == source_artifact.version,
+            )
+            .order_by(ContentScheduleEntry.id)
+            .with_for_update()
+        )
+    )
+    actual = sorted(
+        _schedule_signature(
+            scheduled_at=row.scheduled_at,
+            timezone=row.timezone,
+            content_item_id=row.content_item_id,
+            created_by_id=row.created_by_id,
+        )
+        for row in source_rows
+    )
+    if source_state == DeliverableStatus.SUPERSEDED:
+        if (
+            source_parent.status != "stopped"
+            or source_parent.error_code != "SUPERSEDED_BY_REVISION"
+            or source_child.status != "stopped"
+            or source_child.error_code != "SUPERSEDED_BY_REVISION"
+            or source_rows
+        ):
+            raise SkillApprovalConflict("SKILL_APPROVAL_REVISION_SOURCE_CONFLICT")
+        return [], source_artifact
+    if len(source_slots) != 5 or len(source_rows) != 5 or actual != expected:
+        raise SkillApprovalConflict("SKILL_APPROVAL_REVISION_SCHEDULE_CONFLICT")
+    statuses = {row.status for row in source_rows}
+    if statuses == {"superseded"} and all(row.published_at is None for row in source_rows):
+        return source_rows, source_artifact
+    if statuses != {"planned"} or any(row.published_at is not None for row in source_rows):
+        raise SkillApprovalConflict("SKILL_APPROVAL_REVISION_SCHEDULE_PUBLISHED")
+    return source_rows, source_artifact

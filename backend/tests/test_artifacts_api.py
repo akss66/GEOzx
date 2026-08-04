@@ -460,6 +460,30 @@ async def test_spoken_script_presentation_counts_one_artifact_not_its_scenes(
             },
             "add_to_schedule",
         ),
+        (
+            DeliverableType.PUBLISH_PACKAGE,
+            {
+                "account_id": 1,
+                "platform": "douyin",
+                "readiness": "ready",
+                "period": "2026-08-10 至 2026-08-16",
+                "items": [{"slot_id": f"slot-{index:02d}"} for index in range(1, 8)],
+                "operating_notes": ["仅创建手动发布任务"],
+                "package": {
+                    "scripts": [
+                        {"script_id": f"script-{index:02d}"} for index in range(1, 6)
+                    ]
+                },
+                "participating_experts": ["账号运营专家"],
+            },
+            {
+                "type_label": "周运营发布包",
+                "completion_label": "已准备 5 条待拍摄发布内容",
+                "status_label": "待确认",
+                "detail_action_label": "查看完整运营包",
+            },
+            "add_to_schedule",
+        ),
     ],
 )
 async def test_structured_deliverable_counts_drive_presentation_and_actions(

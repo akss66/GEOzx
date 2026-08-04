@@ -7,6 +7,7 @@ from app.models.enums import DeliverableType
 from app.schemas.deliverable import (
     AdPlanPayload,
     PositioningStrategyPayload,
+    PublishPackagePayload,
     get_schema,
     validate_payload,
 )
@@ -143,6 +144,27 @@ def test_ad_plan_registered_and_validates() -> None:
 
     assert isinstance(payload, AdPlanPayload)
     assert payload.measurement["primary"] == "有效互动成本"
+
+
+def test_publish_package_registered_and_serializes() -> None:
+    payload = validate_payload(
+        DeliverableType.PUBLISH_PACKAGE,
+        {
+            "account_id": 42,
+            "platform": "douyin",
+            "readiness": "ready",
+            "period": "2026-08-10 至 2026-08-16",
+            "items": [{"slot_id": "slot-01"}],
+            "operating_notes": ["仅创建手动发布任务"],
+            "package": {"scripts": [{"script_id": "script-01"}]},
+            "participating_experts": ["账号运营专家"],
+        },
+    )
+
+    assert isinstance(payload, PublishPackagePayload)
+    assert payload.model_dump(mode="json")["package"]["scripts"][0]["script_id"] == (
+        "script-01"
+    )
 
 
 @pytest.mark.parametrize(("deliverable_type", "payload"), _INVALID_BUSINESS_PAYLOADS)

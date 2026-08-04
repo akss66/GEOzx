@@ -30,6 +30,7 @@ const PRESENTATIONS: Partial<Record<KnownArtifactType, DeliverablePresentation>>
   video_asset: fixedPresentation("视频素材清单", "已整理可用视频素材"),
   edited_video: fixedPresentation("成片制作清单", "已整理剪辑与交付要求"),
   publish_calendar: fixedPresentation("发布准备清单", "已完成发布前检查"),
+  publish_package: fixedPresentation("周运营发布包", "已准备 5 条待拍摄内容与 7 天排期"),
   platform_publish_receipt: fixedPresentation("发布记录", "已记录本次发布结果"),
   review_report: fixedPresentation("运营复盘", "已完成本周期数据复盘"),
   engagement_review: fixedPresentation("互动复盘", "已整理近期互动反馈"),

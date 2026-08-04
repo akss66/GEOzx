@@ -57,6 +57,7 @@ from app.orchestrator.composite_skill_runtime import composite_skill_runtime
 from app.orchestrator.operation_lineage import (
     OperationLineageRef,
     resolve_internal_lineage_artifacts,
+    resolve_operation_revision_bridge,
 )
 from app.orchestrator.operation_quality import (
     ArtifactQuality,
@@ -146,6 +147,8 @@ class _ServerSkillContext:
     preloaded_tool_results: dict[str, dict[str, Any]]
     tool_audit_refs: dict[str, dict[str, int]]
     lineage_refs: tuple[OperationLineageRef, ...] = ()
+    revision_id: int | None = None
+    revision_parent_skill_run_id: int | None = None
 
 
 def resolve_revision_executor_boundaries(
@@ -371,6 +374,11 @@ def _server_skill_context_snapshot(
     }
     if context.lineage_refs:
         server_context["lineage_refs"] = [asdict(ref) for ref in context.lineage_refs]
+    if context.revision_id is not None:
+        server_context["revision_id"] = context.revision_id
+        server_context["revision_parent_skill_run_id"] = (
+            context.revision_parent_skill_run_id
+        )
     return {"_server_context": server_context}
 
 
@@ -390,6 +398,14 @@ def _server_skill_context_from_snapshot(value: object) -> _ServerSkillContext | 
         lineage_refs = tuple(OperationLineageRef(**item) for item in raw_lineage_refs)
     except (TypeError, ValueError):
         return None
+    revision_id = value.get("revision_id")
+    revision_parent_skill_run_id = value.get("revision_parent_skill_run_id")
+    if (revision_id is None) != (revision_parent_skill_run_id is None) or any(
+        type(item) is not int or item <= 0
+        for item in (revision_id, revision_parent_skill_run_id)
+        if item is not None
+    ):
+        return None
     return _ServerSkillContext(
         preloaded_tool_results={
             str(code): dict(result)
@@ -406,6 +422,8 @@ def _server_skill_context_from_snapshot(value: object) -> _ServerSkillContext | 
             if isinstance(ref, dict)
         },
         lineage_refs=lineage_refs,
+        revision_id=revision_id,
+        revision_parent_skill_run_id=revision_parent_skill_run_id,
     )
 
 
@@ -1100,8 +1118,27 @@ class SkillRuntime:
         review_value = frozen_input.get("confirmed_review_artifact_id")
         positioning_id = frozen_input.get("positioning_artifact_id")
         attempt = max(1, run.attempt)
+        revision_bridge = await resolve_operation_revision_bridge(
+            session,
+            scope=scope,
+            current_parent_skill_run_id=skill_run.id,
+        )
         source_refs: list[dict[str, Any]]
-        fresh_server_context: _ServerSkillContext | None = None
+        fresh_server_context = (
+            _server_skill_context_from_snapshot(revision_bridge.source_server_context)
+            if revision_bridge is not None
+            else None
+        )
+        if revision_bridge is not None and fresh_server_context is None:
+            raise SkillRecoveryConflict("OPERATION_REVISION_CONTEXT_INVALID")
+        if revision_bridge is not None and fresh_server_context is not None:
+            fresh_server_context = _ServerSkillContext(
+                preloaded_tool_results=fresh_server_context.preloaded_tool_results,
+                tool_audit_refs=fresh_server_context.tool_audit_refs,
+                lineage_refs=fresh_server_context.lineage_refs,
+                revision_id=revision_bridge.revision_id,
+                revision_parent_skill_run_id=skill_run.id,
+            )
         if review_value is not None:
             review_id = int(review_value)
             artifact_ids = [review_id]
@@ -1129,9 +1166,10 @@ class SkillRuntime:
                 for item in sources
             ]
         else:
-            fresh_server_context = _server_skill_context_from_snapshot(
-                dict(skill_run.output_snapshot or {}).get("_server_context")
-            )
+            if revision_bridge is None:
+                fresh_server_context = _server_skill_context_from_snapshot(
+                    dict(skill_run.output_snapshot or {}).get("_server_context")
+                )
             if fresh_server_context is None:
                 await _start_skill_stage(
                     session,
@@ -1257,9 +1295,15 @@ class SkillRuntime:
             attempt=attempt,
         )
         previous_graph = (
-            dict(skill_run.output_snapshot or {}).get("report", {}).get("child_skill_graph")
-            if isinstance(dict(skill_run.output_snapshot or {}).get("report"), dict)
-            else None
+            revision_bridge.previous_graph
+            if revision_bridge is not None
+            else (
+                dict(skill_run.output_snapshot or {})
+                .get("report", {})
+                .get("child_skill_graph")
+                if isinstance(dict(skill_run.output_snapshot or {}).get("report"), dict)
+                else None
+            )
         )
         report = OperationIterationPlan.model_validate(
             composite_skill_runtime.build(
@@ -1367,7 +1411,13 @@ class SkillRuntime:
                             artifact_id=artifact_id,
                             version=artifacts_by_id[artifact_id][0].version,
                             source_skill_run_id=artifacts_by_id[artifact_id][1].id,
-                            parent_skill_run_id=skill_run.id,
+                            parent_skill_run_id=int(
+                                dict(
+                                    artifacts_by_id[artifact_id][1].output_snapshot
+                                    or {}
+                                ).get("composite_parent_skill_run_id")
+                                or skill_run.id
+                            ),
                         )
                         for artifact_id in dependency_artifact_ids
                     )
@@ -1383,6 +1433,16 @@ class SkillRuntime:
                             else {}
                         ),
                         lineage_refs=lineage_refs,
+                        revision_id=(
+                            fresh_server_context.revision_id
+                            if fresh_server_context is not None
+                            else None
+                        ),
+                        revision_parent_skill_run_id=(
+                            fresh_server_context.revision_parent_skill_run_id
+                            if fresh_server_context is not None
+                            else None
+                        ),
                     )
                 child_definition = skill_registry.get(skill_code)
                 if "source_artifact_ids" in child_definition.input_model.model_fields:
@@ -1947,6 +2007,27 @@ class SkillRuntime:
                     if isinstance(tool_call_id, int)
                     else None
                 )
+                cross_run_audit_valid = False
+                if (
+                    tool_call is not None
+                    and tool_call.turn_id != turn.id
+                    and server_context.revision_id is not None
+                    and server_context.revision_parent_skill_run_id is not None
+                ):
+                    revision_bridge = await resolve_operation_revision_bridge(
+                        session,
+                        scope=scope,
+                        current_parent_skill_run_id=(
+                            server_context.revision_parent_skill_run_id
+                        ),
+                    )
+                    cross_run_audit_valid = (
+                        revision_bridge is not None
+                        and revision_bridge.revision_id == server_context.revision_id
+                        and revision_bridge.source_turn_id == tool_call.turn_id
+                        and revision_bridge.source_parent_skill_run_id
+                        == source_skill_run_id
+                    )
                 if (
                     tool_call is None
                     or tool_call.status != "success"
@@ -1954,7 +2035,7 @@ class SkillRuntime:
                     or tool_call.skill_run_id != source_skill_run_id
                     or tool_call.task_id != task.id
                     or tool_call.thread_id != thread.id
-                    or tool_call.turn_id != turn.id
+                    or (tool_call.turn_id != turn.id and not cross_run_audit_valid)
                     or dict((tool_call.meta or {}).get("result") or {}) != result
                 ):
                     raise SkillRecoveryConflict("PRELOADED_TOOL_AUDIT_MISMATCH")
@@ -3968,7 +4049,7 @@ def _build_operating_report(
             participating_experts=list(dict.fromkeys([*experts, *participants])),
         )
         data = report.model_dump(mode="json")
-        return data, DeliverableType.PUBLISH_CALENDAR, data
+        return data, DeliverableType.PUBLISH_PACKAGE, data
 
     if definition.code == "publishing_preparation":
         issues = _string_list(latest.get("issues"))

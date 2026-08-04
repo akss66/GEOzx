@@ -79,6 +79,7 @@ class DeliverableType(enum.StrEnum):
     POSITIONING_STRATEGY = "positioning_strategy"
     TOPIC_PLAN = "topic_plan"
     PUBLISH_CALENDAR = "publish_calendar"
+    PUBLISH_PACKAGE = "publish_package"
     VIDEO_SCRIPT = "video_script"
     ART_PROMPT = "art_prompt"
     VIDEO_ASSET = "video_asset"

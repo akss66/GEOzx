@@ -10,12 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AgentRun,
+    AgentToolCall,
+    ContentScheduleEntry,
     ConversationThread,
     ConversationTurn,
+    Deliverable,
     RunRevision,
     SkillRun,
+    TurnInterrupt,
     User,
 )
+from app.models.enums import DeliverableStatus, DeliverableType
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.step_dependencies import ConstraintPath, build_invalidation_plan
 from app.schemas.conversation import CreateConversationTurnRequest, TurnSteeringMode
@@ -513,6 +518,15 @@ async def _create_supplement_revision(
     )
     if not isinstance(revision, RunRevision):
         raise RuntimeError("NONEMPTY_SUPPLEMENT_REVISION_MISSING")
+    await _supersede_unapproved_operation_source(
+        session,
+        thread=thread,
+        source_run=source_run,
+        source_turn=source_turn,
+        source_skill=source_skill,
+        revision_id=revision.id,
+        revision_run_id=revision_run.id,
+    )
     waiting = await queue_agent_run_behind_task_record(
         session,
         revision_run.id,
@@ -579,6 +593,183 @@ async def _create_supplement_revision(
         "task_id": source_run.task_id,
         "revision_status": revision_run.status,
     }
+
+
+async def _supersede_unapproved_operation_source(
+    session: AsyncSession,
+    *,
+    thread: ConversationThread,
+    source_run: AgentRun,
+    source_turn: ConversationTurn,
+    source_skill: SkillRun,
+    revision_id: int,
+    revision_run_id: int,
+) -> bool:
+    """Atomically retire a pending source package before its revision is queued."""
+
+    report = dict(source_skill.output_snapshot or {}).get("report")
+    graph = report.get("child_skill_graph") if isinstance(report, dict) else None
+    publishing_nodes = [
+        node
+        for node in graph or []
+        if isinstance(node, dict) and node.get("skill_code") == "publishing_preparation"
+    ]
+    artifact_id = publishing_nodes[0].get("artifact_id") if len(publishing_nodes) == 1 else None
+    if type(artifact_id) is not int:
+        return False
+    artifact = await session.scalar(
+        select(Deliverable).where(Deliverable.id == artifact_id).with_for_update()
+    )
+    if artifact is None or artifact.type != DeliverableType.PUBLISH_PACKAGE:
+        raise RuntimeError("REVISION_SOURCE_PACKAGE_INVALID")
+    if artifact.status == DeliverableStatus.APPROVED:
+        return False
+    if artifact.status != DeliverableStatus.PENDING_REVIEW:
+        raise RuntimeError("REVISION_SOURCE_PACKAGE_STATE_CONFLICT")
+    source_child = (
+        await session.scalar(
+            select(SkillRun)
+            .where(SkillRun.id == artifact.skill_run_id)
+            .with_for_update()
+        )
+        if artifact.skill_run_id is not None
+        else None
+    )
+    approval_call = (
+        await session.scalar(
+            select(AgentToolCall)
+            .where(
+                AgentToolCall.skill_run_id == artifact.skill_run_id,
+                AgentToolCall.status == "waiting_approval",
+            )
+            .order_by(AgentToolCall.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if source_child is not None
+        else None
+    )
+    schedule_count = await session.scalar(
+        select(ContentScheduleEntry.id)
+        .where(
+            ContentScheduleEntry.source_artifact_id == artifact.id,
+            ContentScheduleEntry.source_artifact_version == artifact.version,
+        )
+        .limit(1)
+        .with_for_update()
+    )
+    if (
+        source_run.status != "waiting_permission"
+        or source_skill.status != "waiting_permission"
+        or source_child is None
+        or source_child.skill_code != "publishing_preparation"
+        or source_child.run_id != source_run.id
+        or source_child.turn_id != source_turn.id
+        or source_child.task_id != source_run.task_id
+        or dict(source_child.output_snapshot or {}).get("composite_parent_skill_run_id")
+        != source_skill.id
+        or source_child.status != "waiting_permission"
+        or approval_call is None
+        or schedule_count is not None
+    ):
+        raise RuntimeError("REVISION_SOURCE_PENDING_STATE_CONFLICT")
+
+    now = datetime.now(UTC)
+    artifact.status = DeliverableStatus.SUPERSEDED
+    approval_call.status = "failed"
+    approval_call.error = "SUPERSEDED_BY_REVISION"
+    approval_call.finished_at = approval_call.finished_at or now
+    source_child.status = "stopped"
+    source_child.error_code = "SUPERSEDED_BY_REVISION"
+    source_skill.status = "stopped"
+    source_skill.error_code = "SUPERSEDED_BY_REVISION"
+    source_run.status = "stopped"
+    source_run.phase = "stopped"
+    source_run.error_code = "SUPERSEDED_BY_REVISION"
+    source_run.cancel_requested_at = source_run.cancel_requested_at or now
+    source_run.finished_at = source_run.finished_at or now
+    source_run.lease_owner = None
+    source_run.leased_until = None
+    source_run.next_retry_at = None
+    source_turn.status = "stopped"
+    pending_interrupts = list(
+        await session.scalars(
+            select(TurnInterrupt)
+            .where(
+                TurnInterrupt.run_id == source_run.id,
+                TurnInterrupt.status == "pending",
+            )
+            .order_by(TurnInterrupt.id)
+            .with_for_update()
+        )
+    )
+    for interrupt in pending_interrupts:
+        interrupt.status = "superseded"
+        interrupt.version += 1
+        await append_turn_event(
+            session,
+            TurnEventScope(
+                org_id=source_turn.org_id,
+                account_id=thread.account_id,
+                thread_id=thread.id,
+                turn_id=source_turn.id,
+                run_id=source_run.id,
+                skill_run_id=source_skill.id,
+            ),
+            "turn.interrupt_cancelled",
+            {
+                "interrupt_id": interrupt.id,
+                "kind": interrupt.kind,
+                "status": "superseded",
+                "message": "已由新的修订要求取代。",
+                "action_label": interrupt.action_label,
+                "version": interrupt.version,
+            },
+            f"revision:{revision_id}:source-interrupt:{interrupt.id}:superseded",
+        )
+    source_scope = TurnEventScope(
+        org_id=source_turn.org_id,
+        account_id=thread.account_id,
+        thread_id=thread.id,
+        turn_id=source_turn.id,
+        run_id=source_run.id,
+        skill_run_id=source_skill.id,
+    )
+    await append_turn_event(
+        session,
+        source_scope,
+        "deliverable.updated",
+        {
+            "deliverable_id": artifact.id,
+            "deliverable_type": artifact.type.value,
+            "version": artifact.version,
+            "status": "superseded",
+            "metadata": {
+                "kind": "approval_superseded",
+                "source_id": approval_call.id,
+                "status": "superseded",
+            },
+        },
+        f"revision:{revision_id}:source-package:superseded",
+    )
+    await append_turn_event(
+        session,
+        source_scope,
+        "turn.stopped",
+        {
+            "status": "stopped",
+            "message": "原周运营方案已由新的修订任务取代。",
+            "error_code": "SUPERSEDED_BY_REVISION",
+            "metadata": {
+                "category": "revision",
+                "source_id": revision_run_id,
+                "status": "superseded",
+            },
+        },
+        "terminal",
+    )
+    await session.flush()
+    return True
 
 
 async def _load_target_pair(

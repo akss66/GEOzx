@@ -133,6 +133,18 @@ class PublishCalendarPayload(DeliverablePayload):
     operating_notes: list[str] = Field(default_factory=list)
 
 
+@register(DeliverableType.PUBLISH_PACKAGE)
+class PublishPackagePayload(DeliverablePayload):
+    account_id: int
+    platform: str = Field(min_length=1)
+    readiness: str = Field(min_length=1)
+    period: str = Field(min_length=1)
+    items: list[dict]
+    operating_notes: list[str] = Field(default_factory=list)
+    package: dict
+    participating_experts: list[str] = Field(default_factory=list)
+
+
 @register(DeliverableType.AD_PLAN)
 class AdPlanPayload(DeliverablePayload):
     objective: str = Field(min_length=1)

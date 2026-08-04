@@ -576,6 +576,7 @@ export const KNOWN_ARTIFACT_TYPES = [
   "edited_video",
   "content_calendar",
   "publish_calendar",
+  "publish_package",
   "platform_publish_receipt",
   "review_report",
   "engagement_review",
@@ -1587,6 +1588,7 @@ export type DeliverableType =
   | "positioning_strategy"
   | "topic_plan"
   | "publish_calendar"
+  | "publish_package"
   | "video_script"
   | "art_prompt"
   | "video_asset"
