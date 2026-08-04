@@ -414,6 +414,11 @@ async def test_spoken_script_presentation_counts_one_artifact_not_its_scenes(
             "requires_confirmation": True,
         },
         {
+            "code": "request_revision",
+            "label": "保存修改版本",
+            "requires_confirmation": False,
+        },
+        {
             "code": "export",
             "label": "导出内容",
             "requires_confirmation": False,
@@ -485,6 +490,11 @@ async def test_structured_deliverable_counts_drive_presentation_and_actions(
     artifact = response.json()
     assert artifact["presentation"] == expected_presentation
     expected_actions = [
+        {
+            "code": "request_revision",
+            "label": "保存修改版本",
+            "requires_confirmation": False,
+        },
         {
             "code": "export",
             "label": "导出内容",
@@ -844,6 +854,68 @@ async def test_member_cannot_enumerate_view_or_change_another_account_artifact(
     assert hidden_detail.status_code == 404
     assert hidden_revision.status_code == 404
     assert hidden_acceptance.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_next_iteration_visibility_requires_source_thread_owner_in_list_and_detail(
+    client, session, admin, member
+) -> None:
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="thread-owner-actions",
+        status=DeliverableStatus.APPROVED,
+        deliverable_type=DeliverableType.REVIEW_REPORT,
+    )
+    session.add(
+        ProjectMembership(
+            project_id=seeded[0].id,
+            user_id=member.id,
+            role=WorkspaceRole.EDITOR,
+        )
+    )
+    await session.commit()
+    owner_token = await _token(client, admin.email, "admin-pw-123")
+    collaborator_token = await _token(client, member.email, "user-pw-123")
+
+    owner_list = await client.get(
+        f"/artifacts?account_id={seeded[1].id}",
+        headers=_auth(owner_token),
+    )
+    owner_detail = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(owner_token),
+    )
+    collaborator_list = await client.get(
+        f"/artifacts?account_id={seeded[1].id}",
+        headers=_auth(collaborator_token),
+    )
+    collaborator_detail = await client.get(
+        f"/artifacts/{seeded[8].id}",
+        headers=_auth(collaborator_token),
+    )
+
+    assert owner_list.status_code == 200
+    assert owner_detail.status_code == 200
+    assert collaborator_list.status_code == 200
+    assert collaborator_detail.status_code == 200
+    owner_actions = [
+        "request_revision",
+        "generate_next_iteration",
+        "export",
+    ]
+    collaborator_actions = ["request_revision", "export"]
+    assert [
+        action["code"] for action in owner_list.json()["data"][0]["next_actions"]
+    ] == owner_actions
+    assert [action["code"] for action in owner_detail.json()["next_actions"]] == owner_actions
+    assert [
+        action["code"]
+        for action in collaborator_list.json()["data"][0]["next_actions"]
+    ] == collaborator_actions
+    assert [
+        action["code"] for action in collaborator_detail.json()["next_actions"]
+    ] == collaborator_actions
 
 
 @pytest.mark.asyncio

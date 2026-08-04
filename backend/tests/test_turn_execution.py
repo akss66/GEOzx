@@ -1372,6 +1372,54 @@ async def test_explicit_skill_receives_account_scoped_capability_request(
 
 
 @pytest.mark.asyncio
+async def test_server_trusted_structured_input_reaches_operation_iteration_runtime(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    _account, _thread, turn, run = await _turn_context(
+        session,
+        admin,
+        key="trusted-operation-iteration",
+    )
+    run.request_payload = {
+        "trusted_structured_input": {
+            "confirmed_review_artifact_id": 17,
+            "cycle_days": 7,
+        }
+    }
+    await session.commit()
+    captured = {}
+
+    async def capture_capability_request(*_args, **kwargs):
+        captured["request"] = kwargs["capability_request"]
+        return TurnExecutionResult(
+            mode=TurnExecutionMode.SKILL,
+            status="completed",
+            response="ok",
+        )
+
+    monkeypatch.setattr(
+        "app.services.turn_execution._execute_composite_skill",
+        capture_capability_request,
+    )
+    request = CreateConversationTurnRequest(
+        client_message_id="trusted-operation-iteration",
+        message=turn.user_input,
+        requested_skill_code="operation_iteration",
+        execution_preference="FORMAL_TASK",
+    )
+
+    result = await execute_conversation_turn(session, admin, turn, run, request)
+
+    assert result.status == "completed"
+    assert captured["request"].structured_input == {
+        "confirmed_review_artifact_id": 17,
+        "cycle_days": 7,
+    }
+
+
+@pytest.mark.asyncio
 async def test_answer_turn_stays_task_free(session, admin, monkeypatch) -> None:
     account, thread, turn, run = await _turn_context(session, admin, key="answer-1")
     turn.user_input = "你能做什么？"

@@ -168,7 +168,7 @@ async def _execute_conversation_turn(
         thread=thread,
         turn=turn,
         run=run,
-        request_payload=request.model_dump(mode="python"),
+        request_payload=_capability_request_payload(run, request),
         attachment_contexts=attachment_contexts,
     )
     run.request_payload = {
@@ -452,6 +452,31 @@ async def _execute_composite_skill(
     )
     _log_turn_completion(turn, run, result)
     return result
+
+
+def _capability_request_payload(
+    run: AgentRun,
+    request: CreateConversationTurnRequest,
+) -> dict[str, Any]:
+    """Merge only server-owned, Skill-validated structured input."""
+
+    payload = request.model_dump(mode="python")
+    trusted = dict(run.request_payload or {}).get("trusted_structured_input")
+    if trusted is None:
+        return payload
+    requested_skill_code = (request.requested_skill_code or "").strip()
+    if not requested_skill_code or not isinstance(trusted, dict):
+        raise PermissionError("trusted structured input is not bound to a Skill")
+    try:
+        definition = skill_registry.get(requested_skill_code)
+    except KeyError as exc:
+        raise PermissionError("trusted structured input Skill is unavailable") from exc
+    validated = definition.input_model.model_validate(trusted)
+    payload["structured_input"] = validated.model_dump(
+        mode="python",
+        exclude_none=True,
+    )
+    return payload
 
 
 def _require_owned_request(

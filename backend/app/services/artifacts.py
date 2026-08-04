@@ -227,6 +227,7 @@ _CONFIRMATION_PATTERNS = (
 class _ArtifactProvenance:
     quality: AgentQualityScore | None
     task_id: int | None
+    thread_owner_id: int | None
 
 
 def _normalize_artifact_type(
@@ -337,6 +338,7 @@ async def list_artifacts(
             content=content,
             expected_org_id=account.org_id,
             expected_account_id=account.id,
+            actor_user_id=user.id,
             provenance=provenance,
         )
         for deliverable, content, provenance in selected
@@ -387,19 +389,22 @@ async def get_artifact_out(session: AsyncSession, user: User, artifact_id: int) 
         content=content,
         expected_org_id=user.org_id,
         expected_account_id=account_id,
+        actor_user_id=user.id,
         provenance=provenance,
     )
 
 
-async def create_artifact_revision(
+async def create_artifact_revision_record(
     session: AsyncSession,
     user: User,
     *,
     artifact_id: int,
     payload: dict[str, Any],
     note: str | None,
-) -> ArtifactOut:
-    source, content, _ = await _get_artifact_for_revision(
+) -> tuple[Deliverable, ContentItem, _ArtifactProvenance]:
+    """Prepare a revision without committing or taking transaction ownership."""
+
+    source, content, provenance = await _get_artifact_for_revision(
         session,
         user,
         artifact_id,
@@ -425,11 +430,11 @@ async def create_artifact_revision(
         payload=validated_payload,
         note=note,
     )
-    session.add(revision)
     try:
-        await session.flush()
+        async with session.begin_nested():
+            session.add(revision)
+            await session.flush()
     except IntegrityError as exc:
-        await session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="成果版本已更新，请刷新后重试",
@@ -447,6 +452,24 @@ async def create_artifact_revision(
     )
     for row in active_rows:
         row.status = DeliverableStatus.SUPERSEDED
+    return revision, content, provenance
+
+
+async def create_artifact_revision(
+    session: AsyncSession,
+    user: User,
+    *,
+    artifact_id: int,
+    payload: dict[str, Any],
+    note: str | None,
+) -> ArtifactOut:
+    revision, content, _ = await create_artifact_revision_record(
+        session,
+        user,
+        artifact_id=artifact_id,
+        payload=payload,
+        note=note,
+    )
     await session.commit()
     await session.refresh(revision)
     account_id = _require_content_account_id(content)
@@ -456,6 +479,7 @@ async def create_artifact_revision(
         content=content,
         expected_org_id=user.org_id,
         expected_account_id=account_id,
+        actor_user_id=user.id,
     )
 
 
@@ -542,6 +566,7 @@ async def accept_artifact(
         content=content,
         expected_org_id=user.org_id,
         expected_account_id=account_id,
+        actor_user_id=user.id,
         provenance=provenance,
     )
 
@@ -553,6 +578,7 @@ async def project_artifact(
     content: ContentItem | None = None,
     expected_org_id: int,
     expected_account_id: int,
+    actor_user_id: int,
     provenance: _ArtifactProvenance | None = None,
 ) -> ArtifactOut:
     """Create the single Artifact identity consumed by list and detail surfaces."""
@@ -596,7 +622,14 @@ async def project_artifact(
             artifact_status=artifact_status,
             presentation_format=presentation_format,
         ),
-        next_actions=_artifact_next_actions(business_artifact_type, artifact_status),
+        next_actions=_artifact_next_actions(
+            business_artifact_type,
+            artifact_status,
+            deliverable_type=deliverable.type,
+            has_thread=deliverable.thread_id is not None,
+            actor_user_id=actor_user_id,
+            thread_owner_id=provenance.thread_owner_id,
+        ),
         title=_artifact_title(payload, content),
         version=deliverable.version,
         status=artifact_status,
@@ -659,6 +692,15 @@ def _validate_revision_payload(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="成果内容不符合当前类型要求",
         ) from exc
+
+
+def validate_complete_artifact_payload(
+    deliverable_type: DeliverableType,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate a complete action payload without inheriting source-only fields."""
+
+    return _validate_revision_payload(deliverable_type, payload, {})
 
 
 async def _load_valid_provenance(
@@ -775,6 +817,7 @@ async def _load_valid_provenance(
     return _ArtifactProvenance(
         quality=quality_rows[0] if quality_rows else None,
         task_id=task_id,
+        thread_owner_id=thread.created_by_id if thread is not None else None,
     )
 
 
@@ -847,14 +890,31 @@ def _structured_list_count(payload: dict[str, Any], key: str) -> int:
 def _artifact_next_actions(
     artifact_type: str,
     artifact_status: ArtifactStatus,
+    *,
+    deliverable_type: DeliverableType,
+    has_thread: bool,
+    actor_user_id: int,
+    thread_owner_id: int | None,
 ) -> list[DeliverableActionOut]:
     if artifact_status not in _ACTIONABLE_ARTIFACT_STATUSES:
         return []
     executable_specs: list[ActionSpec] = [
         (definition.code, definition.label, definition.requires_confirmation)
         for definition in SERVER_ACTIONS.values()
-        if artifact_type in definition.artifact_types
+        if (
+            definition.artifact_types is None
+            or artifact_type in definition.artifact_types
+        )
+        and deliverable_type in definition.deliverable_types
         and artifact_status in definition.statuses
+        and (
+            not definition.requires_thread
+            or (
+                has_thread
+                and thread_owner_id is not None
+                and thread_owner_id == actor_user_id
+            )
+        )
     ]
     specs = (*executable_specs, _EXPORT_ACTION)
     return [

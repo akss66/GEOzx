@@ -37,6 +37,33 @@ async def claim_agent_run(
 ) -> tuple[AgentRun, bool]:
     """Atomically claim a client message or return its existing run."""
 
+    run, claimed = await claim_agent_run_record(
+        session,
+        org_id=org_id,
+        requested_by_id=requested_by_id,
+        client_message_id=client_message_id,
+        request_payload=request_payload,
+        thread_id=thread_id,
+        turn_id=turn_id,
+    )
+    if claimed:
+        await session.commit()
+        await session.refresh(run)
+    return run, claimed
+
+
+async def claim_agent_run_record(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    requested_by_id: int,
+    client_message_id: str,
+    request_payload: dict,
+    thread_id: int | None = None,
+    turn_id: int | None = None,
+) -> tuple[AgentRun, bool]:
+    """Claim a run without committing the caller-owned transaction."""
+
     if turn_id is not None and thread_id is None:
         raise ValueError("turn_id requires thread_id")
 
@@ -66,11 +93,11 @@ async def claim_agent_run(
         max_attempts=settings.agent_run_max_attempts,
         request_payload=request_payload,
     )
-    session.add(run)
     try:
-        await session.commit()
+        async with session.begin_nested():
+            session.add(run)
+            await session.flush()
     except IntegrityError:
-        await session.rollback()
         existing = await get_agent_run(
             session,
             org_id=org_id,
@@ -86,7 +113,6 @@ async def claim_agent_run(
             request_payload=request_payload,
         )
         return existing, False
-    await session.refresh(run)
     return run, True
 
 
@@ -132,6 +158,7 @@ def _immutable_request_payload(value: dict) -> dict:
         "execution_preference",
         "message",
         "requested_skill_code",
+        "trusted_structured_input",
         "thread_id",
         "turn_id",
     )
@@ -194,6 +221,25 @@ async def mark_agent_run_queued(
     task_id: int | None,
     request_payload: dict | None = None,
 ) -> AgentRun:
+    run = await mark_agent_run_queued_record(
+        session,
+        run_id,
+        task_id=task_id,
+        request_payload=request_payload,
+    )
+    await session.commit()
+    return run
+
+
+async def mark_agent_run_queued_record(
+    session: AsyncSession,
+    run_id: int,
+    *,
+    task_id: int | None,
+    request_payload: dict | None = None,
+) -> AgentRun:
+    """Mark one run queued without committing the caller-owned transaction."""
+
     run = await session.get(AgentRun, run_id)
     if run is None:
         raise ValueError(f"AgentRun not found: {run_id}")
@@ -205,7 +251,7 @@ async def mark_agent_run_queued(
     run.next_retry_at = None
     if request_payload is not None:
         run.request_payload = request_payload
-    await session.commit()
+    await session.flush()
     return run
 
 

@@ -34,15 +34,10 @@ from app.schemas.conversation import (
     TurnSubmissionOut,
     sanitize_conversation_projection,
 )
-from app.services.agent_runs import (
-    claim_agent_run,
-    enqueue_agent_runtime,
-    get_agent_run,
-    mark_agent_run_queued,
-)
+from app.services.agent_runs import enqueue_agent_runtime
 from app.services.attachments import resolve_attachment_contexts
+from app.services.conversation_submission import prepare_conversation_turn_submission
 from app.services.conversations import (
-    append_conversation_turn,
     create_conversation_thread,
     delete_conversation_thread,
     get_conversation_thread,
@@ -511,58 +506,17 @@ async def submit_turn(
         thread=thread,
         attachment_ids=body.attachment_ids,
     )
-    attachment_ids = [item.id for item in attachment_contexts]
-    existing_run = await get_agent_run(
-        session,
-        org_id=user.org_id,
-        requested_by_id=user.id,
-        client_message_id=body.client_message_id,
-    )
-    if existing_run is not None and existing_run.thread_id != thread.id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "CLIENT_MESSAGE_CONFLICT",
-                "message": "client_message_id is already bound to another request",
-            },
-        )
-    turn, created = await append_conversation_turn(
+    prepared = await prepare_conversation_turn_submission(
         session,
         user,
-        thread.id,
+        thread,
         body,
+        attachment_contexts,
     )
-    request_payload = {
-        "account_id": thread.account_id,
-        "attachment_ids": attachment_ids,
-        "attachment_contexts": [item.model_dump(mode="json") for item in attachment_contexts],
-        "client_message_id": body.client_message_id,
-        "execution_preference": body.execution_preference,
-        "message": body.message,
-        "requested_skill_code": body.requested_skill_code,
-        "thread_id": thread.id,
-        "turn_id": turn.id,
-    }
-    try:
-        run, claimed = await claim_agent_run(
-            session,
-            org_id=user.org_id,
-            requested_by_id=user.id,
-            client_message_id=body.client_message_id,
-            request_payload=request_payload,
-            thread_id=thread.id,
-            turn_id=turn.id,
-        )
-    except HTTPException:
-        if created:
-            await session.rollback()
-        raise
-    if claimed:
-        run = await mark_agent_run_queued(
-            session,
-            run.id,
-            task_id=None,
-        )
+    await session.commit()
+    turn = prepared.turn
+    run = prepared.run
+    if prepared.claimed:
         await enqueue_agent_runtime(run_id=run.id)
     await session.refresh(turn)
     await session.refresh(run)
