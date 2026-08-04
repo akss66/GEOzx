@@ -1,6 +1,7 @@
 """Execution contracts for the first account-operations Skill loop."""
 
 import asyncio
+import json
 from copy import deepcopy
 from time import monotonic
 from types import SimpleNamespace
@@ -213,7 +214,76 @@ class _Harness:
         code = kwargs["code"]
         self.calls.append(code)
         self.upstreams.append(dict(kwargs["upstream"]))
-        output = (
+        upstream = dict(kwargs["upstream"])
+        structured_input = dict(upstream.get("structured_input") or {})
+        source_artifacts = list(upstream.get("source_artifacts") or [])
+        source_types = {str(item.get("artifact_type")) for item in source_artifacts}
+        if code is AgentCode.CONTENT_DIRECTOR and "topic_plan" in source_types:
+            topic_payload = next(
+                dict(item.get("payload") or {})
+                for item in source_artifacts
+                if item.get("artifact_type") == "topic_plan"
+            )
+            constraint_hits: dict[int, list[str]] = {}
+            for raw_constraint in structured_input.get("_server_request_constraints") or []:
+                constraint = json.loads(raw_constraint)
+                requirement = str(constraint.get("raw_requirement") or "")
+                for target_index in dict(
+                    constraint.get("target_scope") or {}
+                ).get("item_indexes") or []:
+                    constraint_hits.setdefault(int(target_index), []).append(requirement)
+            output = {
+                "scripts": [
+                    {
+                        "script_id": f"script-{index:02d}",
+                        "topic_id": topic["topic_id"],
+                        "title": topic["title"],
+                        "hook": f"第 {index} 个问题，先看结论",
+                        "voiceover": f"围绕{topic['title']}给出第 {index} 套完整实测说明。",
+                        "shot_list": ["问题开场", "过程实测", "结论总结"],
+                        "duration_seconds": structured_input.get("duration_seconds", 60),
+                        "cta": f"评论区回复 {index}",
+                        "constraints_hit": constraint_hits.get(index, []),
+                    }
+                    for index, topic in enumerate(topic_payload["topics"], start=1)
+                ]
+            }
+        elif code is AgentCode.CONTENT_DIRECTOR and "topic_count" in structured_input:
+            output = {
+                "theme": "下周实测内容",
+                "topics": [
+                    {
+                        "topic_id": f"topic-{index:02d}",
+                        "title": f"第 {index} 个实测选题",
+                        "angle": f"从场景 {index} 验证真实问题",
+                        "format": "short_video",
+                    }
+                    for index in range(1, int(structured_input["topic_count"]) + 1)
+                ],
+                "posting_notes": ["按计划拍摄并记录真实反馈。"],
+            }
+        elif source_types == {"video_script"} and isinstance(
+            source_artifacts[0].get("payload", {}).get("scripts"),
+            list,
+        ):
+            script_payload = dict(source_artifacts[0].get("payload") or {})
+            output = {
+                "visuals": [
+                    {
+                        "visual_id": f"visual-{index:02d}",
+                        "script_id": script["script_id"],
+                        "topic_id": script["topic_id"],
+                        "cover_copy": f"第 {index} 条实测",
+                        "composition": "产品主体与实测数据左右对比",
+                        "shot_list": ["问题开场", "过程实测", "结果总结"],
+                        "asset_checklist": ["产品素材", "实测过程"],
+                        "platform_constraints": ["竖屏 9:16", "字幕安全区"],
+                    }
+                    for index, script in enumerate(script_payload["scripts"], start=1)
+                ]
+            }
+        else:
+            output = (
             {
                 "title": "玻璃贴膜避坑指南",
                 "hook": "贴膜前先看这三个坑。",
@@ -230,7 +300,7 @@ class _Harness:
                 "issues": ["评论互动不足"],
                 "optimization_suggestions": ["强化结尾提问和私信引导"],
             }
-        )
+            )
         invocation = AgentInvocation(
             task_id=kwargs["task"].id,
             run_id=kwargs["run_id"],
@@ -253,6 +323,191 @@ class _Harness:
             deliverable=None,
             output=output,
         )
+
+
+class _AcceptingCritic:
+    async def review(self, **_kwargs):
+        return SimpleNamespace(passed=True, score=95, issues=[], suggestions=[])
+
+
+class _MalformedWeeklyHarness(_Harness):
+    async def execute(self, *args, **kwargs):
+        result = await super().execute(*args, **kwargs)
+        source_types = {
+            str(item.get("artifact_type"))
+            for item in kwargs["upstream"].get("source_artifacts") or []
+        }
+        if kwargs["code"] is AgentCode.CONTENT_DIRECTOR and "topic_plan" in source_types:
+            result.output.clear()
+            result.output["scripts"] = [
+                {
+                    "script_id": f"script-{index:02d}",
+                    "topic_id": f"topic-{index:02d}",
+                    "duration_seconds": 60,
+                }
+                for index in range(1, 6)
+            ]
+        return result
+
+
+@pytest.mark.asyncio
+async def test_weekly_operation_keeps_malformed_scripts_pending_for_review(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="weekly-malformed-scripts",
+        message="结合最近数据和对标内容，规划并制作下周抖音内容",
+    )
+    result = await SkillRuntime(
+        tool_executor=_Tools(),
+        harness=_MalformedWeeklyHarness(),
+        critic=_AcceptingCritic(),
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={"cycle_days": 7, "topic_count": 5},
+        ),
+    )
+
+    nodes = {item["skill_code"]: item for item in result.report["child_skill_graph"]}
+    assert result.status == "waiting_user"
+    assert nodes["topic_planning"]["status"] == "completed"
+    assert nodes["script_generation"]["status"] == "needs_review"
+    assert all(
+        nodes[code]["status"] == "pending"
+        for code in (
+            "visual_brief_generation",
+            "content_calendar_planning",
+            "publishing_preparation",
+        )
+    )
+    script_artifact = await session.get(
+        Deliverable,
+        nodes["script_generation"]["artifact_id"],
+    )
+    assert script_artifact is not None
+    assert script_artifact.status is DeliverableStatus.PENDING_REVIEW
+    quality = script_artifact.payload["quality"]
+    assert quality["status"] == "needs_review"
+    required = next(item for item in quality["checks"] if item["code"] == "required_fields")
+    assert required["passed"] is False
+    assert (
+        await session.scalar(
+            select(func.count(AgentToolCall.id)).where(
+                AgentToolCall.status == "waiting_approval"
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_weekly_operation_builds_one_typed_package_without_intermediate_approval(
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run = await _scope(
+        session,
+        admin,
+        key="weekly-typed-package",
+        message="结合最近数据和对标内容，规划并制作下周抖音内容",
+    )
+    tools = _Tools()
+    runtime = SkillRuntime(
+        tool_executor=tools,
+        harness=_Harness(),
+        critic=_AcceptingCritic(),
+    )
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=_capability_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            structured_input={"cycle_days": 7, "topic_count": 5},
+        ),
+    )
+
+    assert result.status == "waiting_permission"
+    nodes = {item["skill_code"]: item for item in result.report["child_skill_graph"]}
+    assert [nodes[code]["status"] for code in nodes] == [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "waiting_permission",
+    ]
+    artifacts = {
+        code: await session.get(Deliverable, node["artifact_id"])
+        for code, node in nodes.items()
+    }
+    assert all(item is not None for item in artifacts.values())
+    assert all(
+        item.status is DeliverableStatus.PENDING_REVIEW
+        for item in artifacts.values()
+        if item is not None
+    )
+    final = artifacts["publishing_preparation"]
+    assert final is not None
+    package = final.payload["package"]
+    assert [item["topic_id"] for item in package["topics"]] == [
+        f"topic-{index:02d}" for index in range(1, 6)
+    ]
+    assert [item["topic_id"] for item in package["scripts"]] == [
+        f"topic-{index:02d}" for index in range(1, 6)
+    ]
+    assert [item["script_id"] for item in package["visuals"]] == [
+        f"script-{index:02d}" for index in range(1, 6)
+    ]
+    assert [item["slot_type"] for item in package["calendar_slots"]] == [
+        "publish",
+        "publish",
+        "publish",
+        "publish",
+        "publish",
+        "review_buffer",
+        "review_buffer",
+    ]
+    assert sum(call.tool_code == "account.data_context" for call in tools.calls) == 1
+    assert all(result["status"] == "passed" for result in package["quality"].values())
+    approvals = list(
+        await session.scalars(
+            select(AgentToolCall).where(AgentToolCall.status == "waiting_approval")
+        )
+    )
+    assert len(approvals) == 1
+    publishing_run = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "publishing_preparation",
+        )
+    )
+    assert publishing_run is not None
+    assert approvals[0].skill_run_id == publishing_run.id
+    assert not any(call.tool_code == "platform.content_publish" for call in tools.calls)
 
 
 @pytest.mark.asyncio

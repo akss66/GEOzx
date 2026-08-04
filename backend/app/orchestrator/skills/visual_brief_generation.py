@@ -20,13 +20,13 @@ class VisualProductionItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     visual_id: str = Field(min_length=1)
-    script_id: str = Field(min_length=1)
-    topic_id: str = Field(min_length=1)
-    cover_copy: str = Field(min_length=1)
-    composition: str = Field(min_length=1)
-    shot_list: list[str] = Field(min_length=1)
-    asset_checklist: list[str] = Field(min_length=1)
-    platform_constraints: list[str] = Field(min_length=1)
+    script_id: str = ""
+    topic_id: str = ""
+    cover_copy: str = ""
+    composition: str = ""
+    shot_list: list[str] = Field(default_factory=list)
+    asset_checklist: list[str] = Field(default_factory=list)
+    platform_constraints: list[str] = Field(default_factory=list)
 
 
 class VisualBriefGenerationReport(BaseModel):
@@ -35,12 +35,12 @@ class VisualBriefGenerationReport(BaseModel):
     artifact_type: Literal["visual_brief"] = "visual_brief"
     account_id: int = Field(gt=0)
     source_artifact_ids: list[int] = Field(min_length=1)
-    cover_copy: str = Field(min_length=1)
-    composition: str = Field(min_length=1)
-    shot_list: list[str] = Field(min_length=1)
-    asset_checklist: list[str] = Field(min_length=1)
-    platform_constraints: list[str] = Field(min_length=1)
-    visuals: list[VisualProductionItem] = Field(min_length=1)
+    cover_copy: str = ""
+    composition: str = ""
+    shot_list: list[str] = Field(default_factory=list)
+    asset_checklist: list[str] = Field(default_factory=list)
+    platform_constraints: list[str] = Field(default_factory=list)
+    visuals: list[VisualProductionItem] = Field(default_factory=list)
     quality: ArtifactQuality
     evidence_refs: list[dict[str, Any]] = Field(min_length=1)
     participating_experts: list[str] = Field(min_length=1)

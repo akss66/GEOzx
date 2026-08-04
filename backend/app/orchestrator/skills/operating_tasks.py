@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.orchestrator.operation_quality import ArtifactQuality
+from app.orchestrator.skills.content_calendar_planning import CalendarSlot
+from app.orchestrator.skills.visual_brief_generation import VisualProductionItem
 from app.schemas.artifacts import ScriptPresentationFormat
 from app.schemas.skills import SkillDefinition
 
@@ -23,10 +25,10 @@ class TopicPlanningInput(BaseModel):
 class TopicPlanItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    topic_id: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-    angle: str = Field(min_length=1)
-    format: str = Field(min_length=1)
+    topic_id: str = ""
+    title: str = ""
+    angle: str = ""
+    format: str = ""
 
 
 class TopicPlanningReport(BaseModel):
@@ -36,7 +38,7 @@ class TopicPlanningReport(BaseModel):
     account_id: int = Field(gt=0)
     period: str = Field(min_length=1)
     theme: str = Field(min_length=1)
-    topics: list[TopicPlanItem] = Field(min_length=1)
+    topics: list[TopicPlanItem] = Field(default_factory=list)
     posting_notes: list[str] = Field(default_factory=list)
     quality: ArtifactQuality
     evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
@@ -47,13 +49,13 @@ class FilmingScript(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     script_id: str = Field(min_length=1)
-    topic_id: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-    hook: str = Field(min_length=1)
-    voiceover: str = Field(min_length=1)
-    shot_list: list[str] = Field(min_length=1)
+    topic_id: str = ""
+    title: str = ""
+    hook: str = ""
+    voiceover: str = ""
+    shot_list: list[str] = Field(default_factory=list)
     duration_seconds: int = Field(gt=0)
-    cta: str = Field(min_length=1)
+    cta: str = ""
     constraints_hit: list[str] = Field(default_factory=list)
 
 
@@ -69,14 +71,15 @@ class ScriptGenerationReport(BaseModel):
 
     artifact_type: Literal["video_script"] = "video_script"
     account_id: int = Field(gt=0)
-    title: str = Field(min_length=1)
-    hook: str = Field(min_length=1)
-    scenes: list[str] = Field(min_length=3)
+    title: str = ""
+    hook: str = ""
+    scenes: list[str] = Field(default_factory=list)
     duration_seconds: int = Field(gt=0)
     presentation_format: ScriptPresentationFormat = "storyboard"
     bgm_suggestion: str | None = None
-    scripts: list[FilmingScript] = Field(min_length=1)
+    scripts: list[FilmingScript] = Field(default_factory=list)
     quality: ArtifactQuality
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
     participating_experts: list[str] = Field(default_factory=list)
 
 
@@ -94,6 +97,31 @@ class OperationArtifactRef(BaseModel):
     version: int = Field(gt=0)
 
 
+class DataEvidenceRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(min_length=1)
+    id: int = Field(gt=0)
+    data_domains: list[str] = Field(default_factory=list)
+
+
+class ArtifactEvidenceRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: int = Field(gt=0)
+    artifact_type: str = Field(min_length=1)
+    version: int = Field(gt=0)
+
+
+class OperationQualityBundle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topics: ArtifactQuality
+    scripts: ArtifactQuality
+    visuals: ArtifactQuality
+    calendar: ArtifactQuality
+
+
 class PublicNextStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -106,15 +134,42 @@ class WeeklyOperationPackage(BaseModel):
 
     schema_version: Literal[1] = 1
     source_artifacts: list[OperationArtifactRef] = Field(min_length=4)
-    evidence_refs: list[dict[str, Any]] = Field(min_length=1)
+    evidence_refs: list[DataEvidenceRef | ArtifactEvidenceRef] = Field(min_length=1)
     topics: list[TopicPlanItem] = Field(min_length=5, max_length=5)
     scripts: list[FilmingScript] = Field(min_length=5, max_length=5)
-    visuals: list[dict[str, Any]] = Field(min_length=5, max_length=5)
-    calendar_slots: list[dict[str, Any]] = Field(min_length=7, max_length=7)
-    quality: dict[str, ArtifactQuality]
+    visuals: list[VisualProductionItem] = Field(min_length=5, max_length=5)
+    calendar_slots: list[CalendarSlot] = Field(min_length=7, max_length=7)
+    quality: OperationQualityBundle
     participating_experts: list[str] = Field(min_length=1)
     manual_publish_checklist: list[str] = Field(min_length=1)
     next_steps: list[PublicNextStep] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_complete_package(self) -> WeeklyOperationPackage:
+        if any(
+            result.status != "passed"
+            for result in (
+                self.quality.topics,
+                self.quality.scripts,
+                self.quality.visuals,
+                self.quality.calendar,
+            )
+        ):
+            raise ValueError("weekly operation package quality must pass")
+        if any(
+            not (
+                item.script_id
+                and item.topic_id
+                and item.cover_copy
+                and item.composition
+                and item.shot_list
+                and item.asset_checklist
+                and item.platform_constraints
+            )
+            for item in self.visuals
+        ):
+            raise ValueError("weekly operation visuals must be complete")
+        return self
 
 
 class PublishingPreparationReport(BaseModel):
@@ -230,6 +285,9 @@ __all__ = [
     "TOPIC_PLANNING_SKILL",
     "PerformanceReviewInput",
     "PerformanceReviewReport",
+    "ArtifactEvidenceRef",
+    "DataEvidenceRef",
+    "OperationQualityBundle",
     "PublicNextStep",
     "PublishingPreparationInput",
     "PublishingPreparationReport",

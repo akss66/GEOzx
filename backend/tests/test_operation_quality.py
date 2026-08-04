@@ -1,8 +1,21 @@
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+from pydantic import ValidationError
+
 from app.orchestrator.operation_quality import (
+    ArtifactQuality,
+    QualityCheck,
     evaluate_script_quality,
     normalize_script_text,
 )
-from app.orchestrator.skills.operating_tasks import FilmingScript
+from app.orchestrator.skills.content_calendar_planning import CalendarSlot
+from app.orchestrator.skills.operating_tasks import (
+    FilmingScript,
+    TopicPlanItem,
+    WeeklyOperationPackage,
+)
 
 
 def _script(index: int, *, hook: str, voiceover: str) -> FilmingScript:
@@ -66,3 +79,70 @@ def test_short_distinct_scripts_do_not_trigger_similarity_false_positive() -> No
     assert quality.status == "passed"
     assert quality.score == 100
 
+
+def test_weekly_package_rejects_malformed_nested_visual_items() -> None:
+    quality = ArtifactQuality(
+        status="passed",
+        score=100,
+        checks=[QualityCheck(code="complete", passed=True, message="完整")],
+    )
+    scripts = [
+        _script(index, hook=f"钩子 {index}", voiceover=f"完整口播 {index}")
+        for index in range(1, 6)
+    ]
+    start = date(2026, 8, 10)
+    zone = ZoneInfo("Asia/Shanghai")
+    slots = [
+        CalendarSlot(
+            slot_id=f"slot-{index:02d}",
+            date=start + timedelta(days=index - 1),
+            slot_type="publish" if index <= 5 else "review_buffer",
+            title=f"第 {index} 天",
+            owner="运营",
+            readiness="ready" if index <= 5 else "buffer",
+            topic_id=f"topic-{index:02d}" if index <= 5 else None,
+            script_id=f"script-{index:02d}" if index <= 5 else None,
+            scheduled_at=(
+                datetime(2026, 8, 9 + index, 10, tzinfo=zone) if index <= 5 else None
+            ),
+        )
+        for index in range(1, 8)
+    ]
+
+    with pytest.raises(ValidationError):
+        WeeklyOperationPackage.model_validate(
+            {
+                "source_artifacts": [
+                    {
+                        "artifact_id": index,
+                        "artifact_type": "topic_plan",
+                        "version": 1,
+                    }
+                    for index in range(1, 5)
+                ],
+                "evidence_refs": [{"kind": "data_import_batch", "id": 1}],
+                "topics": [
+                    TopicPlanItem(
+                        topic_id=f"topic-{index:02d}",
+                        title=f"选题 {index}",
+                        angle="实测",
+                        format="short_video",
+                    )
+                    for index in range(1, 6)
+                ],
+                "scripts": scripts,
+                "visuals": [{"visual_id": f"visual-{index:02d}"} for index in range(1, 6)],
+                "calendar_slots": slots,
+                "quality": {
+                    "topics": quality,
+                    "scripts": quality,
+                    "visuals": quality,
+                    "calendar": quality,
+                },
+                "participating_experts": ["02-content-director"],
+                "manual_publish_checklist": ["人工确认标题"],
+                "next_steps": [
+                    {"code": "start_filming", "label": "按 5 条拍摄稿开始拍摄"}
+                ],
+            }
+        )

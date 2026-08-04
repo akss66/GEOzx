@@ -8,10 +8,11 @@ import json
 import logging
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -58,6 +59,7 @@ from app.orchestrator.operation_lineage import (
     resolve_internal_lineage_artifacts,
 )
 from app.orchestrator.operation_quality import (
+    ArtifactQuality,
     evaluate_calendar_quality,
     evaluate_script_quality,
     evaluate_topic_quality,
@@ -80,11 +82,14 @@ from app.orchestrator.skills.content_publishing import ContentPublishingReceipt
 from app.orchestrator.skills.engagement_review import EngagementReviewReport
 from app.orchestrator.skills.operating_tasks import (
     FilmingScript,
+    OperationArtifactRef,
+    OperationQualityBundle,
     PerformanceReviewReport,
     PublishingPreparationReport,
     ScriptGenerationReport,
     TopicPlanItem,
     TopicPlanningReport,
+    WeeklyOperationPackage,
 )
 from app.orchestrator.skills.operation_iteration import OperationIterationPlan
 from app.orchestrator.skills.registry import skill_registry
@@ -1509,7 +1514,13 @@ class SkillRuntime:
         response = (
             "下一运营周期的全部专业成果已生成。"
             if parent_status == "completed"
-            else "运营迭代已安全暂停，等待完成当前子成果的确认或处理。"
+            else (
+                "已准备 5 条拍摄稿和 7 天安排。确认后将创建 5 条手动发布任务。"
+                if parent_status == "waiting_permission"
+                and isinstance(interrupt, dict)
+                and interrupt.get("skill_code") == "publishing_preparation"
+                else "运营迭代已安全暂停，等待完成当前子成果的确认或处理。"
+            )
         )
         output = {
             "status": parent_status,
@@ -2192,6 +2203,14 @@ class SkillRuntime:
             if paused is not None:
                 return paused
 
+        operation_mode = (
+            type(
+                dict(skill_run.output_snapshot or {}).get(
+                    "composite_parent_skill_run_id"
+                )
+            )
+            is int
+        )
         report, deliverable_type, deliverable_payload = _build_operating_report(
             definition=definition,
             account_id=thread.account_id,
@@ -2201,6 +2220,11 @@ class SkillRuntime:
             tool_results=tool_results,
             expert_results=expert_results,
             evidence_refs=evidence_refs,
+            source_artifacts=source_artifacts,
+            operation_mode=operation_mode,
+            execution_date=(skill_run.created_at or utc_now())
+            .astimezone(ZoneInfo("Asia/Shanghai"))
+            .date(),
         )
         definition.output_model.model_validate(report)
         self._require_formal_producer(
@@ -2208,6 +2232,37 @@ class SkillRuntime:
             scope=scope,
             definition=definition,
         )
+        quality_payload = report.get("quality")
+        if (
+            operation_mode
+            and
+            definition.code
+            in {
+                "topic_planning",
+                "script_generation",
+                "visual_brief_generation",
+                "content_calendar_planning",
+            }
+            and isinstance(quality_payload, dict)
+            and quality_payload.get("status") != "passed"
+        ):
+            return await self._complete_operating_skill_for_human_review(
+                session,
+                content=content,
+                thread=thread,
+                turn=turn,
+                run=run,
+                task=task,
+                skill_run=skill_run,
+                scope=scope,
+                definition=definition,
+                report=report,
+                deliverable_type=deliverable_type,
+                deliverable_payload=deliverable_payload,
+                producer=expert_results[-1].invocation,
+                review_reason="结构化质量检查未通过。",
+                attempt=attempt,
+            )
         if definition.critic_policy == "required":
             await _start_skill_stage(
                 session,
@@ -2320,7 +2375,16 @@ class SkillRuntime:
                 approval_kind="skill_finish",
                 source_id=approval_call.id,
                 title=f"{definition.name}待确认",
-                body="发布准备包已经生成，确认后本次 Skill 才会完成。",
+                body=(
+                    "确认这份 7 天安排并创建 5 条手动发布任务。"
+                    if definition.code == "publishing_preparation"
+                    else "发布准备包已经生成，确认后本次 Skill 才会完成。"
+                ),
+            )
+            waiting_response = (
+                "已准备 5 条拍摄稿和 7 天安排。确认后将创建 5 条手动发布任务。"
+                if definition.code == "publishing_preparation" and operation_mode
+                else f"{definition.name}已生成，等待你确认后完成。"
             )
             output = {
                 "status": "waiting_permission",
@@ -2328,7 +2392,7 @@ class SkillRuntime:
                 "artifact_id": deliverable.id,
                 "artifact_type": definition.artifact_type or definition.code,
                 "report": report,
-                "response": f"{definition.name}已生成，等待你确认后完成。",
+                "response": waiting_response,
                 "approval_tool_call_id": approval_call.id,
             }
             await _complete_skill_stage(
@@ -3262,6 +3326,9 @@ def _build_operating_report(
     tool_results: dict[str, dict[str, Any]],
     expert_results: list[Any],
     evidence_refs: list[dict[str, Any]],
+    source_artifacts: list[dict[str, Any]],
+    operation_mode: bool,
+    execution_date: date,
 ) -> tuple[dict[str, Any], DeliverableType, dict[str, Any]]:
     outputs = [dict(item.output or {}) for item in expert_results]
     participants = [str(item.invocation.agent_code) for item in expert_results]
@@ -3291,6 +3358,222 @@ def _build_operating_report(
         )
     )
     latest = outputs_by_agent.get(preferred_agent, outputs[-1] if outputs else {})
+
+    def source_payload(artifact_type: str) -> dict[str, Any]:
+        return next(
+            (
+                dict(item.get("payload") or {})
+                for item in source_artifacts
+                if item.get("artifact_type") == artifact_type
+            ),
+            {},
+        )
+
+    if operation_mode and definition.code == "topic_planning":
+        raw_topics = latest.get("topics")
+        candidates = raw_topics if isinstance(raw_topics, list) else []
+        topics = [
+            TopicPlanItem.model_validate(
+                {
+                    **(dict(item) if isinstance(item, dict) else {"title": str(item)}),
+                    "topic_id": (
+                        str(item.get("topic_id") or f"topic-{index:02d}")
+                        if isinstance(item, dict)
+                        else f"topic-{index:02d}"
+                    ),
+                }
+            )
+            for index, item in enumerate(candidates, start=1)
+        ]
+        quality = evaluate_topic_quality(
+            topics,
+            expected_count=int(frozen_input.get("topic_count") or 5),
+        )
+        report = TopicPlanningReport(
+            account_id=account_id,
+            period=f"未来 {int(frozen_input.get('days') or 7)} 天",
+            theme=str(latest.get("theme") or user_input[:80]),
+            topics=topics,
+            posting_notes=_string_list(latest.get("posting_notes")),
+            quality=quality,
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.TOPIC_PLAN, data
+
+    if operation_mode and definition.code == "script_generation":
+        topic_payload = source_payload(DeliverableType.TOPIC_PLAN.value)
+        expected_topic_ids = [
+            str(item.get("topic_id") or "")
+            for item in topic_payload.get("topics") or []
+            if isinstance(item, dict)
+        ]
+        raw_scripts = latest.get("scripts")
+        candidates = raw_scripts if isinstance(raw_scripts, list) else []
+        duration_seconds = int(frozen_input.get("duration_seconds") or 60)
+        scripts = [
+            FilmingScript.model_validate(
+                {
+                    **(dict(item) if isinstance(item, dict) else {}),
+                    "script_id": (
+                        str(item.get("script_id") or f"script-{index:02d}")
+                        if isinstance(item, dict)
+                        else f"script-{index:02d}"
+                    ),
+                    "duration_seconds": (
+                        item.get("duration_seconds", duration_seconds)
+                        if isinstance(item, dict)
+                        else duration_seconds
+                    ),
+                }
+            )
+            for index, item in enumerate(candidates, start=1)
+        ]
+        required_constraints: dict[str, list[str]] = {}
+        for raw_constraint in frozen_input.get("_server_request_constraints") or []:
+            try:
+                constraint = json.loads(raw_constraint)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if constraint.get("constraint_type") != "OFFER_TERMS":
+                continue
+            requirement = str(constraint.get("raw_requirement") or "").strip()
+            indexes = dict(constraint.get("target_scope") or {}).get("item_indexes") or []
+            for index in indexes:
+                if (
+                    requirement
+                    and type(index) is int
+                    and 1 <= index <= len(expected_topic_ids)
+                ):
+                    required_constraints.setdefault(
+                        expected_topic_ids[index - 1], []
+                    ).append(requirement)
+        quality = evaluate_script_quality(
+            scripts,
+            expected_topic_ids=expected_topic_ids,
+            required_constraints=required_constraints,
+        )
+        first = scripts[0] if scripts else None
+        report = ScriptGenerationReport(
+            account_id=account_id,
+            title=first.title if first is not None else "",
+            hook=first.hook if first is not None else "",
+            scenes=first.shot_list if first is not None else [],
+            duration_seconds=(
+                first.duration_seconds if first is not None else duration_seconds
+            ),
+            presentation_format=frozen_input.get("presentation_format", "storyboard"),
+            bgm_suggestion=latest.get("bgm_suggestion"),
+            scripts=scripts,
+            quality=quality,
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.VIDEO_SCRIPT, data
+
+    if operation_mode and definition.code == "visual_brief_generation":
+        script_payload = source_payload(DeliverableType.VIDEO_SCRIPT.value)
+        expected_script_ids = [
+            str(item.get("script_id") or "")
+            for item in script_payload.get("scripts") or []
+            if isinstance(item, dict)
+        ]
+        raw_visuals = latest.get("visuals")
+        candidates = raw_visuals if isinstance(raw_visuals, list) else []
+        visuals = [
+            VisualProductionItem.model_validate(
+                {
+                    **(dict(item) if isinstance(item, dict) else {}),
+                    "visual_id": (
+                        str(item.get("visual_id") or f"visual-{index:02d}")
+                        if isinstance(item, dict)
+                        else f"visual-{index:02d}"
+                    ),
+                }
+            )
+            for index, item in enumerate(candidates, start=1)
+        ]
+        quality = evaluate_visual_quality(
+            visuals,
+            expected_script_ids=expected_script_ids,
+        )
+        first = visuals[0] if visuals else None
+        report = VisualBriefGenerationReport(
+            account_id=account_id,
+            source_artifact_ids=[int(item["artifact_id"]) for item in source_artifacts],
+            cover_copy=first.cover_copy if first is not None else "",
+            composition=first.composition if first is not None else "",
+            shot_list=first.shot_list if first is not None else [],
+            asset_checklist=first.asset_checklist if first is not None else [],
+            platform_constraints=(first.platform_constraints if first is not None else []),
+            visuals=visuals,
+            quality=quality,
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.ART_PROMPT, data
+
+    if operation_mode and definition.code == "content_calendar_planning":
+        visual_payload = source_payload(DeliverableType.ART_PROMPT.value)
+        visuals = [
+            VisualProductionItem.model_validate(item)
+            for item in visual_payload.get("visuals") or []
+            if isinstance(item, dict)
+        ]
+        zone = ZoneInfo("Asia/Shanghai")
+        slots: list[CalendarSlot] = []
+        for index in range(7):
+            slot_date = execution_date + timedelta(days=index)
+            visual = visuals[index] if index < min(5, len(visuals)) else None
+            if visual is None:
+                slots.append(
+                    CalendarSlot(
+                        slot_id=f"slot-{index + 1:02d}",
+                        date=slot_date,
+                        slot_type="review_buffer",
+                        title="复盘与机动安排",
+                        owner="运营",
+                        readiness="buffer",
+                    )
+                )
+            else:
+                slots.append(
+                    CalendarSlot(
+                        slot_id=f"slot-{index + 1:02d}",
+                        date=slot_date,
+                        slot_type="publish",
+                        title=visual.cover_copy or visual.script_id,
+                        owner="运营",
+                        readiness="ready",
+                        topic_id=visual.topic_id,
+                        script_id=visual.script_id,
+                        scheduled_at=datetime.combine(
+                            slot_date,
+                            time(hour=10),
+                            tzinfo=zone,
+                        ),
+                    )
+                )
+        expected_script_ids = [item.script_id for item in visuals]
+        quality = evaluate_calendar_quality(
+            slots,
+            expected_script_ids=expected_script_ids,
+        )
+        report = ContentCalendarPlanningReport(
+            account_id=account_id,
+            source_artifact_ids=[int(item["artifact_id"]) for item in source_artifacts],
+            days=7,
+            items=[item.model_dump(mode="json") for item in slots],
+            slots=slots,
+            quality=quality,
+            evidence_refs=evidence_refs,
+            participating_experts=participants,
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.PUBLISH_CALENDAR, data
 
     if definition.code == "account_positioning":
         audience = _string_list(latest.get("audience"))
@@ -3438,6 +3721,7 @@ def _build_operating_report(
                 expected_topic_ids=[script.topic_id],
                 required_constraints={},
             ),
+            evidence_refs=evidence_refs,
             participating_experts=participants,
         )
         data = report.model_dump(mode="json")
@@ -3455,6 +3739,7 @@ def _build_operating_report(
                     "bgm_suggestion",
                     "scripts",
                     "quality",
+                    "evidence_refs",
                     "participating_experts",
                 )
             },
@@ -3561,6 +3846,104 @@ def _build_operating_report(
                 "optimization_suggestions": data["optimization_suggestions"],
             },
         )
+
+    if (
+        operation_mode
+        and definition.code == "publishing_preparation"
+        and len(source_artifacts) == 4
+    ):
+        topic_payload = source_payload(DeliverableType.TOPIC_PLAN.value)
+        script_payload = source_payload(DeliverableType.VIDEO_SCRIPT.value)
+        visual_payload = source_payload(DeliverableType.ART_PROMPT.value)
+        calendar_payload = source_payload(DeliverableType.PUBLISH_CALENDAR.value)
+        topics = [
+            TopicPlanItem.model_validate(item)
+            for item in topic_payload.get("topics") or []
+            if isinstance(item, dict)
+        ]
+        scripts = [
+            FilmingScript.model_validate(item)
+            for item in script_payload.get("scripts") or []
+            if isinstance(item, dict)
+        ]
+        visuals = [
+            VisualProductionItem.model_validate(item)
+            for item in visual_payload.get("visuals") or []
+            if isinstance(item, dict)
+        ]
+        slots = [
+            CalendarSlot.model_validate(item)
+            for item in calendar_payload.get("slots") or []
+            if isinstance(item, dict)
+        ]
+        quality = OperationQualityBundle(
+            topics=ArtifactQuality.model_validate(topic_payload.get("quality")),
+            scripts=ArtifactQuality.model_validate(script_payload.get("quality")),
+            visuals=ArtifactQuality.model_validate(visual_payload.get("quality")),
+            calendar=ArtifactQuality.model_validate(calendar_payload.get("quality")),
+        )
+        unique_evidence: dict[str, dict[str, Any]] = {}
+        for payload in (topic_payload, script_payload, visual_payload, calendar_payload):
+            for item in payload.get("evidence_refs") or []:
+                if isinstance(item, dict):
+                    key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                    unique_evidence[key] = dict(item)
+        experts = list(
+            dict.fromkeys(
+                participant
+                for payload in (
+                    topic_payload,
+                    script_payload,
+                    visual_payload,
+                    calendar_payload,
+                )
+                for participant in payload.get("participating_experts") or []
+                if isinstance(participant, str) and participant
+            )
+        )
+        package = WeeklyOperationPackage(
+            source_artifacts=[
+                OperationArtifactRef(
+                    artifact_id=int(item["artifact_id"]),
+                    artifact_type=str(item["artifact_type"]),
+                    version=int(item["version"]),
+                )
+                for item in source_artifacts
+            ],
+            evidence_refs=list(unique_evidence.values()),
+            topics=topics,
+            scripts=scripts,
+            visuals=visuals,
+            calendar_slots=slots,
+            quality=quality,
+            participating_experts=experts,
+            manual_publish_checklist=[
+                "逐条确认标题、封面、口播和素材完整。",
+                "按 7 天安排人工发布五条内容；两个缓冲日用于复盘或调整。",
+                "本流程只创建手动发布任务，不会向平台自动发布。",
+            ],
+            next_steps=[
+                {"code": "start_filming", "label": "按 5 条拍摄稿开始拍摄"},
+                {
+                    "code": "confirm_manual_schedule",
+                    "label": "确认 7 天安排并创建手动发布任务",
+                },
+            ],
+        )
+        first_date = slots[0].date.isoformat() if slots else "待确认"
+        last_date = slots[-1].date.isoformat() if slots else "待确认"
+        report = PublishingPreparationReport(
+            account_id=account_id,
+            platform=platform,
+            readiness="ready",
+            period=f"{first_date} 至 {last_date}",
+            items=[item.model_dump(mode="json") for item in slots],
+            operating_notes=["仅创建手动发布任务，不会调用平台发布。"],
+            package=package,
+            participating_experts=list(dict.fromkeys([*experts, *participants])),
+        )
+        data = report.model_dump(mode="json")
+        return data, DeliverableType.PUBLISH_CALENDAR, data
 
     if definition.code == "publishing_preparation":
         issues = _string_list(latest.get("issues"))
