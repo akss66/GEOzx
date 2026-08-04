@@ -30,7 +30,7 @@ class RuntimeRootLock:
     """Unforgeable, session-bound proof of one acquired Run-root lock set."""
 
     _session_identity: int
-    _transaction_identity: int
+    _transaction_identity: object
     run_id: int
     turn_id: int | None
     task_id: int | None
@@ -42,6 +42,7 @@ class RuntimeRootLock:
     invocation_ids: tuple[int, ...]
     tool_call_ids: tuple[int, ...]
     attempt_ids: tuple[int, ...]
+    _pending_object_ids_at_acquire: frozenset[int]
 
     __slots__ = (
         "_session_identity",
@@ -57,6 +58,7 @@ class RuntimeRootLock:
         "invocation_ids",
         "tool_call_ids",
         "attempt_ids",
+        "_pending_object_ids_at_acquire",
     )
 
     def __init__(
@@ -64,7 +66,7 @@ class RuntimeRootLock:
         *,
         _seal: object,
         session_identity: int,
-        transaction_identity: int,
+        transaction_identity: object,
         run_id: int,
         turn_id: int | None,
         task_id: int | None,
@@ -76,6 +78,7 @@ class RuntimeRootLock:
         invocation_ids: tuple[int, ...],
         tool_call_ids: tuple[int, ...],
         attempt_ids: tuple[int, ...],
+        pending_object_ids_at_acquire: frozenset[int] = frozenset(),
     ) -> None:
         if _seal is not _TOKEN_SEAL:
             raise TypeError("RuntimeRootLock tokens are created only by the lock helper")
@@ -92,6 +95,9 @@ class RuntimeRootLock:
         object.__setattr__(self, "invocation_ids", invocation_ids)
         object.__setattr__(self, "tool_call_ids", tool_call_ids)
         object.__setattr__(self, "attempt_ids", attempt_ids)
+        object.__setattr__(
+            self, "_pending_object_ids_at_acquire", pending_object_ids_at_acquire
+        )
 
     def __setattr__(self, _name: str, _value: object) -> None:
         raise AttributeError("RuntimeRootLock is immutable")
@@ -101,11 +107,15 @@ def _session_identity(session: AsyncSession) -> int:
     return id(session.sync_session)
 
 
-def _transaction_identity(session: AsyncSession) -> int:
+def _transaction_identity(session: AsyncSession) -> object:
     transaction = session.get_transaction()
     if transaction is None:
         raise RuntimeLockConflict("runtime lock requires an active transaction")
-    return id(transaction.sync_transaction)
+    return transaction.sync_transaction
+
+
+def _pending_object_ids(session: AsyncSession) -> frozenset[int]:
+    return frozenset(id(row) for row in session.new)
 
 
 async def _advisory_run_gate(session: AsyncSession, run_ids: tuple[int, ...]) -> None:
@@ -152,10 +162,32 @@ async def lock_runtime_root_forest(
 ) -> tuple[RuntimeRootLock, ...]:
     """Lock a multi-Run forest by family, never as per-Run bundles."""
 
-    run_ids = tuple(sorted(set(run_ids)))
-    if not run_ids:
+    requested_run_ids = tuple(sorted(set(run_ids)))
+    if not requested_run_ids:
         return ()
     with session.no_autoflush:
+        run_id_set = set(requested_run_ids)
+        revisions: list[RunRevision] = []
+        while True:
+            revisions = list(
+                await session.scalars(
+                    select(RunRevision)
+                    .where(
+                        (RunRevision.source_run_id.in_(run_id_set))
+                        | (RunRevision.revision_run_id.in_(run_id_set))
+                    )
+                    .order_by(RunRevision.id)
+                )
+            )
+            expanded = run_id_set | {
+                endpoint
+                for row in revisions
+                for endpoint in (row.source_run_id, row.revision_run_id)
+            }
+            if expanded == run_id_set:
+                break
+            run_id_set = expanded
+        run_ids = tuple(sorted(run_id_set))
         discovered_runs = list(
             await session.scalars(
                 select(AgentRun).where(AgentRun.id.in_(run_ids)).order_by(AgentRun.id)
@@ -190,13 +222,7 @@ async def lock_runtime_root_forest(
         child_skill_ids = tuple(
             sorted(skill.id for skill in skills if skill.id not in set(root_skill_ids))
         )
-        revision_ids = tuple(
-            await session.scalars(
-                select(RunRevision.id)
-                .where(RunRevision.revision_run_id.in_(run_ids))
-                .order_by(RunRevision.id)
-            )
-        )
+        revision_ids = tuple(row.id for row in revisions)
         deliverable_ids = tuple(
             sorted(
                 set(
@@ -250,6 +276,11 @@ async def lock_runtime_root_forest(
     invocation_rows = [await session.get(AgentInvocation, row_id) for row_id in invocation_ids]
     tool_rows = [await session.get(AgentToolCall, row_id) for row_id in tool_ids]
     attempt_rows = [await session.get(ToolExecutionAttempt, row_id) for row_id in attempt_ids]
+    if any(
+        row is None or row.run_id not in set(run_ids)
+        for row in deliverable_rows
+    ):
+        raise RuntimeLockConflict("runtime Deliverable lineage mismatch")
     tokens: list[RuntimeRootLock] = []
     for run in runs:
         run_skills = [skill for skill in skills if skill.run_id == run.id]
@@ -280,7 +311,7 @@ async def lock_runtime_root_forest(
             for row in attempt_rows
             if row is not None and row.tool_call_id in set(run_tool_ids)
         )
-        task = task_by_id.get(run.task_id)
+        task = task_by_id.get(run.task_id) if run.task_id is not None else None
         tokens.append(
             RuntimeRootLock(
                 _seal=_TOKEN_SEAL,
@@ -297,7 +328,8 @@ async def lock_runtime_root_forest(
                 run_revision_ids=tuple(
                     row.id
                     for row in revision_rows
-                    if row is not None and row.revision_run_id == run.id
+                    if row is not None
+                    and run.id in {row.source_run_id, row.revision_run_id}
                 ),
                 deliverable_ids=tuple(
                     row.id
@@ -306,7 +338,8 @@ async def lock_runtime_root_forest(
                 ),
                 invocation_ids=run_invocation_ids,
                 tool_call_ids=run_tool_ids,
-                attempt_ids=run_attempt_ids,
+            attempt_ids=run_attempt_ids,
+            pending_object_ids_at_acquire=_pending_object_ids(session),
             )
         )
     return tuple(tokens)
@@ -337,6 +370,7 @@ async def lock_runtime_root_scope(
     expected_turn_id: int | None = None,
     expected_task_id: int | None = None,
     expected_content_item_id: int | None = None,
+    transition_task_id: int | None = None,
     root_skill_run_id: int | None = None,
     child_skill_run_ids: tuple[int, ...] = (),
     validate_child_parent: bool = True,
@@ -363,10 +397,10 @@ async def lock_runtime_root_scope(
     if run is None:
         raise RuntimeLockConflict(f"AgentRun not found: {run_id}")
     turn_id = expected_turn_id if expected_turn_id is not None else run.turn_id
-    task_id = expected_task_id if expected_task_id is not None else run.task_id
+    current_task_id = run.task_id
     if expected_turn_id is not None and run.turn_id != expected_turn_id:
         raise RuntimeLockConflict("runtime Turn does not belong to AgentRun")
-    if expected_task_id is not None and run.task_id != expected_task_id:
+    if expected_task_id is not None and current_task_id != expected_task_id:
         raise RuntimeLockConflict("runtime BrainTask does not belong to AgentRun")
     turn = (
         await session.scalar(
@@ -378,16 +412,18 @@ async def lock_runtime_root_scope(
         if turn_id is not None
         else None
     )
-    task = (
-        await session.scalar(
-            select(BrainTask)
-            .where(BrainTask.id == task_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+    task_id = transition_task_id if transition_task_id is not None else current_task_id
+    task_ids = tuple(
+        sorted(
+            task_id
+            for task_id in {current_task_id, transition_task_id}
+            if task_id is not None
         )
-        if task_id is not None
-        else None
     )
+    locked_tasks = await _lock_rows(session, BrainTask, task_ids)
+    task_by_id = {row.id: row for row in locked_tasks}
+    current_task = task_by_id.get(current_task_id)
+    task = task_by_id.get(task_id)
     if turn_id is not None and (
         turn is None
         or turn.id != run.turn_id
@@ -395,10 +431,12 @@ async def lock_runtime_root_scope(
         or turn.org_id != run.org_id
     ):
         raise RuntimeLockConflict("runtime Turn lineage mismatch")
-    if task_id is not None and (
-        task is None or task.id != run.task_id or task.org_id != run.org_id
+    if current_task_id is not None and (
+        current_task is None or current_task.org_id != run.org_id
     ):
         raise RuntimeLockConflict("runtime BrainTask lineage mismatch")
+    if task_id is not None and (task is None or task.org_id != run.org_id):
+        raise RuntimeLockConflict("runtime target BrainTask lineage mismatch")
     content_item_id = (
         expected_content_item_id
         if expected_content_item_id is not None
@@ -410,14 +448,16 @@ async def lock_runtime_root_scope(
         and task.content_item_id != expected_content_item_id
     ):
         raise RuntimeLockConflict("runtime ContentItem does not belong to BrainTask")
-    if content_item_id is not None:
-        locked_content_id = await session.scalar(
-            select(ContentItem.id)
-            .where(ContentItem.id == content_item_id)
-            .with_for_update()
+    content_item_ids = tuple(
+        sorted(
+            {
+                row.content_item_id
+                for row in locked_tasks
+                if row.content_item_id is not None
+            }
         )
-        if locked_content_id is None:
-            raise RuntimeLockConflict("runtime ContentItem is missing")
+    )
+    await _lock_rows(session, ContentItem, content_item_ids)
 
     skill_ids = tuple(
         skill_id
@@ -468,17 +508,33 @@ async def lock_runtime_root_scope(
     locked_invocations = await _lock_rows(session, AgentInvocation, invocation_ids)
     locked_tools = await _lock_rows(session, AgentToolCall, tool_call_ids)
     locked_attempts = await _lock_rows(session, ToolExecutionAttempt, attempt_ids)
+    if transition_task_id is not None and transition_task_id != current_task_id and (
+        skills
+        or revisions
+        or locked_deliverables
+        or locked_invocations
+        or locked_tools
+        or locked_attempts
+    ):
+        raise RuntimeLockConflict("runtime cannot rebind existing runtime family")
     for row in locked_deliverables:
         if row.run_id != run.id:
             raise RuntimeLockConflict("runtime Deliverable lineage mismatch")
     for row in locked_invocations:
         if row.run_id != run.id:
             raise RuntimeLockConflict("runtime AgentInvocation lineage mismatch")
+    locked_skill_ids = {skill.id for skill in skills}
+    locked_invocation_ids = {row.id for row in locked_invocations}
     for row in locked_tools:
-        if row.task_id != run.task_id or (
-            row.skill_run_id is not None
-            and row.skill_run_id not in {skill.id for skill in skills}
-        ):
+        through_skill = (
+            row.skill_run_id is not None and row.skill_run_id in locked_skill_ids
+        )
+        through_invocation = (
+            row.skill_run_id is None
+            and row.invocation_id is not None
+            and row.invocation_id in locked_invocation_ids
+        )
+        if row.task_id != run.task_id or not (through_skill or through_invocation):
             raise RuntimeLockConflict("runtime AgentToolCall lineage mismatch")
     locked_tool_ids = {row.id for row in locked_tools}
     for row in locked_attempts:
@@ -500,6 +556,122 @@ async def lock_runtime_root_scope(
         invocation_ids=invocation_ids,
         tool_call_ids=tool_call_ids,
         attempt_ids=attempt_ids,
+        pending_object_ids_at_acquire=_pending_object_ids(session),
+    )
+
+
+async def extend_runtime_root_lock(
+    session: AsyncSession,
+    token: RuntimeRootLock,
+    *,
+    task: BrainTask,
+    content: ContentItem | None,
+    skill_run: SkillRun,
+    expected_content_account_id: int | None = None,
+) -> RuntimeRootLock:
+    """Flush and attest rows added only after the Run gate was acquired."""
+
+    require_runtime_root_lock(
+        session,
+        token,
+        run_id=token.run_id,
+        turn_id=token.turn_id,
+    )
+    def require_new(row: object, label: str) -> None:
+        if (
+            row not in session.new
+            or id(row) in token._pending_object_ids_at_acquire
+        ):
+            raise RuntimeLockConflict(
+                f"runtime {label} must be inserted in the current transaction "
+                "after root lock acquisition"
+            )
+
+    new_task = task.id is None or token.task_id != task.id
+    new_content = (
+        content is not None
+        and (content.id is None or token.content_item_id != content.id)
+    )
+    locked_skill_ids = {
+        token.root_skill_run_id,
+        *token.child_skill_run_ids,
+    }
+    new_skill = skill_run.id is None or skill_run.id not in locked_skill_ids
+    if new_task:
+        require_new(task, "BrainTask")
+    if new_content:
+        if content is None:
+            raise RuntimeLockConflict("runtime inserted ContentItem is missing")
+        require_new(content, "ContentItem")
+    if new_skill:
+        require_new(skill_run, "SkillRun")
+
+    run = await session.get(AgentRun, token.run_id)
+    if run is None or run.turn_id != token.turn_id or (
+        task.org_id != run.org_id
+        or skill_run.run_id != run.id
+        or skill_run.turn_id != run.turn_id
+        or skill_run.thread_id != run.thread_id
+        or skill_run.org_id != run.org_id
+    ):
+        raise RuntimeLockConflict("runtime inserted row lineage mismatch")
+
+    if new_content:
+        assert content is not None
+        if (
+            expected_content_account_id is not None
+            and content.account_id != expected_content_account_id
+        ):
+            raise RuntimeLockConflict("runtime inserted ContentItem account mismatch")
+        await session.flush([content])
+    content_item_id = content.id if content is not None else None
+    if new_task:
+        task.content_item_id = content_item_id
+        await session.flush([task])
+    if task.content_item_id != content_item_id:
+        raise RuntimeLockConflict("runtime inserted BrainTask content mismatch")
+    run.task_id = task.id
+    skill_run.task_id = task.id
+    await session.flush()
+    if (
+        run.task_id != task.id
+        or skill_run.task_id != task.id
+        or skill_run.id is None
+    ):
+        raise RuntimeLockConflict("runtime inserted row lineage mismatch")
+
+    parent_id = dict(skill_run.output_snapshot or {}).get(
+        "composite_parent_skill_run_id"
+    )
+    if type(parent_id) is int:
+        if parent_id not in locked_skill_ids:
+            raise RuntimeLockConflict("runtime inserted child SkillRun parent mismatch")
+        root_skill_run_id = token.root_skill_run_id
+        child_skill_run_ids = tuple(
+            sorted(set(token.child_skill_run_ids) | {skill_run.id})
+        )
+    else:
+        if token.root_skill_run_id not in {None, skill_run.id}:
+            raise RuntimeLockConflict("runtime inserted root SkillRun conflicts with root")
+        root_skill_run_id = skill_run.id
+        child_skill_run_ids = token.child_skill_run_ids
+
+    return RuntimeRootLock(
+        _seal=_TOKEN_SEAL,
+        session_identity=_session_identity(session),
+        transaction_identity=_transaction_identity(session),
+        run_id=run.id,
+        turn_id=run.turn_id,
+        task_id=task.id,
+        content_item_id=content_item_id,
+        root_skill_run_id=root_skill_run_id,
+        child_skill_run_ids=child_skill_run_ids,
+        run_revision_ids=token.run_revision_ids,
+        deliverable_ids=token.deliverable_ids,
+        invocation_ids=token.invocation_ids,
+        tool_call_ids=token.tool_call_ids,
+        attempt_ids=token.attempt_ids,
+        pending_object_ids_at_acquire=_pending_object_ids(session),
     )
 
 
@@ -529,6 +701,10 @@ def require_runtime_root_lock(
     skill_run_id: int | None = None,
     deliverable_id: int | None = None,
     tool_call_id: int | None = None,
+    run_revision_ids: tuple[int, ...] = (),
+    invocation_ids: tuple[int, ...] = (),
+    tool_call_ids: tuple[int, ...] = (),
+    attempt_ids: tuple[int, ...] = (),
 ) -> None:
     """Reject forged, cross-session, or incomplete prelock proofs."""
 
@@ -536,7 +712,7 @@ def require_runtime_root_lock(
         token._session_identity != _session_identity(session)
     ):
         raise RuntimeLockConflict("runtime lock token does not belong to this session")
-    if token._transaction_identity != _transaction_identity(session):
+    if token._transaction_identity is not _transaction_identity(session):
         raise RuntimeLockConflict("runtime lock token belongs to another transaction")
     if token.run_id != run_id:
         raise RuntimeLockConflict("runtime lock token belongs to another AgentRun")
@@ -556,12 +732,22 @@ def require_runtime_root_lock(
         raise RuntimeLockConflict("runtime Deliverable was not prelocked")
     if tool_call_id is not None and tool_call_id not in token.tool_call_ids:
         raise RuntimeLockConflict("runtime AgentToolCall was not prelocked")
+    required_sets = (
+        (run_revision_ids, token.run_revision_ids, "RunRevision"),
+        (invocation_ids, token.invocation_ids, "AgentInvocation"),
+        (tool_call_ids, token.tool_call_ids, "AgentToolCall"),
+        (attempt_ids, token.attempt_ids, "ToolExecutionAttempt"),
+    )
+    for required, locked, label in required_sets:
+        if not set(required).issubset(locked):
+            raise RuntimeLockConflict(f"runtime {label} was not prelocked")
 
 
 __all__ = [
     "RuntimeLockConflict",
     "RuntimeRootLock",
     "discover_runtime_skill_lock_ids",
+    "extend_runtime_root_lock",
     "lock_runtime_root_scope",
     "lock_runtime_root_forest",
     "lock_runtime_run_headers",

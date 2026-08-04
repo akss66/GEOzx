@@ -17,6 +17,7 @@ from app.models import (
     AgentToolCall,
     AuditRecord,
     BrainTask,
+    ContentItem,
     ConversationAttachment,
     ConversationThread,
     ConversationTurn,
@@ -24,6 +25,7 @@ from app.models import (
     DeliverableAcceptance,
     Event,
     LLMCall,
+    RunRevision,
     SkillRun,
     ToolExecutionAttempt,
     User,
@@ -35,6 +37,7 @@ from app.schemas.conversation import (
     CreateConversationTurnRequest,
 )
 from app.services.attachments import remove_attachment_objects, restore_attachment_objects
+from app.services.runtime_locking import RuntimeRootLock, lock_runtime_root_forest
 from app.services.runtime_state import runtime_status_family
 
 _TERMINAL_INVOCATION_STATUSES = {
@@ -78,6 +81,199 @@ class ConversationThreadSummary:
     thread: ConversationThread
     turn_count: int
     last_message: str
+
+
+async def _discover_conversation_runtime_roots(
+    session: AsyncSession,
+    *,
+    user: User,
+    thread_id: int,
+) -> tuple[ConversationThread, tuple[int, ...], tuple[int, ...]]:
+    """Read only the Run roots needed before any deletion lock or mutation."""
+
+    with session.no_autoflush:
+        thread = await session.scalar(
+            select(ConversationThread).where(
+                ConversationThread.id == thread_id,
+                ConversationThread.org_id == user.org_id,
+                ConversationThread.created_by_id == user.id,
+            )
+        )
+        if thread is None:
+            raise _thread_not_found()
+        try:
+            await require_account_access(session, user, thread.account_id)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                raise _thread_not_found() from exc
+            raise
+        turn_ids = tuple(
+            await session.scalars(
+                select(ConversationTurn.id)
+                .where(ConversationTurn.thread_id == thread.id)
+                .order_by(ConversationTurn.id)
+            )
+        )
+        run_ids = set(
+            await session.scalars(
+                select(AgentRun.id).where(
+                    or_(
+                        AgentRun.thread_id == thread.id,
+                        AgentRun.turn_id.in_(turn_ids),
+                    )
+                )
+            )
+        )
+        run_ids.update(
+            row
+            for row in await session.scalars(
+                select(SkillRun.run_id).where(
+                    or_(
+                        SkillRun.thread_id == thread.id,
+                        SkillRun.turn_id.in_(turn_ids),
+                    )
+                )
+            )
+            if row is not None
+        )
+        run_ids.update(
+            row
+            for row in await session.scalars(
+                select(AgentInvocation.run_id).where(
+                    or_(
+                        AgentInvocation.thread_id == thread.id,
+                        AgentInvocation.turn_id.in_(turn_ids),
+                    )
+                )
+            )
+            if row is not None
+        )
+        scoped_deliverables = list(
+            await session.scalars(
+                select(Deliverable).where(
+                    or_(
+                        Deliverable.thread_id == thread.id,
+                        Deliverable.turn_id.in_(turn_ids),
+                    )
+                )
+            )
+        )
+        run_ids.update(
+            row.run_id for row in scoped_deliverables if row.run_id is not None
+        )
+        runtime_deliverable_ids = tuple(
+            sorted(row.id for row in scoped_deliverables if row.run_id is not None)
+        )
+    return thread, tuple(sorted(run_ids)), runtime_deliverable_ids
+
+
+def _validate_locked_conversation_runtime(
+    *,
+    thread: ConversationThread,
+    discovered_run_ids: tuple[int, ...],
+    tokens: tuple[RuntimeRootLock, ...],
+    runs: list[AgentRun],
+    tasks: list[BrainTask],
+    contents: list[ContentItem],
+    skills: list[SkillRun],
+    revisions: list[RunRevision],
+    deliverables: list[Deliverable],
+    invocations: list[AgentInvocation],
+    tools: list[AgentToolCall],
+    attempts: list[ToolExecutionAttempt],
+) -> None:
+    locked_run_ids = {token.run_id for token in tokens}
+    post_run_ids = {
+        *(row.id for row in runs),
+        *(row.run_id for row in skills),
+        *(row.run_id for row in invocations if row.run_id is not None),
+        *(row.run_id for row in deliverables if row.run_id is not None),
+    }
+    if post_run_ids != set(discovered_run_ids) or locked_run_ids != post_run_ids:
+        raise _active_delete_conflict()
+
+    locked_turn_ids = {token.turn_id for token in tokens if token.turn_id is not None}
+    locked_task_ids = {token.task_id for token in tokens if token.task_id is not None}
+    locked_content_ids = {
+        token.content_item_id for token in tokens if token.content_item_id is not None
+    }
+    locked_skill_ids = {
+        skill_id
+        for token in tokens
+        for skill_id in (token.root_skill_run_id, *token.child_skill_run_ids)
+        if skill_id is not None
+    }
+    locked_revision_ids = {
+        row_id for token in tokens for row_id in token.run_revision_ids
+    }
+    locked_deliverable_ids = {
+        row_id for token in tokens for row_id in token.deliverable_ids
+    }
+    locked_invocation_ids = {
+        row_id for token in tokens for row_id in token.invocation_ids
+    }
+    locked_tool_ids = {row_id for token in tokens for row_id in token.tool_call_ids}
+    locked_attempt_ids = {row_id for token in tokens for row_id in token.attempt_ids}
+    invocation_by_id = {row.id: row for row in invocations}
+    runtime_tool_ids = {
+        row.id
+        for row in tools
+        if row.skill_run_id is not None
+        or (
+            row.invocation_id is not None
+            and invocation_by_id.get(row.invocation_id) is not None
+            and invocation_by_id[row.invocation_id].run_id is not None
+        )
+    }
+    runtime_attempt_ids = {
+        row.id for row in attempts if row.tool_call_id in runtime_tool_ids
+    }
+    required_sets = (
+        ({row.turn_id for row in runs if row.turn_id is not None}, locked_turn_ids),
+        ({row.task_id for row in runs if row.task_id is not None}, locked_task_ids),
+        ({row.id for row in skills}, locked_skill_ids),
+        ({row.id for row in revisions}, locked_revision_ids),
+        (
+            {row.id for row in deliverables if row.run_id is not None},
+            locked_deliverable_ids,
+        ),
+        (
+            {row.id for row in invocations if row.run_id is not None},
+            locked_invocation_ids,
+        ),
+        (runtime_tool_ids, locked_tool_ids),
+        (runtime_attempt_ids, locked_attempt_ids),
+    )
+    if any(not required.issubset(locked) for required, locked in required_sets):
+        raise _active_delete_conflict()
+    if any(
+        row.skill_run_id is not None and row.skill_run_id not in locked_skill_ids
+        or row.invocation_id is not None
+        and invocation_by_id.get(row.invocation_id) is not None
+        and invocation_by_id[row.invocation_id].run_id is not None
+        and row.invocation_id not in locked_invocation_ids
+        for row in tools
+    ):
+        raise _active_delete_conflict()
+
+    content_by_id = {row.id: row for row in contents}
+    runtime_content_ids = {
+        row.content_item_id
+        for row in tasks
+        if row.id in locked_task_ids and row.content_item_id is not None
+    }
+    if not runtime_content_ids.issubset(locked_content_ids):
+        raise _active_delete_conflict()
+    if any(
+        row.account_id != thread.account_id
+        for row in contents
+        if row.id in runtime_content_ids
+    ) or any(
+        content_by_id.get(row.content_item_id) is None
+        or content_by_id[row.content_item_id].account_id != thread.account_id
+        for row in deliverables
+    ):
+        raise _active_delete_conflict()
 
 
 async def create_conversation_thread(
@@ -216,6 +412,20 @@ async def delete_conversation_thread(
     """Permanently delete one terminal, owned conversation and its private traces."""
 
     try:
+        _, discovered_run_ids, discovered_deliverable_ids = (
+            await _discover_conversation_runtime_roots(
+                session,
+                user=user,
+                thread_id=thread_id,
+            )
+        )
+        runtime_tokens: tuple[RuntimeRootLock, ...] = ()
+        if discovered_run_ids:
+            runtime_tokens = await lock_runtime_root_forest(
+                session,
+                run_ids=discovered_run_ids,
+                extra_deliverable_ids=discovered_deliverable_ids,
+            )
         thread = await session.scalar(
             select(ConversationThread)
             .where(
@@ -302,11 +512,12 @@ async def delete_conversation_thread(
             else []
         )
 
-        task_ids = {
-            row.task_id
-            for row in [*runs, *skill_runs, *invocations, *tool_calls]
-            if row.task_id is not None
-        }
+        task_ids = (
+            {row.task_id for row in runs if row.task_id is not None}
+            | {row.task_id for row in skill_runs if row.task_id is not None}
+            | {row.task_id for row in invocations if row.task_id is not None}
+            | {row.task_id for row in tool_calls if row.task_id is not None}
+        )
         tasks = (
             list(
                 await session.scalars(
@@ -416,6 +627,54 @@ async def delete_conversation_thread(
         retained_deliverable_ids = [
             row.id for row in scoped_deliverables if row.id not in draft_deliverable_ids
         ]
+
+        scoped_content_ids = tuple(
+            sorted(
+                {
+                    row.content_item_id
+                    for row in tasks
+                    if row.content_item_id is not None
+                }
+                | {row.content_item_id for row in scoped_deliverables}
+            )
+        )
+        scoped_contents = (
+            list(
+                await session.scalars(
+                    select(ContentItem)
+                    .where(ContentItem.id.in_(scoped_content_ids))
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            if scoped_content_ids
+            else []
+        )
+        scoped_revisions = (
+            list(
+                await session.scalars(
+                    select(RunRevision)
+                    .where(RunRevision.revision_run_id.in_(run_ids))
+                    .execution_options(populate_existing=True)
+                )
+            )
+            if run_ids
+            else []
+        )
+        _validate_locked_conversation_runtime(
+            thread=thread,
+            discovered_run_ids=discovered_run_ids,
+            tokens=runtime_tokens,
+            runs=runs,
+            tasks=tasks,
+            contents=scoped_contents,
+            skills=skill_runs,
+            revisions=scoped_revisions,
+            deliverables=scoped_deliverables,
+            invocations=invocations,
+            tools=tool_calls,
+            attempts=attempts,
+        )
 
         retained_audit_categories = _add_minimal_audit_records(
             session,

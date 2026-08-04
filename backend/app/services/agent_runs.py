@@ -10,18 +10,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.runtime_failures import FailureDisposition
 from app.models import (
+    AgentInvocation,
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ConversationThread,
+    Deliverable,
     SkillRun,
+    ToolExecutionAttempt,
 )
 from app.services.run_revisions import cancel_revision_for_run
 from app.services.runtime_locking import (
+    RuntimeLockConflict,
     RuntimeRootLock,
     lock_runtime_root_scope,
     lock_runtime_run_headers,
 )
-from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.runtime_state import TERMINAL_STATUSES, RuntimeStateScope, close_runtime_state
 
 ACTIVE_TASK_RUN_STATUSES = {
     "claimed",
@@ -752,12 +757,88 @@ async def complete_agent_run(
     task_id: int,
     status: str,
 ) -> None:
+    with session.no_autoflush:
+        discovered = await session.get(AgentRun, run_id)
+        target_task = await session.get(BrainTask, task_id)
+        if discovered is None:
+            return
+        if target_task is None:
+            raise ValueError(f"BrainTask not found: {task_id}")
+        skills = list(
+            await session.scalars(
+                select(SkillRun)
+                .where(SkillRun.run_id == run_id)
+                .order_by(SkillRun.id)
+            )
+        )
+        roots = [
+            item
+            for item in skills
+            if type(
+                dict(item.output_snapshot or {}).get("composite_parent_skill_run_id")
+            )
+            is not int
+        ]
+        root = next(
+            (item for item in roots if item.skill_code == "operation_iteration"),
+            roots[0] if roots else None,
+        )
+        root_id = root.id if root is not None else None
+        child_ids = tuple(item.id for item in skills if item.id != root_id)
+        deliverable_ids = tuple(
+            await session.scalars(
+                select(Deliverable.id)
+                .where(Deliverable.run_id == run_id)
+                .order_by(Deliverable.id)
+            )
+        )
+        invocation_ids = tuple(
+            await session.scalars(
+                select(AgentInvocation.id)
+                .where(AgentInvocation.run_id == run_id)
+                .order_by(AgentInvocation.id)
+            )
+        )
+        skill_ids = tuple(item.id for item in skills)
+        tool_call_ids = tuple(
+            await session.scalars(
+                select(AgentToolCall.id)
+                .where(
+                    AgentToolCall.skill_run_id.in_(skill_ids)
+                    | AgentToolCall.invocation_id.in_(invocation_ids)
+                )
+                .order_by(AgentToolCall.id)
+            )
+        )
+        attempt_ids = tuple(
+            await session.scalars(
+                select(ToolExecutionAttempt.id)
+                .where(ToolExecutionAttempt.tool_call_id.in_(tool_call_ids))
+                .order_by(ToolExecutionAttempt.id)
+            )
+        )
+        runtime_lock = await lock_runtime_root_scope(
+            session,
+            run_id=run_id,
+            expected_turn_id=discovered.turn_id,
+            expected_task_id=discovered.task_id,
+            expected_content_item_id=target_task.content_item_id,
+            transition_task_id=task_id,
+            root_skill_run_id=root_id,
+            child_skill_run_ids=child_ids,
+            validate_child_parent=False,
+            include_run_revisions=True,
+            deliverable_ids=deliverable_ids,
+            invocation_ids=invocation_ids,
+            tool_call_ids=tool_call_ids,
+            attempt_ids=attempt_ids,
+        )
     run = await session.get(AgentRun, run_id)
-    if run is None:
-        return
     task = await session.get(BrainTask, task_id)
-    if task is None:
-        raise ValueError(f"BrainTask not found: {task_id}")
+    if run is None or task is None:
+        raise RuntimeLockConflict("runtime completion scope changed after root lock")
+    if run.status in TERMINAL_STATUSES and run.task_id != task_id:
+        raise RuntimeLockConflict("terminal runtime cannot rebind its BrainTask")
     run.task_id = task_id
     await session.flush()
     await close_runtime_state(
@@ -769,6 +850,7 @@ async def complete_agent_run(
         ),
         status=status,
         message=task.current_focus or f"任务状态：{status}",
+        prelocked=runtime_lock,
     )
 
 

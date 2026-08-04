@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base
 from app.models import (
+    Account,
     AgentRun,
     AgentToolCall,
+    AuditRecord,
     BrainTask,
     ContentItem,
     ConversationThread,
@@ -30,15 +32,16 @@ from app.models.enums import (
     UserRole,
 )
 from app.orchestrator.runtime_scope import RuntimeScope
-from app.orchestrator.skill_runtime import SkillRuntime
-from app.services.agent_runs import cancel_agent_run
+from app.orchestrator.skill_runtime import SkillRecoveryConflict, SkillRuntime
+from app.services.agent_runs import cancel_agent_run, complete_agent_run
 from app.services.artifacts import accept_artifact
 from app.services.composite_skill_runs import (
     lock_composite_finish_approval,
     pause_composite_parent_for_artifacts,
 )
+from app.services.conversations import delete_conversation_thread
 from app.services.runtime_deliverables import write_runtime_deliverable
-from app.services.runtime_locking import lock_runtime_root_scope
+from app.services.runtime_locking import RuntimeLockConflict, lock_runtime_root_scope
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.skill_approvals import (
     SkillApprovalConflict,
@@ -52,6 +55,742 @@ from tests.test_operating_skills import (
     _Tools,
 )
 from tests.test_operation_iteration_skill import _artifact
+
+
+async def _wait_for_advisory_gate(
+    sessions, pid: int, *, deadline_seconds: float = 10
+) -> None:
+    """Prove a backend is waiting on the production Run advisory gate."""
+
+    deadline = monotonic() + deadline_seconds
+    async with sessions() as monitor:
+        while monotonic() < deadline:
+            waiting, wait_type = (
+                await monitor.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM pg_locks "
+                        "WHERE pid = :pid AND locktype = 'advisory' AND NOT granted), "
+                        "(SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid)"
+                    ),
+                    {"pid": pid},
+                )
+            ).one()
+            if waiting and wait_type == "Lock":
+                return
+            await asyncio.sleep(0.01)
+    raise AssertionError("writer never waited on the Run advisory gate")
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the first-create gate",
+)
+def test_postgres_first_skill_create_waits_on_run_gate_against_cancel(
+    monkeypatch,
+) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+
+    async def exercise() -> None:
+        import app.orchestrator.skill_runtime as skill_runtime_module
+        import app.services.agent_runs as agent_runs_module
+
+        engine = create_async_engine(
+            async_url,
+            connect_args={
+                "server_settings": {
+                    "lock_timeout": "5000",
+                    "statement_timeout": "15000",
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with sessions() as setup:
+                from app.models import Org
+
+                org = Org(name=f"first-create-gate-{suffix}")
+                admin = User(
+                    org=org,
+                    email=f"first-create-gate-{suffix}@test.invalid",
+                    hashed_password="unused",
+                    display_name="First create gate",
+                    role=UserRole.ADMIN,
+                )
+                setup.add(admin)
+                await setup.commit()
+                account, thread, turn, run = await _scope(
+                    setup,
+                    admin,
+                    key=f"first-create-gate-{suffix}",
+                    message="create first skill",
+                )
+                ids = {
+                    "admin": admin.id,
+                    "account": account.id,
+                    "thread": thread.id,
+                    "turn": turn.id,
+                    "run": run.id,
+                }
+
+            cancel_holds_root = asyncio.Event()
+            release_cancel = asyncio.Event()
+            create_entered_root = asyncio.Event()
+            create_pid = None
+            original_cancel_lock = agent_runs_module.lock_runtime_root_scope
+            original_create_lock = skill_runtime_module.lock_runtime_root_scope
+
+            async def hold_cancel(*args, **kwargs):
+                token = await original_cancel_lock(*args, **kwargs)
+                cancel_holds_root.set()
+                await release_cancel.wait()
+                return token
+
+            async def observe_create(*args, **kwargs):
+                nonlocal create_pid
+                create_pid = await args[0].scalar(select(func.pg_backend_pid()))
+                create_entered_root.set()
+                return await original_create_lock(*args, **kwargs)
+
+            monkeypatch.setattr(agent_runs_module, "lock_runtime_root_scope", hold_cancel)
+            monkeypatch.setattr(skill_runtime_module, "lock_runtime_root_scope", observe_create)
+
+            async def cancel_writer() -> None:
+                async with sessions() as cancel_session:
+                    await cancel_agent_run(cancel_session, ids["run"])
+
+            async def create_writer() -> None:
+                await cancel_holds_root.wait()
+                async with sessions() as create_session:
+                    actor = await create_session.get(User, ids["admin"])
+                    account_row = await create_session.get(Account, ids["account"])
+                    thread_row = await create_session.get(ConversationThread, ids["thread"])
+                    turn_row = await create_session.get(type(turn), ids["turn"])
+                    run_row = await create_session.get(AgentRun, ids["run"])
+                    assert all(
+                        row is not None
+                        for row in (actor, account_row, thread_row, turn_row, run_row)
+                    )
+                    await SkillRuntime(tool_executor=_Tools(), harness=_Harness()).execute(
+                        create_session,
+                        user=actor,
+                        thread=thread_row,
+                        turn=turn_row,
+                        run=run_row,
+                        skill_code="script_generation",
+                        capability_request=_capability_request(
+                            admin=actor,
+                            account=account_row,
+                            thread=thread_row,
+                            turn=turn_row,
+                            run=run_row,
+                            skill_code="script_generation",
+                            structured_input={},
+                        ),
+                    )
+
+            cancel_task = asyncio.create_task(cancel_writer(), name="cancel-first")
+            await asyncio.wait_for(cancel_holds_root.wait(), timeout=10)
+            create_task = asyncio.create_task(create_writer(), name="first-create")
+            await asyncio.wait_for(create_entered_root.wait(), timeout=10)
+            assert create_pid is not None
+            await _wait_for_advisory_gate(sessions, create_pid)
+            assert not create_task.done()
+            release_cancel.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(cancel_task, create_task, return_exceptions=True),
+                timeout=15,
+            )
+            assert results[0] is None
+            assert isinstance(results[1], SkillRecoveryConflict)
+
+            async with sessions() as verify:
+                run_row = await verify.get(AgentRun, ids["run"])
+                assert run_row is not None and run_row.status == "cancelled"
+                assert await verify.scalar(
+                    select(func.count(SkillRun.id)).where(SkillRun.run_id == ids["run"])
+                ) == 0
+                assert await verify.scalar(
+                    select(func.count(Event.id)).where(
+                        Event.run_id == ids["run"], Event.type == "turn.cancelled"
+                    )
+                ) == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the nested-create gate",
+)
+def test_postgres_nested_child_create_has_no_post_commit_skill_flush_before_pause_or_cancel_gate(
+    monkeypatch,
+) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+
+    async def exercise() -> None:
+        import app.orchestrator.skill_runtime as skill_runtime_module
+        import app.services.composite_skill_runs as composite_module
+
+        engine = create_async_engine(
+            async_url,
+            connect_args={
+                "server_settings": {
+                    "lock_timeout": "5000",
+                    "statement_timeout": "15000",
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with sessions() as setup:
+                from app.models import Org
+
+                org = Org(name=f"nested-create-gate-{suffix}")
+                admin = User(
+                    org=org,
+                    email=f"nested-create-gate-{suffix}@test.invalid",
+                    hashed_password="unused",
+                    display_name="Nested create gate",
+                    role=UserRole.ADMIN,
+                )
+                setup.add(admin)
+                await setup.commit()
+                account, thread, turn, run = await _scope(
+                    setup,
+                    admin,
+                    key=f"nested-create-gate-{suffix}",
+                    message="create nested child",
+                )
+                content = ContentItem(
+                    account_id=account.id,
+                    created_by_id=admin.id,
+                    title="Nested child content",
+                )
+                setup.add(content)
+                await setup.flush()
+                task = BrainTask(
+                    org_id=admin.org_id,
+                    created_by_id=admin.id,
+                    content_item_id=content.id,
+                    title="Nested child task",
+                    status=BrainTaskStatus.RUNNING,
+                )
+                setup.add(task)
+                await setup.flush()
+                run.task_id = task.id
+                run.status = "running"
+                turn.status = "running"
+                parent = SkillRun(
+                    org_id=admin.org_id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    task_id=task.id,
+                    idempotency_key=f"parent-{suffix}",
+                    skill_code="operation_iteration",
+                    skill_version=1,
+                    status="running",
+                    input_snapshot={},
+                    output_snapshot={},
+                )
+                setup.add(parent)
+                await setup.commit()
+                ids = {
+                    "admin": admin.id,
+                    "account": account.id,
+                    "thread": thread.id,
+                    "turn": turn.id,
+                    "run": run.id,
+                    "task": task.id,
+                    "parent": parent.id,
+                }
+
+            pause_holds_root = asyncio.Event()
+            release_pause = asyncio.Event()
+            child_entered_root = asyncio.Event()
+            child_pid = None
+            pause_held_once = False
+            original_pause_lock = composite_module.lock_runtime_root_scope
+            original_child_lock = skill_runtime_module.lock_runtime_root_scope
+
+            async def hold_pause(*args, **kwargs):
+                nonlocal pause_held_once
+                token = await original_pause_lock(*args, **kwargs)
+                if not pause_held_once:
+                    pause_held_once = True
+                    pause_holds_root.set()
+                    await release_pause.wait()
+                return token
+
+            async def observe_child(*args, **kwargs):
+                nonlocal child_pid
+                child_pid = await args[0].scalar(select(func.pg_backend_pid()))
+                child_entered_root.set()
+                return await original_child_lock(*args, **kwargs)
+
+            monkeypatch.setattr(composite_module, "lock_runtime_root_scope", hold_pause)
+            monkeypatch.setattr(skill_runtime_module, "lock_runtime_root_scope", observe_child)
+
+            async def pause_writer() -> None:
+                async with sessions() as pause_session:
+                    parent_row = await pause_session.get(SkillRun, ids["parent"])
+                    assert parent_row is not None
+                    assert not await pause_composite_parent_for_artifacts(
+                        pause_session,
+                        parent_skill_run=parent_row,
+                        source_artifact_ids=[],
+                    )
+                    await pause_session.commit()
+
+            async def child_writer() -> int:
+                nonlocal_child = {"execute_returned": False}
+
+                class ObservedRuntime(SkillRuntime):
+                    async def execute(self, *args, **kwargs):
+                        result = await super().execute(*args, **kwargs)
+                        if kwargs.get("parent_skill_run_id") is not None:
+                            nonlocal_child["execute_returned"] = True
+                        return result
+
+                await pause_holds_root.wait()
+                async with sessions() as child_session:
+                    original_flush = child_session.flush
+
+                    async def guarded_flush(*args, **kwargs):
+                        if nonlocal_child["execute_returned"]:
+                            raise AssertionError(
+                                "nested wrapper flushed after child execute committed"
+                            )
+                        return await original_flush(*args, **kwargs)
+
+                    monkeypatch.setattr(child_session, "flush", guarded_flush)
+                    actor = await child_session.get(User, ids["admin"])
+                    account_row = await child_session.get(Account, ids["account"])
+                    thread_row = await child_session.get(ConversationThread, ids["thread"])
+                    turn_row = await child_session.get(type(turn), ids["turn"])
+                    run_row = await child_session.get(AgentRun, ids["run"])
+                    parent_row = await child_session.get(SkillRun, ids["parent"])
+                    assert all(
+                        row is not None
+                        for row in (
+                            actor,
+                            account_row,
+                            thread_row,
+                            turn_row,
+                            run_row,
+                            parent_row,
+                        )
+                    )
+                    runtime = ObservedRuntime(tool_executor=_Tools(), harness=_Harness())
+                    result = await runtime._execute_child_skill(
+                        child_session,
+                        user=actor,
+                        thread=thread_row,
+                        turn=turn_row,
+                        run=run_row,
+                        parent_skill_run=parent_row,
+                        skill_code="script_generation",
+                        capability_request=_capability_request(
+                            admin=actor,
+                            account=account_row,
+                            thread=thread_row,
+                            turn=turn_row,
+                            run=run_row,
+                            skill_code="script_generation",
+                            structured_input={},
+                        ),
+                        lease_owner=f"nested-create-{suffix}",
+                    )
+                    return result.skill_run_id
+
+            pause_task = asyncio.create_task(pause_writer(), name="pause-root")
+            await asyncio.wait_for(pause_holds_root.wait(), timeout=10)
+            child_task = asyncio.create_task(child_writer(), name="nested-child-create")
+            await asyncio.wait_for(child_entered_root.wait(), timeout=10)
+            assert child_pid is not None
+            await _wait_for_advisory_gate(sessions, child_pid)
+            assert not child_task.done()
+            release_pause.set()
+            _pause_result, child_id = await asyncio.wait_for(
+                asyncio.gather(pause_task, child_task), timeout=15
+            )
+
+            async with sessions() as verify:
+                child = await verify.get(SkillRun, child_id)
+                assert child is not None and child.status == "completed"
+                assert child.output_snapshot["composite_parent_skill_run_id"] == ids["parent"]
+                artifacts = list(
+                    await verify.scalars(
+                        select(Deliverable)
+                        .where(Deliverable.skill_run_id == child_id)
+                        .order_by(Deliverable.id)
+                    )
+                )
+                assert len(artifacts) == 1
+                assert artifacts[0].version == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the complete-rebind gate",
+)
+def test_postgres_complete_rebind_waits_on_run_gate_against_cancel(
+    monkeypatch,
+) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+
+    async def exercise() -> None:
+        import app.services.agent_runs as agent_runs_module
+
+        engine = create_async_engine(
+            async_url,
+            connect_args={
+                "server_settings": {
+                    "lock_timeout": "5000",
+                    "statement_timeout": "15000",
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with sessions() as setup:
+                from app.models import Org
+
+                org = Org(name=f"complete-rebind-gate-{suffix}")
+                admin = User(
+                    org=org,
+                    email=f"complete-rebind-gate-{suffix}@test.invalid",
+                    hashed_password="unused",
+                    display_name="Complete rebind gate",
+                    role=UserRole.ADMIN,
+                )
+                setup.add(admin)
+                await setup.commit()
+                account, _thread, _turn, run = await _scope(
+                    setup,
+                    admin,
+                    key=f"complete-rebind-gate-{suffix}",
+                    message="complete rebind",
+                )
+                content = ContentItem(
+                    account_id=account.id,
+                    created_by_id=admin.id,
+                    title="Complete rebind content",
+                )
+                setup.add(content)
+                await setup.flush()
+                target_task = BrainTask(
+                    org_id=admin.org_id,
+                    created_by_id=admin.id,
+                    content_item_id=content.id,
+                    title="Complete rebind target",
+                    status=BrainTaskStatus.RUNNING,
+                )
+                setup.add(target_task)
+                await setup.commit()
+                ids = {"run": run.id, "task": target_task.id}
+
+            cancel_holds_root = asyncio.Event()
+            release_cancel = asyncio.Event()
+            complete_entered_root = asyncio.Event()
+            complete_pid = None
+            original_lock = agent_runs_module.lock_runtime_root_scope
+
+            async def checkpoint_lock(*args, **kwargs):
+                nonlocal complete_pid
+                if kwargs.get("transition_task_id") is not None:
+                    complete_pid = await args[0].scalar(select(func.pg_backend_pid()))
+                    complete_entered_root.set()
+                    return await original_lock(*args, **kwargs)
+                token = await original_lock(*args, **kwargs)
+                cancel_holds_root.set()
+                await release_cancel.wait()
+                return token
+
+            monkeypatch.setattr(agent_runs_module, "lock_runtime_root_scope", checkpoint_lock)
+
+            async def cancel_writer() -> None:
+                async with sessions() as cancel_session:
+                    await cancel_agent_run(cancel_session, ids["run"])
+
+            async def complete_writer() -> None:
+                await cancel_holds_root.wait()
+                async with sessions() as complete_session:
+                    await complete_agent_run(
+                        complete_session,
+                        ids["run"],
+                        task_id=ids["task"],
+                        status="completed",
+                    )
+
+            cancel_task = asyncio.create_task(cancel_writer(), name="cancel-rebind")
+            await asyncio.wait_for(cancel_holds_root.wait(), timeout=10)
+            complete_task = asyncio.create_task(complete_writer(), name="complete-rebind")
+            await asyncio.wait_for(complete_entered_root.wait(), timeout=10)
+            assert complete_pid is not None
+            await _wait_for_advisory_gate(sessions, complete_pid)
+            assert not complete_task.done()
+            release_cancel.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(cancel_task, complete_task, return_exceptions=True),
+                timeout=15,
+            )
+            assert results[0] is None
+            assert isinstance(results[1], RuntimeLockConflict)
+
+            async with sessions() as verify:
+                run_row = await verify.get(AgentRun, ids["run"])
+                assert run_row is not None and run_row.status == "cancelled"
+                assert run_row.task_id is None
+                assert await verify.scalar(
+                    select(func.count(Event.id)).where(
+                        Event.run_id == ids["run"], Event.type == "turn.cancelled"
+                    )
+                ) == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the terminal/delete forest gate",
+)
+def test_postgres_terminal_close_and_conversation_delete_serialize_on_run_forest(
+    monkeypatch,
+) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+
+    async def exercise() -> None:
+        import app.services.conversations as conversations_module
+        import app.services.runtime_state as runtime_state_module
+
+        engine = create_async_engine(
+            async_url,
+            connect_args={
+                "server_settings": {
+                    "lock_timeout": "5000",
+                    "statement_timeout": "15000",
+                }
+            },
+        )
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with sessions() as setup:
+                from app.models import Org
+
+                org = Org(name=f"terminal-delete-gate-{suffix}")
+                admin = User(
+                    org=org,
+                    email=f"terminal-delete-gate-{suffix}@test.invalid",
+                    hashed_password="unused",
+                    display_name="Terminal delete gate",
+                    role=UserRole.ADMIN,
+                )
+                setup.add(admin)
+                await setup.commit()
+                account, thread, turn, run = await _scope(
+                    setup,
+                    admin,
+                    key=f"terminal-delete-gate-{suffix}",
+                    message="terminal then delete",
+                )
+                content = ContentItem(
+                    account_id=account.id,
+                    created_by_id=admin.id,
+                    title="Retained terminal artifact",
+                )
+                setup.add(content)
+                await setup.flush()
+                task = BrainTask(
+                    org_id=admin.org_id,
+                    created_by_id=admin.id,
+                    content_item_id=content.id,
+                    title="Terminal delete task",
+                    status=BrainTaskStatus.RUNNING,
+                )
+                setup.add(task)
+                await setup.flush()
+                run.task_id = task.id
+                run.status = "running"
+                turn.status = "running"
+                skill = SkillRun(
+                    org_id=admin.org_id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    task_id=task.id,
+                    idempotency_key=f"terminal-delete-{suffix}",
+                    skill_code="script_generation",
+                    skill_version=1,
+                    status="running",
+                    input_snapshot={},
+                    output_snapshot={},
+                )
+                setup.add(skill)
+                await setup.flush()
+                retained = Deliverable(
+                    content_item_id=content.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    skill_run_id=skill.id,
+                    agent_code=AgentCode.CONTENT_DIRECTOR.value,
+                    type=DeliverableType.VIDEO_SCRIPT,
+                    version=1,
+                    status=DeliverableStatus.APPROVED,
+                    payload={"title": "retained"},
+                )
+                approval_event = Event(
+                    type="approval.decided",
+                    org_id=admin.org_id,
+                    account_id=account.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    skill_run_id=skill.id,
+                    payload={"approved": True, "approval_kind": "terminal-delete-gate"},
+                )
+                setup.add_all([retained, approval_event])
+                await setup.commit()
+                ids = {
+                    "admin": admin.id,
+                    "org": admin.org_id,
+                    "account": account.id,
+                    "thread": thread.id,
+                    "turn": turn.id,
+                    "run": run.id,
+                    "task": task.id,
+                    "content": content.id,
+                    "skill": skill.id,
+                    "retained": retained.id,
+                }
+
+            terminal_holds_root = asyncio.Event()
+            release_terminal = asyncio.Event()
+            delete_entered_forest = asyncio.Event()
+            delete_pid = None
+            original_terminal_lock = runtime_state_module.lock_runtime_root_scope
+            original_delete_forest = conversations_module.lock_runtime_root_forest
+            original_add_audit = conversations_module._add_minimal_audit_records
+
+            async def hold_terminal(*args, **kwargs):
+                token = await original_terminal_lock(*args, **kwargs)
+                terminal_holds_root.set()
+                await release_terminal.wait()
+                return token
+
+            async def observe_delete(*args, **kwargs):
+                nonlocal delete_pid
+                delete_pid = await args[0].scalar(select(func.pg_backend_pid()))
+                delete_entered_forest.set()
+                return await original_delete_forest(*args, **kwargs)
+
+            def assert_unique_terminal_event(*args, **kwargs):
+                events = kwargs["events"]
+                assert sum(event.type == "turn.completed" for event in events) == 1
+                return original_add_audit(*args, **kwargs)
+
+            monkeypatch.setattr(runtime_state_module, "lock_runtime_root_scope", hold_terminal)
+            monkeypatch.setattr(conversations_module, "lock_runtime_root_forest", observe_delete)
+            monkeypatch.setattr(
+                conversations_module,
+                "_add_minimal_audit_records",
+                assert_unique_terminal_event,
+            )
+
+            async def terminal_writer() -> None:
+                async with sessions() as terminal_session:
+                    await close_runtime_state(
+                        terminal_session,
+                        scope=RuntimeStateScope(
+                            run_id=ids["run"],
+                            org_id=ids["org"],
+                            account_id=ids["account"],
+                            thread_id=ids["thread"],
+                            turn_id=ids["turn"],
+                            task_id=ids["task"],
+                            skill_run_id=ids["skill"],
+                            content_item_id=ids["content"],
+                            skill_output_snapshot={"status": "completed"},
+                        ),
+                        status="completed",
+                        message="Terminal writer completed",
+                    )
+
+            async def delete_writer():
+                await terminal_holds_root.wait()
+                async with sessions() as delete_session:
+                    actor = await delete_session.get(User, ids["admin"])
+                    assert actor is not None
+                    return await delete_conversation_thread(
+                        delete_session, actor, ids["thread"]
+                    )
+
+            terminal_task = asyncio.create_task(terminal_writer(), name="terminal-close")
+            await asyncio.wait_for(terminal_holds_root.wait(), timeout=10)
+            delete_task = asyncio.create_task(delete_writer(), name="conversation-delete")
+            await asyncio.wait_for(delete_entered_forest.wait(), timeout=10)
+            assert delete_pid is not None
+            await _wait_for_advisory_gate(sessions, delete_pid)
+            assert not delete_task.done()
+            release_terminal.set()
+            _terminal_result, deletion_summary = await asyncio.wait_for(
+                asyncio.gather(terminal_task, delete_task), timeout=15
+            )
+            assert "approval" in deletion_summary.retained_audit_categories
+
+            async with sessions() as verify:
+                assert await verify.get(ConversationThread, ids["thread"]) is None
+                assert await verify.get(AgentRun, ids["run"]) is None
+                retained_row = await verify.get(Deliverable, ids["retained"])
+                assert retained_row is not None
+                assert retained_row.version == 1
+                assert retained_row.run_id is None
+                assert retained_row.skill_run_id is None
+                assert await verify.scalar(
+                    select(func.count(AuditRecord.id)).where(
+                        AuditRecord.org_id == ids["org"],
+                        AuditRecord.category == "approval",
+                        AuditRecord.action == "terminal-delete-gate",
+                    )
+                ) == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.skipif(
@@ -469,12 +1208,16 @@ def test_postgres_child_finish_follows_global_lock_order(
                 artifact_row = await verify.get(Deliverable, ids["artifact"])
                 assert child_row is not None and parent_row is not None
                 assert run_row is not None and artifact_row is not None
-                assert await verify.scalar(
-                    select(func.count(Deliverable.id)).where(
-                        Deliverable.skill_run_id == ids["child"],
-                        Deliverable.type == DeliverableType.VIDEO_ASSET,
+                replay_rows = list(
+                    await verify.scalars(
+                        select(Deliverable).where(
+                            Deliverable.skill_run_id == ids["child"],
+                            Deliverable.type == DeliverableType.VIDEO_ASSET,
+                        )
                     )
-                ) == 1
+                )
+                assert len(replay_rows) == 1
+                assert replay_rows[0].version == 1
                 if competing_action == "cancel":
                     assert run_row.status == "cancelled"
                     assert parent_row.status == "cancelled"

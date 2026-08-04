@@ -267,6 +267,138 @@ class _PassingCritic:
 
 
 @pytest.mark.asyncio
+async def test_first_skill_run_flushes_only_after_root_gate_and_reuses_token(
+    session, admin, monkeypatch
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-run-first-create"
+    )
+    import app.orchestrator.skill_runtime as skill_runtime_module
+
+    original_lock = skill_runtime_module.lock_runtime_root_scope
+    original_close = skill_runtime_module.close_runtime_state
+    original_flush = session.flush
+    root_gate_acquired = False
+    observed_prelocked = []
+
+    async def observed_lock(*args, **kwargs):
+        nonlocal root_gate_acquired
+        token = await original_lock(*args, **kwargs)
+        root_gate_acquired = True
+        return token
+
+    async def guarded_flush(*args, **kwargs):
+        assert root_gate_acquired, "runtime mutation flushed before the Run root gate"
+        return await original_flush(*args, **kwargs)
+
+    async def observed_close(*args, **kwargs):
+        observed_prelocked.append(kwargs.get("prelocked"))
+        return await original_close(*args, **kwargs)
+
+    monkeypatch.setattr(skill_runtime_module, "lock_runtime_root_scope", observed_lock)
+    monkeypatch.setattr(skill_runtime_module, "close_runtime_state", observed_close)
+    monkeypatch.setattr(session, "flush", guarded_flush)
+
+    result = await SkillRuntime(
+        tool_executor=_FakeTools(sufficient=False),
+        harness=_FakeHarness(),
+        critic=_PassingCritic(),
+    ).execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+    )
+
+    assert result.status == "completed"
+    assert observed_prelocked and observed_prelocked[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_nested_skill_creation_freezes_parent_link_without_post_execute_flush(
+    session, admin, monkeypatch
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="nested-parent-link-no-post-flush"
+    )
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="nested-parent-link-task",
+        status=BrainTaskStatus.RUNNING,
+    )
+    session.add(task)
+    await session.flush()
+    run.task_id = task.id
+    parent = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="nested-parent-link-parent",
+        skill_code="operation_iteration",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(parent)
+    await session.flush()
+    child = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="nested-parent-link-child",
+        skill_code="script_generation",
+        skill_version=1,
+        status="completed",
+        input_snapshot={},
+        output_snapshot={"composite_parent_skill_run_id": parent.id},
+    )
+    session.add(child)
+    await session.commit()
+    expected = SkillExecutionResult(
+        skill_run_id=child.id,
+        task_id=task.id,
+        status="completed",
+        response="done",
+        artifact_id=None,
+        artifact_type=None,
+        report={},
+    )
+    runtime = SkillRuntime()
+
+    async def completed_child(*_args, **_kwargs):
+        return expected
+
+    async def forbidden_flush(*_args, **_kwargs):
+        raise AssertionError("child parent link must not be rewritten after execute commits")
+
+    monkeypatch.setattr(runtime, "execute", completed_child)
+    monkeypatch.setattr(session, "flush", forbidden_flush)
+
+    result = await runtime._execute_child_skill(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        parent_skill_run=parent,
+        skill_code="script_generation",
+        capability_request=SimpleNamespace(),
+        lease_owner="nested-parent-link-owner",
+    )
+
+    assert result.skill_run_id == child.id
+    assert child.output_snapshot["composite_parent_skill_run_id"] == parent.id
+
+
+@pytest.mark.asyncio
 async def test_account_inspection_reports_missing_data_without_fabricated_metrics(
     session,
     admin,

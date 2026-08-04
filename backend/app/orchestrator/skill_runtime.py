@@ -84,9 +84,11 @@ from app.services.runtime_deliverables import write_runtime_deliverable
 from app.services.runtime_locking import (
     RuntimeRootLock,
     discover_runtime_skill_lock_ids,
+    extend_runtime_root_lock,
     lock_runtime_root_scope,
+    require_runtime_root_lock,
 )
-from app.services.runtime_state import RuntimeStateScope, close_runtime_state
+from app.services.runtime_state import TERMINAL_STATUSES, RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
 
 _ACCOUNT_INSPECTION = "account_inspection"
@@ -520,6 +522,72 @@ class SkillRuntime:
                 return self._existing_result(existing)
             run = claimed
 
+        creation_lock: RuntimeRootLock | None = None
+        if existing is None:
+            with session.no_autoflush:
+                discovered_task = (
+                    await session.get(BrainTask, run.task_id) if run.task_id else None
+                )
+                discovered_skills = list(
+                    await session.scalars(
+                        select(SkillRun)
+                        .where(SkillRun.run_id == run_id)
+                        .order_by(SkillRun.id)
+                    )
+                )
+                root_candidates = [
+                    item
+                    for item in discovered_skills
+                    if type(
+                        dict(item.output_snapshot or {}).get(
+                            "composite_parent_skill_run_id"
+                        )
+                    )
+                    is not int
+                ]
+                root_candidate = next(
+                    (
+                        item
+                        for item in root_candidates
+                        if item.skill_code == "operation_iteration"
+                    ),
+                    root_candidates[0] if root_candidates else None,
+                )
+                root_id = root_candidate.id if root_candidate is not None else None
+                child_ids = tuple(
+                    item.id for item in discovered_skills if item.id != root_id
+                )
+                creation_lock = await lock_runtime_root_scope(
+                    session,
+                    run_id=run_id,
+                    expected_turn_id=turn.id,
+                    expected_task_id=run.task_id,
+                    expected_content_item_id=(
+                        discovered_task.content_item_id
+                        if discovered_task is not None
+                        else None
+                    ),
+                    root_skill_run_id=root_id,
+                    child_skill_run_ids=child_ids,
+                    validate_child_parent=False,
+                )
+                contender = await session.scalar(
+                    select(SkillRun).where(
+                        SkillRun.run_id == run_id,
+                        SkillRun.idempotency_key == idempotency_key,
+                    )
+                )
+            if contender is not None:
+                return self._existing_result(contender)
+            locked_run = await session.scalar(
+                select(AgentRun)
+                .where(AgentRun.id == run_id)
+                .execution_options(populate_existing=True)
+            )
+            if locked_run is None or locked_run.status in TERMINAL_STATUSES:
+                raise SkillRecoveryConflict("SKILL_CREATE_RUN_TERMINAL")
+            run = locked_run
+
         task, content = await self._compatibility_task(
             session,
             user=user,
@@ -560,7 +628,16 @@ class SkillRuntime:
             run.started_at = run.started_at or now
             run.next_retry_at = None
             try:
-                await session.flush()
+                if creation_lock is None:
+                    raise SkillRecoveryConflict("SKILL_CREATE_ROOT_LOCK_MISSING")
+                creation_lock = await extend_runtime_root_lock(
+                    session,
+                    creation_lock,
+                    task=task,
+                    content=content,
+                    skill_run=skill_run,
+                    expected_content_account_id=thread.account_id,
+                )
                 await close_runtime_state(
                     session,
                     scope=RuntimeStateScope(
@@ -577,6 +654,7 @@ class SkillRuntime:
                         nested_skill=parent_skill_run_id is not None,
                     ),
                     status="running",
+                    prelocked=creation_lock,
                     message=f"{definition.name}正在执行。",
                 )
                 await session.refresh(skill_run)
@@ -1216,11 +1294,13 @@ class SkillRuntime:
         child_skill_run = await session.get(SkillRun, result.skill_run_id)
         if child_skill_run is None:
             raise SkillRecoveryConflict("COMPOSITE_CHILD_SKILL_RUN_MISSING")
-        child_skill_run.output_snapshot = {
-            **dict(child_skill_run.output_snapshot or {}),
-            "composite_parent_skill_run_id": parent_skill_run.id,
-        }
-        await session.flush()
+        if (
+            dict(child_skill_run.output_snapshot or {}).get(
+                "composite_parent_skill_run_id"
+            )
+            != parent_skill_run.id
+        ):
+            raise SkillRecoveryConflict("COMPOSITE_CHILD_PARENT_LINK_MISMATCH")
         return self._existing_result(child_skill_run)
 
     async def _execute_account_inspection(
@@ -2242,6 +2322,14 @@ class SkillRuntime:
             tool_call_ids=discovered_tool_ids,
             attempt_ids=discovered_attempt_ids,
         )
+        require_runtime_root_lock(
+            session,
+            runtime_lock,
+            run_id=run.id,
+            invocation_ids=discovered_invocation_ids,
+            tool_call_ids=discovered_tool_ids,
+            attempt_ids=discovered_attempt_ids,
+        )
         ambiguous_writes = list(
             await session.scalars(
                 select(AgentToolCall)
@@ -2657,11 +2745,9 @@ class SkillRuntime:
                 status=ContentStatus.IN_PROGRESS,
             )
             session.add(content)
-            await session.flush()
             task = BrainTask(
                 org_id=user.org_id,
                 created_by_id=user.id,
-                content_item_id=content.id,
                 title=turn.user_input[:300],
                 type=task_type,
                 status=BrainTaskStatus.RUNNING,
@@ -2681,9 +2767,6 @@ class SkillRuntime:
                 confirmation_actions=[],
             )
             session.add(task)
-            await session.flush()
-            run.task_id = task.id
-            await session.commit()
             return task, content
         if task.org_id != user.org_id or task.content_item_id is None:
             raise PermissionError("existing compatibility task is unavailable")

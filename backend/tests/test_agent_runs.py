@@ -12,10 +12,12 @@ from app.core.runtime_failures import FailureDisposition
 from app.models import (
     Account,
     BrainTask,
+    ContentItem,
     ConversationThread,
     ConversationTurn,
     Event,
     OrchestrationPlan,
+    SkillRun,
     TaskBrief,
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, BrainTaskType, Platform
@@ -35,6 +37,7 @@ from app.services.agent_runs import (
     request_agent_run_cancel,
     utc_now,
 )
+from app.services.runtime_locking import RuntimeLockConflict
 from app.worker import execute_agent_run, recover_agent_runs
 
 
@@ -116,6 +119,112 @@ async def _turn_owned_run(session, admin, *, key: str):
         turn_id=turn.id,
     )
     return account, thread, turn, run
+
+
+@pytest.mark.asyncio
+async def test_complete_agent_run_rebind_flushes_only_after_root_gate_and_reuses_token(
+    session, admin, monkeypatch
+) -> None:
+    account, _thread, _turn, run = await _turn_owned_run(
+        session, admin, key="complete-run-first-rebind"
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="complete-run-first-content",
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="complete-run-first-task",
+        status=BrainTaskStatus.RUNNING,
+    )
+    session.add(task)
+    await session.commit()
+    import app.services.agent_runs as agent_runs_module
+
+    original_lock = agent_runs_module.lock_runtime_root_scope
+    original_close = agent_runs_module.close_runtime_state
+    original_flush = session.flush
+    root_gate_acquired = False
+    observed_prelocked = []
+
+    async def observed_lock(*args, **kwargs):
+        nonlocal root_gate_acquired
+        token = await original_lock(*args, **kwargs)
+        root_gate_acquired = True
+        return token
+
+    async def guarded_flush(*args, **kwargs):
+        assert root_gate_acquired, "AgentRun rebind flushed before the Run root gate"
+        return await original_flush(*args, **kwargs)
+
+    async def observed_close(*args, **kwargs):
+        observed_prelocked.append(kwargs.get("prelocked"))
+        return await original_close(*args, **kwargs)
+
+    monkeypatch.setattr(agent_runs_module, "lock_runtime_root_scope", observed_lock)
+    monkeypatch.setattr(agent_runs_module, "close_runtime_state", observed_close)
+    monkeypatch.setattr(session, "flush", guarded_flush)
+
+    await complete_agent_run(session, run.id, task_id=task.id, status="completed")
+
+    assert run.task_id == task.id
+    assert observed_prelocked and observed_prelocked[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_complete_agent_run_rebind_rejects_existing_runtime_family(
+    session, admin
+) -> None:
+    _account, thread, turn, run = await _turn_owned_run(
+        session, admin, key="complete-rebind-existing-family"
+    )
+    current_task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="current-task",
+        status=BrainTaskStatus.RUNNING,
+    )
+    target_task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="target-task",
+        status=BrainTaskStatus.RUNNING,
+    )
+    session.add_all([current_task, target_task])
+    await session.flush()
+    run.task_id = current_task.id
+    session.add(
+        SkillRun(
+            org_id=admin.org_id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+            task_id=current_task.id,
+            idempotency_key="complete-rebind-existing-family",
+            skill_code="account_inspection",
+            skill_version=1,
+            status="running",
+            input_snapshot={},
+            output_snapshot={},
+        )
+    )
+    await session.commit()
+
+    with pytest.raises(RuntimeLockConflict, match="cannot rebind existing runtime family"):
+        await complete_agent_run(
+            session,
+            run.id,
+            task_id=target_task.id,
+            status="completed",
+        )
+
+    await session.refresh(run)
+    assert run.task_id == current_task.id
 
 
 @pytest.mark.asyncio

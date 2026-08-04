@@ -19,6 +19,7 @@ from app.models import (
     AccountMetricSnapshot,
     AdminSecurityCredential,
     AgentInvocation,
+    AgentRun,
     AgentToolCall,
     AudienceProfileItem,
     AudienceProfileSnapshot,
@@ -27,6 +28,8 @@ from app.models import (
     Client,
     ClientMembership,
     ContentItem,
+    ConversationThread,
+    ConversationTurn,
     DataArtifact,
     DataConflict,
     DataImportBatch,
@@ -67,7 +70,7 @@ from app.models.enums import (
 
 async def _login(client, email: str, password: str) -> str:
     response = await client.post("/auth/login", json={"email": email, "password": password})
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     return response.json()["access_token"]
 
 
@@ -138,6 +141,72 @@ async def _delete(client, token: str, target: User, preview_token: str, **overri
     )
 
 
+async def _cross_task_runtime_deliverable(session, admin: User, target: User, *, key: str):
+    workspace = Client(org_id=admin.org_id, name=f"Runtime client {key}")
+    project = Project(org_id=admin.org_id, client=workspace, name=f"Runtime project {key}")
+    account = Account(
+        org_id=admin.org_id,
+        client=workspace,
+        project=project,
+        platform=Platform.DOUYIN,
+        nickname=f"runtime-account-{key}",
+    )
+    session.add_all([workspace, project, account])
+    await session.flush()
+    content = ContentItem(
+        project_id=project.id,
+        account_id=account.id,
+        created_by_id=target.id,
+        title=f"Owned runtime content {key}",
+    )
+    shared_task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title=f"Shared runtime task {key}",
+    )
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title=f"Runtime thread {key}",
+    )
+    session.add_all([content, shared_task, thread])
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=f"runtime-turn-{key}",
+        user_input="runtime",
+    )
+    session.add(turn)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=shared_task.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        client_message_id=f"runtime-run-{key}",
+        status="claimed",
+        request_payload={},
+    )
+    session.add(run)
+    await session.flush()
+    deliverable = Deliverable(
+        content_item_id=content.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        agent_code="runtime-owner",
+        type=DeliverableType.VIDEO_SCRIPT,
+        payload={"title": key},
+    )
+    session.add(deliverable)
+    await session.commit()
+    return content, shared_task, run, deliverable
+
+
 @pytest.mark.asyncio
 async def test_member_cannot_use_protected_user_lifecycle_endpoints(
     client, session, admin, member
@@ -206,6 +275,8 @@ async def test_permanent_delete_rejects_wrong_secondary_password_and_keeps_asset
     owned = BrainTask(org_id=admin.org_id, created_by_id=target.id, title="Keep me")
     session.add(owned)
     await session.commit()
+    target_id = target.id
+    owned_id = owned.id
     token = await _login(client, admin.email, "admin-pw-123")
     credential = await _ready_secondary_password(session, admin)
     preview = await _preview(client, token, target)
@@ -222,14 +293,204 @@ async def test_permanent_delete_rejects_wrong_secondary_password_and_keeps_asset
     assert _code(response) == "SECONDARY_PASSWORD_INVALID"
     await session.refresh(credential)
     assert credential.failed_attempts == 1
-    assert await session.get(User, target.id) is not None
-    assert await session.get(BrainTask, owned.id) is not None
+    assert await session.get(User, target_id) is not None
+    assert await session.get(BrainTask, owned_id) is not None
     assert await session.scalar(
         select(func.count(UserDeletionPreviewReservation.id))
     ) == 0
     assert "wrong-secondary-password" not in str(
         [event.payload for event in await session.scalars(select(Event))]
     )
+    failed_audits = list(
+        await session.scalars(
+            select(Event).where(
+                Event.type == "user.deletion_secondary_password_auth"
+            )
+        )
+    )
+    assert len(failed_audits) == 1
+    assert failed_audits[0].payload["outcome"] == "failure"
+    assert failed_audits[0].payload["deletion_subject_id"] == target_id
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_auth_commits_before_new_runtime_forest_transaction(
+    client, session, admin, monkeypatch
+):
+    from app.services import user_deletion
+
+    target = await _target(session, admin, "auth-before-forest")
+    _content, _task, run, _deliverable = await _cross_task_runtime_deliverable(
+        session, admin, target, key="auth-before-forest"
+    )
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+    real_verify = user_deletion.verify_secondary_password
+    real_forest = user_deletion.lock_runtime_root_forest
+    auth_transactions = []
+
+    async def capture_auth_transaction(auth_session, *args, **kwargs):
+        auth_transactions.append(
+            auth_session.get_transaction().sync_transaction
+        )
+        await real_verify(auth_session, *args, **kwargs)
+
+    async def assert_new_transaction_after_auth(lock_session, *, run_ids, **kwargs):
+        assert tuple(run_ids) == (run.id,)
+        assert auth_transactions
+        assert lock_session.get_transaction().sync_transaction is not auth_transactions[0]
+        audit = await lock_session.scalar(
+            select(Event).where(
+                Event.type == "user.deletion_secondary_password_auth",
+                Event.payload["deletion_subject_id"].as_integer() == target.id,
+            )
+        )
+        assert audit is not None
+        assert audit.payload["outcome"] == "success"
+        return await real_forest(lock_session, run_ids=run_ids, **kwargs)
+
+    monkeypatch.setattr(
+        user_deletion, "verify_secondary_password", capture_auth_transaction
+    )
+    monkeypatch.setattr(
+        user_deletion, "lock_runtime_root_forest", assert_new_transaction_after_auth
+    )
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_locks_cross_task_deliverable_run_before_mutation(
+    client, session, admin, monkeypatch
+):
+    from app.services import user_deletion
+
+    target = await _target(session, admin, "cross-task-runtime")
+    content, shared_task, run, deliverable = await _cross_task_runtime_deliverable(
+        session, admin, target, key="cross-task-runtime"
+    )
+    target_id = target.id
+    content_id = content.id
+    task_id = shared_task.id
+    run_id = run.id
+    deliverable_id = deliverable.id
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+    real_forest = user_deletion.lock_runtime_root_forest
+    locked_run_sets = []
+
+    async def capture_forest(lock_session, *, run_ids, **kwargs):
+        locked_run_sets.append(tuple(run_ids))
+        assert not lock_session.new
+        return await real_forest(lock_session, run_ids=run_ids, **kwargs)
+
+    monkeypatch.setattr(user_deletion, "lock_runtime_root_forest", capture_forest)
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 200
+    assert locked_run_sets == [(run_id,)]
+    session.expire_all()
+    assert await session.get(User, target_id) is None
+    assert await session.get(ContentItem, content_id) is None
+    assert await session.get(Deliverable, deliverable_id) is None
+    assert await session.get(BrainTask, task_id) is not None
+    assert await session.get(AgentRun, run_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_rejects_runtime_family_growth_after_forest(
+    client, session, admin, monkeypatch
+):
+    from app.services import user_deletion
+
+    target = await _target(session, admin, "runtime-growth")
+    content, _shared_task, run, original = await _cross_task_runtime_deliverable(
+        session, admin, target, key="runtime-growth"
+    )
+    target_id = target.id
+    content_id = content.id
+    run_id = run.id
+    original_id = original.id
+    thread_id = original.thread_id
+    turn_id = original.turn_id
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+    real_forest = user_deletion.lock_runtime_root_forest
+
+    async def grow_after_forest(lock_session, *, run_ids, **kwargs):
+        tokens = await real_forest(lock_session, run_ids=run_ids, **kwargs)
+        lock_session.add(
+            Deliverable(
+                content_item_id=content_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                run_id=run_id,
+                agent_code="runtime-growth",
+                type=DeliverableType.VIDEO_SCRIPT,
+                version=2,
+                payload={"title": "grew after forest"},
+            )
+        )
+        await lock_session.flush()
+        return tokens
+
+    monkeypatch.setattr(user_deletion, "lock_runtime_root_forest", grow_after_forest)
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 409
+    assert _code(response) == "USER_DELETION_PREVIEW_STALE"
+    session.expire_all()
+    assert await session.get(User, target_id) is not None
+    assert await session.get(Deliverable, original_id) is not None
+    assert await session.scalar(
+        select(func.count(Deliverable.id)).where(Deliverable.run_id == run_id)
+    ) == 1
+    assert await session.scalar(
+        select(func.count(UserDeletionPreviewReservation.id))
+    ) == 0
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_rejects_cross_account_runtime_lineage(
+    client, session, admin
+):
+    target = await _target(session, admin, "cross-account-runtime")
+    content, _shared_task, _run, deliverable = await _cross_task_runtime_deliverable(
+        session, admin, target, key="cross-account-runtime"
+    )
+    other_account = Account(
+        org_id=admin.org_id,
+        project_id=content.project_id,
+        platform=Platform.DOUYIN,
+        nickname="cross-account-content-owner",
+    )
+    session.add(other_account)
+    await session.flush()
+    content.account_id = other_account.id
+    await session.commit()
+    target_id = target.id
+    deliverable_id = deliverable.id
+    token = await _login(client, admin.email, "admin-pw-123")
+    await _ready_secondary_password(session, admin)
+    preview = await _preview(client, token, target)
+
+    response = await _delete(client, token, target, preview["preview_token"])
+
+    assert response.status_code == 409
+    assert _code(response) == "USER_DELETION_PREVIEW_STALE"
+    session.expire_all()
+    assert await session.get(User, target_id) is not None
+    assert await session.get(Deliverable, deliverable_id) is not None
+    assert await session.scalar(
+        select(func.count(UserDeletionPreviewReservation.id))
+    ) == 0
 
 
 @pytest.mark.asyncio
@@ -346,7 +607,14 @@ async def test_permanent_delete_rolls_back_every_change_on_transaction_failure(
     assert await session.get(BrainTask, owned_id) is not None
     stored_credential = await session.get(AdminSecurityCredential, credential_id)
     assert stored_credential is not None
-    assert stored_credential.failed_attempts == 4
+    # Authentication is intentionally committed before the destructive
+    # transaction, so its successful reset and audit survive deletion rollback.
+    assert stored_credential.failed_attempts == 0
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.type == "user.deletion_secondary_password_auth"
+        )
+    ) == 1
     assert await session.scalar(
         select(func.count(UserDeletionPreviewReservation.id))
     ) == 0
@@ -542,7 +810,7 @@ async def test_permanent_delete_removes_owned_roots_and_keeps_sanitized_receipt(
     preview = await _preview(client, token, target)
     response = await _delete(client, token, target, preview["preview_token"])
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     receipt = response.json()
     assert receipt["counts"]["brain_tasks"] == 1
     assert receipt["counts"]["content_items"] == 1

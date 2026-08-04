@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, select
 
 from app.config import settings
@@ -1251,6 +1253,216 @@ async def test_owner_can_delete_empty_and_terminal_conversations(
     assert terminal_deleted.json()["messages_deleted"] == 1
     assert await session.get(ConversationThread, empty_thread["id"]) is None
     assert await session.get(ConversationThread, terminal_thread["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_executes_no_flush_or_dml_before_runtime_forest(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "delete-run-first-dml")
+    thread = await _create_thread(client, admin, account)
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="delete-run-first-dml",
+        user_input="done",
+        status="completed",
+    )
+    session.add(turn)
+    await session.flush()
+    session.add(
+        AgentRun(
+            org_id=admin.org_id,
+            requested_by_id=admin.id,
+            thread_id=thread["id"],
+            turn_id=turn.id,
+            client_message_id="delete-run-first-dml",
+            status="completed",
+            phase="completed",
+            request_payload={},
+        )
+    )
+    await session.commit()
+    import app.services.conversations as conversations_module
+
+    real_forest = conversations_module.lock_runtime_root_forest
+    forest_acquired = False
+
+    async def observed_forest(*args, **kwargs):
+        nonlocal forest_acquired
+        tokens = await real_forest(*args, **kwargs)
+        forest_acquired = True
+        return tokens
+
+    def reject_early_dml(_conn, clauseelement, *_args, **_kwargs):
+        operation = str(clauseelement).lstrip().split(" ", 1)[0].upper()
+        if operation in {"INSERT", "UPDATE", "DELETE"}:
+            assert forest_acquired, f"{operation} executed before runtime forest"
+
+    monkeypatch.setattr(conversations_module, "lock_runtime_root_forest", observed_forest)
+    sqlalchemy_event.listen(session.bind.sync_engine, "before_execute", reject_early_dml)
+    try:
+        await delete_conversation_thread(session, admin, thread["id"])
+    finally:
+        sqlalchemy_event.remove(session.bind.sync_engine, "before_execute", reject_early_dml)
+
+    assert forest_acquired
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_locks_multi_run_forest_once_in_sorted_order(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "delete-multi-run-forest")
+    thread = await _create_thread(client, admin, account)
+    run_ids = []
+    for index in range(2):
+        turn = ConversationTurn(
+            thread_id=thread["id"],
+            org_id=admin.org_id,
+            created_by_id=admin.id,
+            client_message_id=f"delete-multi-run-{index}",
+            user_input="done",
+            status="completed",
+        )
+        session.add(turn)
+        await session.flush()
+        run = AgentRun(
+            org_id=admin.org_id,
+            requested_by_id=admin.id,
+            thread_id=thread["id"],
+            turn_id=turn.id,
+            client_message_id=f"delete-multi-run-{index}",
+            status="completed",
+            phase="completed",
+            request_payload={},
+        )
+        session.add(run)
+        await session.flush()
+        run_ids.append(run.id)
+    await session.commit()
+    import app.services.conversations as conversations_module
+
+    real_forest = conversations_module.lock_runtime_root_forest
+    observed = []
+
+    async def observed_forest(*args, **kwargs):
+        observed.append(kwargs["run_ids"])
+        return await real_forest(*args, **kwargs)
+
+    monkeypatch.setattr(conversations_module, "lock_runtime_root_forest", observed_forest)
+    await delete_conversation_thread(session, admin, thread["id"])
+
+    assert observed == [tuple(sorted(run_ids))]
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_rejects_cross_account_runtime_lineage_without_partial_delete(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    thread_account = await _account(session, admin, "delete-thread-account")
+    other_account = await _account(session, admin, "delete-other-account")
+    thread = await _create_thread(client, admin, thread_account)
+    content = ContentItem(
+        account_id=other_account.id,
+        created_by_id=admin.id,
+        title="cross-account-runtime-content",
+    )
+    session.add(content)
+    await session.flush()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        content_item_id=content.id,
+        title="cross-account-runtime-task",
+        status=BrainTaskStatus.COMPLETED,
+    )
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="delete-cross-account-runtime",
+        user_input="done",
+        status="completed",
+    )
+    session.add_all([task, turn])
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        turn_id=turn.id,
+        client_message_id="delete-cross-account-runtime",
+        status="completed",
+        phase="completed",
+        request_payload={},
+    )
+    session.add(run)
+    await session.commit()
+    run_id = run.id
+
+    with pytest.raises(HTTPException) as caught:
+        await delete_conversation_thread(session, admin, thread["id"])
+
+    assert caught.value.status_code == 409
+    assert await session.get(ConversationThread, thread["id"]) is not None
+    assert await session.get(AgentRun, run_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_permanent_delete_rechecks_pending_blocker_after_forest(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "delete-postlock-pending")
+    thread = await _create_thread(client, admin, account)
+    turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="delete-postlock-pending",
+        user_input="done",
+        status="completed",
+    )
+    session.add(turn)
+    await session.flush()
+    run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        thread_id=thread["id"],
+        turn_id=turn.id,
+        client_message_id="delete-postlock-pending",
+        status="completed",
+        phase="completed",
+        request_payload={},
+    )
+    session.add(run)
+    await session.commit()
+    import app.services.conversations as conversations_module
+
+    real_forest = conversations_module.lock_runtime_root_forest
+
+    async def make_pending_after_lock(*args, **kwargs):
+        tokens = await real_forest(*args, **kwargs)
+        locked_run = await session.get(AgentRun, run.id)
+        locked_run.status = "running"
+        await session.flush()
+        return tokens
+
+    monkeypatch.setattr(
+        conversations_module, "lock_runtime_root_forest", make_pending_after_lock
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await delete_conversation_thread(session, admin, thread["id"])
+
+    assert caught.value.status_code == 409
+    assert await session.get(ConversationThread, thread["id"]) is not None
 
 
 @pytest.mark.asyncio

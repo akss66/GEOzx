@@ -26,6 +26,7 @@ from app.models import (
     RunRevision,
     SkillRun,
     StrategyPlan,
+    ToolExecutionAttempt,
 )
 from app.models.enums import (
     AccountStatus,
@@ -65,6 +66,7 @@ from app.services.agent_runs import (
 from app.services.runtime_locking import (
     RuntimeLockConflict,
     RuntimeRootLock,
+    lock_runtime_root_forest,
     lock_runtime_root_scope,
     require_runtime_root_lock,
 )
@@ -579,6 +581,262 @@ async def test_runtime_root_lock_token_is_unforgeable_and_transaction_bound(
     await session.execute(select(AgentRun.id).where(AgentRun.id == run.id))
     with pytest.raises(RuntimeLockConflict, match="another transaction"):
         require_runtime_root_lock(session, token, run_id=run.id)
+
+
+@pytest.mark.asyncio
+async def test_runtime_lock_requires_revision_invocation_tool_and_attempt_subsets(
+    session, admin
+) -> None:
+    _account, _thread, _turn, run, task, skill = await _four_ledger_context(
+        session, admin, key="runtime-lock-subsets"
+    )
+    invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        skill_run_id=skill.id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        step_key="subset-invocation",
+        agent_code=AgentCode.OPERATOR,
+        agent_name="Operator",
+    )
+    session.add(invocation)
+    await session.flush()
+    tool_call = AgentToolCall(
+        org_id=run.org_id,
+        task_id=task.id,
+        invocation_id=invocation.id,
+        skill_run_id=skill.id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        tool_code="subset.tool",
+        tool_name="Subset tool",
+        status="running",
+        side_effect_level="read",
+    )
+    session.add(tool_call)
+    await session.flush()
+    attempt = ToolExecutionAttempt(
+        tool_call_id=tool_call.id,
+        attempt_no=1,
+        status="dispatched",
+    )
+    session.add(attempt)
+    await session.commit()
+
+    token = await lock_runtime_root_scope(
+        session,
+        run_id=run.id,
+        expected_turn_id=run.turn_id,
+        expected_task_id=task.id,
+        root_skill_run_id=skill.id,
+        invocation_ids=(invocation.id,),
+        tool_call_ids=(tool_call.id,),
+        attempt_ids=(attempt.id,),
+    )
+    require_runtime_root_lock(
+        session,
+        token,
+        run_id=run.id,
+        invocation_ids=(invocation.id,),
+        tool_call_ids=(tool_call.id,),
+        attempt_ids=(attempt.id,),
+    )
+    for keyword, expected in (
+        ("run_revision_ids", "RunRevision"),
+        ("invocation_ids", "AgentInvocation"),
+        ("tool_call_ids", "AgentToolCall"),
+        ("attempt_ids", "ToolExecutionAttempt"),
+    ):
+        with pytest.raises(RuntimeLockConflict, match=f"{expected} was not prelocked"):
+            require_runtime_root_lock(
+                session,
+                token,
+                run_id=run.id,
+                **{keyword: (999_999,)},
+            )
+
+
+@pytest.mark.asyncio
+async def test_runtime_forest_expands_both_run_revision_endpoints(
+    session, admin
+) -> None:
+    (
+        _account,
+        _thread,
+        _turn,
+        revision_run,
+        _task,
+        _skill,
+        revision,
+    ) = await _revision_execution_context(
+        session, admin, key="runtime-forest-revision-endpoints"
+    )
+
+    tokens = await lock_runtime_root_forest(
+        session,
+        run_ids=(revision.source_run_id,),
+    )
+
+    assert tuple(token.run_id for token in tokens) == (
+        revision.source_run_id,
+        revision_run.id,
+    )
+    assert all(revision.id in token.run_revision_ids for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_runtime_lock_rejects_tool_via_unlocked_invocation(
+    session, admin
+) -> None:
+    _account, thread, turn, run, task, skill = await _four_ledger_context(
+        session, admin, key="runtime-lock-cross-run-tool"
+    )
+    unlocked_invocation = AgentInvocation(
+        task_id=task.id,
+        run_id=run.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        step_key="unlocked-invocation",
+        agent_code=AgentCode.OPERATOR,
+        agent_name="Unlocked operator",
+    )
+    session.add(unlocked_invocation)
+    await session.flush()
+    cross_run_tool = AgentToolCall(
+        org_id=run.org_id,
+        task_id=task.id,
+        invocation_id=unlocked_invocation.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        tool_code="cross.run.tool",
+        tool_name="Cross-run tool",
+        status="running",
+        side_effect_level="read",
+    )
+    session.add(cross_run_tool)
+    await session.commit()
+
+    with pytest.raises(RuntimeLockConflict, match="AgentToolCall lineage mismatch"):
+        await lock_runtime_root_scope(
+            session,
+            run_id=run.id,
+            expected_turn_id=run.turn_id,
+            expected_task_id=task.id,
+            root_skill_run_id=skill.id,
+            tool_call_ids=(cross_run_tool.id,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_forest_rejects_cross_run_extra_deliverables(session, admin) -> None:
+    account, _thread, _turn, run, _task, _skill = await _four_ledger_context(
+        session, admin, key="runtime-forest-extra-deliverable"
+    )
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="cross-forest-deliverable",
+    )
+    session.add(content)
+    await session.flush()
+    deliverable = Deliverable(
+        content_item_id=content.id,
+        agent_code="02-content",
+        type=DeliverableType.VIDEO_SCRIPT,
+        payload={},
+    )
+    session.add(deliverable)
+    await session.commit()
+
+    with pytest.raises(RuntimeLockConflict, match="Deliverable lineage mismatch"):
+        await lock_runtime_root_forest(
+            session,
+            run_ids=(run.id,),
+            extra_deliverable_ids=(deliverable.id,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_lock_extension_rejects_preexisting_unlocked_rows(
+    session, admin
+) -> None:
+    _account, _thread, _turn, run, task, root = await _four_ledger_context(
+        session, admin, key="runtime-lock-extension-existing"
+    )
+    child = SkillRun(
+        org_id=run.org_id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="runtime-lock-extension-existing-child",
+        skill_code="script_generation",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={"composite_parent_skill_run_id": root.id},
+    )
+    session.add(child)
+    await session.commit()
+    token = await lock_runtime_root_scope(
+        session,
+        run_id=run.id,
+        expected_turn_id=run.turn_id,
+        expected_task_id=task.id,
+        root_skill_run_id=root.id,
+    )
+    import app.services.runtime_locking as runtime_locking_module
+
+    with pytest.raises(RuntimeLockConflict, match="inserted in the current transaction"):
+        await runtime_locking_module.extend_runtime_root_lock(
+            session,
+            token,
+            task=task,
+            content=None,
+            skill_run=child,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_lock_extension_rejects_rows_pending_before_gate(
+    session, admin
+) -> None:
+    _account, _thread, _turn, run, task, root = await _four_ledger_context(
+        session, admin, key="runtime-lock-extension-pregate"
+    )
+    child = SkillRun(
+        org_id=run.org_id,
+        thread_id=run.thread_id,
+        turn_id=run.turn_id,
+        run_id=run.id,
+        task_id=task.id,
+        idempotency_key="runtime-lock-extension-pregate-child",
+        skill_code="script_generation",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={"composite_parent_skill_run_id": root.id},
+    )
+    session.add(child)
+    with session.no_autoflush:
+        token = await lock_runtime_root_scope(
+            session,
+            run_id=run.id,
+            expected_turn_id=run.turn_id,
+            expected_task_id=task.id,
+            root_skill_run_id=root.id,
+        )
+    import app.services.runtime_locking as runtime_locking_module
+
+    with pytest.raises(RuntimeLockConflict, match="after root lock acquisition"):
+        await runtime_locking_module.extend_runtime_root_lock(
+            session,
+            token,
+            task=task,
+            content=None,
+            skill_run=child,
+        )
 
 
 @pytest.mark.asyncio

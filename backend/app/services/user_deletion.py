@@ -6,11 +6,12 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Never
 
 import jwt
 from fastapi import HTTPException, status
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import Numeric, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ from app.models import (
     ClientMembership,
     ComplianceCheck,
     ContentItem,
+    ConversationThread,
     DataImportBatch,
     Deliverable,
     DeliverableAcceptance,
@@ -43,18 +45,27 @@ from app.models import (
     Notification,
     OptimizationSuggestion,
     OrchestrationPlan,
+    Project,
     ProjectMembership,
+    RunRevision,
+    SkillRun,
     TaskBrief,
+    ToolExecutionAttempt,
     User,
     UserDeletionPreviewReservation,
 )
 from app.models.enums import UserRole
 from app.services.admin_security import verify_secondary_password
-from app.services.runtime_locking import lock_runtime_root_forest
+from app.services.runtime_locking import (
+    RuntimeLockConflict,
+    RuntimeRootLock,
+    lock_runtime_root_forest,
+)
 
 PREVIEW_TTL_MINUTES = 5
 PREVIEW_PURPOSE = "user_deletion_preview"
 RECEIPT_EVENT_TYPE = "user.permanently_deleted"
+SECONDARY_AUTH_EVENT_TYPE = "user.deletion_secondary_password_auth"
 RESERVATION_UNIQUE_CONSTRAINT = (
     "uq_user_deletion_preview_reservations_org_operation"
 )
@@ -111,6 +122,18 @@ class DeletionReceipt:
     counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class RuntimeDeletionFootprint:
+    run_ids: tuple[int, ...]
+    skill_ids: tuple[int, ...]
+    revision_ids: tuple[int, ...]
+    deliverable_ids: tuple[int, ...]
+    invocation_ids: tuple[int, ...]
+    tool_call_ids: tuple[int, ...]
+    attempt_ids: tuple[int, ...]
+    extra_deliverable_ids: tuple[int, ...]
+
+
 def _business_error(http_status: int, code: str, message: str) -> Never:
     raise HTTPException(
         status_code=http_status,
@@ -128,8 +151,23 @@ def _version_text(value) -> str | None:
 
 
 def _row_fingerprint(row) -> str:
+    def canonical(value, *, numeric: bool = False):
+        if numeric and value is not None:
+            return format(Decimal(str(value)).normalize(), "f")
+        if isinstance(value, Decimal):
+            return format(value.normalize(), "f")
+        if isinstance(value, datetime):
+            return _version_text(value)
+        if isinstance(value, dict):
+            return {key: canonical(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [canonical(item) for item in value]
+        return value
+
     values = {
-        column.name: getattr(row, column.name)
+        column.name: canonical(
+            getattr(row, column.name), numeric=isinstance(column.type, Numeric)
+        )
         for column in row.__table__.columns
         if column.name != "id"
     }
@@ -634,6 +672,400 @@ def _map_secondary_password_error(exc: HTTPException) -> Never:
     _business_error(exc.status_code, code, str(exc.detail))
 
 
+def _secondary_password_error_code(exc: HTTPException) -> str:
+    return {
+        "Secondary password is not configured": "SECONDARY_PASSWORD_NOT_CONFIGURED",
+        "Secondary password cooldown is active": "SECONDARY_PASSWORD_COOLDOWN",
+        "Secondary password is temporarily locked": "SECONDARY_PASSWORD_LOCKED",
+        "Invalid secondary password": "SECONDARY_PASSWORD_INVALID",
+    }.get(str(exc.detail), "SECONDARY_PASSWORD_INVALID")
+
+
+async def _authenticate_deletion_request(
+    session: AsyncSession,
+    *,
+    actor_id: int,
+    actor_org_id: int,
+    target_user_id: int,
+    operation_id: str,
+    secondary_password: str,
+) -> None:
+    """Verify and audit in a transaction independent of runtime deletion."""
+
+    auth_actor = await session.scalar(
+        select(User).where(User.id == actor_id, User.org_id == actor_org_id)
+    )
+    if auth_actor is None:
+        _business_error(
+            status.HTTP_409_CONFLICT,
+            "USER_DELETION_PREVIEW_INVALID",
+            "Deletion preview does not match this operation",
+        )
+    try:
+        await verify_secondary_password(
+            session,
+            auth_actor,
+            secondary_password,
+            commit_on_success=False,
+        )
+    except HTTPException as exc:
+        # Invalid-password counters are committed by the verifier. Other
+        # authentication failures may leave a read transaction open.
+        if session.in_transaction():
+            await session.rollback()
+        session.add(
+            Event(
+                type=SECONDARY_AUTH_EVENT_TYPE,
+                org_id=actor_org_id,
+                payload={
+                    "actor_id": actor_id,
+                    "deletion_subject_id": target_user_id,
+                    "operation_id": operation_id,
+                    "outcome": "failure",
+                    "error_code": _secondary_password_error_code(exc),
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+            )
+        )
+        await session.commit()
+        _map_secondary_password_error(exc)
+
+    session.add(
+        Event(
+            type=SECONDARY_AUTH_EVENT_TYPE,
+            org_id=actor_org_id,
+            payload={
+                "actor_id": actor_id,
+                "deletion_subject_id": target_user_id,
+                "operation_id": operation_id,
+                "outcome": "success",
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    await session.commit()
+
+
+async def _discover_runtime_deletion_footprint(
+    session: AsyncSession,
+    *,
+    impact: DeletionImpact,
+    target_user_id: int,
+    organization_id: int,
+) -> RuntimeDeletionFootprint:
+    """Build the Run-root closure of every runtime row affected by deletion."""
+
+    ids = impact.record_ids
+    task_ids = ids["brain_tasks"]
+    impacted_deliverable_ids = ids["deliverables"]
+    impacted_invocation_ids = ids["agent_invocations"]
+    impacted_tool_ids = ids["agent_tool_calls"]
+    with session.no_autoflush:
+        impacted_deliverables = list(
+            await session.scalars(
+                select(Deliverable)
+                .where(Deliverable.id.in_(impacted_deliverable_ids))
+                .order_by(Deliverable.id)
+            )
+        )
+        impacted_invocations = list(
+            await session.scalars(
+                select(AgentInvocation)
+                .where(AgentInvocation.id.in_(impacted_invocation_ids))
+                .order_by(AgentInvocation.id)
+            )
+        )
+        impacted_tools = list(
+            await session.scalars(
+                select(AgentToolCall)
+                .where(AgentToolCall.id.in_(impacted_tool_ids))
+                .order_by(AgentToolCall.id)
+            )
+        )
+        referenced_skill_ids = tuple(
+            sorted(
+                {
+                    row.skill_run_id
+                    for row in impacted_deliverables
+                    if row.skill_run_id is not None
+                }
+                | {
+                    row.skill_run_id
+                    for row in impacted_invocations
+                    if row.skill_run_id is not None
+                }
+                | {
+                    row.skill_run_id
+                    for row in impacted_tools
+                    if row.skill_run_id is not None
+                }
+            )
+        )
+        referenced_invocation_ids = tuple(
+            sorted(
+                {
+                    row.invocation_id
+                    for row in impacted_tools
+                    if row.invocation_id is not None
+                }
+            )
+        )
+        referenced_skills = list(
+            await session.scalars(
+                select(SkillRun)
+                .where(SkillRun.id.in_(referenced_skill_ids))
+                .order_by(SkillRun.id)
+            )
+        )
+        referenced_invocations = list(
+            await session.scalars(
+                select(AgentInvocation)
+                .where(AgentInvocation.id.in_(referenced_invocation_ids))
+                .order_by(AgentInvocation.id)
+            )
+        )
+        referenced_skill_by_id = {row.id: row for row in referenced_skills}
+        referenced_invocation_by_id = {row.id: row for row in referenced_invocations}
+        for deliverable in impacted_deliverables:
+            if deliverable.skill_run_id is None:
+                continue
+            skill = referenced_skill_by_id.get(deliverable.skill_run_id)
+            if skill is None or deliverable.run_id != skill.run_id:
+                raise RuntimeLockConflict(
+                    "runtime deletion Deliverable SkillRun lineage mismatch"
+                )
+        for invocation in impacted_invocations:
+            if invocation.skill_run_id is None:
+                continue
+            skill = referenced_skill_by_id.get(invocation.skill_run_id)
+            if skill is None or invocation.run_id != skill.run_id:
+                raise RuntimeLockConflict(
+                    "runtime deletion AgentInvocation SkillRun lineage mismatch"
+                )
+        for tool in impacted_tools:
+            linked_run_ids: set[int] = set()
+            linked_skill = (
+                referenced_skill_by_id.get(tool.skill_run_id)
+                if tool.skill_run_id is not None
+                else None
+            )
+            linked_invocation = (
+                referenced_invocation_by_id.get(tool.invocation_id)
+                if tool.invocation_id is not None
+                else None
+            )
+            if linked_skill is not None:
+                linked_run_ids.add(linked_skill.run_id)
+            if linked_invocation is not None and linked_invocation.run_id is not None:
+                linked_run_ids.add(linked_invocation.run_id)
+            if (
+                (tool.skill_run_id is not None or tool.invocation_id is not None)
+                and len(linked_run_ids) != 1
+            ):
+                raise RuntimeLockConflict(
+                    "runtime deletion AgentToolCall lineage mismatch"
+                )
+        seed_run_ids = (
+            {row.run_id for row in impacted_deliverables if row.run_id is not None}
+            | {row.run_id for row in impacted_invocations if row.run_id is not None}
+            | {row.run_id for row in referenced_skills if row.run_id is not None}
+            | {row.run_id for row in referenced_invocations if row.run_id is not None}
+        )
+        seed_run_ids.update(
+            await session.scalars(
+                select(AgentRun.id).where(
+                    or_(
+                        AgentRun.task_id.in_(task_ids),
+                        AgentRun.requested_by_id == target_user_id,
+                    )
+                )
+            )
+        )
+        revision_links: list[RunRevision] = []
+        while True:
+            revision_links = list(
+                await session.scalars(
+                    select(RunRevision)
+                    .where(
+                        (RunRevision.source_run_id.in_(seed_run_ids))
+                        | (RunRevision.revision_run_id.in_(seed_run_ids))
+                    )
+                    .order_by(RunRevision.id)
+                )
+            )
+            expanded_run_ids = seed_run_ids | {
+                endpoint
+                for row in revision_links
+                for endpoint in (row.source_run_id, row.revision_run_id)
+            }
+            if expanded_run_ids == seed_run_ids:
+                break
+            seed_run_ids = expanded_run_ids
+        run_ids = tuple(sorted(seed_run_ids))
+        runs = list(
+            await session.scalars(
+                select(AgentRun).where(AgentRun.id.in_(run_ids)).order_by(AgentRun.id)
+            )
+        )
+        if len(runs) != len(run_ids):
+            raise RuntimeLockConflict("runtime deletion AgentRun set changed")
+        if any(run.org_id != organization_id for run in runs):
+            raise RuntimeLockConflict("runtime deletion crosses organization boundary")
+
+        thread_ids = tuple(sorted({run.thread_id for run in runs if run.thread_id is not None}))
+        threads = {
+            row.id: row
+            for row in await session.scalars(
+                select(ConversationThread)
+                .where(ConversationThread.id.in_(thread_ids))
+                .order_by(ConversationThread.id)
+            )
+        }
+        if len(threads) != len(thread_ids) or any(
+            thread.org_id != organization_id for thread in threads.values()
+        ):
+            raise RuntimeLockConflict("runtime deletion Thread boundary mismatch")
+        run_by_id = {run.id: run for run in runs}
+        content_ids = tuple(
+            sorted({row.content_item_id for row in impacted_deliverables if row.run_id is not None})
+        )
+        contents = {
+            row.id: row
+            for row in await session.scalars(
+                select(ContentItem)
+                .where(ContentItem.id.in_(content_ids))
+                .order_by(ContentItem.id)
+            )
+        }
+        project_ids = tuple(
+            sorted(
+                {
+                    row.project_id
+                    for row in contents.values()
+                    if row.project_id is not None
+                }
+            )
+        )
+        projects = {
+            row.id: row
+            for row in await session.scalars(
+                select(Project)
+                .where(Project.id.in_(project_ids))
+                .order_by(Project.id)
+            )
+        }
+        if len(contents) != len(content_ids) or any(
+            content.project_id is None
+            or projects.get(content.project_id) is None
+            or projects[content.project_id].org_id != organization_id
+            for content in contents.values()
+        ):
+            raise RuntimeLockConflict("runtime deletion Content boundary mismatch")
+        for deliverable in impacted_deliverables:
+            if deliverable.run_id is None:
+                continue
+            run = run_by_id.get(deliverable.run_id)
+            content = contents.get(deliverable.content_item_id)
+            if run is None or content is None:
+                raise RuntimeLockConflict("runtime deletion Deliverable lineage mismatch")
+            thread = threads.get(run.thread_id) if run.thread_id is not None else None
+            if (
+                thread is not None
+                and content.account_id is not None
+                and content.account_id != thread.account_id
+            ):
+                raise RuntimeLockConflict("runtime deletion crosses account boundary")
+
+        skills = list(
+            await session.scalars(
+                select(SkillRun).where(SkillRun.run_id.in_(run_ids)).order_by(SkillRun.id)
+            )
+        )
+        revisions = tuple(row.id for row in revision_links)
+        deliverables = list(
+            await session.scalars(
+                select(Deliverable).where(Deliverable.run_id.in_(run_ids)).order_by(Deliverable.id)
+            )
+        )
+        invocations = list(
+            await session.scalars(
+                select(AgentInvocation)
+                .where(AgentInvocation.run_id.in_(run_ids))
+                .order_by(AgentInvocation.id)
+            )
+        )
+        skill_ids = tuple(row.id for row in skills)
+        invocation_ids = tuple(row.id for row in invocations)
+        tools = list(
+            await session.scalars(
+                select(AgentToolCall)
+                .where(
+                    or_(
+                        AgentToolCall.skill_run_id.in_(skill_ids),
+                        AgentToolCall.invocation_id.in_(invocation_ids),
+                    )
+                )
+                .order_by(AgentToolCall.id)
+            )
+        )
+        tool_ids = tuple(row.id for row in tools)
+        attempt_ids = tuple(
+            await session.scalars(
+                select(ToolExecutionAttempt.id)
+                .where(ToolExecutionAttempt.tool_call_id.in_(tool_ids))
+                .order_by(ToolExecutionAttempt.id)
+            )
+        )
+    impacted_deliverable_id_set = set(impacted_deliverable_ids)
+    return RuntimeDeletionFootprint(
+        run_ids=run_ids,
+        skill_ids=skill_ids,
+        revision_ids=revisions,
+        deliverable_ids=tuple(row.id for row in deliverables),
+        invocation_ids=invocation_ids,
+        tool_call_ids=tool_ids,
+        attempt_ids=attempt_ids,
+        extra_deliverable_ids=tuple(
+            row.id for row in deliverables if row.id in impacted_deliverable_id_set
+        ),
+    )
+
+
+def _validate_runtime_deletion_forest(
+    footprint: RuntimeDeletionFootprint,
+    tokens: tuple[RuntimeRootLock, ...],
+) -> None:
+    if tuple(token.run_id for token in tokens) != footprint.run_ids:
+        raise RuntimeLockConflict("runtime deletion forest roots changed")
+    locked_skill_ids = {
+        skill_id
+        for token in tokens
+        for skill_id in (token.root_skill_run_id, *token.child_skill_run_ids)
+        if skill_id is not None
+    }
+    # Keep the direction explicit for every family: the post-lock affected set
+    # must be fully contained in the acquired forest proof.
+    locked_sets = {
+        "RunRevision": {row for token in tokens for row in token.run_revision_ids},
+        "Deliverable": {row for token in tokens for row in token.deliverable_ids},
+        "AgentInvocation": {row for token in tokens for row in token.invocation_ids},
+        "AgentToolCall": {row for token in tokens for row in token.tool_call_ids},
+        "ToolExecutionAttempt": {row for token in tokens for row in token.attempt_ids},
+    }
+    affected_sets = {
+        "RunRevision": set(footprint.revision_ids),
+        "Deliverable": set(footprint.deliverable_ids),
+        "AgentInvocation": set(footprint.invocation_ids),
+        "AgentToolCall": set(footprint.tool_call_ids),
+        "ToolExecutionAttempt": set(footprint.attempt_ids),
+    }
+    if not set(footprint.skill_ids).issubset(locked_skill_ids):
+        raise RuntimeLockConflict("runtime deletion SkillRun family changed")
+    for label, affected in affected_sets.items():
+        if not affected.issubset(locked_sets[label]):
+            raise RuntimeLockConflict(f"runtime deletion {label} family changed")
+
+
 async def _delete_ids(
     session: AsyncSession,
     model,
@@ -707,11 +1139,13 @@ async def execute_permanent_deletion(
     preview_token: str,
     secondary_password: str,
 ) -> DeletionReceipt:
+    actor_id = actor.id
+    actor_org_id = actor.org_id
     claims = _decode_preview_token(preview_token)
     if (
-        claims.actor_id != actor.id
+        claims.actor_id != actor_id
         or claims.target_user_id != target_user_id
-        or claims.organization_id != actor.org_id
+        or claims.organization_id != actor_org_id
     ):
         _business_error(
             status.HTTP_409_CONFLICT,
@@ -720,9 +1154,9 @@ async def execute_permanent_deletion(
         )
     if await _preview_was_used(
         session,
-        organization_id=actor.org_id,
+        organization_id=actor_org_id,
         operation_id=claims.operation_id,
-        actor_id=actor.id,
+        actor_id=actor_id,
     ):
         _business_error(
             status.HTTP_409_CONFLICT,
@@ -731,7 +1165,7 @@ async def execute_permanent_deletion(
         )
 
     target = await session.scalar(
-        select(User).where(User.id == target_user_id, User.org_id == actor.org_id)
+        select(User).where(User.id == target_user_id, User.org_id == actor_org_id)
     )
     if target is None:
         _business_error(
@@ -748,64 +1182,112 @@ async def execute_permanent_deletion(
             "Deletion impact changed; create a new preview",
         )
 
+    # End all preview/discovery reads before password hashing. Authentication
+    # and its durable audit form their own transaction, independent of runtime
+    # locks and the later destructive transaction.
+    await session.rollback()
     try:
-        try:
-            await verify_secondary_password(
-                session,
-                actor,
-                secondary_password,
-                commit_on_success=False,
-            )
-        except HTTPException as exc:
-            _map_secondary_password_error(exc)
+        await _authenticate_deletion_request(
+            session,
+            actor_id=actor_id,
+            actor_org_id=actor_org_id,
+            target_user_id=target_user_id,
+            operation_id=claims.operation_id,
+            secondary_password=secondary_password,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        await session.rollback()
+        _business_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "USER_DELETION_TRANSACTION_FAILED",
+            "Permanent deletion authentication failed safely",
+        )
 
+    try:
+        if await _preview_was_used(
+            session,
+            organization_id=actor_org_id,
+            operation_id=claims.operation_id,
+            actor_id=actor_id,
+        ):
+            _business_error(
+                status.HTTP_409_CONFLICT,
+                "USER_DELETION_PREVIEW_USED",
+                "Deletion preview has already been used",
+            )
+        deletion_actor = await session.scalar(
+            select(User).where(User.id == actor_id, User.org_id == actor_org_id)
+        )
+        target = await session.scalar(
+            select(User).where(User.id == target_user_id, User.org_id == actor_org_id)
+        )
+        if deletion_actor is None or target is None:
+            _business_error(
+                status.HTTP_409_CONFLICT,
+                "USER_DELETION_PREVIEW_STALE",
+                "Deletion target changed; create a new preview",
+            )
+        impact = await build_deletion_impact(
+            session, actor=deletion_actor, target=target
+        )
+        _raise_blocker(impact.blockers)
+        if impact.version_digest != claims.impact_hash:
+            _business_error(
+                status.HTTP_409_CONFLICT,
+                "USER_DELETION_PREVIEW_STALE",
+                "Deletion impact changed; create a new preview",
+            )
+        discovered_footprint = await _discover_runtime_deletion_footprint(
+            session,
+            impact=impact,
+            target_user_id=target_user_id,
+            organization_id=actor_org_id,
+        )
+        forest = await lock_runtime_root_forest(
+            session,
+            run_ids=discovered_footprint.run_ids,
+            extra_deliverable_ids=discovered_footprint.extra_deliverable_ids,
+        )
         await _reserve_preview(
             session,
-            organization_id=actor.org_id,
+            organization_id=actor_org_id,
             operation_id=claims.operation_id,
         )
         await session.execute(
             select(User.id)
             .where(
-                User.org_id == actor.org_id,
+                User.org_id == actor_org_id,
                 User.role == UserRole.ADMIN,
                 User.is_active.is_(True),
             )
             .order_by(User.id)
             .with_for_update()
         )
+        deletion_actor = await session.scalar(
+            select(User)
+            .where(User.id == actor_id, User.org_id == actor_org_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         target = await session.scalar(
             select(User)
-            .where(User.id == target_user_id, User.org_id == actor.org_id)
+            .where(User.id == target_user_id, User.org_id == actor_org_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
-        if target is None:
+        if deletion_actor is None or target is None:
             _business_error(
                 status.HTTP_409_CONFLICT,
                 "USER_DELETION_PREVIEW_STALE",
                 "Deletion target changed; create a new preview",
             )
-        impact = await build_deletion_impact(session, actor=actor, target=target)
-        _raise_blocker(impact.blockers)
-        if impact.version_digest != claims.impact_hash:
-            _business_error(
-                status.HTTP_409_CONFLICT,
-                "USER_DELETION_PREVIEW_STALE",
-                "Deletion impact changed; create a new preview",
-            )
-        task_ids = impact.record_ids["brain_tasks"]
-        with session.no_autoflush:
-            runtime_run_ids = tuple(
-                await session.scalars(
-                    select(AgentRun.id)
-                    .where(AgentRun.task_id.in_(task_ids))
-                    .order_by(AgentRun.id)
-                )
-            )
-        await lock_runtime_root_forest(session, run_ids=runtime_run_ids)
         # Decisions come from a post-lock snapshot; the earlier impact is only
         # discovery and may not authorize deletion after lock contention.
-        impact = await build_deletion_impact(session, actor=actor, target=target)
+        impact = await build_deletion_impact(
+            session, actor=deletion_actor, target=target
+        )
         _raise_blocker(impact.blockers)
         if impact.version_digest != claims.impact_hash:
             _business_error(
@@ -813,13 +1295,26 @@ async def execute_permanent_deletion(
                 "USER_DELETION_PREVIEW_STALE",
                 "Deletion impact changed; create a new preview",
             )
+        locked_footprint = await _discover_runtime_deletion_footprint(
+            session,
+            impact=impact,
+            target_user_id=target_user_id,
+            organization_id=actor_org_id,
+        )
+        if locked_footprint != discovered_footprint:
+            _business_error(
+                status.HTTP_409_CONFLICT,
+                "USER_DELETION_PREVIEW_STALE",
+                "Deletion runtime changed; create a new preview",
+            )
+        _validate_runtime_deletion_forest(locked_footprint, forest)
         await _delete_owned_records(session, impact)
         deleted_at = datetime.now(UTC)
         session.add(
             Event(
                 type=RECEIPT_EVENT_TYPE,
                 payload={
-                    "actor_id": actor.id,
+                    "actor_id": actor_id,
                     "operation_id": claims.operation_id,
                     "timestamp": deleted_at.isoformat(),
                     "counts": impact.counts,
@@ -831,6 +1326,13 @@ async def execute_permanent_deletion(
     except HTTPException:
         await session.rollback()
         raise
+    except RuntimeLockConflict:
+        await session.rollback()
+        _business_error(
+            status.HTTP_409_CONFLICT,
+            "USER_DELETION_PREVIEW_STALE",
+            "Deletion runtime changed; create a new preview",
+        )
     except Exception:
         await session.rollback()
         _business_error(
