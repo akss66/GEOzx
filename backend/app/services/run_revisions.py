@@ -29,6 +29,14 @@ from app.services.checkpoint_hashing import revision_plan_hash
 
 CandidateOutcome = Literal["reusable", "full_recompute", "manual_reconciliation"]
 ResolutionMode = Literal["partial", "full_recompute", "manual_reconciliation"]
+RevisionTerminalStatus = Literal[
+    "completed",
+    "failed",
+    "cancelled",
+    "blocked",
+    "stopped",
+    "manual_reconciliation",
+]
 
 _FULL_RECOMPUTE_REASONS = frozenset(
     {
@@ -500,7 +508,14 @@ async def require_manual_reconciliation(
     revision = await _locked_revision(session, revision_id)
     if revision.mode == "manual_reconciliation" and revision.manual_reconciliation_reason == reason:
         return revision
-    if revision.status in {"completed", "failed", "cancelled"}:
+    if revision.status in {
+        "completed",
+        "failed",
+        "cancelled",
+        "blocked",
+        "stopped",
+        "manual_reconciliation",
+    }:
         raise RevisionStateConflict("Terminal revision cannot be replaced by manual reconciliation")
     revision.mode = "manual_reconciliation"
     revision.earliest_affected_step = None
@@ -515,12 +530,28 @@ async def require_manual_reconciliation(
 
 
 async def complete_revision(session: AsyncSession, *, revision_id: int) -> RunRevision:
+    return await finish_revision(session, revision_id=revision_id, status="completed")
+
+
+async def finish_revision(
+    session: AsyncSession,
+    *,
+    revision_id: int,
+    status: RevisionTerminalStatus,
+) -> RunRevision:
     revision = await _locked_revision(session, revision_id)
-    if revision.status == "completed":
+    if revision.status == status:
         return revision
-    if revision.status != "running":
-        raise RevisionStateConflict("Only a running revision can complete")
-    revision.status = "completed"
+    allowed_sources = {"running"}
+    if status == "manual_reconciliation":
+        allowed_sources.update({"planned", "waiting_predecessor"})
+        if revision.mode != "manual_reconciliation":
+            raise RevisionStateConflict(
+                "Manual reconciliation terminal status requires manual mode"
+            )
+    if revision.status not in allowed_sources:
+        raise RevisionStateConflict("Revision cannot transition to terminal status")
+    revision.status = status
     revision.finished_at = await load_transaction_db_now(session)
     await session.flush()
     return revision
@@ -528,12 +559,14 @@ async def complete_revision(session: AsyncSession, *, revision_id: int) -> RunRe
 
 __all__ = [
     "CheckpointCandidateVerdict",
+    "RevisionTerminalStatus",
     "RevisionResolution",
     "RevisionScopeConflict",
     "RevisionStateConflict",
     "complete_revision",
     "create_revision_record",
     "fall_back_to_full_recompute",
+    "finish_revision",
     "mark_revision_running",
     "require_manual_reconciliation",
     "resolve_revision_policy",

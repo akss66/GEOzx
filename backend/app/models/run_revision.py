@@ -39,7 +39,8 @@ class RunRevision(Base, TimestampMixin):
         ),
         CheckConstraint(
             "status IN ('planned', 'waiting_predecessor', 'running', "
-            "'completed', 'failed', 'cancelled')",
+            "'completed', 'failed', 'cancelled', 'blocked', 'stopped', "
+            "'manual_reconciliation')",
             name="ck_run_revisions_status",
         ),
         CheckConstraint(
@@ -59,7 +60,8 @@ class RunRevision(Base, TimestampMixin):
         ),
         CheckConstraint(
             "(status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL) OR "
-            "(status IN ('completed', 'failed', 'cancelled') AND finished_at IS NOT NULL) OR "
+            "(status IN ('completed', 'failed', 'cancelled', 'blocked', 'stopped', "
+            "'manual_reconciliation') AND finished_at IS NOT NULL) OR "
             "(status IN ('planned', 'waiting_predecessor') AND "
             "started_at IS NULL AND finished_at IS NULL)",
             name="ck_run_revisions_lifecycle",

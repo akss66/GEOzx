@@ -646,7 +646,11 @@ async def test_operation_iteration_persists_deterministic_plan_boundary(
             turn=turn,
             run=run,
             skill_code="operation_iteration",
-            structured_input={"confirmed_review_artifact_id": review.id, "cycle_days": 7},
+            structured_input={
+                "confirmed_review_artifact_id": review.id,
+                "cycle_days": 7,
+                "script_duration_seconds": 30,
+            },
         ),
     )
     events = list(
@@ -669,6 +673,12 @@ async def test_operation_iteration_persists_deterministic_plan_boundary(
     )
 
     assert result.status == "completed"
+    script_node = next(
+        node
+        for node in result.report["child_skill_graph"]
+        if node["skill_code"] == "script_generation"
+    )
+    assert script_node["input"] == {"duration_seconds": 30}
     assert [(event.type, event.payload.get("step")) for event in events] == [
         ("step.started", "prepare_deliverable"),
         ("deliverable.updated", None),

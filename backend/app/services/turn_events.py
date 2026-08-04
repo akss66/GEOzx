@@ -82,7 +82,6 @@ _REVISION_FIELDS = frozenset(
         "mode",
         "status",
         "reason",
-        "plan_hash",
         "step",
         "step_key",
         "source_id",

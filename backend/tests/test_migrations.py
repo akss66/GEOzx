@@ -601,8 +601,198 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_run_revision_stage_checkpoints() -> None:
-    assert get_head_revision() == "20260804_0400"
+def test_migration_head_is_revision_terminal_deliverable_streams() -> None:
+    assert get_head_revision() == "20260804_0450"
+
+
+def test_revision_terminal_deliverable_streams_sqlite_upgrade_and_downgrade(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0450_revision_terminal_deliverable_streams"
+    )
+    assert migration.down_revision == "20260804_0400"
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "deliverables",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("content_item_id", sa.Integer, nullable=False),
+        sa.Column("agent_code", sa.String(64), nullable=False),
+        sa.Column("type", sa.String(64), nullable=False),
+        sa.Column("version", sa.Integer, nullable=False),
+        sa.UniqueConstraint(
+            "content_item_id", "type", "version", name="uq_deliverable_version"
+        ),
+    )
+    sa.Table(
+        "run_revisions",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint(
+            "status IN ('planned', 'waiting_predecessor', 'running', "
+            "'completed', 'failed', 'cancelled')",
+            name="ck_run_revisions_status",
+        ),
+        sa.CheckConstraint(
+            "(status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL) OR "
+            "(status IN ('completed', 'failed', 'cancelled') AND finished_at IS NOT NULL) OR "
+            "(status IN ('planned', 'waiting_predecessor') AND "
+            "started_at IS NULL AND finished_at IS NULL)",
+            name="ck_run_revisions_lifecycle",
+        ),
+    )
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverables "
+                "(id, content_item_id, agent_code, type, version) VALUES "
+                "(1, 1, 'decision', 'review', 1), "
+                "(2, 1, 'content', 'review', 2), "
+                "(3, 1, 'decision', 'review', 3)"
+            )
+        )
+        connection.execute(
+            sa.text("INSERT INTO run_revisions (id, status) VALUES (1, 'planned')")
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        rows = connection.execute(
+            sa.text(
+                "SELECT agent_code, version FROM deliverables "
+                "ORDER BY agent_code, version"
+            )
+        ).all()
+        assert rows == [("content", 1), ("decision", 1), ("decision", 2)]
+        connection.execute(
+            sa.text(
+                "INSERT INTO deliverables "
+                "(id, content_item_id, agent_code, type, version) "
+                "VALUES (4, 1, 'operator', 'review', 1)"
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO deliverables "
+                    "(id, content_item_id, agent_code, type, version) "
+                    "VALUES (5, 1, 'decision', 'review', 2)"
+                )
+            )
+        connection.execute(
+            sa.text(
+                "UPDATE run_revisions SET status = 'blocked', "
+                "finished_at = CURRENT_TIMESTAMP WHERE id = 1"
+            )
+        )
+
+        migration.downgrade()
+
+        assert connection.scalar(
+            sa.text("SELECT status FROM run_revisions WHERE id = 1")
+        ) == "failed"
+        versions = connection.execute(
+            sa.text(
+                "SELECT version FROM deliverables WHERE content_item_id = 1 "
+                "AND type = 'review' ORDER BY version"
+            )
+        ).scalars().all()
+        assert versions == [1, 2, 3, 4]
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the PostgreSQL concurrent writer gate",
+)
+def test_revision_terminal_deliverable_streams_postgres_concurrent_writers(
+    monkeypatch,
+) -> None:
+    import asyncio
+    from uuid import uuid4
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import ContentItem
+    from app.models.enums import AgentCode, DeliverableStatus, DeliverableType
+    from app.services.runtime_deliverables import write_runtime_deliverable
+
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace("postgresql+psycopg://", "postgresql+asyncpg://").replace(
+        "postgresql://", "postgresql+asyncpg://"
+    )
+    monkeypatch.setattr(settings, "database_url", async_url)
+    command.upgrade(Config("alembic.ini"), "20260804_0450")
+
+    async def exercise() -> None:
+        engine = create_async_engine(async_url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        suffix = uuid4().hex
+        try:
+            async with sessions() as session:
+                content = ContentItem(title=f"deliverable-concurrency-{suffix}")
+                session.add(content)
+                await session.commit()
+                content_id = content.id
+
+            first_locked = asyncio.Event()
+            allow_first_commit = asyncio.Event()
+
+            async def write_one(
+                payload: str,
+                *,
+                agent_code: str = AgentCode.DECISION.value,
+                hold_lock: bool = False,
+            ) -> int:
+                async with sessions() as session:
+                    content = await session.get(ContentItem, content_id)
+                    assert content is not None
+                    deliverable = await write_runtime_deliverable(
+                        session,
+                        scope=None,
+                        content=content,
+                        agent_code=agent_code,
+                        deliverable_type=DeliverableType.REVIEW_REPORT,
+                        status=DeliverableStatus.PENDING_REVIEW,
+                        payload={"summary": payload},
+                    )
+                    if hold_lock:
+                        first_locked.set()
+                        await allow_first_commit.wait()
+                    await session.commit()
+                    return deliverable.version
+
+            first = asyncio.create_task(write_one("first", hold_lock=True))
+            await asyncio.wait_for(first_locked.wait(), timeout=5)
+            second = asyncio.create_task(write_one("second"))
+            await asyncio.sleep(0.1)
+            assert not second.done()
+            allow_first_commit.set()
+            assert await asyncio.gather(first, second) == [1, 2]
+            assert await write_one(
+                "other-agent",
+                agent_code=AgentCode.CONTENT_DIRECTOR.value,
+            ) == 1
+        finally:
+            async with sessions() as session:
+                content = await session.get(ContentItem, content_id)
+                if content is not None:
+                    await session.delete(content)
+                    await session.commit()
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(

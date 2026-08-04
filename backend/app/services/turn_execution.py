@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 import logging
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.core.workspace_access import require_account_access
 from app.models import (
     AgentRun,
+    AgentToolCall,
     BrainTask,
     ContentItem,
     ConversationThread,
@@ -22,6 +23,7 @@ from app.models import (
     RunRevision,
     SkillRun,
     TaskBrief,
+    ToolExecutionAttempt,
     User,
 )
 from app.models.enums import (
@@ -62,9 +64,12 @@ from app.schemas.run_revision import ExpectedStageInputs, ManualReconciliation, 
 from app.services.attachments import resolve_attachment_contexts
 from app.services.capability_request import build_capability_request
 from app.services.run_revisions import (
+    RevisionTerminalStatus,
     complete_revision,
     fall_back_to_full_recompute,
+    finish_revision,
     mark_revision_running,
+    require_manual_reconciliation,
 )
 from app.services.runtime_state import (
     RuntimeEventSpec,
@@ -107,6 +112,35 @@ _MODEL_SKILL_ALIASES = {
 log = logging.getLogger("dyflow.main_agent_v2")
 
 
+async def _has_uncertain_revision_write(
+    session: AsyncSession,
+    *,
+    skill_run_id: int,
+) -> bool:
+    receipt_id = await session.scalar(
+        select(AgentToolCall.id)
+        .outerjoin(
+            ToolExecutionAttempt,
+            ToolExecutionAttempt.tool_call_id == AgentToolCall.id,
+        )
+        .where(
+            AgentToolCall.skill_run_id == skill_run_id,
+            AgentToolCall.side_effect_level == "non_idempotent_write",
+            or_(
+                AgentToolCall.status.in_({"completed", "ambiguous"}),
+                and_(
+                    AgentToolCall.status == "running",
+                    ToolExecutionAttempt.status.in_({"dispatched", "success", "ambiguous"}),
+                ),
+            ),
+        )
+        .order_by(AgentToolCall.id)
+        .limit(1)
+        .with_for_update(of=AgentToolCall)
+    )
+    return receipt_id is not None
+
+
 async def execute_revision_task_run(
     session: AsyncSession,
     *,
@@ -124,8 +158,16 @@ async def execute_revision_task_run(
     )
     if revision is None or revision.revision_run_id != run.id:
         raise ValueError("REVISION_EXECUTION_SCOPE_INVALID")
-    if revision.status == "completed":
-        return "completed"
+    terminal_revision_results = {
+        "completed": "completed",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "blocked": "blocked",
+        "stopped": "stopped",
+        "manual_reconciliation": "stopped",
+    }
+    if revision.status in terminal_revision_results:
+        return terminal_revision_results[revision.status]
     thread = await session.get(ConversationThread, revision.thread_id)
     turn = await session.get(ConversationTurn, revision.revision_turn_id)
     revision_skill = await session.get(SkillRun, revision.revision_skill_run_id)
@@ -159,6 +201,54 @@ async def execute_revision_task_run(
         run_id=run.id,
         skill_run_id=revision_skill.id,
     )
+    if revision.status == "running" and revision_skill.status == "completed":
+        revision = await complete_revision(session, revision_id=revision.id)
+        await append_turn_event(
+            session,
+            event_scope,
+            "run.revision_completed",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": run.id,
+                "task_id": task.id,
+                "mode": revision.mode,
+                "status": "completed",
+            },
+            f"revision:{revision.id}:completed",
+        )
+        await session.commit()
+        return "completed"
+    if revision.status == "running" and await _has_uncertain_revision_write(
+        session,
+        skill_run_id=revision_skill.id,
+    ):
+        reason = "non_idempotent_effect_completed"
+        revision = await require_manual_reconciliation(
+            session,
+            revision_id=revision.id,
+            reason=reason,
+        )
+        revision = await finish_revision(
+            session,
+            revision_id=revision.id,
+            status="manual_reconciliation",
+        )
+        await append_turn_event(
+            session,
+            event_scope,
+            "run.revision_manual_reconciliation",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": run.id,
+                "task_id": task.id,
+                "mode": "manual_reconciliation",
+                "status": "stopped",
+                "reason": reason,
+            },
+            f"revision:{revision.id}:manual",
+        )
+        await session.commit()
+        return "stopped"
     contract = require_checkpoint_graph_contract("operation_iteration", 1)
     boundary_map = resolve_revision_executor_boundaries(contract)
     if boundary_map.requires_full_recompute:
@@ -176,7 +266,32 @@ async def execute_revision_task_run(
         # projection exists, the checkpoint service safely falls back to full.
         expected_inputs=ExpectedStageInputs(values={}),
     )
+    for step_key in revision.affected_steps:
+        await append_turn_event(
+            session,
+            event_scope,
+            "step.invalidated",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": run.id,
+                "task_id": task.id,
+                "step": step_key,
+                "step_key": step_key,
+                "status": "invalidated",
+            },
+            f"revision:{revision.id}:invalidated:{step_key}",
+        )
     if isinstance(verdict, ManualReconciliation):
+        revision = await require_manual_reconciliation(
+            session,
+            revision_id=revision.id,
+            reason=verdict.reason,
+        )
+        revision = await finish_revision(
+            session,
+            revision_id=revision.id,
+            status="manual_reconciliation",
+        )
         await append_turn_event(
             session,
             event_scope,
@@ -188,7 +303,6 @@ async def execute_revision_task_run(
                 "mode": "manual_reconciliation",
                 "status": "stopped",
                 "reason": verdict.reason,
-                "plan_hash": verdict.plan_hash,
             },
             f"revision:{revision.id}:manual",
         )
@@ -233,7 +347,6 @@ async def execute_revision_task_run(
                 "mode": "full_recompute",
                 "status": "planned",
                 "reason": verdict.reason,
-                "plan_hash": verdict.plan_hash,
             },
             f"revision:{revision.id}:fallback",
         )
@@ -261,18 +374,38 @@ async def execute_revision_task_run(
         attachment_ids=[],
         attachment_contexts=[],
     )
-    executed = await skill_runtime.execute(
-        session,
-        user=user,
-        thread=thread,
-        turn=turn,
-        run=run,
-        skill_code="operation_iteration",
-        capability_request=capability_request,
-        lease_owner=worker_id,
-        resume_skill_run=revision_skill,
-    )
+    try:
+        executed = await skill_runtime.execute(
+            session,
+            user=user,
+            thread=thread,
+            turn=turn,
+            run=run,
+            skill_code="operation_iteration",
+            capability_request=capability_request,
+            lease_owner=worker_id,
+            resume_skill_run=revision_skill,
+        )
+    except Exception as exc:
+        if classify_runtime_failure(exc) is FailureDisposition.TERMINAL:
+            # Discard any incomplete business writes left by the failed executor;
+            # the running marker is already durable behind the execution barrier.
+            await session.rollback()
+            await finish_revision(
+                session,
+                revision_id=revision.id,
+                status="failed",
+            )
+            await session.commit()
+        raise
     if executed.status != "completed":
+        if executed.status in {"blocked", "failed", "stopped"}:
+            await finish_revision(
+                session,
+                revision_id=revision.id,
+                status=cast(RevisionTerminalStatus, executed.status),
+            )
+            await session.commit()
         return executed.status
     await complete_revision(session, revision_id=revision.id)
     await append_turn_event(
@@ -285,7 +418,6 @@ async def execute_revision_task_run(
             "task_id": task.id,
             "mode": revision.mode,
             "status": "completed",
-            "plan_hash": revision.plan_hash,
         },
         f"revision:{revision.id}:completed",
     )

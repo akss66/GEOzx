@@ -309,21 +309,39 @@ async def complete_control_run_record(
     )
 
 
-def _supplement_changed_constraints(message: str) -> set[ConstraintPath | str]:
+def _normalized_supplement_input(
+    message: str,
+    *,
+    source_input: dict[str, object],
+) -> tuple[set[ConstraintPath | str], dict[str, object]]:
     normalized = "".join(message.strip().split())
-    if any(marker in normalized for marker in ("保持现有要求不变", "保持不变", "无需修改")):
-        return set()
+    if normalized in {"保持现有要求不变", "保持不变", "无需修改"}:
+        return set(), dict(source_input)
     extracted = extract_structured_constraints(message)
+    merged_input = dict(source_input)
     mapped: set[ConstraintPath | str] = set()
-    if "days" in extracted or "topic_count" in extracted:
-        mapped.add(ConstraintPath.TOPIC_REQUIREMENTS)
+    if "days" in extracted:
+        cycle_days = int(extracted["days"])
+        if merged_input.get("cycle_days") != cycle_days:
+            mapped.add(ConstraintPath.TOPIC_REQUIREMENTS)
+        merged_input["cycle_days"] = cycle_days
+    if "topic_count" in extracted:
+        topic_count = int(extracted["topic_count"])
+        if merged_input.get("topic_count") != topic_count:
+            mapped.add(ConstraintPath.TOPIC_REQUIREMENTS)
+        merged_input["topic_count"] = topic_count
     if "duration_seconds" in extracted:
-        mapped.add(ConstraintPath.SCRIPT_REQUIREMENTS)
+        duration_seconds = int(extracted["duration_seconds"])
+        if merged_input.get("script_duration_seconds") != duration_seconds:
+            mapped.add(ConstraintPath.SCRIPT_REQUIREMENTS)
+        merged_input["script_duration_seconds"] = duration_seconds
     if "generate_strategy" in extracted or "requested_output" in extracted:
         mapped.add(ConstraintPath.GOAL)
     # Unknown free text must never be guessed into a concrete field. A stable
     # unknown marker makes the dependency planner choose safe full recompute.
-    return mapped or {"unmapped_supplement"}
+    if not extracted:
+        mapped.add("unmapped_supplement")
+    return mapped, merged_input
 
 
 async def _create_supplement_revision(
@@ -334,9 +352,6 @@ async def _create_supplement_revision(
     steering_run: AgentRun,
     resolved: ResolvedTurnSteering,
 ) -> dict[str, object]:
-    changed = _supplement_changed_constraints(steering_turn.user_input)
-    if not changed:
-        return {}
     source_run = resolved.target_run
     source_turn = resolved.target_turn
     if (
@@ -378,6 +393,12 @@ async def _create_supplement_revision(
     )
     if source_skill is None:
         return {}
+    changed, revision_input = _normalized_supplement_input(
+        steering_turn.user_input,
+        source_input=dict(source_skill.input_snapshot or {}),
+    )
+    if not changed:
+        return {}
 
     revision_run = AgentRun(
         org_id=steering_turn.org_id,
@@ -397,7 +418,7 @@ async def _create_supplement_revision(
             "client_message_id": steering_turn.client_message_id,
             "requested_skill_code": "operation_iteration",
             "execution_preference": "FORMAL_TASK",
-            "structured_input": dict(source_skill.input_snapshot or {}),
+            "structured_input": revision_input,
             "attachment_ids": [],
         },
     )
@@ -413,7 +434,7 @@ async def _create_supplement_revision(
         skill_code="operation_iteration",
         skill_version=1,
         status="running",
-        input_snapshot=dict(source_skill.input_snapshot or {}),
+        input_snapshot=revision_input,
         output_snapshot={},
     )
     session.add(revision_skill)
@@ -499,7 +520,6 @@ async def _create_supplement_revision(
             "task_id": source_run.task_id,
             "mode": revision.mode,
             "status": revision.status,
-            "plan_hash": revision.plan_hash,
         },
         f"revision:{revision.id}:planned",
     )

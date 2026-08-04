@@ -68,12 +68,18 @@ class Deliverable(Base, TimestampMixin):
     """交付物：type + version + agent + status + payload(JSONB)。
 
     多态：payload 结构按 `type` 用对应 Pydantic schema 校验（见 app/schemas/deliverable.py）。
-    同一内容同一 type 的多个版本通过 (content_item_id, type, version) 唯一约束区分。
+    每个 agent 的同类成果通过 (content_item_id, agent_code, type, version) 唯一约束区分。
     """
 
     __tablename__ = "deliverables"
     __table_args__ = (
-        UniqueConstraint("content_item_id", "type", "version", name="uq_deliverable_version"),
+        UniqueConstraint(
+            "content_item_id",
+            "agent_code",
+            "type",
+            "version",
+            name="uq_deliverable_version",
+        ),
         ForeignKeyConstraint(
             ["turn_id", "thread_id"],
             ["conversation_turns.id", "conversation_turns.thread_id"],

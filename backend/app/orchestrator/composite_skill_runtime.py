@@ -22,6 +22,8 @@ class CompositeSkillRuntime:
         *,
         account_id: int,
         cycle_days: int,
+        topic_count: int | None = None,
+        script_duration_seconds: int | None = None,
         source_artifacts: list[dict[str, Any]],
         previous_graph: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -44,6 +46,12 @@ class CompositeSkillRuntime:
                     "depends_on": list(dependencies),
                     "artifact_id": previous.get("artifact_id"),
                     "error_code": previous.get("error_code"),
+                    "input": self._child_input(
+                        skill_code=skill_code,
+                        cycle_days=cycle_days,
+                        topic_count=topic_count,
+                        script_duration_seconds=script_duration_seconds,
+                    ),
                 }
             )
         return {
@@ -66,6 +74,23 @@ class CompositeSkillRuntime:
             ],
             "participating_experts": [],
         }
+
+    @staticmethod
+    def _child_input(
+        *,
+        skill_code: str,
+        cycle_days: int,
+        topic_count: int | None,
+        script_duration_seconds: int | None,
+    ) -> dict[str, int]:
+        if skill_code == "topic_planning":
+            return {
+                "days": cycle_days,
+                **({"topic_count": topic_count} if topic_count is not None else {}),
+            }
+        if skill_code == "script_generation" and script_duration_seconds is not None:
+            return {"duration_seconds": script_duration_seconds}
+        return {}
 
 
 composite_skill_runtime = CompositeSkillRuntime()

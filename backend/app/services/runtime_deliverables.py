@@ -85,6 +85,7 @@ async def write_runtime_deliverable(
         await session.scalar(
             select(func.max(Deliverable.version)).where(
                 Deliverable.content_item_id == content.id,
+                Deliverable.agent_code == agent_code,
                 Deliverable.type == deliverable_type,
             )
         )

@@ -44,6 +44,7 @@ from app.schemas.run_revision import (
     StageDataEnvelope,
     StageReuseBinding,
 )
+from app.services.agent_runs import complete_agent_run
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
@@ -247,6 +248,364 @@ async def test_revision_barrier_precedes_external_and_terminal_retry_is_exactly_
 
 
 @pytest.mark.asyncio
+async def test_revision_crash_before_barrier_commit_retries_with_zero_early_external_calls(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, _turn, run, task, _skill, revision = (
+        await _revision_execution_context(session, admin, key="barrier-commit-crash")
+    )
+    real_commit = session.commit
+    commit_calls = 0
+    external_calls = 0
+
+    async def barrier(*_args, **_kwargs):
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def fail_first_commit():
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise ConnectionError("barrier commit interrupted")
+        await real_commit()
+
+    async def execute(*_args, **_kwargs):
+        nonlocal external_calls
+        external_calls += 1
+        return SimpleNamespace(status="completed", response="done")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+    monkeypatch.setattr(session, "commit", fail_first_commit)
+    run_id = run.id
+    task_id = task.id
+
+    with pytest.raises(ConnectionError, match="barrier commit interrupted"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="revision-worker"
+        )
+    assert external_calls == 0
+    await session.rollback()
+    run = await session.get(AgentRun, run_id)
+    task = await session.get(BrainTask, task_id)
+    assert run is not None
+    assert task is not None
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    assert status == "completed"
+    assert external_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_revision_external_success_without_local_completion_retries_to_manual_once(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run, task, skill, revision = (
+        await _revision_execution_context(session, admin, key="external-success-crash")
+    )
+    provider_calls = 0
+
+    async def barrier(*_args, **_kwargs):
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def execute(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        session.add(
+            AgentToolCall(
+                org_id=run.org_id,
+                task_id=task.id,
+                skill_run_id=skill.id,
+                thread_id=turn.thread_id,
+                turn_id=turn.id,
+                tool_code="publish-non-idempotent",
+                tool_name="publish",
+                idempotency_key="external-success-crash",
+                side_effect_level="non_idempotent_write",
+                status="completed",
+                input_summary="safe",
+                output_summary="safe",
+            )
+        )
+        await session.commit()
+        raise ConnectionError("worker lost after provider success")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+
+    with pytest.raises(ConnectionError, match="worker lost"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="revision-worker"
+        )
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    await session.refresh(revision)
+    assert status == "stopped"
+    assert provider_calls == 1
+    assert revision.status == "manual_reconciliation"
+    assert revision.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_revision_completed_skill_before_revision_completion_retries_without_reexecution(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, _turn, run, task, skill, revision = (
+        await _revision_execution_context(session, admin, key="skill-complete-crash")
+    )
+    external_calls = 0
+    completion_calls = 0
+    from app.services import turn_execution as turn_execution_service
+
+    real_complete_revision = turn_execution_service.complete_revision
+
+    async def barrier(*_args, **_kwargs):
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def execute(*_args, **_kwargs):
+        nonlocal external_calls
+        external_calls += 1
+        skill.status = "completed"
+        skill.output_snapshot = {"status": "completed", "response": "durable"}
+        await session.commit()
+        return SimpleNamespace(status="completed", response="durable")
+
+    async def fail_once(*args, **kwargs):
+        nonlocal completion_calls
+        completion_calls += 1
+        if completion_calls == 1:
+            raise ConnectionError("revision completion interrupted")
+        return await real_complete_revision(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.complete_revision", fail_once, raising=False
+    )
+
+    with pytest.raises(ConnectionError, match="revision completion interrupted"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="revision-worker"
+        )
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    await session.refresh(revision)
+    assert status == "completed"
+    assert external_calls == 1
+    assert revision.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_revision_barrier_committed_before_step_start_retries_without_early_external_call(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run, task, _skill, revision = (
+        await _revision_execution_context(session, admin, key="after-barrier-before-step")
+    )
+    event_scope = TurnEventScope(
+        org_id=run.org_id,
+        account_id=revision.account_id,
+        thread_id=turn.thread_id,
+        turn_id=turn.id,
+        run_id=run.id,
+        skill_run_id=revision.revision_skill_run_id,
+    )
+    await append_turn_event(
+        session,
+        event_scope,
+        "step.invalidated",
+        {
+            "revision_id": revision.id,
+            "revision_run_id": run.id,
+            "task_id": task.id,
+            "step": "script_generation",
+            "step_key": "script_generation",
+            "status": "invalidated",
+        },
+        f"revision:{revision.id}:invalidated:script_generation",
+    )
+    await session.commit()
+    executor_entries = 0
+    external_calls = 0
+
+    async def barrier(*_args, **_kwargs):
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def execute(*_args, **_kwargs):
+        nonlocal executor_entries, external_calls
+        executor_entries += 1
+        if executor_entries == 1:
+            persisted = await session.scalar(
+                select(func.count(Event.id)).where(
+                    Event.run_id == run.id,
+                    Event.type == "step.invalidated",
+                )
+            )
+            assert persisted > 0
+            raise ConnectionError("crash before _start_skill_stage")
+        external_calls += 1
+        return SimpleNamespace(status="completed", response="done")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+
+    with pytest.raises(ConnectionError, match="before _start_skill_stage"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="revision-worker"
+        )
+    await session.refresh(revision)
+    assert revision.status == "running"
+    assert external_calls == 0
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    assert status == "completed"
+    assert executor_entries == 2
+    assert external_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_revision_terminal_executor_error_marks_revision_failed(session, admin, monkeypatch):
+    _account, _thread, _turn, run, task, _skill, revision = (
+        await _revision_execution_context(session, admin, key="terminal-executor-error")
+    )
+
+    async def barrier(*_args, **_kwargs):
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def execute(*_args, **_kwargs):
+        raise ValueError("terminal executor failure")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+
+    with pytest.raises(ValueError, match="terminal executor failure"):
+        await execute_revision_task_run(
+            session, run=run, task=task, worker_id="revision-worker"
+        )
+
+    await session.refresh(revision)
+    assert revision.status == "failed"
+    assert revision.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_revision_full_fallback_emits_each_new_invalidated_step_once(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run, task, _skill, revision = (
+        await _revision_execution_context(session, admin, key="fallback-invalidated")
+    )
+    revision.mode = "partial"
+    revision.affected_steps = ["script_generation"]
+    revision.direct_affected_steps = ["script_generation"]
+    revision.reused_steps = []
+    revision.fallback_reason = None
+    await session.commit()
+    event_scope = TurnEventScope(
+        org_id=run.org_id,
+        account_id=revision.account_id,
+        thread_id=turn.thread_id,
+        turn_id=turn.id,
+        run_id=run.id,
+        skill_run_id=revision.revision_skill_run_id,
+    )
+    await append_turn_event(
+        session,
+        event_scope,
+        "step.invalidated",
+        {
+            "revision_id": revision.id,
+            "revision_run_id": run.id,
+            "task_id": task.id,
+            "step": "script_generation",
+            "step_key": "script_generation",
+            "status": "invalidated",
+        },
+        f"revision:{revision.id}:invalidated:script_generation",
+    )
+    await session.commit()
+
+    async def execute(*_args, **_kwargs):
+        return SimpleNamespace(status="completed", response="done")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+
+    first = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+    second = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    contract = require_checkpoint_graph_contract("operation_iteration", 1)
+    invalidated = list(
+        await session.scalars(
+            select(Event).where(
+                Event.run_id == run.id,
+                Event.type == "step.invalidated",
+            )
+        )
+    )
+    assert first == second == "completed"
+    invalidated_keys = [event.payload["step_key"] for event in invalidated]
+    assert len(invalidated_keys) == len(contract.steps)
+    assert set(invalidated_keys) == {step.key for step in contract.steps}
+
+
+@pytest.mark.asyncio
 async def test_revision_partial_hydrates_reused_output_without_completed_event(
     session, admin, monkeypatch
 ) -> None:
@@ -351,11 +710,66 @@ async def test_revision_manual_reconciliation_stops_with_zero_external_calls(
     status = await execute_revision_task_run(
         session, run=run, task=task, worker_id="revision-worker"
     )
+    await complete_agent_run(session, run.id, task_id=task.id, status=status)
 
     events = list(await session.scalars(select(Event).where(Event.turn_id == turn.id)))
     assert status == "stopped"
     assert external_calls == 0
+    await session.refresh(run)
+    await session.refresh(_skill)
+    await session.refresh(revision)
+    assert (run.status, _skill.status, revision.status) == (
+        "stopped",
+        "stopped",
+        "manual_reconciliation",
+    )
+    assert revision.finished_at is not None
     assert any(event.type == "run.revision_manual_reconciliation" for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["blocked", "failed", "stopped"])
+async def test_revision_noncompleted_result_synchronizes_all_runtime_ledgers(
+    session, admin, monkeypatch, terminal_status
+) -> None:
+    _account, _thread, _turn, run, task, skill, revision = (
+        await _revision_execution_context(
+            session, admin, key=f"revision-terminal-{terminal_status}"
+        )
+    )
+
+    async def barrier(*_args, **_kwargs):
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def execute(*_args, **_kwargs):
+        return SimpleNamespace(status=terminal_status, response="revision terminal")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", execute, raising=False
+    )
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+    await complete_agent_run(session, run.id, task_id=task.id, status=status)
+
+    await session.refresh(run)
+    await session.refresh(skill)
+    await session.refresh(revision)
+    assert status == terminal_status
+    assert (run.status, skill.status, revision.status) == (
+        terminal_status,
+        terminal_status,
+        terminal_status,
+    )
+    assert revision.finished_at is not None
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from app.models import (
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    Event,
     Org,
     SkillRun,
     User,
@@ -264,6 +265,15 @@ async def test_runtime_deliverable_allocates_next_version_and_replays_same_skill
         status=DeliverableStatus.PENDING_REVIEW,
         payload={"summary": "source"},
     )
+    other_agent = await write_runtime_deliverable(
+        session,
+        scope=source_scope,
+        content=graph["content"],
+        agent_code=AgentCode.CONTENT_DIRECTOR.value,
+        deliverable_type=DeliverableType.REVIEW_REPORT,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "other agent"},
+    )
 
     revision_turn = ConversationTurn(
         thread_id=graph["thread"].id,
@@ -325,7 +335,15 @@ async def test_runtime_deliverable_allocates_next_version_and_replays_same_skill
 
     assert replay.id == first.id
     assert first.version == 1
+    assert other_agent.version == 1
     assert second.version == 2
+    event_count = await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.turn_id.in_([graph["turn"].id, revision_turn.id]),
+            Event.type == "deliverable.updated",
+        )
+    )
+    assert event_count == 3
 
 
 @pytest.mark.asyncio

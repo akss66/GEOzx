@@ -12,8 +12,8 @@ from app.schemas.capability_request import CapabilityRequest
 _DAY_PATTERN = re.compile(r"(?P<value>\d{1,3})\s*天")
 _TOPIC_COUNT_PATTERN = re.compile(r"(?P<value>\d{1,2})\s*个?\s*选题")
 _DURATION_PATTERNS = (
-    re.compile(r"(?P<value>\d{1,4})\s*秒.{0,8}(?:脚本|视频)"),
-    re.compile(r"(?:脚本|视频).{0,8}(?P<value>\d{1,4})\s*秒"),
+    re.compile(r"(?P<value>\d{1,4})\s*秒.{0,8}?(?:脚本|视频)"),
+    re.compile(r"(?:脚本|视频).{0,8}?(?P<value>\d{1,4})\s*秒"),
 )
 _NEGATED_TOPIC_PATTERN = re.compile(r"(?:不要|不需要|无需|别).{0,8}选题")
 

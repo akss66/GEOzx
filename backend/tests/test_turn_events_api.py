@@ -521,6 +521,51 @@ async def test_list_sanitizes_legacy_public_type_rows_again_at_read_boundary(
 
 
 @pytest.mark.asyncio
+async def test_list_never_exposes_revision_hashes_or_snapshots(
+    client,
+    session,
+    admin,
+) -> None:
+    account, thread, turn, run, _scope = await _event_scope(
+        session, admin, key="revision-list-sanitize"
+    )
+    session.add(
+        Event(
+            type="run.revision_planned",
+            org_id=admin.org_id,
+            account_id=account.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+            sequence=1,
+            payload={
+                "revision_id": 41,
+                "revision_run_id": run.id,
+                "status": "planned",
+                "plan_hash": "private-plan-hash",
+                "input_snapshot": {"secret": "input"},
+                "output_snapshot": {"secret": "output"},
+                "snapshot_hash": "private-snapshot-hash",
+            },
+            idempotency_key="revision-list-sanitize",
+        )
+    )
+    await session.commit()
+
+    response = await client.get(
+        f"/conversation-threads/{thread.id}/events",
+        headers=_auth(admin),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["payload"] == {
+        "revision_id": 41,
+        "revision_run_id": run.id,
+        "status": "planned",
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_drops_corrupt_nested_payload_and_continues_recovery(
     client,
     session,
@@ -634,6 +679,57 @@ async def test_stream_drops_corrupt_nested_payload_and_continues_recovery(
         {"step": "corrupt", "status": "started"},
         {"step": "valid", "status": "started"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_never_exposes_revision_hashes_or_snapshots(session, admin) -> None:
+    account, thread, turn, run, _scope = await _event_scope(
+        session, admin, key="revision-stream-sanitize"
+    )
+    session.add(
+        Event(
+            type="run.revision_fallback",
+            org_id=admin.org_id,
+            account_id=account.id,
+            thread_id=thread.id,
+            turn_id=turn.id,
+            run_id=run.id,
+            sequence=1,
+            payload={
+                "revision_id": 42,
+                "revision_run_id": run.id,
+                "status": "planned",
+                "reason": "missing_executor_boundary",
+                "plan_hash": "private-plan-hash",
+                "input_snapshot": {"secret": "input"},
+                "output_snapshot": {"secret": "output"},
+                "snapshot_hash": "private-snapshot-hash",
+            },
+            idempotency_key="revision-stream-sanitize",
+        )
+    )
+    await session.commit()
+    tracker = _SessionTracker()
+    stream = _stream_generator(
+        scope=_stream_scope(account, thread),
+        after_id=0,
+        request=_ConnectedRequest(),
+        session_factory=_tracked_session_factory(session, tracker),
+        redis_client=_FakeRedis(_FakePubSub(tracker=tracker)),
+        poll_seconds=60,
+        heartbeat_seconds=60,
+    )
+
+    frame = await anext(stream)
+    await stream.aclose()
+
+    payload = json.loads(frame.splitlines()[2].removeprefix("data: "))["payload"]
+    assert payload == {
+        "revision_id": 42,
+        "revision_run_id": run.id,
+        "status": "planned",
+        "reason": "missing_executor_boundary",
+    }
 
 
 @pytest.mark.asyncio

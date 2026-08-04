@@ -934,6 +934,16 @@ class SkillRuntime:
             composite_skill_runtime.build(
                 account_id=thread.account_id,
                 cycle_days=int(frozen_input.get("cycle_days") or 7),
+                topic_count=(
+                    int(frozen_input["topic_count"])
+                    if frozen_input.get("topic_count") is not None
+                    else None
+                ),
+                script_duration_seconds=(
+                    int(frozen_input["script_duration_seconds"])
+                    if frozen_input.get("script_duration_seconds") is not None
+                    else None
+                ),
                 source_artifacts=source_refs,
             )
         ).model_dump(mode="json")

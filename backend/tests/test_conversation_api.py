@@ -235,7 +235,7 @@ async def test_nonempty_supplement_creates_task_revision_and_dispatches_after_co
         skill_code="operation_iteration",
         skill_version=1,
         status="completed",
-        input_snapshot={},
+        input_snapshot={"confirmed_review_artifact_id": 123, "cycle_days": 7},
         output_snapshot={},
     )
     session.add(source_skill)
@@ -257,7 +257,7 @@ async def test_nonempty_supplement_creates_task_revision_and_dispatches_after_co
         admin,
         thread["id"],
         client_message_id="revision-supplement",
-        message="补充：脚本控制在30秒",
+        message="补充：选题周期仍为7天，脚本控制在30秒",
         target_turn_id=target_turn.id,
     )
     replay_response = await _submit_turn(
@@ -265,7 +265,7 @@ async def test_nonempty_supplement_creates_task_revision_and_dispatches_after_co
         admin,
         thread["id"],
         client_message_id="revision-supplement",
-        message="补充：脚本控制在30秒",
+        message="补充：选题周期仍为7天，脚本控制在30秒",
         target_turn_id=target_turn.id,
     )
 
@@ -286,7 +286,21 @@ async def test_nonempty_supplement_creates_task_revision_and_dispatches_after_co
     assert revision_run is not None
     assert revision_run.task_id == task.id
     assert revision_run.request_payload["operation"] == "execute_revision"
+    assert revision_run.request_payload["structured_input"] == {
+        "confirmed_review_artifact_id": 123,
+        "cycle_days": 7,
+        "script_duration_seconds": 30,
+    }
     assert revision_run.status == "queued"
+    revision_skill = await session.scalar(
+        select(SkillRun).where(SkillRun.run_id == revision_run.id)
+    )
+    assert revision_skill is not None
+    assert revision_skill.input_snapshot == {
+        "confirmed_review_artifact_id": 123,
+        "cycle_days": 7,
+        "script_duration_seconds": 30,
+    }
     assert enqueued == [revision_run.id, revision_run.id]
     assert await session.scalar(select(func.count(RunRevision.id))) == 1
     assert steering_run.result_payload["revision_run_id"] == revision_run.id

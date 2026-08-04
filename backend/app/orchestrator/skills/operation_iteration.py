@@ -14,6 +14,8 @@ class OperationIterationInput(BaseModel):
 
     confirmed_review_artifact_id: int = Field(gt=0)
     cycle_days: int = Field(default=7, ge=1, le=30)
+    topic_count: int | None = Field(default=None, ge=1, le=50)
+    script_duration_seconds: int | None = Field(default=None, ge=10, le=600)
     positioning_artifact_id: int | None = Field(default=None, gt=0)
 
 
