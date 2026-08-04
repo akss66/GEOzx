@@ -605,8 +605,82 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_revision_terminal_deliverable_streams() -> None:
-    assert get_head_revision() == "20260804_0450"
+def test_migration_head_is_turn_interrupts() -> None:
+    assert get_head_revision() == "20260804_0500"
+
+
+def test_turn_interrupts_sqlite_upgrade_and_downgrade(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260804_0500_turn_interrupts"
+    )
+    assert migration.down_revision == "20260804_0450"
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        assert "turn_interrupts" in inspector.get_table_names()
+        assert {
+            "uq_turn_interrupts_effective_pending",
+            "ix_turn_interrupts_scope_status",
+            "ix_turn_interrupts_source",
+            "ix_turn_interrupts_resolved_by",
+        } <= {index["name"] for index in inspector.get_indexes("turn_interrupts")}
+
+        migration.downgrade()
+        assert "turn_interrupts" not in sa.inspect(connection).get_table_names()
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the PostgreSQL migration gate",
+)
+def test_turn_interrupts_postgres_upgrade_downgrade_reupgrade_gate(monkeypatch) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+    sync_url = raw_url.replace(
+        "postgresql+asyncpg://", "postgresql+psycopg://"
+    ).replace("postgresql://", "postgresql+psycopg://")
+    monkeypatch.setattr(settings, "database_url", async_url)
+    config = Config("alembic.ini")
+
+    command.upgrade(config, "20260804_0450")
+    command.upgrade(config, "20260804_0500")
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0500"
+            )
+            inspector = sa.inspect(connection)
+            assert "turn_interrupts" in inspector.get_table_names()
+            assert "uq_turn_interrupts_effective_pending" in {
+                item["name"] for item in inspector.get_indexes("turn_interrupts")
+            }
+
+        command.downgrade(config, "20260804_0450")
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0450"
+            )
+            assert "turn_interrupts" not in sa.inspect(connection).get_table_names()
+
+        command.upgrade(config, "20260804_0500")
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260804_0500"
+            )
+            assert "turn_interrupts" in sa.inspect(connection).get_table_names()
+    finally:
+        engine.dispose()
 
 
 def test_revision_terminal_deliverable_streams_sqlite_upgrade_and_downgrade(

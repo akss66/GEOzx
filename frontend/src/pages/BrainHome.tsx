@@ -1442,7 +1442,7 @@ export default function BrainHome() {
                       interruptMutation.mutate({
                         interrupt,
                         resolution,
-                        idempotencyKey: createInterruptIdempotencyKey(interrupt),
+                        idempotencyKey: createInterruptIdempotencyKey(interrupt, resolution),
                       })
                     }
                     onArtifactAction={(action) => handleArtifactAction(action, deliverableActionMutation.mutate)}
@@ -1900,11 +1900,30 @@ function findLatestPendingInterrupt(
   return null;
 }
 
-function createInterruptIdempotencyKey(interrupt: TurnInterrupt) {
-  const nonce = typeof globalThis.crypto?.randomUUID === "function"
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return `interrupt-${interrupt.id}-v${interrupt.version}-${nonce}`;
+function createInterruptIdempotencyKey(
+  interrupt: TurnInterrupt,
+  resolution: Record<string, unknown>,
+) {
+  const payload = stableJson(resolution);
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(payload)) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `interrupt-${interrupt.id}-v${interrupt.version}-${hash.toString(16).padStart(16, "0")}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  }
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? "null" : encoded;
 }
 
 function createStopIdempotencyKey(turn: ConversationTurn) {

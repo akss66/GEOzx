@@ -1477,6 +1477,58 @@ describe("BrainHome V3 conversation projection", () => {
     expect(approveToolCall).not.toHaveBeenCalled();
   });
 
+  it("reuses the interrupt idempotency key after a lost response", async () => {
+    const waiting = {
+      ...persistedTurn(501, "interrupt-retry", "Prepare publishing", null, "waiting_permission"),
+      pending_interrupt: {
+        id: 72,
+        account_id: 3,
+        thread_id: 81,
+        turn_id: 501,
+        run_id: 701,
+        kind: "approval" as const,
+        status: "pending" as const,
+        public_message: "Publish this draft?",
+        action_label: "Publish now",
+        response_schema: {},
+        version: 2,
+        resolved_at: null,
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:00Z",
+      },
+    };
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [waiting]));
+    vi.mocked(resolveTurnInterrupt)
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockImplementationOnce(async () => ({
+        interrupt: {
+          ...waiting.pending_interrupt,
+          status: "resolved" as const,
+          version: 3,
+          resolved_at: "2026-08-04T00:00:01Z",
+        },
+        run_id: 701,
+        dispatch_deferred: false,
+        dispatch_message: null,
+      }));
+
+    renderBrainHome();
+
+    const action = await screen.findByRole("button", { name: "Publish now" });
+    fireEvent.click(action);
+    await waitFor(() => expect(resolveTurnInterrupt).toHaveBeenCalledTimes(1));
+
+    cleanup();
+    renderBrainHome();
+    const retryAction = await screen.findByRole("button", { name: "Publish now" });
+    fireEvent.click(retryAction);
+    await waitFor(() => expect(resolveTurnInterrupt).toHaveBeenCalledTimes(2));
+
+    expect(vi.mocked(resolveTurnInterrupt).mock.calls[1][0].idempotencyKey)
+      .toBe(vi.mocked(resolveTurnInterrupt).mock.calls[0][0].idempotencyKey);
+  });
+
   it("uses a durable active Turn to disable input and stop after reload", async () => {
     saveThread(3, 81);
     vi.mocked(getConversation).mockResolvedValue(thread(81, [
