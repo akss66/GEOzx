@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.models import ConversationTurn
+from app.orchestrator.skills.operation_iteration import OperationIterationInput
 from app.schemas.conversation import CreateConversationTurnRequest
 from app.services.conversation_submission import prepare_conversation_turn_submission
 from tests.test_artifacts_api import _seed_artifact
@@ -35,10 +36,15 @@ async def test_prepare_submission_keeps_commit_ownership_with_caller(session, ad
     assert prepared.claimed is True
     assert prepared.turn.status == "queued"
     assert prepared.run.status == "queued"
-    assert prepared.run.request_payload["trusted_structured_input"] == {
-        "confirmed_review_artifact_id": seeded[8].id,
-        "cycle_days": 7,
-    }
+    expected_trusted_input = OperationIterationInput.model_validate(
+        {
+            "confirmed_review_artifact_id": seeded[8].id,
+            "cycle_days": 7,
+        }
+    ).model_dump(mode="json", exclude_none=True)
+    assert prepared.run.request_payload["trusted_structured_input"] == expected_trusted_input
+    assert expected_trusted_input["topic_count"] == 5
+    assert expected_trusted_input["constraints"] == []
     session.commit.assert_not_awaited()
 
 
