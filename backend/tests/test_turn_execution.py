@@ -270,6 +270,7 @@ async def _real_revision_runtime_context(session, admin, monkeypatch, *, key: st
         "topic_count": 4,
         "script_duration_seconds": 30,
         "positioning_artifact_id": None,
+        "constraints": [],
     }
     skill.input_snapshot = frozen_input
     skill.input_hash = skill_input_hash(frozen_input)
@@ -1263,7 +1264,7 @@ async def test_revision_external_success_without_local_completion_retries_to_man
                 tool_name="publish",
                 idempotency_key="external-success-crash",
                 side_effect_level="non_idempotent_write",
-                status="completed",
+                status="success",
                 input_summary="safe",
                 output_summary="safe",
             )
@@ -1845,7 +1846,7 @@ async def test_i4_rule_6_non_idempotent_child_success_without_local_completion_g
                     tool_name=request.tool_code,
                     idempotency_key=f"i4-rule-6:{self.calls}",
                     side_effect_level="non_idempotent_write",
-                    status="completed",
+                    status="success",
                     input_summary="safe",
                     output_summary="safe",
                 )
@@ -1867,9 +1868,12 @@ async def test_i4_rule_6_non_idempotent_child_success_without_local_completion_g
     status = await execute_revision_task_run(
         session, run=run, task=task, worker_id="i4-real-worker"
     )
+    replay = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
     await session.refresh(revision)
 
-    assert status == "stopped"
+    assert status == replay == "stopped"
     assert first_counts == await _real_runtime_counts(
         session, run_id=run.id, tools=external, harness=harness
     ) == {"provider": 0, "tool": 1, "expert": 0}
@@ -1886,6 +1890,72 @@ async def test_i4_rule_6_non_idempotent_child_success_without_local_completion_g
             Event.type == "run.revision_completed",
         )
     ) == 0
+
+
+@pytest.mark.asyncio
+async def test_i4_non_idempotent_ambiguous_receipt_stops_before_external_replay(
+    session, admin, monkeypatch
+) -> None:
+    (
+        _account,
+        _thread,
+        turn,
+        run,
+        task,
+        skill,
+        revision,
+        _runtime,
+        tools,
+        harness,
+    ) = await _real_revision_runtime_context(
+        session, admin, monkeypatch, key="i4-ambiguous-replay"
+    )
+    revision.status = "running"
+    revision.started_at = datetime.now(UTC)
+    receipt = AgentToolCall(
+        org_id=run.org_id,
+        task_id=task.id,
+        skill_run_id=skill.id,
+        thread_id=turn.thread_id,
+        turn_id=turn.id,
+        tool_code="provider.publish",
+        tool_name="Provider publish",
+        idempotency_key="i4-ambiguous-replay",
+        side_effect_level="non_idempotent_write",
+        status="ambiguous",
+        input_summary="safe",
+        output_summary="verification required",
+    )
+    session.add(receipt)
+    await session.flush()
+    session.add(
+        ToolExecutionAttempt(
+            tool_call_id=receipt.id,
+            attempt_no=1,
+            status="ambiguous",
+            error="TOOL_RESULT_AMBIGUOUS",
+            finished_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+    first = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+    replay = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="i4-real-worker"
+    )
+
+    assert first == replay == "stopped"
+    assert await _real_runtime_counts(
+        session, run_id=run.id, tools=tools, harness=harness
+    ) == {"provider": 0, "tool": 0, "expert": 0}
+    assert await session.scalar(
+        select(func.count(Event.id)).where(
+            Event.run_id == run.id,
+            Event.type == "run.revision_manual_reconciliation",
+        )
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -3477,6 +3547,8 @@ async def test_server_trusted_structured_input_reaches_operation_iteration_runti
     assert captured["request"].structured_input == {
         "confirmed_review_artifact_id": 17,
         "cycle_days": 7,
+        "topic_count": 5,
+        "constraints": [],
     }
 
 

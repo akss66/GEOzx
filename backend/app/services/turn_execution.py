@@ -111,6 +111,11 @@ _MODEL_SKILL_ALIASES = {
 }
 log = logging.getLogger("dyflow.main_agent_v2")
 
+# ``success`` and ``ambiguous`` are the durable executor's terminal receipt
+# states.  Keep ``completed`` for rows written before that status vocabulary
+# was standardized so legacy successful writes are reconciled conservatively.
+_UNCERTAIN_NON_IDEMPOTENT_TOOL_STATUSES = {"success", "ambiguous", "completed"}
+
 
 async def _has_uncertain_revision_write(
     session: AsyncSession,
@@ -128,7 +133,7 @@ async def _has_uncertain_revision_write(
             SkillRun.run_id == run_id,
             AgentToolCall.side_effect_level == "non_idempotent_write",
             or_(
-                AgentToolCall.status.in_({"completed", "ambiguous"}),
+                AgentToolCall.status.in_(_UNCERTAIN_NON_IDEMPOTENT_TOOL_STATUSES),
                 and_(
                     AgentToolCall.status == "running",
                     ToolExecutionAttempt.status.in_({"dispatched", "success", "ambiguous"}),
