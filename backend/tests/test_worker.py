@@ -163,6 +163,109 @@ async def test_worker_executes_a_task_free_conversation_before_legacy_task_looku
     assert run.error_code is None
 
 
+@pytest.mark.asyncio
+async def test_worker_treats_turn_bound_revision_as_task_mode_and_promotes_successor(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        nickname="Revision worker account",
+        platform=Platform.DOUYIN,
+    )
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="Revision worker task",
+        type=BrainTaskType.CONTENT_CREATION,
+        status=BrainTaskStatus.RUNNING,
+        runtime_mode="skill",
+    )
+    session.add_all([account, task])
+    await session.flush()
+    thread = ConversationThread(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        account_id=account.id,
+        title="Revision worker thread",
+    )
+    session.add(thread)
+    await session.flush()
+    turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="revision-worker-turn",
+        user_input="补充脚本时长",
+        status="queued",
+    )
+    session.add(turn)
+    await session.flush()
+    revision_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        client_message_id="revision-worker-run",
+        status="queued",
+        phase="queued",
+        request_payload={
+            "operation": "execute_revision",
+            "task_id": task.id,
+            "revision_id": 77,
+        },
+    )
+    successor = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        client_message_id="revision-worker-successor",
+        status="waiting_predecessor",
+        phase="waiting_predecessor",
+        request_payload={"operation": "start", "task_id": task.id},
+    )
+    session.add_all([revision_run, successor])
+    await session.commit()
+
+    @asynccontextmanager
+    async def test_session_factory():
+        yield session
+
+    executed: list[tuple[int, int, str]] = []
+    enqueued: list[int] = []
+
+    async def capture_revision(_session, *, run, task, worker_id):
+        executed.append((run.id, task.id, worker_id))
+        task.status = BrainTaskStatus.COMPLETED
+        return "completed"
+
+    async def capture_conversation(*_args, **_kwargs):
+        raise AssertionError("revision run must not enter conversation execution")
+
+    async def capture_enqueue(*, run_id: int) -> bool:
+        enqueued.append(run_id)
+        return True
+
+    monkeypatch.setattr("app.worker.async_session", test_session_factory)
+    monkeypatch.setattr(
+        "app.worker.execute_revision_task_run", capture_revision, raising=False
+    )
+    monkeypatch.setattr("app.worker.execute_conversation_turn", capture_conversation)
+    monkeypatch.setattr("app.worker.enqueue_agent_runtime", capture_enqueue)
+
+    result = await execute_agent_run({"worker_id": "revision-worker"}, revision_run.id)
+
+    assert result == task.id
+    assert executed == [(revision_run.id, task.id, "revision-worker")]
+    await session.refresh(revision_run)
+    await session.refresh(successor)
+    assert revision_run.status == "completed"
+    assert successor.status == "queued"
+    assert enqueued == [successor.id]
+
+
 @pytest.mark.parametrize(
     (
         "skill_status",

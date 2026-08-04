@@ -19,6 +19,7 @@ from app.models import (
     ConversationThread,
     ConversationTurn,
     OrchestrationPlan,
+    RunRevision,
     SkillRun,
     TaskBrief,
     User,
@@ -40,8 +41,14 @@ from app.orchestrator.capability_router import (
     route_explicit_request,
     route_migrated_operation_request,
 )
+from app.orchestrator.checkpoint_graph_contracts import require_checkpoint_graph_contract
+from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
-from app.orchestrator.skill_runtime import skill_input_hash, skill_runtime
+from app.orchestrator.skill_runtime import (
+    resolve_revision_executor_boundaries,
+    skill_input_hash,
+    skill_runtime,
+)
 from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import skill_registry
 from app.schemas.capability_request import CapabilityRequest
@@ -51,12 +58,22 @@ from app.schemas.conversation import (
     TurnExecutionResult,
     TurnRouteDecision,
 )
+from app.schemas.run_revision import ExpectedStageInputs, ManualReconciliation, PartialExecution
 from app.services.attachments import resolve_attachment_contexts
 from app.services.capability_request import build_capability_request
+from app.services.run_revisions import (
+    complete_revision,
+    fall_back_to_full_recompute,
+    mark_revision_running,
+)
 from app.services.runtime_state import (
     RuntimeEventSpec,
     RuntimeStateScope,
     close_runtime_state,
+)
+from app.services.skill_stage_checkpoints import (
+    load_latest_stage_output,
+    prepare_revision_execution,
 )
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.turn_observability import (
@@ -88,6 +105,192 @@ _MODEL_SKILL_ALIASES = {
     "account_health_check": "account_inspection",
 }
 log = logging.getLogger("dyflow.main_agent_v2")
+
+
+async def execute_revision_task_run(
+    session: AsyncSession,
+    *,
+    run: AgentRun,
+    task: BrainTask,
+    worker_id: str,
+) -> str:
+    """Run the durable reuse barrier before any revision external execution."""
+
+    revision_id = run.request_payload.get("revision_id")
+    if type(revision_id) is not int or revision_id <= 0 or run.task_id != task.id:
+        raise ValueError("REVISION_EXECUTION_SCOPE_INVALID")
+    revision = await session.scalar(
+        select(RunRevision).where(RunRevision.id == revision_id).with_for_update()
+    )
+    if revision is None or revision.revision_run_id != run.id:
+        raise ValueError("REVISION_EXECUTION_SCOPE_INVALID")
+    if revision.status == "completed":
+        return "completed"
+    thread = await session.get(ConversationThread, revision.thread_id)
+    turn = await session.get(ConversationTurn, revision.revision_turn_id)
+    revision_skill = await session.get(SkillRun, revision.revision_skill_run_id)
+    user = await session.get(User, run.requested_by_id)
+    if (
+        thread is None
+        or turn is None
+        or revision_skill is None
+        or user is None
+        or thread.account_id != revision.account_id
+        or revision_skill.run_id != run.id
+        or revision_skill.task_id != task.id
+        or user.org_id != run.org_id
+    ):
+        raise ValueError("REVISION_EXECUTION_SCOPE_INVALID")
+    scope = RuntimeScope(
+        org_id=run.org_id,
+        user_id=user.id,
+        account_id=revision.account_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=task.id,
+        skill_run_id=revision_skill.id,
+    )
+    event_scope = TurnEventScope(
+        org_id=run.org_id,
+        account_id=revision.account_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        skill_run_id=revision_skill.id,
+    )
+    contract = require_checkpoint_graph_contract("operation_iteration", 1)
+    boundary_map = resolve_revision_executor_boundaries(contract)
+    if boundary_map.requires_full_recompute:
+        revision = await fall_back_to_full_recompute(
+            session,
+            revision_id=revision.id,
+            reason="invalid_graph:executor_boundary_missing",
+        )
+    verdict = await prepare_revision_execution(
+        session,
+        revision_scope=scope,
+        revision_id=revision.id,
+        contract=contract,
+        # Free text never guesses a projection. Until a concrete server-owned
+        # projection exists, the checkpoint service safely falls back to full.
+        expected_inputs=ExpectedStageInputs(values={}),
+    )
+    if isinstance(verdict, ManualReconciliation):
+        await append_turn_event(
+            session,
+            event_scope,
+            "run.revision_manual_reconciliation",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": run.id,
+                "task_id": task.id,
+                "mode": "manual_reconciliation",
+                "status": "stopped",
+                "reason": verdict.reason,
+                "plan_hash": verdict.plan_hash,
+            },
+            f"revision:{revision.id}:manual",
+        )
+        await session.commit()
+        return "stopped"
+
+    hydrated_outputs: dict[str, object] = {}
+    if isinstance(verdict, PartialExecution):
+        for binding in verdict.reused:
+            hydrated = await load_latest_stage_output(
+                session,
+                scope=scope,
+                step_key=binding.step_key,
+            )
+            if hydrated.output != binding.output:
+                raise RuntimeError("REVISION_HYDRATED_OUTPUT_MISMATCH")
+            hydrated_outputs[binding.step_key] = hydrated.output.model_dump(mode="json")
+            await append_turn_event(
+                session,
+                event_scope,
+                "step.reused",
+                {
+                    "revision_id": revision.id,
+                    "revision_run_id": run.id,
+                    "task_id": task.id,
+                    "step": binding.step_key,
+                    "step_key": binding.step_key,
+                    "status": "reused",
+                    "source_id": binding.source_checkpoint_id,
+                },
+                f"revision:{revision.id}:reused:{binding.step_key}",
+            )
+    else:
+        await append_turn_event(
+            session,
+            event_scope,
+            "run.revision_fallback",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": run.id,
+                "task_id": task.id,
+                "mode": "full_recompute",
+                "status": "planned",
+                "reason": verdict.reason,
+                "plan_hash": verdict.plan_hash,
+            },
+            f"revision:{revision.id}:fallback",
+        )
+    run.request_payload = {
+        **dict(run.request_payload or {}),
+        "hydrated_outputs_by_step_key": hydrated_outputs,
+    }
+    await mark_revision_running(session, revision_id=revision.id)
+    # This commit is the one-way barrier: no expert/tool/provider/deliverable
+    # execution is reachable above it.
+    await session.commit()
+
+    capability_request = CapabilityRequest(
+        org_id=run.org_id,
+        user_id=user.id,
+        account_id=revision.account_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        message=turn.user_input,
+        requested_skill_code="operation_iteration",
+        execution_preference="FORMAL_TASK",
+        structured_input=dict(revision_skill.input_snapshot or {}),
+        constraints=[],
+        attachment_ids=[],
+        attachment_contexts=[],
+    )
+    executed = await skill_runtime.execute(
+        session,
+        user=user,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="operation_iteration",
+        capability_request=capability_request,
+        lease_owner=worker_id,
+        resume_skill_run=revision_skill,
+    )
+    if executed.status != "completed":
+        return executed.status
+    await complete_revision(session, revision_id=revision.id)
+    await append_turn_event(
+        session,
+        event_scope,
+        "run.revision_completed",
+        {
+            "revision_id": revision.id,
+            "revision_run_id": run.id,
+            "task_id": task.id,
+            "mode": revision.mode,
+            "status": "completed",
+            "plan_hash": revision.plan_hash,
+        },
+        f"revision:{revision.id}:completed",
+    )
+    await session.commit()
+    return "completed"
 
 
 async def execute_conversation_turn(

@@ -51,6 +51,7 @@ from app.orchestrator.ai_coo_critic import (
     ai_coo_critic_service,
 )
 from app.orchestrator.brain_intelligence import brain_intelligence
+from app.orchestrator.checkpoint_graph_contracts import CheckpointGraphContract
 from app.orchestrator.composite_skill_runtime import composite_skill_runtime
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
@@ -90,6 +91,47 @@ _ACTIVE_SKILL_STAGES: ContextVar[tuple[tuple[str, int], ...]] = ContextVar(
     "active_skill_stages",
     default=(),
 )
+_OPERATION_ITERATION_NATIVE_BOUNDARIES = frozenset({"prepare_deliverable"})
+
+
+@dataclass(frozen=True)
+class RevisionExecutorBoundaryMap:
+    native_boundaries: frozenset[str]
+    logical_boundaries: dict[str, str | None]
+
+    @property
+    def requires_full_recompute(self) -> bool:
+        return any(boundary is None for boundary in self.logical_boundaries.values())
+
+
+def resolve_revision_executor_boundaries(
+    contract: CheckpointGraphContract,
+) -> RevisionExecutorBoundaryMap:
+    """Resolve declared logical owners only against real runtime boundaries."""
+
+    logical: dict[str, str | None] = {}
+    for step in contract.steps:
+        owner, separator, boundary = step.executor_boundary_key.partition(":")
+        resolved: str | None = None
+        if separator and owner == "child_skill" and step.executor_owner == "child_skill":
+            try:
+                skill_registry.get(boundary)
+            except KeyError:
+                pass
+            else:
+                resolved = step.executor_boundary_key
+        elif (
+            separator
+            and owner == "native_runtime"
+            and step.executor_owner == "native_runtime"
+            and boundary in _OPERATION_ITERATION_NATIVE_BOUNDARIES
+        ):
+            resolved = step.executor_boundary_key
+        logical[step.key] = resolved
+    return RevisionExecutorBoundaryMap(
+        native_boundaries=_OPERATION_ITERATION_NATIVE_BOUNDARIES,
+        logical_boundaries=logical,
+    )
 
 
 class _SkillStageFailure(Exception):
@@ -901,7 +943,6 @@ class SkillRuntime:
             content=content,
             agent_code=AgentCode.DECISION.value,
             deliverable_type=DeliverableType.PUBLISH_CALENDAR,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=report,
             note="business_artifact_type=operation_execution_plan; deterministic child Skill DAG",
@@ -1208,7 +1249,6 @@ class SkillRuntime:
             content=content,
             agent_code=latest_result.invocation.agent_code.value,
             deliverable_type=DeliverableType.REVIEW_REPORT,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
             note=(
@@ -1578,7 +1618,6 @@ class SkillRuntime:
             content=content,
             agent_code=expert_results[-1].invocation.agent_code.value,
             deliverable_type=deliverable_type,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=deliverable_payload,
             note=(
@@ -1703,7 +1742,6 @@ class SkillRuntime:
             content=content,
             agent_code=producer.agent_code.value,
             deliverable_type=deliverable_type,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=deliverable_payload,
             note=(
@@ -2108,7 +2146,6 @@ class SkillRuntime:
             content=content,
             agent_code=producer.agent_code.value,
             deliverable_type=DeliverableType.REVIEW_REPORT,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload=_review_report_payload(report),
             note=(

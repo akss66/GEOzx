@@ -266,6 +266,25 @@ async def queue_agent_run_behind_task(
 ) -> bool:
     """Queue one follow-up without mutating the shared task before its turn."""
 
+    waiting = await queue_agent_run_behind_task_record(
+        session,
+        run_id,
+        task_id=task_id,
+        request_payload=request_payload,
+    )
+    await session.commit()
+    return waiting
+
+
+async def queue_agent_run_behind_task_record(
+    session: AsyncSession,
+    run_id: int,
+    *,
+    task_id: int,
+    request_payload: dict,
+) -> bool:
+    """Queue a follow-up in the caller-owned transaction."""
+
     await session.scalar(select(BrainTask.id).where(BrainTask.id == task_id).with_for_update())
     blocker = await session.scalar(
         select(AgentRun.id)
@@ -290,7 +309,7 @@ async def queue_agent_run_behind_task(
     run.lease_owner = None
     run.leased_until = None
     run.next_retry_at = None
-    await session.commit()
+    await session.flush()
     return True
 
 

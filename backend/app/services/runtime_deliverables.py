@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ContentItem, Deliverable
@@ -21,7 +22,7 @@ async def write_runtime_deliverable(
     content: ContentItem,
     agent_code: str,
     deliverable_type: DeliverableType,
-    version: int,
+    version: int | None = None,
     status: DeliverableStatus,
     payload: dict[str, Any],
     note: str | None = None,
@@ -32,6 +33,9 @@ async def write_runtime_deliverable(
     Legacy callers may omit ``scope`` only when every provenance field is null.
     """
 
+    # Compatibility-only input for older callers outside this integration
+    # slice. Allocation below is authoritative and never trusts this value.
+    del version
     provenance = {field: (legacy_provenance or {}).get(field) for field in _PROVENANCE_FIELDS}
     if scope is None:
         if any(value is not None for value in provenance.values()):
@@ -48,6 +52,44 @@ async def write_runtime_deliverable(
             "run_id": scope.run_id,
             "skill_run_id": scope.skill_run_id,
         }
+
+    if content.id is None:
+        raise RuntimeScopeConflict("deliverable content must be persisted")
+    await session.scalar(
+        select(ContentItem.id).where(ContentItem.id == content.id).with_for_update()
+    )
+    if scope is not None and scope.skill_run_id is not None:
+        replay = await session.scalar(
+            select(Deliverable)
+            .where(
+                Deliverable.content_item_id == content.id,
+                Deliverable.agent_code == agent_code,
+                Deliverable.type == deliverable_type,
+                Deliverable.skill_run_id == scope.skill_run_id,
+            )
+            .order_by(Deliverable.id)
+            .limit(1)
+            .with_for_update()
+        )
+        if replay is not None:
+            if (
+                replay.status == status
+                and replay.payload == payload
+                and replay.note == note
+                and all(getattr(replay, field) == provenance[field] for field in _PROVENANCE_FIELDS)
+            ):
+                return replay
+            raise RuntimeScopeConflict("runtime deliverable replay differs from durable write")
+
+    version = (
+        await session.scalar(
+            select(func.max(Deliverable.version)).where(
+                Deliverable.content_item_id == content.id,
+                Deliverable.type == deliverable_type,
+            )
+        )
+        or 0
+    ) + 1
 
     deliverable = Deliverable(
         content_item_id=content.id,

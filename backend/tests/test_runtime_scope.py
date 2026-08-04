@@ -201,7 +201,6 @@ async def test_runtime_deliverable_rejects_partial_and_cross_account_provenance(
             content=graph_a["content"],
             agent_code=AgentCode.DECISION.value,
             deliverable_type=DeliverableType.REVIEW_REPORT,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload={"summary": "partial"},
             legacy_provenance={"thread_id": graph_a["thread"].id},
@@ -213,7 +212,6 @@ async def test_runtime_deliverable_rejects_partial_and_cross_account_provenance(
             content=graph_b["content"],
             agent_code=AgentCode.DECISION.value,
             deliverable_type=DeliverableType.REVIEW_REPORT,
-            version=1,
             status=DeliverableStatus.PENDING_REVIEW,
             payload={"summary": "wrong account"},
         )
@@ -225,7 +223,6 @@ async def test_runtime_deliverable_rejects_partial_and_cross_account_provenance(
         content=graph_a["content"],
         agent_code=AgentCode.DECISION.value,
         deliverable_type=DeliverableType.REVIEW_REPORT,
-        version=1,
         status=DeliverableStatus.PENDING_REVIEW,
         payload={"summary": "valid"},
     )
@@ -240,6 +237,95 @@ async def test_runtime_deliverable_rejects_partial_and_cross_account_provenance(
         scope_a.run_id,
         scope_a.skill_run_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_deliverable_allocates_next_version_and_replays_same_skill_write(
+    session,
+    admin,
+) -> None:
+    graph = await _runtime_graph(session, admin, suffix="deliverable-version")
+    source_scope = await _scope(session, admin, graph)
+    first = await write_runtime_deliverable(
+        session,
+        scope=source_scope,
+        content=graph["content"],
+        agent_code=AgentCode.DECISION.value,
+        deliverable_type=DeliverableType.REVIEW_REPORT,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "source"},
+    )
+    replay = await write_runtime_deliverable(
+        session,
+        scope=source_scope,
+        content=graph["content"],
+        agent_code=AgentCode.DECISION.value,
+        deliverable_type=DeliverableType.REVIEW_REPORT,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "source"},
+    )
+
+    revision_turn = ConversationTurn(
+        thread_id=graph["thread"].id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="deliverable-version-revision-turn",
+        user_input="supplement",
+        target_turn_id=graph["turn"].id,
+        steering_mode="supplement",
+    )
+    session.add(revision_turn)
+    await session.flush()
+    revision_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=graph["task"].id,
+        thread_id=graph["thread"].id,
+        turn_id=revision_turn.id,
+        client_message_id="deliverable-version-revision-run",
+        status="running",
+        request_payload={},
+    )
+    session.add(revision_run)
+    await session.flush()
+    revision_skill = SkillRun(
+        org_id=admin.org_id,
+        thread_id=graph["thread"].id,
+        turn_id=revision_turn.id,
+        run_id=revision_run.id,
+        task_id=graph["task"].id,
+        idempotency_key="deliverable-version-revision-skill",
+        skill_code=graph["skill_run"].skill_code,
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(revision_skill)
+    await session.flush()
+    revision_scope = RuntimeScope(
+        org_id=admin.org_id,
+        user_id=admin.id,
+        account_id=graph["account"].id,
+        thread_id=graph["thread"].id,
+        turn_id=revision_turn.id,
+        run_id=revision_run.id,
+        task_id=graph["task"].id,
+        skill_run_id=revision_skill.id,
+    )
+    second = await write_runtime_deliverable(
+        session,
+        scope=revision_scope,
+        content=graph["content"],
+        agent_code=AgentCode.DECISION.value,
+        deliverable_type=DeliverableType.REVIEW_REPORT,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"summary": "revision"},
+    )
+
+    assert replay.id == first.id
+    assert first.version == 1
+    assert second.version == 2
 
 
 @pytest.mark.asyncio

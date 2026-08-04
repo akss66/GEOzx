@@ -54,7 +54,7 @@ from app.services.agent_runs import (
     promote_next_waiting_agent_run,
     release_agent_run_failure,
 )
-from app.services.turn_execution import execute_conversation_turn
+from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
 
 log = logging.getLogger("dyflow.worker")
 
@@ -123,7 +123,11 @@ async def execute_agent_run(
             return None
         request = dict(run.request_payload or {})
         task_id = int(request.get("task_id") or run.task_id or 0)
-        is_conversation_run = run.thread_id is not None and run.turn_id is not None
+        operation = str(request.get("operation") or "start")
+        is_revision_run = operation == "execute_revision"
+        is_conversation_run = (
+            run.thread_id is not None and run.turn_id is not None and not is_revision_run
+        )
         task = (
             None if is_conversation_run else await _load_runtime_task(session, task_id, run.org_id)
         )
@@ -148,8 +152,9 @@ async def execute_agent_run(
                     worker_id=worker_id,
                 )
                 return result.task_id
+            assert task is not None
 
-            operation = str(request.get("operation") or "start")
+            revision_status: str | None = None
             if operation == "start":
                 intent = IntentDecision.model_validate(request.get("intent"))
                 persisted_route = request.get("route_decision")
@@ -170,6 +175,13 @@ async def execute_agent_run(
                     client_message_id=str(request.get("client_message_id") or ""),
                     agent_run_id=run.id,
                     agent_run_attempt=run.attempt,
+                )
+            elif operation == "execute_revision":
+                revision_status = await execute_revision_task_run(
+                    session,
+                    run=run,
+                    task=task,
+                    worker_id=worker_id,
                 )
             elif operation == "prepare_and_start":
                 from app.api.brain import _execute_brain_message
@@ -233,7 +245,7 @@ async def execute_agent_run(
                 )
             else:
                 raise ValueError(f"Unsupported AgentRun operation: {operation}")
-            status_value = await runtime_status(session, task)
+            status_value = revision_status or await runtime_status(session, task)
             await complete_agent_run(
                 session,
                 run_id,

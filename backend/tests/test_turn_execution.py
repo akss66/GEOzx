@@ -20,11 +20,13 @@ from app.models import (
     ConversationTurn,
     Deliverable,
     Event,
+    RunRevision,
     SkillRun,
     StrategyPlan,
 )
 from app.models.enums import AccountStatus, BrainTaskStatus, Platform
 from app.orchestrator.brain_runtime import runtime_graph
+from app.orchestrator.checkpoint_graph_contracts import require_checkpoint_graph_contract
 from app.orchestrator.skill_runtime import SkillRuntime
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.attachment import AttachmentContext
@@ -34,9 +36,17 @@ from app.schemas.conversation import (
     TurnExecutionResult,
     TurnRouteDecision,
 )
+from app.schemas.run_revision import (
+    FullRecompute,
+    ManualReconciliation,
+    PartialExecution,
+    ResolvedStageOutput,
+    StageDataEnvelope,
+    StageReuseBinding,
+)
 from app.services.runtime_state import RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
-from app.services.turn_execution import execute_conversation_turn
+from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
 
 
 async def _turn_context(session, admin, *, key: str):
@@ -109,6 +119,243 @@ async def _four_ledger_context(session, admin, *, key: str):
     session.add(skill_run)
     await session.commit()
     return account, thread, turn, run, task, skill_run
+
+
+async def _revision_execution_context(session, admin, *, key: str):
+    account, thread, source_turn, source_run, task, source_skill = await _four_ledger_context(
+        session, admin, key=key
+    )
+    source_skill.skill_code = "operation_iteration"
+    source_skill.status = "completed"
+    revision_turn = ConversationTurn(
+        thread_id=thread.id,
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id=f"revision-turn-{key}",
+        user_input="补充脚本时长",
+        target_turn_id=source_turn.id,
+        steering_mode="supplement",
+    )
+    session.add(revision_turn)
+    await session.flush()
+    revision_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        thread_id=thread.id,
+        turn_id=revision_turn.id,
+        client_message_id=f"revision-run-{key}",
+        status="queued",
+        phase="queued",
+        request_payload={"operation": "execute_revision", "task_id": task.id},
+    )
+    session.add(revision_run)
+    await session.flush()
+    revision_skill = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=revision_turn.id,
+        run_id=revision_run.id,
+        task_id=task.id,
+        idempotency_key=f"revision-skill-{key}",
+        skill_code="operation_iteration",
+        skill_version=1,
+        status="running",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(revision_skill)
+    await session.flush()
+    contract = require_checkpoint_graph_contract("operation_iteration", 1)
+    revision = RunRevision(
+        org_id=admin.org_id,
+        account_id=account.id,
+        thread_id=thread.id,
+        task_id=task.id,
+        source_turn_id=source_turn.id,
+        source_run_id=source_run.id,
+        source_skill_run_id=source_skill.id,
+        revision_turn_id=revision_turn.id,
+        revision_run_id=revision_run.id,
+        revision_skill_run_id=revision_skill.id,
+        mode="full_recompute",
+        status="planned",
+        dependency_graph_version=contract.graph_version,
+        earliest_affected_step=contract.steps[0].key,
+        changed_constraints={"unknown_constraint": {"operation": "changed"}},
+        direct_affected_steps=[],
+        affected_steps=[step.key for step in contract.steps],
+        reused_steps=[],
+        plan_hash="a" * 64,
+        fallback_reason="unknown_constraint",
+    )
+    session.add(revision)
+    await session.commit()
+    revision_run.request_payload = {
+        **revision_run.request_payload,
+        "revision_id": revision.id,
+        "revision_skill_run_id": revision_skill.id,
+    }
+    await session.commit()
+    return account, thread, revision_turn, revision_run, task, revision_skill, revision
+
+
+@pytest.mark.asyncio
+async def test_revision_barrier_precedes_external_and_terminal_retry_is_exactly_once(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, _turn, run, task, _skill, revision = await _revision_execution_context(
+        session, admin, key="barrier-order"
+    )
+    calls: list[str] = []
+    original_commit = session.commit
+
+    async def barrier(*_args, **_kwargs):
+        calls.append("barrier")
+        return FullRecompute(
+            reason="unknown_constraint",
+            execute_steps=tuple(revision.affected_steps),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def track_commit():
+        calls.append("commit")
+        await original_commit()
+
+    async def execute(*_args, **_kwargs):
+        calls.append("external")
+        return SimpleNamespace(status="completed", response="revision completed")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime.execute", execute, raising=False)
+    monkeypatch.setattr(session, "commit", track_commit)
+
+    first = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+    second = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    assert first == "completed"
+    assert second == "completed"
+    assert calls.count("barrier") == 1
+    assert calls.count("external") == 1
+    assert calls.index("commit") < calls.index("external")
+
+
+@pytest.mark.asyncio
+async def test_revision_partial_hydrates_reused_output_without_completed_event(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run, task, _skill, revision = await _revision_execution_context(
+        session, admin, key="hydrate"
+    )
+    envelope = StageDataEnvelope(
+        schema_version="read_account_data-output/v1",
+        data={"account_snapshot": {"summary": "durable"}},
+    )
+    binding = StageReuseBinding(
+        step_key="read_account_data",
+        source_checkpoint_id=11,
+        checkpoint_id=12,
+        output=envelope,
+    )
+    hydrated_calls: list[str] = []
+
+    async def barrier(*_args, **_kwargs):
+        return PartialExecution(
+            execute_steps=("script_generation",),
+            reused=(binding,),
+            hydrated_outputs={"read_account_data": envelope},
+            plan_hash=revision.plan_hash,
+        )
+
+    async def hydrate(*_args, step_key, **_kwargs):
+        hydrated_calls.append(step_key)
+        return ResolvedStageOutput(
+            checkpoint_id=12,
+            source_checkpoint_id=11,
+            output=envelope,
+        )
+
+    async def execute(*_args, **_kwargs):
+        return SimpleNamespace(status="completed", response="revision completed")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.resolve_revision_executor_boundaries",
+        lambda _contract: SimpleNamespace(requires_full_recompute=False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.load_latest_stage_output", hydrate, raising=False
+    )
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime.execute", execute, raising=False)
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    events = list(
+        await session.scalars(
+            select(Event).where(Event.turn_id == turn.id).order_by(Event.sequence)
+        )
+    )
+    assert status == "completed"
+    assert hydrated_calls == ["read_account_data"]
+    assert [event.type for event in events].count("step.reused") == 1
+    assert not any(
+        event.type == "step.completed" and event.payload.get("step") == "read_account_data"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_revision_manual_reconciliation_stops_with_zero_external_calls(
+    session, admin, monkeypatch
+) -> None:
+    _account, _thread, turn, run, task, _skill, revision = await _revision_execution_context(
+        session, admin, key="manual"
+    )
+    external_calls = 0
+
+    async def barrier(*_args, **_kwargs):
+        return ManualReconciliation(
+            reason="external_write_ambiguous",
+            blocking_receipt_ids=(91,),
+            plan_hash=revision.plan_hash,
+        )
+
+    async def forbidden_external(*_args, **_kwargs):
+        nonlocal external_calls
+        external_calls += 1
+        raise AssertionError("manual reconciliation must not execute externally")
+
+    monkeypatch.setattr(
+        "app.services.turn_execution.resolve_revision_executor_boundaries",
+        lambda _contract: SimpleNamespace(requires_full_recompute=False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.prepare_revision_execution", barrier, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.turn_execution.skill_runtime.execute", forbidden_external, raising=False
+    )
+
+    status = await execute_revision_task_run(
+        session, run=run, task=task, worker_id="revision-worker"
+    )
+
+    events = list(await session.scalars(select(Event).where(Event.turn_id == turn.id)))
+    assert status == "stopped"
+    assert external_calls == 0
+    assert any(event.type == "run.revision_manual_reconciliation" for event in events)
 
 
 @pytest.mark.asyncio

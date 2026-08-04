@@ -28,6 +28,7 @@ from app.models import (
     Event,
     LLMCall,
     Org,
+    RunRevision,
     SkillRun,
     ToolExecutionAttempt,
     User,
@@ -35,6 +36,8 @@ from app.models import (
 from app.models.enums import (
     AgentCode,
     AgentInvocationStatus,
+    BrainTaskStatus,
+    BrainTaskType,
     DeliverableStatus,
     DeliverableType,
     Platform,
@@ -183,6 +186,151 @@ async def test_supplement_creates_immutable_steering_turn_without_cancelling_tar
             "source_id": body["turn"]["id"],
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_nonempty_supplement_creates_task_revision_and_dispatches_after_commit(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "supplement-revision")
+    thread = await _create_thread(client, admin, account)
+    target_turn = ConversationTurn(
+        thread_id=thread["id"],
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        client_message_id="revision-source-turn",
+        user_input="规划本周运营",
+        status="waiting_user",
+    )
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="revision-source-task",
+        type=BrainTaskType.CONTENT_CREATION,
+        status=BrainTaskStatus.PENDING_CONFIRMATION,
+    )
+    session.add_all([target_turn, task])
+    await session.flush()
+    target_run = AgentRun(
+        org_id=admin.org_id,
+        requested_by_id=admin.id,
+        task_id=task.id,
+        thread_id=thread["id"],
+        turn_id=target_turn.id,
+        client_message_id="revision-source-run",
+        status="waiting_user",
+        phase="waiting_user",
+        request_payload={"structured_input": {}},
+    )
+    session.add(target_run)
+    await session.flush()
+    source_skill = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread["id"],
+        turn_id=target_turn.id,
+        run_id=target_run.id,
+        task_id=task.id,
+        idempotency_key="revision-source-skill",
+        skill_code="operation_iteration",
+        skill_version=1,
+        status="completed",
+        input_snapshot={},
+        output_snapshot={},
+    )
+    session.add(source_skill)
+    await session.commit()
+
+    enqueued: list[int] = []
+
+    async def capture_enqueue(*, run_id: int) -> bool:
+        assert session.in_transaction() is False
+        enqueued.append(run_id)
+        if len(enqueued) == 1:
+            raise ConnectionError("queue unavailable")
+        return True
+
+    monkeypatch.setattr("app.api.conversations.enqueue_agent_runtime", capture_enqueue)
+
+    first_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="revision-supplement",
+        message="补充：脚本控制在30秒",
+        target_turn_id=target_turn.id,
+    )
+    replay_response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="revision-supplement",
+        message="补充：脚本控制在30秒",
+        target_turn_id=target_turn.id,
+    )
+
+    assert first_response.status_code == 202
+    assert replay_response.status_code == 202
+    assert first_response.json()["dispatch_deferred"] is True
+    assert replay_response.json()["dispatch_deferred"] is False
+    steering_run_id = first_response.json()["run"]["id"]
+    steering_run = await session.get(AgentRun, steering_run_id)
+    revision = await session.scalar(
+        select(RunRevision).where(RunRevision.source_run_id == target_run.id)
+    )
+    assert steering_run is not None
+    assert revision is not None
+    assert revision.task_id == task.id
+    assert revision.revision_run_id != steering_run.id
+    revision_run = await session.get(AgentRun, revision.revision_run_id)
+    assert revision_run is not None
+    assert revision_run.task_id == task.id
+    assert revision_run.request_payload["operation"] == "execute_revision"
+    assert revision_run.status == "queued"
+    assert enqueued == [revision_run.id, revision_run.id]
+    assert await session.scalar(select(func.count(RunRevision.id))) == 1
+    assert steering_run.result_payload["revision_run_id"] == revision_run.id
+    assert steering_run.result_payload["revision_id"] == revision.id
+    assert steering_run.result_payload["task_id"] == task.id
+    revision_events = list(
+        await session.scalars(
+            select(Event)
+            .where(Event.run_id == revision_run.id)
+            .order_by(Event.sequence)
+        )
+    )
+    assert [event.type for event in revision_events[:-1]] == [
+        "step.invalidated"
+    ] * len(revision.affected_steps)
+    assert revision_events[-1].type == "run.revision_planned"
+
+
+@pytest.mark.asyncio
+async def test_empty_supplement_diff_keeps_control_only_and_creates_no_revision(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "empty-supplement")
+    thread = await _create_thread(client, admin, account)
+    target = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="empty-supplement-source",
+        message="规划本周运营",
+    )
+
+    response = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="empty-supplement-control",
+        message="保持现有要求不变",
+        target_turn_id=target.json()["turn"]["id"],
+    )
+
+    assert response.status_code == 202
+    assert await session.scalar(select(func.count(RunRevision.id))) == 0
 
 
 @pytest.mark.asyncio

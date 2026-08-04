@@ -74,6 +74,22 @@ _DELIVERABLE_FIELDS = frozenset(
         "metadata",
     }
 )
+_REVISION_FIELDS = frozenset(
+    {
+        "revision_id",
+        "revision_run_id",
+        "task_id",
+        "mode",
+        "status",
+        "reason",
+        "plan_hash",
+        "step",
+        "step_key",
+        "source_id",
+        "message",
+        "metadata",
+    }
+)
 
 _METADATA_FIELDS = frozenset(
     {
@@ -124,8 +140,14 @@ PUBLIC_EVENT_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "turn.stopped": _TURN_FIELDS,
     "step.started": _STEP_FIELDS,
     "step.completed": _STEP_FIELDS,
+    "step.reused": _REVISION_FIELDS,
+    "step.invalidated": _REVISION_FIELDS,
     "step.failed": _STEP_FIELDS,
     "deliverable.updated": _DELIVERABLE_FIELDS,
+    "run.revision_planned": _REVISION_FIELDS,
+    "run.revision_fallback": _REVISION_FIELDS,
+    "run.revision_manual_reconciliation": _REVISION_FIELDS,
+    "run.revision_completed": _REVISION_FIELDS,
 }
 _TERMINAL_EVENT_TYPES = frozenset(
     {

@@ -534,14 +534,23 @@ async def submit_turn(
     turn = prepared.turn
     run = prepared.run
     dispatch_deferred = False
-    if should_enqueue and run.status == "queued":
+    revision_run_id = run.result_payload.get("revision_run_id")
+    revision_status = run.result_payload.get("revision_status")
+    dispatch_run_id = (
+        run.id
+        if should_enqueue and run.status == "queued"
+        else revision_run_id
+        if isinstance(revision_run_id, int) and revision_status == "queued"
+        else None
+    )
+    if dispatch_run_id is not None:
         try:
-            await enqueue_agent_runtime(run_id=run.id)
+            await enqueue_agent_runtime(run_id=dispatch_run_id)
         except Exception:  # noqa: BLE001 - durable queued state is recoverable
             dispatch_deferred = True
             logger.warning(
                 "Conversation run dispatch deferred",
-                extra={"run_id": run.id, "thread_id": thread.id},
+                extra={"run_id": dispatch_run_id, "thread_id": thread.id},
                 exc_info=True,
             )
     await session.refresh(turn)

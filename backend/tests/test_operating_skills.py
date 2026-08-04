@@ -473,7 +473,6 @@ async def test_deliverable_and_updated_event_rollback_together(session, admin) -
         content=content,
         agent_code="06-operator",
         deliverable_type=DeliverableType.REVIEW_REPORT,
-        version=1,
         status=DeliverableStatus.PENDING_REVIEW,
         payload={"summary": "pending transaction"},
     )

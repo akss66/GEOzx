@@ -7,9 +7,24 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AgentRun, ConversationThread, ConversationTurn, User
+from app.models import (
+    AgentRun,
+    ConversationThread,
+    ConversationTurn,
+    RunRevision,
+    SkillRun,
+    User,
+)
+from app.orchestrator.runtime_scope import RuntimeScope
+from app.orchestrator.step_dependencies import ConstraintPath, build_invalidation_plan
 from app.schemas.conversation import CreateConversationTurnRequest, TurnSteeringMode
-from app.services.agent_runs import request_agent_run_cancel_record
+from app.services.agent_runs import (
+    mark_agent_run_queued_record,
+    queue_agent_run_behind_task_record,
+    request_agent_run_cancel_record,
+)
+from app.services.capability_request import extract_structured_constraints
+from app.services.run_revisions import create_revision_record
 from app.services.turn_events import TurnEventScope, append_turn_event
 
 _TERMINAL_STATUSES = {
@@ -92,6 +107,7 @@ async def resolve_turn_steering(
             legacy_replay=True,
         )
     if existing is not None:
+        assert existing.steering_mode is not None
         mode = TurnSteeringMode(existing.steering_mode)
         target_turn, target_run = await _load_persisted_target(
             session,
@@ -201,6 +217,24 @@ async def apply_turn_steering(
             message="已收到补充要求。",
         )
 
+        revision_payload = await _create_supplement_revision(
+            session,
+            thread=thread,
+            steering_turn=steering_turn,
+            steering_run=steering_run,
+            resolved=resolved,
+        )
+        await complete_control_run_record(
+            session,
+            thread,
+            steering_turn,
+            steering_run,
+            decision,
+            result_fields=revision_payload,
+        )
+        await session.flush()
+        return False
+
     await complete_control_run_record(
         session,
         thread,
@@ -218,6 +252,8 @@ async def complete_control_run_record(
     steering_turn: ConversationTurn,
     steering_run: AgentRun,
     decision: TurnSteeringDecision,
+    *,
+    result_fields: dict[str, object] | None = None,
 ) -> None:
     """Canonically complete a no-model control Run without committing."""
 
@@ -258,6 +294,7 @@ async def complete_control_run_record(
         "task_id": None,
         "projections": [],
         "error_code": None,
+        **(result_fields or {}),
     }
     await append_turn_event(
         session,
@@ -270,6 +307,209 @@ async def complete_control_run_record(
         },
         "terminal",
     )
+
+
+def _supplement_changed_constraints(message: str) -> set[ConstraintPath | str]:
+    normalized = "".join(message.strip().split())
+    if any(marker in normalized for marker in ("保持现有要求不变", "保持不变", "无需修改")):
+        return set()
+    extracted = extract_structured_constraints(message)
+    mapped: set[ConstraintPath | str] = set()
+    if "days" in extracted or "topic_count" in extracted:
+        mapped.add(ConstraintPath.TOPIC_REQUIREMENTS)
+    if "duration_seconds" in extracted:
+        mapped.add(ConstraintPath.SCRIPT_REQUIREMENTS)
+    if "generate_strategy" in extracted or "requested_output" in extracted:
+        mapped.add(ConstraintPath.GOAL)
+    # Unknown free text must never be guessed into a concrete field. A stable
+    # unknown marker makes the dependency planner choose safe full recompute.
+    return mapped or {"unmapped_supplement"}
+
+
+async def _create_supplement_revision(
+    session: AsyncSession,
+    *,
+    thread: ConversationThread,
+    steering_turn: ConversationTurn,
+    steering_run: AgentRun,
+    resolved: ResolvedTurnSteering,
+) -> dict[str, object]:
+    changed = _supplement_changed_constraints(steering_turn.user_input)
+    if not changed:
+        return {}
+    source_run = resolved.target_run
+    source_turn = resolved.target_turn
+    if (
+        source_run is None
+        or source_turn is None
+        or source_run.task_id is None
+        or thread.account_id is None
+    ):
+        return {}
+    existing_revision = await session.scalar(
+        select(RunRevision)
+        .where(
+            RunRevision.revision_turn_id == steering_turn.id,
+            RunRevision.source_run_id == source_run.id,
+            RunRevision.task_id == source_run.task_id,
+        )
+        .with_for_update()
+    )
+    if existing_revision is not None:
+        existing_run = await session.get(AgentRun, existing_revision.revision_run_id)
+        if existing_run is None:
+            raise RuntimeError("REVISION_RUN_MISSING")
+        return {
+            "revision_run_id": existing_run.id,
+            "revision_id": existing_revision.id,
+            "task_id": source_run.task_id,
+            "revision_status": existing_run.status,
+        }
+    source_skill = await session.scalar(
+        select(SkillRun)
+        .where(
+            SkillRun.run_id == source_run.id,
+            SkillRun.task_id == source_run.task_id,
+            SkillRun.skill_code == "operation_iteration",
+        )
+        .order_by(SkillRun.id.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    if source_skill is None:
+        return {}
+
+    revision_run = AgentRun(
+        org_id=steering_turn.org_id,
+        requested_by_id=steering_run.requested_by_id,
+        task_id=source_run.task_id,
+        thread_id=thread.id,
+        turn_id=steering_turn.id,
+        client_message_id=f"revision-run:{steering_run.id}",
+        status="claimed",
+        phase="request",
+        request_payload={
+            "operation": "execute_revision",
+            "task_id": source_run.task_id,
+            "source_run_id": source_run.id,
+            "source_skill_run_id": source_skill.id,
+            "message": steering_turn.user_input,
+            "client_message_id": steering_turn.client_message_id,
+            "requested_skill_code": "operation_iteration",
+            "execution_preference": "FORMAL_TASK",
+            "structured_input": dict(source_skill.input_snapshot or {}),
+            "attachment_ids": [],
+        },
+    )
+    session.add(revision_run)
+    await session.flush()
+    revision_skill = SkillRun(
+        org_id=steering_turn.org_id,
+        thread_id=thread.id,
+        turn_id=steering_turn.id,
+        run_id=revision_run.id,
+        task_id=source_run.task_id,
+        idempotency_key=f"revision:{revision_run.id}:operation_iteration:v1",
+        skill_code="operation_iteration",
+        skill_version=1,
+        status="running",
+        input_snapshot=dict(source_skill.input_snapshot or {}),
+        output_snapshot={},
+    )
+    session.add(revision_skill)
+    await session.flush()
+    common_scope = {
+        "org_id": steering_turn.org_id,
+        "user_id": steering_run.requested_by_id,
+        "account_id": thread.account_id,
+        "thread_id": thread.id,
+        "task_id": source_run.task_id,
+    }
+    revision = await create_revision_record(
+        session,
+        source_scope=RuntimeScope(
+            **common_scope,
+            turn_id=source_turn.id,
+            run_id=source_run.id,
+            skill_run_id=source_skill.id,
+        ),
+        revision_scope=RuntimeScope(
+            **common_scope,
+            turn_id=steering_turn.id,
+            run_id=revision_run.id,
+            skill_run_id=revision_skill.id,
+        ),
+        invalidation=build_invalidation_plan("operation_iteration", changed),
+    )
+    if not isinstance(revision, RunRevision):
+        raise RuntimeError("NONEMPTY_SUPPLEMENT_REVISION_MISSING")
+    waiting = await queue_agent_run_behind_task_record(
+        session,
+        revision_run.id,
+        task_id=source_run.task_id,
+        request_payload={
+            **dict(revision_run.request_payload),
+            "revision_id": revision.id,
+            "revision_skill_run_id": revision_skill.id,
+        },
+    )
+    if waiting:
+        revision.status = "waiting_predecessor"
+    else:
+        await mark_agent_run_queued_record(
+            session,
+            revision_run.id,
+            task_id=source_run.task_id,
+            request_payload={
+                **dict(revision_run.request_payload),
+                "revision_id": revision.id,
+                "revision_skill_run_id": revision_skill.id,
+            },
+        )
+    revision_scope = TurnEventScope(
+        org_id=steering_turn.org_id,
+        account_id=thread.account_id,
+        thread_id=thread.id,
+        turn_id=steering_turn.id,
+        run_id=revision_run.id,
+        skill_run_id=revision_skill.id,
+    )
+    for step in revision.affected_steps:
+        await append_turn_event(
+            session,
+            revision_scope,
+            "step.invalidated",
+            {
+                "revision_id": revision.id,
+                "revision_run_id": revision_run.id,
+                "task_id": source_run.task_id,
+                "step": step,
+                "step_key": step,
+                "status": "invalidated",
+            },
+            f"revision:{revision.id}:invalidated:{step}",
+        )
+    await append_turn_event(
+        session,
+        revision_scope,
+        "run.revision_planned",
+        {
+            "revision_id": revision.id,
+            "revision_run_id": revision_run.id,
+            "task_id": source_run.task_id,
+            "mode": revision.mode,
+            "status": revision.status,
+            "plan_hash": revision.plan_hash,
+        },
+        f"revision:{revision.id}:planned",
+    )
+    await session.flush()
+    return {
+        "revision_run_id": revision_run.id,
+        "revision_id": revision.id,
+        "task_id": source_run.task_id,
+        "revision_status": revision_run.status,
+    }
 
 
 async def _load_target_pair(
