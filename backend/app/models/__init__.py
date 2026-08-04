@@ -74,6 +74,7 @@ from app.models.platform import PlatformAccountAuth, PlatformIntegration
 from app.models.publishing import PlatformPublishJob
 from app.models.run_revision import RunRevision, SkillStageCheckpoint
 from app.models.skill_runtime import SkillRun
+from app.models.turn_interrupt import TurnInterrupt
 from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
@@ -120,6 +121,7 @@ __all__ = [
     "RunRevision",
     "SkillStageCheckpoint",
     "SkillRun",
+    "TurnInterrupt",
     "StrategyPlan",
     "DecisionTrace",
     "ExperienceMemory",
