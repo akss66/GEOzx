@@ -17,10 +17,10 @@ from tests.test_operating_skills import _Harness, _scope, _Tools
 class _CountingTools(_Tools):
     def __init__(self) -> None:
         super().__init__()
-        self.calls: list[str] = []
+        self.observed_calls: list[str] = []
 
     async def execute(self, **kwargs):
-        self.calls.append(str(kwargs["request"].tool_code))
+        self.observed_calls.append(str(kwargs["request"].tool_code))
         return await super().execute(**kwargs)
 
 
@@ -147,7 +147,7 @@ async def test_required_generic_skill_failed_quality_gate_is_terminal_and_idempo
     assert first.artifact_id is not None
     assert duplicate == first
     assert critic.calls == 1
-    assert tools.calls == ["account.profile", "account.data_context"]
+    assert tools.observed_calls == ["account.profile", "account.data_context"]
     assert harness.calls == [required.expert_stages[0][0]]
     skill_run = await session.scalar(select(SkillRun).where(SkillRun.id == first.skill_run_id))
     assert skill_run is not None
