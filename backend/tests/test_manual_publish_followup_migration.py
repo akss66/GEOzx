@@ -20,6 +20,9 @@ def test_manual_publish_followup_migration_is_reversible_and_cross_dialect(
         "content_schedule_entries",
         metadata,
         sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("org_id", sa.Integer, nullable=False),
+        sa.Column("account_id", sa.Integer, nullable=False),
+        sa.Column("created_by_id", sa.Integer, nullable=False),
         sa.Column("status", sa.String(32), nullable=False),
     )
     with engine.begin() as connection:
@@ -36,11 +39,19 @@ def test_manual_publish_followup_migration_is_reversible_and_cross_dialect(
             for column in sa.inspect(connection).get_columns("content_schedule_entries")
         }
         assert columns["published_at"]["nullable"] is True
+        assert "ix_content_schedule_entries_publication_followup" in {
+            index["name"]
+            for index in sa.inspect(connection).get_indexes("content_schedule_entries")
+        }
 
         migration.downgrade()
         assert "published_at" not in {
             column["name"]
             for column in sa.inspect(connection).get_columns("content_schedule_entries")
+        }
+        assert "ix_content_schedule_entries_publication_followup" not in {
+            index["name"]
+            for index in sa.inspect(connection).get_indexes("content_schedule_entries")
         }
 
     output = StringIO()
@@ -53,4 +64,6 @@ def test_manual_publish_followup_migration_is_reversible_and_cross_dialect(
     migration.downgrade()
     sql = output.getvalue().lower()
     assert "add column published_at timestamp with time zone" in sql
+    assert "create index ix_content_schedule_entries_publication_followup" in sql
+    assert "drop index ix_content_schedule_entries_publication_followup" in sql
     assert "drop column published_at" in sql

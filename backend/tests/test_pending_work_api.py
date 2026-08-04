@@ -13,15 +13,20 @@ from app.models import (
     ContentScheduleEntry,
     DataImportBatch,
     Event,
+    MetricSnapshot,
+    PlatformContentRecord,
     ProjectMembership,
     ShootTask,
     TurnInterrupt,
     User,
 )
 from app.models.enums import (
+    ContentIdentityConfidence,
     DataSourceKind,
     DeliverableType,
     ImportBatchStatus,
+    MetricSource,
+    Platform,
     WorkspaceRole,
 )
 from tests.test_artifacts_api import _seed_artifact, _video_script_payload
@@ -561,7 +566,23 @@ async def test_publication_follow_up_closes_only_for_relevant_post_publish_metri
         period_end=publication_date,
         identity="wrong-account",
     )
-    session.add_all([old_batch, benchmark_batch, uncovered_batch, wrong_account_batch])
+    platform_only_batch = _committed_batch(
+        owner=admin,
+        account_id=account.id,
+        committed_at=schedule.published_at + timedelta(hours=1),
+        period_start=publication_date,
+        period_end=publication_date,
+        identity="platform-only",
+    )
+    session.add_all(
+        [
+            old_batch,
+            benchmark_batch,
+            uncovered_batch,
+            wrong_account_batch,
+            platform_only_batch,
+        ]
+    )
     await session.flush()
     session.add_all(
         [
@@ -600,6 +621,17 @@ async def test_publication_follow_up_closes_only_for_relevant_post_publish_metri
                 stat_date=publication_date,
                 total_play=300,
             ),
+            PlatformContentRecord(
+                org_id=admin.org_id,
+                account_id=account.id,
+                platform=Platform.DOUYIN,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                canonical_import_batch_id=platform_only_batch.id,
+                canonical_import_row_number=1,
+                title="只有作品身份，没有表现指标",
+                published_at=schedule.published_at,
+                identity_confidence=ContentIdentityConfidence.CONFIRMED,
+            ),
         ]
     )
     await session.commit()
@@ -619,20 +651,41 @@ async def test_publication_follow_up_closes_only_for_relevant_post_publish_metri
         owner=admin,
         account_id=account.id,
         committed_at=schedule.published_at + timedelta(hours=2),
-        period_start=publication_date,
-        period_end=publication_date,
+        period_start=publication_date + timedelta(days=1),
+        period_end=publication_date + timedelta(days=1),
         identity="covered",
     )
     session.add(covered_batch)
     await session.flush()
+    covered_content = PlatformContentRecord(
+        org_id=admin.org_id,
+        account_id=account.id,
+        platform=Platform.DOUYIN,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        canonical_import_batch_id=covered_batch.id,
+        canonical_import_row_number=1,
+        title="有真实作品指标",
+        published_at=schedule.published_at,
+        identity_confidence=ContentIdentityConfidence.CONFIRMED,
+    )
+    session.add(covered_content)
+    await session.flush()
     session.add(
-        AccountMetricSnapshot(
+        MetricSnapshot(
             org_id=admin.org_id,
             account_id=account.id,
             import_batch_id=covered_batch.id,
-            source_kind=DataSourceKind.PLATFORM_EXPORT,
-            stat_date=publication_date,
-            total_play=400,
+            platform_content_record_id=covered_content.id,
+            source=MetricSource.DOUYIN,
+            stat_date=publication_date + timedelta(days=1),
+            title="有真实作品指标",
+            play=400,
+            exposure=500,
+            completion_rate=0.4,
+            like_rate=0.1,
+            comment_rate=0.02,
+            share_rate=0.01,
+            follower_delta=2,
         )
     )
     await session.commit()

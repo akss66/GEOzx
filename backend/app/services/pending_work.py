@@ -395,9 +395,9 @@ async def _completed_publication_follow_up_ids(
         if batch_id is not None:
             projected_dates.setdefault(batch_id, set()).add(stat_date)
     for batch_id, published_at in platform_rows:
-        if batch_id is None:
+        if batch_id is None or batch_id not in projected_dates:
             continue
-        dates = projected_dates.setdefault(batch_id, set())
+        dates = projected_dates[batch_id]
         if published_at is not None:
             dates.add(_as_utc(published_at).date())
 

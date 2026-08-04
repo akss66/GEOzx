@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -79,6 +79,16 @@ class ShootTask(Base, TimestampMixin):
 
 class ContentScheduleEntry(Base, TimestampMixin):
     __tablename__ = "content_schedule_entries"
+    __table_args__ = (
+        Index(
+            "ix_content_schedule_entries_publication_followup",
+            "org_id",
+            "account_id",
+            "created_by_id",
+            "status",
+            "published_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(

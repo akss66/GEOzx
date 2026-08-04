@@ -21,7 +21,16 @@ def upgrade() -> None:
         "content_schedule_entries",
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
     )
+    op.create_index(
+        "ix_content_schedule_entries_publication_followup",
+        "content_schedule_entries",
+        ["org_id", "account_id", "created_by_id", "status", "published_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "ix_content_schedule_entries_publication_followup",
+        table_name="content_schedule_entries",
+    )
     op.drop_column("content_schedule_entries", "published_at")
