@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -53,6 +53,10 @@ from app.orchestrator.ai_coo_critic import (
 from app.orchestrator.brain_intelligence import brain_intelligence
 from app.orchestrator.checkpoint_graph_contracts import CheckpointGraphContract
 from app.orchestrator.composite_skill_runtime import composite_skill_runtime
+from app.orchestrator.operation_lineage import (
+    OperationLineageRef,
+    resolve_internal_lineage_artifacts,
+)
 from app.orchestrator.operation_quality import (
     evaluate_calendar_quality,
     evaluate_script_quality,
@@ -136,6 +140,7 @@ class _ServerSkillContext:
 
     preloaded_tool_results: dict[str, dict[str, Any]]
     tool_audit_refs: dict[str, dict[str, int]]
+    lineage_refs: tuple[OperationLineageRef, ...] = ()
 
 
 def resolve_revision_executor_boundaries(
@@ -355,12 +360,13 @@ def _server_skill_context_snapshot(
 ) -> dict[str, Any]:
     if context is None:
         return {}
-    return {
-        "_server_context": {
+    server_context: dict[str, Any] = {
             "preloaded_tool_results": context.preloaded_tool_results,
             "tool_audit_refs": context.tool_audit_refs,
-        }
     }
+    if context.lineage_refs:
+        server_context["lineage_refs"] = [asdict(ref) for ref in context.lineage_refs]
+    return {"_server_context": server_context}
 
 
 def _server_skill_context_from_snapshot(value: object) -> _ServerSkillContext | None:
@@ -368,7 +374,16 @@ def _server_skill_context_from_snapshot(value: object) -> _ServerSkillContext | 
         return None
     preloaded = value.get("preloaded_tool_results")
     audit_refs = value.get("tool_audit_refs")
+    raw_lineage_refs = value.get("lineage_refs", [])
     if not isinstance(preloaded, dict) or not isinstance(audit_refs, dict):
+        return None
+    if not isinstance(raw_lineage_refs, list) or any(
+        not isinstance(item, dict) for item in raw_lineage_refs
+    ):
+        return None
+    try:
+        lineage_refs = tuple(OperationLineageRef(**item) for item in raw_lineage_refs)
+    except (TypeError, ValueError):
         return None
     return _ServerSkillContext(
         preloaded_tool_results={
@@ -385,6 +400,7 @@ def _server_skill_context_from_snapshot(value: object) -> _ServerSkillContext | 
             for code, ref in audit_refs.items()
             if isinstance(ref, dict)
         },
+        lineage_refs=lineage_refs,
     )
 
 
@@ -1280,10 +1296,8 @@ class SkillRuntime:
             if any(item["status"] != "completed" for item in dependencies):
                 break
             structured_input = dict(node["input"])
-            if skill_code in {
-                "visual_brief_generation",
-                "content_calendar_planning",
-            }:
+            child_server_context = fresh_server_context if skill_code == "topic_planning" else None
+            if dependencies:
                 dependency_artifact_ids = [
                     int(item["artifact_id"])
                     for item in dependencies
@@ -1296,39 +1310,81 @@ class SkillRuntime:
                     parent_status = "blocked"
                     break
                 dependency_artifacts = list(
-                    await session.scalars(
-                        select(Deliverable).where(
+                    await session.execute(
+                        select(Deliverable, SkillRun)
+                        .join(SkillRun, SkillRun.id == Deliverable.skill_run_id)
+                        .where(
                             Deliverable.id.in_(dependency_artifact_ids),
                             Deliverable.content_item_id == content.id,
                         )
                     )
                 )
-                approved_ids = {
-                    item.id
-                    for item in dependency_artifacts
-                    if item.status == DeliverableStatus.APPROVED
+                artifacts_by_id = {
+                    artifact.id: (artifact, source_skill_run)
+                    for artifact, source_skill_run in dependency_artifacts
                 }
-                if approved_ids != set(dependency_artifact_ids):
-                    should_pause = await pause_composite_parent_for_artifacts(
-                        session,
-                        parent_skill_run=skill_run,
-                        source_artifact_ids=dependency_artifact_ids,
+                if set(artifacts_by_id) != set(dependency_artifact_ids):
+                    node["status"] = "blocked"
+                    node["error_code"] = "REQUIRED_CHILD_DEPENDENCY_MISSING"
+                    node["terminal_reason"] = "dependency_artifact_scope_mismatch"
+                    parent_status = "blocked"
+                    break
+                weekly_batch = int(frozen_input.get("topic_count") or 5) == 5
+                if not weekly_batch and skill_code in {
+                    "visual_brief_generation",
+                    "content_calendar_planning",
+                }:
+                    approved_ids = {
+                        artifact_id
+                        for artifact_id, (artifact, _source_run) in artifacts_by_id.items()
+                        if artifact.status == DeliverableStatus.APPROVED
+                    }
+                    if approved_ids != set(dependency_artifact_ids):
+                        should_pause = await pause_composite_parent_for_artifacts(
+                            session,
+                            parent_skill_run=skill_run,
+                            source_artifact_ids=dependency_artifact_ids,
+                        )
+                        if should_pause:
+                            node["status"] = "waiting_user"
+                            node["error_code"] = "DEPENDENCY_ARTIFACT_APPROVAL_REQUIRED"
+                            node["terminal_reason"] = "dependency_artifact_not_approved"
+                            parent_status = "waiting_user"
+                            interrupt = {
+                                "kind": "artifact_approval_required",
+                                "skill_code": skill_code,
+                                "source_artifact_ids": dependency_artifact_ids,
+                            }
+                            break
+                if weekly_batch:
+                    lineage_refs = tuple(
+                        OperationLineageRef(
+                            artifact_id=artifact_id,
+                            version=artifacts_by_id[artifact_id][0].version,
+                            source_skill_run_id=artifacts_by_id[artifact_id][1].id,
+                            parent_skill_run_id=skill_run.id,
+                        )
+                        for artifact_id in dependency_artifact_ids
                     )
-                    if should_pause:
-                        node["status"] = "waiting_user"
-                        node["error_code"] = "DEPENDENCY_ARTIFACT_APPROVAL_REQUIRED"
-                        node["terminal_reason"] = "dependency_artifact_not_approved"
-                        parent_status = "waiting_user"
-                        interrupt = {
-                            "kind": "artifact_approval_required",
-                            "skill_code": skill_code,
-                            "source_artifact_ids": dependency_artifact_ids,
-                        }
-                        break
-                structured_input["source_artifact_ids"] = dependency_artifact_ids
+                    child_server_context = _ServerSkillContext(
+                        preloaded_tool_results=(
+                            dict(fresh_server_context.preloaded_tool_results)
+                            if fresh_server_context is not None
+                            else {}
+                        ),
+                        tool_audit_refs=(
+                            dict(fresh_server_context.tool_audit_refs)
+                            if fresh_server_context is not None
+                            else {}
+                        ),
+                        lineage_refs=lineage_refs,
+                    )
+                child_definition = skill_registry.get(skill_code)
+                if "source_artifact_ids" in child_definition.input_model.model_fields:
+                    structured_input["source_artifact_ids"] = dependency_artifact_ids
                 if skill_code == "content_calendar_planning":
                     structured_input["days"] = int(frozen_input.get("cycle_days") or 7)
-            elif skill_code == "publishing_preparation":
+            if skill_code == "publishing_preparation":
                 structured_input["content_item_id"] = content.id
             child_constraints = [
                 json.dumps(
@@ -1362,7 +1418,7 @@ class SkillRuntime:
                     constraints=child_constraints,
                 ),
                 lease_owner=lease_owner,
-                server_context=(fresh_server_context if skill_code == "topic_planning" else None),
+                server_context=child_server_context,
             )
             node["status"] = child_result.status
             node["artifact_id"] = child_result.artifact_id
@@ -2017,11 +2073,30 @@ class SkillRuntime:
             else tool_results.get("account.data_context", {})
         )
         evidence_refs = _evidence_refs(evidence_context)
-        source_artifacts = await _confirmed_source_artifacts(
-            session,
-            account_id=thread.account_id,
-            artifact_ids=list(frozen_input.get("source_artifact_ids") or []),
-        )
+        requested_source_ids = list(frozen_input.get("source_artifact_ids") or [])
+        if server_context is not None and server_context.lineage_refs:
+            if not requested_source_ids:
+                requested_source_ids = [
+                    ref.artifact_id for ref in server_context.lineage_refs
+                ]
+            parent_skill_run_id = dict(skill_run.output_snapshot or {}).get(
+                "composite_parent_skill_run_id"
+            )
+            if type(parent_skill_run_id) is not int:
+                raise SkillRecoveryConflict("OPERATION_LINEAGE_PARENT_MISSING")
+            source_artifacts = await resolve_internal_lineage_artifacts(
+                session,
+                refs=list(server_context.lineage_refs),
+                expected_parent_skill_run_id=parent_skill_run_id,
+                expected_source_artifact_ids=requested_source_ids,
+                scope=scope,
+            )
+        else:
+            source_artifacts = await _confirmed_source_artifacts(
+                session,
+                account_id=thread.account_id,
+                artifact_ids=requested_source_ids,
+            )
         evidence_refs.extend(
             {
                 "artifact_id": item["artifact_id"],

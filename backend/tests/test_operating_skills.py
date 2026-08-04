@@ -348,6 +348,34 @@ async def test_fresh_operation_reuses_one_audited_evidence_read_for_topic_planni
         for node in result.report["child_skill_graph"]
         if node["skill_code"] == "script_generation"
     )
+    visual_node = next(
+        node
+        for node in result.report["child_skill_graph"]
+        if node["skill_code"] == "visual_brief_generation"
+    )
+    assert script_node["status"] == "completed"
+    assert visual_node["status"] == "needs_review"
+    assert result.report["interrupt"]["kind"] == "child_skill_paused"
+    assert result.report["interrupt"]["skill_code"] == "visual_brief_generation"
+    script_deliverable = await session.get(Deliverable, script_node["artifact_id"])
+    assert script_deliverable is not None
+    assert script_deliverable.status is DeliverableStatus.PENDING_REVIEW
+    visual_run = await session.scalar(
+        select(SkillRun).where(
+            SkillRun.run_id == run.id,
+            SkillRun.skill_code == "visual_brief_generation",
+        )
+    )
+    assert visual_run is not None
+    lineage = visual_run.input_snapshot["_server_context"]["lineage_refs"]
+    assert lineage == [
+        {
+            "artifact_id": script_deliverable.id,
+            "version": script_deliverable.version,
+            "source_skill_run_id": script_deliverable.skill_run_id,
+            "parent_skill_run_id": root_run.id,
+        }
+    ]
     await accept_artifact(session, admin, artifact_id=script_node["artifact_id"])
     await session.refresh(run)
     await session.refresh(root_run)

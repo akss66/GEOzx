@@ -14,7 +14,15 @@ class CompositeSkillRuntime:
         ("script_generation", ("topic_planning",)),
         ("visual_brief_generation", ("script_generation",)),
         ("content_calendar_planning", ("visual_brief_generation",)),
-        ("publishing_preparation", ("content_calendar_planning",)),
+        (
+            "publishing_preparation",
+            (
+                "topic_planning",
+                "script_generation",
+                "visual_brief_generation",
+                "content_calendar_planning",
+            ),
+        ),
     )
 
     def build(
