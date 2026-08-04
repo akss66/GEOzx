@@ -737,6 +737,96 @@ def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
             )
             == 1
         )
+        connection.execute(
+            sa.text("INSERT INTO accounts (id, org_id) VALUES (1, 1)")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO conversation_threads (id, account_id, org_id) "
+                "VALUES (1, 1, 1)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO conversation_turns "
+                "(id, target_turn_id, thread_id, org_id) VALUES "
+                "(1, NULL, 1, 1), (2, 1, 1, 1)"
+            )
+        )
+        connection.execute(
+            sa.text("INSERT INTO brain_tasks (id, org_id) VALUES (1, 1)")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO agent_runs (id, task_id, thread_id, turn_id, org_id) "
+                "VALUES (1, 1, 1, 1, 1), (2, 1, 1, 2, 1)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO skill_runs (id, task_id, run_id, thread_id, turn_id) "
+                "VALUES (1, 1, 1, 1, 1), (2, 1, 2, 1, 2)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO run_revisions ("
+                "id, org_id, account_id, thread_id, task_id, source_turn_id, "
+                "source_run_id, source_skill_run_id, revision_turn_id, "
+                "revision_run_id, revision_skill_run_id, mode, status, "
+                "dependency_graph_version, earliest_affected_step, changed_constraints, "
+                "direct_affected_steps, affected_steps, reused_steps, plan_hash"
+                ") VALUES ("
+                "1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 'partial', 'planned', "
+                "'operation-loop/v1', 'script_generation', '{}', '[\"script_generation\"]', "
+                "'[\"script_generation\"]', '[]', :plan_hash)"
+            ),
+            {"plan_hash": "a" * 64},
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO skill_stage_checkpoints ("
+                "id, org_id, account_id, thread_id, turn_id, task_id, run_id, "
+                "skill_run_id, step_key, stage_revision, status, skill_code, "
+                "skill_version, dependency_graph_version, stage_contract_hash, "
+                "input_snapshot, input_hash, output_snapshot, output_hash, "
+                "source_artifact_refs, evidence_refs, reuse_policy, side_effect_level, "
+                "manual_reconciliation_required, finalized_at"
+                ") VALUES ("
+                "1, 1, 1, 1, 1, 1, 1, 1, 'script_generation', 1, 'completed', "
+                "'operation_iteration', 1, 'operation-loop/v1', :contract_hash, "
+                "'{}', :input_hash, '{}', :output_hash, '[]', '[]', 'immutable', "
+                "'none', 0, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "contract_hash": "a" * 64,
+                "input_hash": "b" * 64,
+                "output_hash": "c" * 64,
+            },
+        )
+
+        with pytest.raises(sa.exc.DatabaseError, match="immutable"):
+            connection.execute(
+                sa.text(
+                    "UPDATE skill_stage_checkpoints SET output_hash = :output_hash "
+                    "WHERE id = 1"
+                ),
+                {"output_hash": "d" * 64},
+            )
+
+        connection.execute(sa.text("DELETE FROM skill_runs WHERE id IN (1, 2)"))
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM run_revisions")) == 0
+        assert connection.scalar(
+            sa.text("SELECT COUNT(*) FROM skill_stage_checkpoints")
+        ) == 0
+        connection.execute(sa.text("DELETE FROM agent_runs WHERE id IN (1, 2)"))
+        deleted_turns = connection.execute(
+            sa.text("DELETE FROM conversation_turns WHERE id IN (1, 2)")
+        )
+        connection.execute(sa.text("DELETE FROM conversation_threads WHERE id = 1"))
+        assert deleted_turns.rowcount == 2
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM agent_runs")) == 0
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM conversation_turns")) == 0
 
         migration.downgrade()
         inspector = sa.inspect(connection)
@@ -764,7 +854,7 @@ def test_run_revision_stage_checkpoint_sqlite_upgrade_downgrade_reupgrade(
     reason="TEST_POSTGRES_URL is required for the PostgreSQL migration gate",
 )
 def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
     from uuid import uuid4
 
     from sqlalchemy.orm import Session
@@ -1019,13 +1109,198 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
                 "manual_reconciliation_required": False,
                 "finalized_at": datetime.now(UTC),
             }
-            with pytest.raises(sa.exc.IntegrityError):
-                with session.begin_nested():
-                    session.add(SkillStageCheckpoint(**(reused_values | {"input_hash": hash_a})))
-                    session.flush()
+
+            def assert_checkpoint_rejected(values: dict) -> None:
+                with pytest.raises(sa.exc.IntegrityError):
+                    with session.begin_nested():
+                        session.add(SkillStageCheckpoint(**values))
+                        session.flush()
+
+            def reused_from(
+                source_checkpoint: SkillStageCheckpoint,
+                *,
+                stage_revision: int = 1,
+                **overrides,
+            ) -> dict:
+                values = reused_values | {
+                    "step_key": source_checkpoint.step_key,
+                    "stage_revision": stage_revision,
+                    "stage_contract_hash": source_checkpoint.stage_contract_hash,
+                    "input_snapshot": source_checkpoint.input_snapshot,
+                    "input_hash": source_checkpoint.input_hash,
+                    "output_hash": source_checkpoint.output_hash,
+                    "source_stage_checkpoint_id": source_checkpoint.id,
+                    "source_artifact_refs": source_checkpoint.source_artifact_refs,
+                    "evidence_refs": source_checkpoint.evidence_refs,
+                    "reuse_policy": source_checkpoint.reuse_policy,
+                    "data_watermark_hash": source_checkpoint.data_watermark_hash,
+                    "freshness_expires_at": source_checkpoint.freshness_expires_at,
+                    "side_effect_level": source_checkpoint.side_effect_level,
+                    "manual_reconciliation_required": (
+                        source_checkpoint.manual_reconciliation_required
+                    ),
+                }
+                values.update(overrides)
+                return values
+
+            other_org = Org(name="other checkpoint migration org")
+            other_account = Account(
+                org_id=org.id,
+                platform=Platform.DOUYIN,
+                nickname="other checkpoint migration account",
+                status=AccountStatus.ACTIVE,
+            )
+            other_task = BrainTask(
+                org_id=org.id,
+                created_by_id=user.id,
+                title="other checkpoint migration task",
+                type=BrainTaskType.CONTENT_CREATION,
+                status=BrainTaskStatus.RUNNING,
+            )
+            other_thread = ConversationThread(
+                org_id=org.id,
+                created_by_id=user.id,
+                account_id=account.id,
+                title="other checkpoint migration thread",
+            )
+            session.add_all([other_org, other_account, other_task, other_thread])
+            session.flush()
+
+            for overrides in (
+                {"org_id": other_org.id},
+                {"account_id": other_account.id},
+                {"task_id": other_task.id},
+                {"thread_id": other_thread.id},
+                {"source_stage_checkpoint_id": 9_999_999},
+                {"input_hash": hash_a},
+            ):
+                assert_checkpoint_rejected(
+                    reused_values | {"stage_revision": 2} | overrides
+                )
+
+            completed_values = {
+                "org_id": org.id,
+                "account_id": account.id,
+                "thread_id": thread.id,
+                "turn_id": source_turn.id,
+                "task_id": task.id,
+                "run_id": source_run.id,
+                "skill_run_id": source_skill.id,
+                "step_key": "missing_output",
+                "stage_revision": 1,
+                "status": "completed",
+                "skill_code": "operation_iteration",
+                "skill_version": 1,
+                "dependency_graph_version": "operation-loop/v1",
+                "stage_contract_hash": hash_a,
+                "input_snapshot": {"schema_version": 1, "data": {}},
+                "input_hash": hash_b,
+                "output_snapshot": None,
+                "output_hash": hash_c,
+                "source_artifact_refs": [],
+                "evidence_refs": [],
+                "reuse_policy": "immutable",
+                "side_effect_level": "none",
+                "manual_reconciliation_required": False,
+                "finalized_at": datetime.now(UTC),
+            }
+            assert_checkpoint_rejected(completed_values)
+            assert_checkpoint_rejected(
+                reused_values
+                | {
+                    "stage_revision": 2,
+                    "output_snapshot": {"schema_version": 1, "data": {}},
+                }
+            )
+
+            expires_at = datetime.now(UTC) + timedelta(hours=1)
+            freshness_source = SkillStageCheckpoint(
+                **(
+                    completed_values
+                    | {
+                        "step_key": "freshness_step",
+                        "output_snapshot": {"schema_version": 1, "data": {}},
+                        "reuse_policy": "freshness_bound",
+                        "data_watermark_hash": hash_a,
+                        "freshness_expires_at": expires_at,
+                    }
+                )
+            )
+            never_source = SkillStageCheckpoint(
+                **(
+                    completed_values
+                    | {
+                        "step_key": "never_step",
+                        "output_snapshot": {"schema_version": 1, "data": {}},
+                        "reuse_policy": "never",
+                    }
+                )
+            )
+            non_idempotent_source = SkillStageCheckpoint(
+                **(
+                    completed_values
+                    | {
+                        "step_key": "non_idempotent_step",
+                        "output_snapshot": {"schema_version": 1, "data": {}},
+                        "reuse_policy": "never",
+                        "side_effect_level": "non_idempotent_write",
+                    }
+                )
+            )
+            manual_source = SkillStageCheckpoint(
+                **(
+                    completed_values
+                    | {
+                        "step_key": "manual_step",
+                        "output_snapshot": {"schema_version": 1, "data": {}},
+                        "reuse_policy": "never",
+                        "manual_reconciliation_required": True,
+                    }
+                )
+            )
+            session.add_all(
+                [
+                    freshness_source,
+                    never_source,
+                    non_idempotent_source,
+                    manual_source,
+                ]
+            )
+            session.flush()
+
+            freshness_values = reused_from(
+                freshness_source,
+                freshness_validated_at=datetime.now(UTC),
+            )
+            assert_checkpoint_rejected(
+                freshness_values | {"data_watermark_hash": hash_b}
+            )
+            assert_checkpoint_rejected(
+                freshness_values
+                | {"freshness_expires_at": expires_at + timedelta(seconds=1)}
+            )
+            assert_checkpoint_rejected(
+                freshness_values
+                | {"freshness_validated_at": expires_at + timedelta(seconds=1)}
+            )
+            for unsafe_source in (
+                never_source,
+                non_idempotent_source,
+                manual_source,
+            ):
+                assert_checkpoint_rejected(reused_from(unsafe_source))
 
             reused = SkillStageCheckpoint(**reused_values)
             session.add(reused)
+            session.flush()
+            resolved_source = session.get(
+                SkillStageCheckpoint,
+                reused.source_stage_checkpoint_id,
+            )
+            assert resolved_source is not None
+            assert resolved_source.status == "completed"
+            assert resolved_source.source_stage_checkpoint_id is None
+            assert_checkpoint_rejected(reused_from(reused, stage_revision=2))
             session.commit()
             checkpoint_id = source.id
             org_id = org.id
@@ -1083,7 +1358,10 @@ def test_run_revision_stage_checkpoint_postgres_gate(monkeypatch) -> None:
             ) == 0
             assert session.get(ConversationThread, thread_id) is None
 
-            session.execute(sa.text("DELETE FROM orgs WHERE id = :id"), {"id": org_id})
+            session.execute(
+                sa.text("DELETE FROM orgs WHERE id IN (:org_id, :other_org_id)"),
+                {"org_id": org_id, "other_org_id": other_org.id},
+            )
             session.commit()
 
         command.downgrade(config, "20260804_0300")

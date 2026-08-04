@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.exc import DatabaseError, IntegrityError
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     Account,
@@ -317,6 +317,51 @@ async def test_legal_completed_and_reused_final_facts(session, admin) -> None:
     assert reused.source_stage_checkpoint_id == completed.id
 
 
+@pytest.mark.parametrize("side", ["source", "revision"])
+@pytest.mark.asyncio
+async def test_run_revision_rejects_cross_scope_run(
+    session, admin, side: str
+) -> None:
+    await session.execute(text("PRAGMA foreign_keys=ON"))
+    scope = await _runtime_scope(session, admin, suffix=f"revision-{side}-scope")
+    other = await _runtime_scope(session, admin, suffix=f"other-{side}-scope")
+    revision = _revision(scope)
+    if side == "source":
+        revision.source_run_id = other.source_run.id
+        revision.source_skill_run_id = None
+    else:
+        revision.revision_run_id = other.revision_run.id
+        revision.revision_skill_run_id = None
+    session.add(revision)
+
+    with pytest.raises(IntegrityError):
+        await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_run_revision_rejects_revision_turn_not_targeting_selected_source(
+    session, admin
+) -> None:
+    await session.execute(text("PRAGMA foreign_keys=ON"))
+    scope = await _runtime_scope(session, admin, suffix="lineage-target")
+    other_source = await _runtime_scope(
+        session,
+        admin,
+        suffix="lineage-other-source",
+        account=scope.account,
+        thread=scope.thread,
+        task=scope.task,
+    )
+    revision = _revision(scope)
+    revision.source_turn_id = other_source.source_turn.id
+    revision.source_run_id = other_source.source_run.id
+    revision.source_skill_run_id = other_source.source_skill.id
+    session.add(revision)
+
+    with pytest.raises(IntegrityError):
+        await session.flush()
+
+
 @pytest.mark.asyncio
 async def test_reused_checkpoint_rejects_cross_account_source(session, admin) -> None:
     await session.execute(text("PRAGMA foreign_keys=ON"))
@@ -568,27 +613,12 @@ async def test_freshness_source_contract_is_fail_closed(session, admin, mismatch
 
 
 @pytest.mark.asyncio
-async def test_update_is_immutable_but_parent_thread_cascade_can_delete(session, admin) -> None:
+async def test_parent_thread_cascade_can_delete_checkpoints(session, admin) -> None:
     await session.execute(text("PRAGMA foreign_keys=ON"))
     scope = await _runtime_scope(session, admin, suffix="immutable")
     completed = _completed_checkpoint(scope)
     session.add(completed)
     await session.commit()
-    await session.execute(
-        text(
-            "CREATE TRIGGER trg_test_stage_checkpoint_no_update "
-            "BEFORE UPDATE ON skill_stage_checkpoints "
-            "BEGIN SELECT RAISE(ABORT, 'skill stage checkpoints are immutable'); END"
-        )
-    )
-    await session.commit()
-
-    with pytest.raises(DatabaseError, match="immutable"):
-        await session.execute(
-            text("UPDATE skill_stage_checkpoints SET output_hash = :value WHERE id = :id"),
-            {"value": HASH_A, "id": completed.id},
-        )
-    await session.rollback()
 
     await session.delete(scope.thread)
     await session.commit()
