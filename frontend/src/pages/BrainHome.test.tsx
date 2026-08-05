@@ -551,7 +551,9 @@ describe("BrainHome V3 conversation projection", () => {
 
     renderBrainHome();
 
-    fireEvent.click(await screen.findByRole("button", { name: "添加能力或材料" }));
+    const launcher = await screen.findByRole("button", { name: "添加能力或材料" });
+    await waitFor(() => expect(launcher).toBeEnabled());
+    fireEvent.click(launcher);
     fireEvent.click(await screen.findByRole("menuitem", { name: /一键账号体检/ }));
 
     await waitFor(() => expect(createConversation).toHaveBeenCalledWith({ account_id: 3 }));
@@ -760,6 +762,45 @@ describe("BrainHome V3 conversation projection", () => {
     expect(optimisticArticle).toHaveAttribute("data-turn-id", "301");
   });
 
+  it("keeps the optimistic follow-up root and user alignment when the server binds the turn", async () => {
+    const request = deferred<TurnSubmission>();
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "durable-running", "生成长报告", null, "running"),
+    ]));
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+
+    renderBrainHome();
+    await screen.findByText("生成长报告");
+    fireEvent.change(screen.getByLabelText("运营大脑消息"), {
+      target: { value: "补充：突出本周异常" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "补充或排队" }));
+
+    const optimisticMessage = await screen.findByText("补充：突出本周异常");
+    const optimisticRoot = optimisticMessage.closest("article");
+    const optimisticUser = optimisticRoot?.querySelector(".tz-work-turn__user");
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+    const optimisticKey = optimisticRoot?.getAttribute("data-turn-key");
+    expect(optimisticKey).toBe(`org:1:thread:81:message:${clientMessageId}`);
+    const serverTurn = {
+      ...persistedTurn(502, "server-rebound-id", "补充：突出本周异常", null, "running"),
+      target_turn_id: 501,
+      steering_mode: "supplement" as const,
+    };
+
+    await act(async () => request.resolve(submission(serverTurn)));
+    act(() => mocks.turnEvents.handler?.(durableTurnEvent("step.started", 1, 1, 81, 502, {
+      step: "understand",
+    })));
+
+    await waitFor(() => expect(optimisticRoot).toHaveAttribute("data-turn-id", "502"));
+    expect(screen.getByText("补充：突出本周异常").closest("article")).toBe(optimisticRoot);
+    expect(optimisticRoot).toHaveAttribute("data-turn-key", optimisticKey);
+    expect(optimisticRoot?.querySelector(".tz-work-turn__user")).toBe(optimisticUser);
+    expect(optimisticUser).toHaveTextContent("补充：突出本周异常");
+  });
+
   it("does not write cache or invalidate when a delayed success belongs to another active Thread", async () => {
     const request = deferred<TurnSubmission>();
     vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
@@ -820,6 +861,33 @@ describe("BrainHome V3 conversation projection", () => {
     expect(setQueryData).toHaveBeenCalledTimes(setCalls);
     expect(invalidateQueries).toHaveBeenCalledTimes(invalidateCalls);
     expect(screen.queryByText("旧账号成功")).not.toBeInTheDocument();
+  });
+
+  it("does not show or restore a pending follow-up from account A after switching to account B", async () => {
+    const request = deferred<TurnSubmission>();
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "account-a-running", "账号 A 正在执行", null, "running"),
+    ]));
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+
+    renderBrainHome();
+    await screen.findByText("账号 A 正在执行");
+    fireEvent.change(screen.getByLabelText("运营大脑消息"), {
+      target: { value: "账号 A 的补充要求" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "补充或排队" }));
+    await screen.findByText("账号 A 的补充要求");
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
+    await waitFor(() => expect(screen.queryByText("账号 A 的补充要求")).not.toBeInTheDocument());
+
+    await act(async () => request.reject(new Error("account A request failed")));
+
+    await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
+    expect(screen.queryByText("账号 A 的补充要求")).not.toBeInTheDocument();
   });
 
   it("preserves streamed text when a delayed stale conversation response reconciles", async () => {
@@ -1656,23 +1724,54 @@ describe("BrainHome V3 conversation projection", () => {
       .toBe(vi.mocked(resolveTurnInterrupt).mock.calls[0][0].idempotencyKey);
   });
 
-  it("uses a durable active Turn to disable input and stop after reload", async () => {
+  it("sends a follow-up against the latest active turn without disabling input", async () => {
+    const request = deferred<TurnSubmission>();
     saveThread(3, 81);
     vi.mocked(getConversation).mockResolvedValue(thread(81, [
-      persistedTurn(501, "durable-running", "生成长报告", null, "running"),
+      persistedTurn(502, "durable-running", "生成长报告", null, "running"),
     ]));
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
 
     renderBrainHome();
 
     expect(await screen.findByText("生成长报告")).toBeInTheDocument();
-    expect(screen.getByLabelText("运营大脑消息")).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "停止当前任务" }));
-    await waitFor(() => expect(stopConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
-      threadId: 81,
-      turnId: 501,
-      idempotencyKey: expect.stringContaining("stop-81-501-"),
-    })));
-    expect(stopBrainGeneration).not.toHaveBeenCalled();
+    const input = screen.getByLabelText("运营大脑消息");
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "补充：不要生成长期策略" } });
+    fireEvent.click(screen.getByRole("button", { name: "补充或排队" }));
+
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(
+      81,
+      expect.objectContaining({ target_turn_id: 502 }),
+    ));
+  });
+
+  it("renders retry inside the failed work turn and does not append a global regenerate action", async () => {
+    const request = deferred<TurnSubmission>();
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "failed-turn", "重新诊断账号", "诊断未完成", "failed"),
+    ]));
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+
+    renderBrainHome();
+
+    const failedTurnRoot = (await screen.findByText("重新诊断账号")).closest("article");
+    expect(failedTurnRoot).not.toBeNull();
+    const retry = within(failedTurnRoot as HTMLElement).getByRole("button", {
+      name: "重试未完成部分",
+    });
+    expect(retry).toBeVisible();
+    expect(screen.queryByRole("button", { name: "重新生成" })).not.toBeInTheDocument();
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(
+      81,
+      expect.objectContaining({
+        message: "重新诊断账号",
+        target_turn_id: 501,
+      }),
+    ));
   });
 
   it("stops the newest active persisted Turn and never an older active Turn", async () => {
@@ -1692,6 +1791,21 @@ describe("BrainHome V3 conversation projection", () => {
     })));
     expect(stopConversationTurn).not.toHaveBeenCalledWith(expect.objectContaining({ turnId: 501 }));
     expect(stopBrainGeneration).not.toHaveBeenCalled();
+  });
+
+  it("disables the stop action while its active-turn mutation is pending", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(501, "durable-running", "生成长报告", null, "running"),
+    ]));
+    vi.mocked(stopConversationTurn).mockReturnValue(new Promise(() => undefined));
+
+    renderBrainHome();
+
+    const stop = await screen.findByRole("button", { name: "停止当前任务" });
+    fireEvent.click(stop);
+    await waitFor(() => expect(stopConversationTurn).toHaveBeenCalledTimes(1));
+    expect(stop).toBeDisabled();
   });
 
   it("never restores the removed legacy Task runtime even when stale local storage exists", async () => {

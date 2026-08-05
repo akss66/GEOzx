@@ -141,6 +141,43 @@ describe("TurnStream", () => {
     expect(root).toHaveAttribute("data-turn-key", "org:1:thread:81:message:optimistic-1");
   });
 
+  it.each([
+    ["failed", "重试未完成部分"],
+    ["dead_letter", "重试未完成部分"],
+    ["blocked", "查看如何继续"],
+    ["cancelled", "重新开始本轮"],
+    ["stopped", "重新开始本轮"],
+  ])("renders the %s recovery action inside its source work-turn", (status, label) => {
+    const onRetryTurn = vi.fn();
+    const failedTurn = { ...thread.turns[0], status, projections: [] };
+    render(<TurnStream
+      thread={{ ...thread, turns: [failedTurn] }}
+      onRetryTurn={onRetryTurn}
+    />);
+
+    const root = screen.getByTestId("work-turn");
+    fireEvent.click(within(root).getByRole("button", { name: label }));
+
+    expect(onRetryTurn).toHaveBeenCalledWith(failedTurn);
+  });
+
+  it.each(["queued", "running", "completed", "waiting_permission"])(
+    "does not render a recovery action for a %s work-turn",
+    (status) => {
+      render(<TurnStream
+        thread={{
+          ...thread,
+          turns: [{ ...thread.turns[0], status, projections: [] }],
+        }}
+        onRetryTurn={vi.fn()}
+      />);
+
+      expect(screen.queryByRole("button", { name: "重试未完成部分" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "查看如何继续" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "重新开始本轮" })).not.toBeInTheDocument();
+    },
+  );
+
   it("keeps experts out of chat and renders technical details only after both disclosures open", () => {
     render(<TurnStream thread={{
       ...thread,

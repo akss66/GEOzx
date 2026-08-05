@@ -1339,6 +1339,14 @@
   border-top: 1px solid var(--tz-line-subtle);
 }
 
+.tz-work-turn__recovery .ant-btn {
+  width: fit-content;
+  justify-self: start;
+  padding-inline: 0;
+  color: var(--tz-ink);
+  font-weight: 650;
+}
+
 @media (max-width: 760px) {
   .tz-brain-toolbar,
   .tz-brain-empty-actions {

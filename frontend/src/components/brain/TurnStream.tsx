@@ -29,6 +29,7 @@ export function TurnStream({
   artifactRefreshKey = 0,
   revisionArtifacts = {},
   sourceArtifactOverrides = {},
+  onRetryTurn,
 }: {
   thread: ConversationThread;
   approvingToolCallId?: number | null;
@@ -43,6 +44,7 @@ export function TurnStream({
   artifactRefreshKey?: number;
   revisionArtifacts?: Record<number, Artifact[]>;
   sourceArtifactOverrides?: Record<number, Artifact>;
+  onRetryTurn?: (turn: ConversationTurn) => void;
 }) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
@@ -71,12 +73,14 @@ export function TurnStream({
             })}
             businessActions={renderBusinessActions({
               turn,
+              recoveryStatus: view.status,
               approvingToolCallId,
               approvalComment,
               onApprovalCommentChange,
               onApprove,
               resolvingInterruptId,
               onResolveInterrupt,
+              onRetryTurn,
             })}
           />
         );
@@ -133,20 +137,24 @@ function renderDeliverables({
 
 function renderBusinessActions({
   turn,
+  recoveryStatus,
   approvingToolCallId,
   approvalComment,
   onApprovalCommentChange,
   onApprove,
   resolvingInterruptId,
   onResolveInterrupt,
+  onRetryTurn,
 }: {
   turn: ConversationTurn;
+  recoveryStatus: string;
   approvingToolCallId: number | null;
   approvalComment: string;
   onApprovalCommentChange?: (value: string) => void;
   onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   resolvingInterruptId: number | null;
   onResolveInterrupt?: (interrupt: TurnInterrupt, resolution: Record<string, unknown>) => void;
+  onRetryTurn?: (turn: ConversationTurn) => void;
 }) {
   const interrupt = turn.pending_interrupt?.status === "pending"
     ? turn.pending_interrupt
@@ -154,6 +162,7 @@ function renderBusinessActions({
   const projections = projectionsForTurn(turn);
   const approval = projections.find((projection) => projection.type === "approval");
   const blocked = projections.find((projection) => projection.type === "execution_blocked");
+  const recoveryLabel = recoveryActionLabel(recoveryStatus);
 
   return (
     <>
@@ -175,8 +184,20 @@ function renderBusinessActions({
       {blocked?.type === "execution_blocked" ? (
         <p>本次执行需要处理。{blocked.recovery_action ? ` ${blocked.recovery_action}` : ""}</p>
       ) : null}
+      {recoveryLabel && onRetryTurn ? (
+        <section className="tz-work-turn__recovery" aria-label="恢复操作">
+          <Button type="text" onClick={() => onRetryTurn(turn)}>{recoveryLabel}</Button>
+        </section>
+      ) : null}
     </>
   );
+}
+
+function recoveryActionLabel(status: string) {
+  if (status === "failed") return "重试未完成部分";
+  if (status === "blocked") return "查看如何继续";
+  if (status === "cancelled") return "重新开始本轮";
+  return null;
 }
 
 function InterruptAction({

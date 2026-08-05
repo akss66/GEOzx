@@ -2,7 +2,6 @@ import {
   DownOutlined,
   HistoryOutlined,
   PlusOutlined,
-  RedoOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App as AntApp, Button, Tag } from "antd";
@@ -565,12 +564,14 @@ export default function BrainHome() {
       clientMessageId,
       requestedSkillCode,
       attachmentIds,
+      targetTurnId,
     }: {
       threadId: number;
       content: string;
       clientMessageId: string;
       requestedSkillCode: string | null;
       attachmentIds: number[];
+      targetTurnId?: number | null;
       accountId: number;
     }) => sendConversationTurn(
       threadId,
@@ -578,11 +579,13 @@ export default function BrainHome() {
         ? {
             client_message_id: clientMessageId,
             message: content,
+            target_turn_id: targetTurnId ?? null,
             attachment_ids: attachmentIds,
           }
         : {
             client_message_id: clientMessageId,
             message: content,
+            target_turn_id: targetTurnId ?? null,
             requested_skill_code: requestedSkillCode,
             execution_preference: "AUTO",
             attachment_ids: attachmentIds,
@@ -602,7 +605,7 @@ export default function BrainHome() {
         ["brain-conversation", variables.threadId],
         (current) => {
           if (!current) return current;
-          const clientMessageId = submission.turn.client_message_id || variables.clientMessageId;
+          const clientMessageId = variables.clientMessageId;
           const merged = mergeConversationTurn(current, {
             ...submission.turn,
             client_message_id: clientMessageId,
@@ -625,7 +628,7 @@ export default function BrainHome() {
         pendingClientMessageId.current = null;
         return;
       }
-      const clientMessageId = submission.run.client_message_id || variables.clientMessageId;
+      const clientMessageId = variables.clientMessageId;
       const taskId = submission.task_id ?? submission.run.task_id;
       setPendingTurn((current) =>
         current?.clientMessageId === variables.clientMessageId
@@ -862,10 +865,12 @@ export default function BrainHome() {
     content,
     requestedSkillCode,
     attachmentIds,
+    targetTurnId,
   }: {
     content: string;
     requestedSkillCode: string | null;
     attachmentIds?: number[];
+    targetTurnId?: number | null;
   }) => {
     const account = effectiveAccount;
     if (!account) return;
@@ -935,6 +940,7 @@ export default function BrainHome() {
       content,
       clientMessageId: request.clientMessageId,
       requestedSkillCode,
+      targetTurnId,
       attachmentIds: attachmentIds ?? draftAttachments
         .filter((item) => item.status === "ready" && item.id != null)
         .map((item) => item.id as number),
@@ -1040,7 +1046,7 @@ export default function BrainHome() {
   }, []);
 
   const startWorkflow = async () => {
-    if (launcherRequestInFlight.current || isGenerating) return;
+    if (launcherRequestInFlight.current) return;
     const content = goal.trim();
     if (!content) {
       message.warning("先写下要交给运营大脑的运营目标");
@@ -1061,8 +1067,9 @@ export default function BrainHome() {
     launcherRequestInFlight.current = true;
     setLauncherPending(true);
     setGoal("");
+    const targetTurnId = activeTurn?.id ?? null;
     try {
-      await submitTurn({ content, requestedSkillCode: null });
+      await submitTurn({ content, requestedSkillCode: null, targetTurnId });
     } catch {
       // submitTurn restores the captured goal only if its original scope remains active.
     } finally {
@@ -1106,11 +1113,25 @@ export default function BrainHome() {
     submitTurn,
   ]);
 
-  const regenerateLastTurn = () => {
-    const sourceMessage = activeConversation?.turns.at(-1)?.user_input.trim();
-    if (!sourceMessage || isGenerating) return;
-    void submitTurn({ content: sourceMessage, requestedSkillCode: null });
-  };
+  const retryTurn = useCallback(async (turn: ConversationTurn) => {
+    if (launcherRequestInFlight.current || turn.id == null) return;
+    const content = turn.user_input.trim();
+    if (!content || !effectiveAccount || !accountReady) return;
+    launcherRequestInFlight.current = true;
+    setLauncherPending(true);
+    try {
+      await submitTurn({
+        content,
+        requestedSkillCode: null,
+        targetTurnId: turn.id,
+      });
+    } catch {
+      // submitTurn owns scoped draft recovery and user-facing error feedback.
+    } finally {
+      launcherRequestInFlight.current = false;
+      setLauncherPending(false);
+    }
+  }, [accountReady, effectiveAccount, submitTurn]);
 
   const resetConversation = () => {
     if (effectiveAccount) {
@@ -1506,17 +1527,8 @@ export default function BrainHome() {
                       })
                     }
                     onArtifactAction={(action) => handleArtifactAction(action, deliverableActionMutation.mutate)}
+                    onRetryTurn={(turn) => void retryTurn(turn)}
                   />
-                  {!isGenerating && !pendingPermission ? (
-                    <Button
-                      aria-label="重新生成"
-                      icon={<RedoOutlined />}
-                      type="text"
-                      onClick={regenerateLastTurn}
-                    >
-                      重新生成
-                    </Button>
-                  ) : null}
                 </>
               ) : activeConversationThreadId != null ? (
                 <div className="tz-turn-stream" aria-live="polite">
@@ -1545,7 +1557,7 @@ export default function BrainHome() {
             {workspaceMode === "conversation" ? (
               <BrainComposer
                 value={goal}
-                disabled={isGenerating}
+                disabled={effectiveAccount == null || !accountReady || launcherPending}
                 loading={isGenerating}
                 skills={composerSkillsQuery.data ?? []}
                 onSelectSkill={launchComposerSkill}
@@ -1568,7 +1580,7 @@ export default function BrainHome() {
                   approveMutation.mutate({ toolCallId, approved, comment })
                 }
                 onSubmit={startWorkflow}
-                onStop={() => {
+                onStop={activeTurn != null && !stopMutation.isPending ? () => {
                   if (!activeTurn || stopMutation.isPending) return;
                   if (activeTurn.id != null) {
                     stopMutation.mutate({
@@ -1588,7 +1600,7 @@ export default function BrainHome() {
                         ? pendingTurn.taskId
                         : null,
                   });
-                }}
+                } : undefined}
               />
             ) : null}
           </div>
