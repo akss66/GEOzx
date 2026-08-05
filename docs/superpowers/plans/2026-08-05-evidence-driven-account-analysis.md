@@ -586,14 +586,14 @@ if definition.code == "account_data_analysis":
 
 Execution order:
 
-1. emit “正在确认数据范围”;  
-2. execute/persist `account.metrics_analysis`;  
-3. emit the actual observed period and data-quality summary;  
-4. if `insufficient`, build a deterministic answer without expert invocation;  
-5. otherwise call only `06-operator` with facts, answerability, limits, question, and a prohibition on altering deterministic fields;  
-6. replace expert-supplied facts/evidence with Tool-owned facts/evidence before validation;  
-7. reject interpretation statements whose numeric tokens or metric direction disagree with facts;  
-8. run Critic once, allow one expert redo only for expression/recommendation quality;  
+1. emit “正在确认数据范围”;
+2. execute/persist `account.metrics_analysis`;
+3. emit the actual observed period and data-quality summary;
+4. if `insufficient`, build a deterministic answer without expert invocation;
+5. otherwise call only `06-operator` with facts, answerability, limits, question, and a prohibition on altering deterministic fields;
+6. replace expert-supplied facts/evidence with Tool-owned facts/evidence before validation;
+7. reject interpretation statements whose numeric tokens or metric direction disagree with facts;
+8. run Critic once, allow one expert redo only for expression/recommendation quality;
 9. persist one artifact and complete all terminal states in one transaction boundary.
 
 - [ ] **Step 4: Verify focused runtime and regression suites**
