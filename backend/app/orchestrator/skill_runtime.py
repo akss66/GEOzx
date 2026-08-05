@@ -46,7 +46,7 @@ from app.models.enums import (
     DeliverableStatus,
     DeliverableType,
 )
-from app.orchestrator.agent_harness import agent_harness
+from app.orchestrator.agent_harness import AgentHarnessError, agent_harness
 from app.orchestrator.ai_coo_critic import (
     CriticDisposition,
     ai_coo_critic_service,
@@ -1857,29 +1857,64 @@ class SkillRuntime:
                     attempt=attempt,
                 )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            latest_result = await self._harness.execute(
-                session,
-                user=user,
-                task=task,
-                code=AgentCode.OPERATOR,
-                purpose="按质量审核意见修订账号体检建议，不得编造数据。",
-                evidence_refs=[_evidence_label(item) for item in evidence_refs],
-                run_id=run.id,
-                skill_run_id=skill_run.id,
-                thread_id=thread.id,
-                turn_id=turn.id,
-                step_key=(f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"),
-                attempt=iteration + 1,
-                upstream={
-                    "tool_results": {"items": tool_packet},
-                    "critic": {
-                        "issues": review.issues,
-                        "suggestions": review.suggestions,
+            try:
+                latest_result = await self._harness.execute(
+                    session,
+                    user=user,
+                    task=task,
+                    code=AgentCode.OPERATOR,
+                    purpose="按质量审核意见修订账号体检建议，不得编造数据。",
+                    evidence_refs=[_evidence_label(item) for item in evidence_refs],
+                    run_id=run.id,
+                    skill_run_id=skill_run.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    step_key=(
+                        f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"
+                    ),
+                    attempt=iteration + 1,
+                    upstream={
+                        "tool_results": {"items": tool_packet},
+                        "critic": {
+                            "issues": review.issues,
+                            "suggestions": review.suggestions,
+                        },
                     },
-                },
-                scope=scope,
-                trace_only=True,
-            )
+                    scope=scope,
+                    trace_only=True,
+                )
+            except AgentHarnessError as exc:
+                log.warning(
+                    "Account-inspection critic revision failed; delivering the "
+                    "last evidence-backed report for human review: %s",
+                    exc,
+                )
+                await _complete_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="quality_review",
+                    attempt=attempt,
+                    commit=True,
+                )
+                await _start_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="prepare_deliverable",
+                    attempt=attempt,
+                )
+                return await self._complete_for_human_review(
+                    session,
+                    skill_run=skill_run,
+                    task=task,
+                    content=content,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    report=report,
+                    scope=scope,
+                    producer=latest_result.invocation,
+                    attempt=attempt,
+                )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             await self._attach_expert_provenance(
                 session,

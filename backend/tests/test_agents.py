@@ -253,6 +253,22 @@ async def test_llm_agent_retries_on_bad_then_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_restarts_compactly_after_truncated_json():
+    import json
+
+    truncated = '{"account_persona":"x","target_audience":"' + ("y" * 5000)
+    gw = FakeGateway([truncated, json.dumps(_VALID)])
+    agent = _PositioningAgent(llm=gw)
+
+    result = await agent.run(None, 1, AgentContext(content_item_id=1))
+
+    assert result.account_persona == "硬核数码测评"
+    assert gw.calls == 2
+    assert "疑似被截断" in gw.messages[1][-1]["content"]
+    assert all(message["content"] != truncated for message in gw.messages[1])
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_raises_after_exhausting_retries():
     # 始终返回结构不符的 JSON（缺字段）→ 重试用尽后抛错
     gw = FakeGateway(['{"account_persona": "x"}'])

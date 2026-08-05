@@ -66,6 +66,11 @@ def extract_json(text: str) -> dict:
     return value
 
 
+def _looks_like_truncated_json(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("{") and not stripped.endswith("}")
+
+
 class LLMAgent(BaseAgent):
     """调 LLMGateway 的通用 Agent：system prompt + 上游输入 → JSON → schema 校验。
 
@@ -328,9 +333,21 @@ class LLMAgent(BaseAgent):
         ]
 
         last_err: str | None = None
+        last_was_truncated = False
         for _attempt in range(self.max_retries + 1):
             if last_err is not None:
-                retry_msg = f"上次输出校验失败：{last_err}\n请修正后重新输出唯一 JSON 对象。"
+                if last_was_truncated:
+                    retry_msg = (
+                        f"上次输出校验失败：{last_err}\n"
+                        "输出疑似被截断。请从头重新输出完整、精简的 JSON 对象，"
+                        "不要续写上次内容；每个列表最多保留 5 项，每项只写一句，"
+                        "总正文控制在 3000 字以内。"
+                    )
+                else:
+                    retry_msg = (
+                        f"上次输出校验失败：{last_err}\n"
+                        "请修正后重新输出唯一 JSON 对象。"
+                    )
                 messages.append({"role": "user", "content": retry_msg})
             scope = {
                 key: value
@@ -365,6 +382,8 @@ class LLMAgent(BaseAgent):
                 return validate_payload(self.output_type, data)
             except (ValueError, ValidationError) as exc:
                 last_err = str(exc)
-                messages.append({"role": "assistant", "content": result.content})
+                last_was_truncated = _looks_like_truncated_json(result.content)
+                if not last_was_truncated:
+                    messages.append({"role": "assistant", "content": result.content})
 
         raise ValueError(f"[{self.code}] 输出经 {self.max_retries + 1} 次仍未通过校验：{last_err}")

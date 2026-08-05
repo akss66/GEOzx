@@ -32,6 +32,7 @@ from app.models.enums import (
     Platform,
     UserRole,
 )
+from app.orchestrator.agent_harness import AgentHarnessError
 from app.orchestrator.skill_runtime import SkillExecutionResult, SkillRuntime
 from app.orchestrator.skills.account_inspection import (
     ACCOUNT_INSPECTION_SKILL,
@@ -223,6 +224,14 @@ class _RevisionHarness(_FakeHarness):
                 ],
             }
         return result
+
+
+class _FailingRevisionHarness(_FakeHarness):
+    async def execute(self, *args, **kwargs):
+        if kwargs["code"] is AgentCode.OPERATOR and kwargs["attempt"] > 0:
+            self.calls.append(kwargs["code"])
+            raise AgentHarnessError("operator revision returned truncated JSON")
+        return await super().execute(*args, **kwargs)
 
 
 class _PassingCritic:
@@ -640,6 +649,48 @@ async def test_account_inspection_critic_retry_budget_delivers_for_human_review(
     )
     assert latest_quality is not None
     assert latest_quality.deliverable_id == deliverable.id
+    assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_revision_failure_delivers_for_human_review(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-revision-failed"
+    )
+    critic = _PassingCritic([False])
+    harness = _FailingRevisionHarness()
+    runtime = SkillRuntime(
+        tool_executor=_FakeTools(sufficient=True),
+        harness=harness,
+        critic=critic,
+    )
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+        days=30,
+    )
+
+    assert result.status == "needs_review"
+    assert result.error_code is None
+    assert result.artifact_id is not None
+    assert result.report["critic"]["passed"] is False
+    assert "人工确认" in result.response
+    assert critic.calls == 1
+    assert harness.calls == [
+        AgentCode.POSITIONING,
+        AgentCode.CONTENT_DIRECTOR,
+        AgentCode.OPERATOR,
+        AgentCode.OPERATOR,
+    ]
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
     assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
 
 
