@@ -80,8 +80,16 @@ export function mergeConversationTurn(
 
   const current = thread.turns[index];
   const incomingIsTerminal = isTerminalConversationTurnStatus(incoming.status);
+  const overlayTerminalStatus = current.runtime_overlay?.terminalStatus;
+  const currentTerminalStatus = isTerminalConversationTurnStatus(current.status)
+    ? current.status
+    : overlayTerminalStatus != null && isTerminalConversationTurnStatus(overlayTerminalStatus)
+      ? overlayTerminalStatus
+      : null;
+  const preserveTerminalResult = !incomingIsTerminal && currentTerminalStatus != null;
   const preserveRuntimeOverlay = !incomingIsTerminal && (
-    current.stream_state != null
+    preserveTerminalResult
+    || current.stream_state != null
     || (
       current.id != null
       && current.status !== "queued"
@@ -92,8 +100,10 @@ export function mergeConversationTurn(
     ? {
         ...incoming,
         client_message_id: incoming.client_message_id ?? current.client_message_id,
-        assistant_response: current.assistant_response ?? incoming.assistant_response,
-        status: current.status,
+        assistant_response: preserveTerminalResult
+          ? current.assistant_response
+          : current.assistant_response ?? incoming.assistant_response,
+        status: currentTerminalStatus ?? current.status,
         stream_state: current.stream_state,
         runtime_overlay: current.runtime_overlay,
       }

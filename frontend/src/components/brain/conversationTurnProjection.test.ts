@@ -442,6 +442,67 @@ describe("conversation Turn projection", () => {
   });
 
   it.each([
+    {
+      source: "persisted status",
+      currentStatus: "completed",
+      runtimeOverlay: undefined,
+    },
+    {
+      source: "runtime overlay",
+      currentStatus: "running",
+      runtimeOverlay: {
+        lastEventId: 8,
+        lastSequence: 8,
+        terminalStatus: "completed",
+        steps: {},
+        deliverableIds: [],
+      },
+    },
+  ])("keeps a terminal result from $source when recovery returns a stale running snapshot", ({
+    currentStatus,
+    runtimeOverlay,
+  }) => {
+    const current: ConversationThread = {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        id: 101,
+        status: currentStatus,
+        assistant_response: "authoritative final answer",
+        runtime_overlay: runtimeOverlay,
+      }],
+    };
+    const reconciled = reconcileConversationThread(current, {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        id: 101,
+        status: "running",
+        assistant_response: "stale partial answer",
+      }],
+    });
+
+    expect(reconciled.turns[0]).toMatchObject({
+      status: "completed",
+      assistant_response: "authoritative final answer",
+    });
+
+    const terminalReconciled = reconcileConversationThread(reconciled, {
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        id: 101,
+        status: "failed",
+        assistant_response: "newer terminal answer",
+      }],
+    });
+    expect(terminalReconciled.turns[0]).toMatchObject({
+      status: "failed",
+      assistant_response: "newer terminal answer",
+    });
+  });
+
+  it.each([
     "claimed",
     "waiting_predecessor",
     "queued",

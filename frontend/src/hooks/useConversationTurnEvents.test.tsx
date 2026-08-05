@@ -113,12 +113,13 @@ describe("useConversationTurnEvents", () => {
     expect(onEvent).toHaveBeenNthCalledWith(2, event(2));
   });
 
-  it("advances the durable cursor without redelivering the same turn sequence", async () => {
+  it("advances the durable cursor without redelivering equal or lower turn sequences", async () => {
     vi.useRealTimers();
     const onEvent = vi.fn();
-    vi.mocked(listConversationEvents).mockResolvedValueOnce([event(1, 1, 10)]);
+    vi.mocked(listConversationEvents).mockResolvedValueOnce([event(1, 2, 10)]);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponse(
-      `id: 2\nevent: brain.runtime.message_delta\ndata: ${JSON.stringify(event(2, 1, 10))}\n\n`,
+      `id: 2\nevent: brain.runtime.message_delta\ndata: ${JSON.stringify(event(2, 2, 10))}\n\n`,
+      `id: 3\nevent: brain.runtime.message_delta\ndata: ${JSON.stringify(event(3, 1, 10))}\n\n`,
     )));
 
     const { result } = renderHook(() => useConversationTurnEvents({
@@ -127,9 +128,9 @@ describe("useConversationTurnEvents", () => {
       onEvent,
     }));
 
-    await waitFor(() => expect(result.current.lastEventId).toBe(2));
+    await waitFor(() => expect(result.current.lastEventId).toBe(3));
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(onEvent).toHaveBeenCalledWith(event(1, 1, 10));
+    expect(onEvent).toHaveBeenCalledWith(event(1, 2, 10));
   });
 
   it("ignores a malformed stream event from another conversation thread", async () => {
