@@ -2171,6 +2171,8 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
     client, session, admin, monkeypatch
 ) -> None:
     monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    monkeypatch.setattr(settings, "environment", "test")
+    monkeypatch.setattr(settings, "llm_deterministic_test_provider_enabled", True)
     account = await _account(session, admin, "流式普通问答账号")
     thread = await _create_thread(client, admin, account)
     realtime_events: list[tuple[str, dict]] = []
@@ -2209,9 +2211,18 @@ async def test_task_free_turn_broadcasts_incremental_response_events(
         }
     ]
     assert [event_type for event_type, _payload in response_events] == [
-        "brain.runtime.message_done"
+        "brain.runtime.message_start",
+        "brain.runtime.message_delta",
+        "brain.runtime.message_delta",
+        "brain.runtime.message_done",
     ]
-    assert response_events[0][1]["content"] == result.response
+    assert [payload["stream_seq"] for _, payload in response_events] == [0, 1, 2, 3]
+    assert "".join(
+        payload["delta"]
+        for event_type, payload in response_events
+        if event_type == "brain.runtime.message_delta"
+    ) == result.response
+    assert response_events[-1][1]["content"] == result.response
     assert all(
         payload["client_message_id"] == "task-free-stream-1"
         and payload["thread_id"] == thread["id"]
