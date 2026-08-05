@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import SkillRegistry
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
@@ -57,10 +59,62 @@ _DATA_AVAILABILITY_PATTERNS = (
     "现在账号有数据吗",
     "现在有数据了吗",
     "已经有数据了吗",
+    "数据更新到哪一天",
+    "数据更新到哪天",
+    "有哪些指标",
+    "有什么指标",
 )
 _METRIC_QUESTION_MARKERS = ("多少", "怎么样", "如何", "高吗", "低吗", "趋势")
 _OPERATION_TERMS = ("体检", "诊断", "分析", "优化", "策划", "生成", "发布", "执行", "制定")
 _ACCOUNT_INSPECTION_CODE = "account_inspection"
+_ACCOUNT_DATA_ANALYSIS_CODE = "account_data_analysis"
+_ANALYSIS_MARKERS = (
+    "分析",
+    "表现怎么样",
+    "表现如何",
+    "下降",
+    "上升",
+    "变化",
+    "趋势",
+    "异常",
+    "最差",
+    "最好",
+    "哪个指标",
+)
+_ANALYSIS_CONTEXT = (
+    "账号",
+    "账户",
+    "数据",
+    "指标",
+    "表现",
+    "作品",
+    *_QUERY_TARGETS,
+)
+_UNSUPPORTED_BENCHMARK_TERMS = ("行业平均", "行业基准", "行业水平", "大盘平均")
+_ALLOWED_NEGATED_OUTPUTS = (
+    "不要生成长期策略",
+    "不生成长期策略",
+    "不要生成策略",
+    "不生成策略",
+    "无需生成策略",
+    "不用生成策略",
+)
+_ANALYSIS_DAY_PATTERN = re.compile(r"(?:最近|近|过去)?(?P<value>\d{1,3})天")
+_ANALYSIS_TOP_N_PATTERN = re.compile(r"(?:最差|最好).{0,8}?(?P<value>\d{1,2})条")
+_METRIC_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("play", ("播放量", "播放")),
+    ("exposure", ("曝光量", "曝光")),
+    ("follower_delta", ("净增粉丝", "新增粉丝", "涨粉")),
+    ("follower_count", ("总粉丝量", "总粉丝", "粉丝量", "粉丝数")),
+    ("like_count", ("作品点赞", "点赞量", "点赞")),
+    ("comment_count", ("作品评论", "评论量", "评论")),
+    ("share_count", ("作品分享", "分享量", "转发量", "分享", "转发")),
+    ("completion_rate", ("完播率", "完播")),
+    ("cover_click_rate", ("封面点击率", "封面点击")),
+    ("profile_visit_count", ("主页访问量", "主页访问")),
+    ("engagement_rate", ("互动率", "互动")),
+    ("unfollow_count", ("取关粉丝", "取关")),
+)
 _FRESH_OPERATION_REQUESTS = frozenset({"结合最近数据和对标内容，规划并制作下周抖音内容"})
 _MIGRATED_OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("operation_iteration", ("运营迭代", "下一周期", "下周运营")),
@@ -95,12 +149,35 @@ def route_deterministic_request(
     if normalized in _CAPABILITY_MESSAGES:
         return _answer_route("deterministic_capability_question")
 
-    if _contains_any(normalized, _NEGATION_TERMS):
+    if _contains_blocking_negation(normalized):
         return None
     if _is_capability_question(normalized):
         return _answer_route("deterministic_capability_question")
     if _is_data_availability_query(normalized):
         return _query_route("deterministic_data_availability_query")
+    if _has_only_data_query_intent(normalized) and not _is_only_data_query(normalized):
+        return None
+    if _is_unsupported_benchmark_analysis(normalized):
+        return _unsupported_benchmark_route(
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+    if _is_account_inspection(normalized):
+        if _is_question(normalized):
+            return None
+        return _account_inspection_route(
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+    if _is_account_data_analysis(normalized):
+        return _published_skill_route(
+            skill_code=_ACCOUNT_DATA_ANALYSIS_CODE,
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
     if _is_metric_lookup(normalized):
         return _query_route("deterministic_metric_query")
     if _is_question(normalized):
@@ -111,12 +188,6 @@ def route_deterministic_request(
         return None
     if _is_data_query(normalized):
         return _query_route("deterministic_data_query")
-    if _is_account_inspection(normalized):
-        return _account_inspection_route(
-            platform=platform,
-            registry=registry,
-            has_account=has_account,
-        )
     if normalized in _FRESH_OPERATION_REQUESTS:
         return _published_skill_route(
             skill_code="operation_iteration",
@@ -271,6 +342,13 @@ def _contains_any(message: str, terms: tuple[str, ...]) -> bool:
     return any(term in message for term in terms)
 
 
+def _contains_blocking_negation(message: str) -> bool:
+    remaining = message
+    for phrase in _ALLOWED_NEGATED_OUTPUTS:
+        remaining = remaining.replace(phrase, "")
+    return _contains_any(remaining, _NEGATION_TERMS)
+
+
 def _is_question(message: str) -> bool:
     return message.startswith(_QUESTION_PREFIXES) or message.endswith(("吗", "么", "呢"))
 
@@ -286,6 +364,90 @@ def _is_capability_question(message: str) -> bool:
 def _is_data_availability_query(message: str) -> bool:
     compact = message.replace("我的", "").replace("我现在的", "现在")
     return any(pattern in compact for pattern in _DATA_AVAILABILITY_PATTERNS)
+
+
+def _is_account_data_analysis(message: str) -> bool:
+    if any(marker in message for marker in ("体检", "复盘", "顺便")):
+        return False
+    if any(phrase in message for phrase in ("评论分析", "互动分析", "用户反馈", "评论互动")):
+        return False
+    return _contains_any(message, _ANALYSIS_MARKERS) and _contains_any(
+        message,
+        _ANALYSIS_CONTEXT,
+    )
+
+
+def _is_unsupported_benchmark_analysis(message: str) -> bool:
+    return _contains_any(message, _UNSUPPORTED_BENCHMARK_TERMS) and (
+        _is_account_data_analysis(message) or _contains_any(message, _QUERY_TARGETS)
+    )
+
+
+def _unsupported_benchmark_route(
+    *,
+    platform: str,
+    registry: SkillRegistry,
+    has_account: bool,
+) -> TurnRouteDecision | None:
+    route = _published_skill_route(
+        skill_code=_ACCOUNT_DATA_ANALYSIS_CODE,
+        platform=platform,
+        registry=registry,
+        has_account=has_account,
+    )
+    if route is None or route.mode is TurnExecutionMode.CLARIFY:
+        return route
+    return TurnRouteDecision(
+        mode=TurnExecutionMode.CLARIFY,
+        intent=_ACCOUNT_DATA_ANALYSIS_CODE,
+        confidence=1,
+        reason="industry_benchmark_data_is_not_available",
+        skill_code=_ACCOUNT_DATA_ANALYSIS_CODE,
+        requires_account_context=True,
+        requires_operation_task=False,
+        missing_field="benchmark_data",
+        clarifying_question=(
+            "当前没有已确认的行业基准数据。你可以改为分析当前账号自身趋势，"
+            "或先导入可核验的行业对标数据。"
+        ),
+    )
+
+
+def extract_account_analysis_input(message: str) -> dict[str, object]:
+    """Extract bounded, deterministic input for the account analysis Skill."""
+
+    normalized = _normalize_message(message)
+    if not _is_account_data_analysis(normalized):
+        return {}
+    day_match = _ANALYSIS_DAY_PATTERN.search(normalized)
+    has_metric = any(alias in normalized for _, aliases in _METRIC_ALIASES for alias in aliases)
+    has_comparison_shape = any(
+        marker in normalized
+        for marker in ("表现怎么样", "表现如何", "下降", "上升", "变化", "最差", "最好", "哪个指标")
+    )
+    if day_match is None and not has_metric and not has_comparison_shape:
+        return {}
+    result: dict[str, object] = {
+        "question": message.strip(),
+        "comparison": "auto",
+    }
+    if day_match is not None:
+        days = int(day_match.group("value"))
+        if 1 <= days <= 90:
+            result["days"] = days
+    metrics = [
+        metric_code
+        for metric_code, aliases in _METRIC_ALIASES
+        if any(alias in normalized for alias in aliases)
+    ]
+    if metrics:
+        result["requested_metrics"] = metrics
+    top_n_match = _ANALYSIS_TOP_N_PATTERN.search(normalized)
+    if top_n_match is not None:
+        top_n = int(top_n_match.group("value"))
+        if 1 <= top_n <= 20:
+            result["top_n"] = top_n
+    return result
 
 
 def _is_metric_lookup(message: str) -> bool:

@@ -21,6 +21,13 @@ def test_extracts_typed_operating_constraints() -> None:
         "generate_strategy": False,
         "requested_output": "diagnosis",
     }
+    assert extract_structured_constraints("分析最近14天播放和涨粉，找最差5条作品") == {
+        "comparison": "auto",
+        "days": 14,
+        "question": "分析最近14天播放和涨粉，找最差5条作品",
+        "requested_metrics": ["play", "follower_delta"],
+        "top_n": 5,
+    }
 
 
 def test_ignores_ambiguous_or_unrelated_numbers() -> None:

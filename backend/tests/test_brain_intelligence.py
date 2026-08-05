@@ -10,6 +10,7 @@ from app.orchestrator.brain_intelligence import (
     BrainIntelligence,
     IntelligenceUnavailable,
 )
+from app.orchestrator.skills.registry import skill_registry
 
 TEST_SESSION = cast(AsyncSession, object())
 
@@ -89,6 +90,26 @@ async def test_ambiguous_goal_asks_exactly_one_question(monkeypatch):
 )
 def test_low_risk_answer_fast_path_is_fail_closed(message: str, expected: bool) -> None:
     assert BrainIntelligence().can_answer_without_classification(message) is expected
+
+
+@pytest.mark.asyncio
+async def test_analysis_request_skips_the_router_model(monkeypatch) -> None:
+    async def fake_chat(*args, **kwargs):
+        raise AssertionError("确定性数据分析路由不应调用模型")
+
+    monkeypatch.setattr("app.llm.gateway.LLMGateway.chat", fake_chat)
+
+    decision = await BrainIntelligence().classify_turn(
+        None,
+        1,
+        "最近30天账号表现怎么样？",
+        has_account=True,
+        platform="douyin",
+        registry=skill_registry,
+    )
+
+    assert decision.mode.value == "skill"
+    assert decision.skill_code == "account_data_analysis"
 
 
 @pytest.mark.asyncio

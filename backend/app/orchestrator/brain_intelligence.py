@@ -22,7 +22,11 @@ from app.llm.gateway import (
 )
 from app.models.enums import AgentCode
 from app.orchestrator.agent_identity import with_operations_brain_public_identity
-from app.orchestrator.capability_router import SkillUnavailable, route_explicit_request
+from app.orchestrator.capability_router import (
+    SkillUnavailable,
+    route_deterministic_request,
+    route_explicit_request,
+)
 from app.orchestrator.skills.public_catalog import PUBLIC_SKILL_POLICIES
 from app.orchestrator.skills.registry import SkillRegistry
 from app.prompts import prompt_registry
@@ -216,6 +220,16 @@ class BrainIntelligence:
             if route is None:
                 raise RuntimeError("explicit skill routing returned no decision")
             return route
+
+        if registry is not None:
+            deterministic_route = route_deterministic_request(
+                message,
+                platform=platform,
+                registry=registry,
+                has_account=has_account,
+            )
+            if deterministic_route is not None:
+                return deterministic_route
 
         try:
             prompt = prompt_registry.load("main-agent.intent")
@@ -570,9 +584,7 @@ async def _structured_chat(
         prompt_schema_version=prompt.spec.schema_version,
         scope={"org_id": org_id},
         budget=(
-            {"max_attempts": 1, "timeout_seconds": 8}
-            if agent_code == ROUTER_AGENT_CODE
-            else {}
+            {"max_attempts": 1, "timeout_seconds": 8} if agent_code == ROUTER_AGENT_CODE else {}
         ),
         response_format={"type": "json_object"},
     )

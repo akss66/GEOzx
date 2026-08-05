@@ -163,6 +163,103 @@ def test_deterministic_request_routes_account_inspection_to_published_skill(
 @pytest.mark.parametrize(
     "message",
     [
+        "我现在账号有数据吗？",
+        "数据更新到哪一天？",
+        "现在有哪些指标？",
+    ],
+)
+def test_presence_questions_keep_the_fast_query_route(message: str) -> None:
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.QUERY
+    assert decision.skill_code == "account_data_query"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "最近30天账号表现怎么样？",
+        "播放量从什么时候开始下降？",
+        "哪个指标变化最大？",
+        "表现最差的5条作品是什么？",
+    ],
+)
+def test_analysis_questions_route_to_typed_analysis_skill(message: str) -> None:
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == "account_data_analysis"
+
+
+def test_explicit_one_click_inspection_stays_account_inspection() -> None:
+    decision = capability_router.route_deterministic_request(
+        "给我做一次一键账号体检",
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.skill_code == "account_inspection"
+
+
+def test_analysis_without_account_requests_one_actionable_clarification() -> None:
+    decision = capability_router.route_deterministic_request(
+        "最近30天账号表现怎么样？",
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=False,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.CLARIFY
+    assert decision.skill_code == "account_data_analysis"
+    assert decision.missing_field == "account_id"
+    assert decision.clarifying_question == "请先选择需要操作的账号。"
+
+
+def test_unsupported_industry_benchmark_requests_data_clarification() -> None:
+    decision = capability_router.route_deterministic_request(
+        "分析行业平均播放量",
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.CLARIFY
+    assert decision.skill_code == "account_data_analysis"
+    assert decision.missing_field == "benchmark_data"
+
+
+def test_analysis_constraint_does_not_trigger_a_long_term_strategy_route() -> None:
+    decision = capability_router.route_deterministic_request(
+        "分析最近30天播放量，但不要生成长期策略",
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == "account_data_analysis"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
         "不要给当前账号体检",
         "只查询",
         "只查询当前账号数据，再做一次体检",

@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from app.orchestrator.capability_router import extract_account_analysis_input
 from app.schemas.attachment import AttachmentContext
 from app.schemas.capability_request import CapabilityRequest
 
@@ -26,6 +27,7 @@ def extract_structured_constraints(message: str) -> dict[str, Any]:
         return {}
 
     extracted: dict[str, Any] = {}
+    extracted.update(extract_account_analysis_input(message))
     if "只看数据" in normalized or "只查数据" in normalized:
         extracted["requested_output"] = "data"
 
