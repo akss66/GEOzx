@@ -610,6 +610,7 @@ export default function BrainHome() {
       requestedSkillCode,
       attachmentIds,
       targetTurnId,
+      startNewTurn,
     }: {
       threadId: number;
       content: string;
@@ -617,6 +618,7 @@ export default function BrainHome() {
       requestedSkillCode: string | null;
       attachmentIds: number[];
       targetTurnId?: number | null;
+      startNewTurn: boolean;
       accountId: number;
       scopeEpoch: number;
     }) => sendConversationTurn(
@@ -627,6 +629,7 @@ export default function BrainHome() {
             message: content,
             target_turn_id: targetTurnId ?? null,
             attachment_ids: attachmentIds,
+            start_new_turn: startNewTurn,
           }
         : {
             client_message_id: clientMessageId,
@@ -635,6 +638,7 @@ export default function BrainHome() {
             requested_skill_code: requestedSkillCode,
             execution_preference: "AUTO",
             attachment_ids: attachmentIds,
+            start_new_turn: startNewTurn,
           },
     ),
     onSuccess: (submission, variables) => {
@@ -922,11 +926,13 @@ export default function BrainHome() {
     requestedSkillCode,
     attachmentIds,
     targetTurnId,
+    startNewTurn = false,
   }: {
     content: string;
     requestedSkillCode: string | null;
     attachmentIds?: number[];
     targetTurnId?: number | null;
+    startNewTurn?: boolean;
   }) => {
     const account = effectiveAccount;
     if (!account) return;
@@ -997,6 +1003,7 @@ export default function BrainHome() {
       clientMessageId: request.clientMessageId,
       requestedSkillCode,
       targetTurnId,
+      startNewTurn,
       attachmentIds: attachmentIds ?? draftAttachments
         .filter((item) => item.status === "ready" && item.id != null)
         .map((item) => item.id as number),
@@ -1169,7 +1176,7 @@ export default function BrainHome() {
     submitTurn,
   ]);
 
-  const retryTurn = useCallback(async (turn: ConversationTurn) => {
+  const restartTurn = useCallback(async (turn: ConversationTurn) => {
     if (turn.id == null) return;
     const content = turn.user_input.trim();
     if (!content || !effectiveAccount || !accountReady) return;
@@ -1178,8 +1185,13 @@ export default function BrainHome() {
     try {
       await submitTurn({
         content,
-        requestedSkillCode: null,
-        targetTurnId: turn.id,
+        requestedSkillCode:
+          turn.recovery_context?.requested_skill_code
+          ?? turn.recovery_context?.routed_skill_code
+          ?? null,
+        attachmentIds: turn.recovery_context?.attachment_ids ?? [],
+        targetTurnId: null,
+        startNewTurn: true,
       });
     } catch {
       // submitTurn owns scoped draft recovery and user-facing error feedback.
@@ -1586,7 +1598,7 @@ export default function BrainHome() {
                       })
                     }
                     onArtifactAction={(action) => handleArtifactAction(action, deliverableActionMutation.mutate)}
-                    onRetryTurn={(turn) => void retryTurn(turn)}
+                    onRestartTurn={(turn) => void restartTurn(turn)}
                   />
                 </>
               ) : activeConversationThreadId != null ? (

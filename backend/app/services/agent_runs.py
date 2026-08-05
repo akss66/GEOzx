@@ -174,6 +174,7 @@ def _immutable_request_payload(value: dict) -> dict:
         "execution_preference",
         "message",
         "requested_skill_code",
+        "start_new_turn",
         "target_turn_id",
         "trusted_structured_input",
         "thread_id",

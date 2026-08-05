@@ -30,6 +30,13 @@ class CreateConversationTurnRequest(BaseModel):
     execution_preference: Literal["AUTO", "DISCUSS_ONLY", "FORMAL_TASK"] = "AUTO"
     attachment_ids: list[int] = Field(default_factory=list)
     target_turn_id: int | None = Field(default=None, gt=0, strict=True)
+    start_new_turn: bool = False
+
+    @model_validator(mode="after")
+    def validate_restart_target(self):
+        if self.start_new_turn and self.target_turn_id is not None:
+            raise ValueError("start_new_turn cannot target an existing turn")
+        return self
 
 
 class ConversationTurnIntentOut(BaseModel):
@@ -46,6 +53,16 @@ class ConversationTurnIntentOut(BaseModel):
         "system",
     ] = "model"
     skill_code: str | None = None
+
+
+class ConversationTurnRecoveryContextOut(BaseModel):
+    """Allowlisted source request fields needed for an honest new-turn restart."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested_skill_code: str | None = Field(default=None, max_length=120)
+    routed_skill_code: str | None = Field(default=None, max_length=120)
+    attachment_ids: list[int] = Field(default_factory=list)
 
 
 class ConversationExecutionExpertOut(BaseModel):
@@ -243,6 +260,7 @@ class ConversationTurnOut(BaseModel):
     steering_mode: TurnSteeringMode | None
     assistant_response: str | None
     intent: ConversationTurnIntentOut | None
+    recovery_context: ConversationTurnRecoveryContextOut | None = None
     status: str
     route_ms: int | None = Field(default=None, ge=0)
     first_token_ms: int | None = Field(default=None, ge=0)

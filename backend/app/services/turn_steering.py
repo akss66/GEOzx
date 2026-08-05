@@ -130,6 +130,9 @@ async def resolve_turn_steering(
             target_run=target_run,
         )
 
+    if request.start_new_turn:
+        return ResolvedTurnSteering(decision=_independent_decision())
+
     if request.target_turn_id is not None:
         target_turn, target_run = await _load_target_pair(
             session,

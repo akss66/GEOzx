@@ -59,6 +59,8 @@ async def prepare_conversation_turn_submission(
             "thread_id": thread.id,
             "turn_id": turn.id,
         }
+        if request.start_new_turn:
+            request_payload["start_new_turn"] = True
         if normalized_trusted_input is not None:
             request_payload["trusted_structured_input"] = normalized_trusted_input
         run, claimed = await claim_agent_run_record(

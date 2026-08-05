@@ -61,6 +61,7 @@ export async function sendConversationTurn(
       requested_skill_code: input.requested_skill_code ?? null,
       execution_preference: input.execution_preference ?? "AUTO",
       attachment_ids: input.attachment_ids ?? [],
+      start_new_turn: input.start_new_turn ?? false,
     },
   );
   return data;

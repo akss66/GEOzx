@@ -1,5 +1,6 @@
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -136,6 +137,49 @@ def test_turn_request_exposes_optional_positive_target() -> None:
     )
 
     assert request.target_turn_id == 17
+
+
+def test_new_turn_request_rejects_a_conflicting_target() -> None:
+    with pytest.raises(ValidationError):
+        CreateConversationTurnRequest(
+            client_message_id="conflicting-restart",
+            message="重新开始",
+            target_turn_id=17,
+            start_new_turn=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_new_turn_bypasses_active_turn_steering(admin) -> None:
+    class ExistingRequestOnlySession:
+        calls = 0
+
+        async def scalar(self, _statement):
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError(
+                    "an explicit new turn must not inspect or bind an active target"
+                )
+            return None
+
+    session = ExistingRequestOnlySession()
+
+    resolved = await resolve_turn_steering(
+        session,  # type: ignore[arg-type]
+        admin,
+        ConversationThread(id=7, org_id=admin.org_id, account_id=9, title="restart"),
+        CreateConversationTurnRequest(
+            client_message_id="restart-as-new-turn",
+            message="第一条不要讲价格",
+            start_new_turn=True,
+        ),
+    )
+
+    assert resolved.decision.mode is TurnSteeringMode.INDEPENDENT_QUERY
+    assert resolved.decision.target_turn_id is None
+    assert resolved.target_turn is None
+    assert resolved.target_run is None
+    assert session.calls == 1
 
 
 async def test_database_rejects_cross_thread_steering_target(session, admin) -> None:

@@ -104,6 +104,7 @@ async def _submit_turn(
     requested_skill_code: str | None = None,
     attachment_ids: list[int] | None = None,
     target_turn_id: int | None = None,
+    start_new_turn: bool = False,
 ):
     return await client.post(
         f"/brain/conversations/{thread_id}/turns",
@@ -115,8 +116,54 @@ async def _submit_turn(
             "requested_skill_code": requested_skill_code,
             "attachment_ids": attachment_ids or [],
             "target_turn_id": target_turn_id,
+            "start_new_turn": start_new_turn,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_conversation_snapshot_exposes_safe_restart_context(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "restart-context")
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="restart-source",
+        message="重新诊断账号",
+    )
+    assert submitted.status_code == 202
+    run = await session.get(AgentRun, submitted.json()["run"]["id"])
+    assert run is not None
+    run.request_payload = {
+        **run.request_payload,
+        "requested_skill_code": None,
+        "attachment_ids": [91, 92],
+    }
+    source_turn = await session.get(ConversationTurn, submitted.json()["turn"]["id"])
+    assert source_turn is not None
+    source_turn.intent = {
+        "mode": "SKILL",
+        "intent": "explicit_skill",
+        "skill_code": "account_inspection",
+    }
+    await session.commit()
+
+    response = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert response.status_code == 200
+    [turn] = response.json()["turns"]
+    assert turn["recovery_context"] == {
+        "requested_skill_code": None,
+        "routed_skill_code": "account_inspection",
+        "attachment_ids": [91, 92],
+    }
 
 
 @pytest.mark.asyncio
@@ -2826,13 +2873,58 @@ async def test_duplicate_rejects_changed_immutable_request_payload(
         message="直接执行",
         execution_preference="AUTO",
     )
+    changed_restart_semantics = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="payload-conflict-1",
+        message="只讨论方案",
+        execution_preference="AUTO",
+        start_new_turn=True,
+    )
 
     assert first.status_code == 202
     assert changed_preference.status_code == 409
     assert changed_message.status_code == 409
+    assert changed_restart_semantics.status_code == 409
     assert changed_preference.json()["detail"]["code"] == "CLIENT_MESSAGE_CONFLICT"
     assert changed_message.json()["detail"]["code"] == "CLIENT_MESSAGE_CONFLICT"
+    assert changed_restart_semantics.json()["detail"]["code"] == "CLIENT_MESSAGE_CONFLICT"
     assert await session.scalar(select(func.count(AgentRun.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_new_turn_flag_replays_a_pre_flag_request(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = await _account(session, admin, "pre-restart-flag")
+    thread = await _create_thread(client, admin, account)
+    first = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="pre-restart-flag-message",
+        message="查看账号数据",
+    )
+    assert first.status_code == 202
+    run = await session.get(AgentRun, first.json()["run"]["id"])
+    assert run is not None
+    run.request_payload = {
+        key: value for key, value in run.request_payload.items() if key != "start_new_turn"
+    }
+    await session.commit()
+
+    replay = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="pre-restart-flag-message",
+        message="查看账号数据",
+    )
+
+    assert replay.status_code == 202
+    assert replay.json()["run"]["id"] == run.id
 
 
 @pytest.mark.asyncio

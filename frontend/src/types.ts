@@ -471,6 +471,7 @@ export interface SendConversationTurnInput {
   requested_skill_code?: string | null;
   execution_preference?: ConversationExecutionPreference;
   attachment_ids?: number[];
+  start_new_turn?: boolean;
 }
 
 export interface ConversationAttachment {
@@ -787,6 +788,11 @@ export interface ConversationTurn {
     mode: string | null;
     route_source: "deterministic" | "explicit" | "model" | "recovery" | "system";
     skill_code: string | null;
+  } | null;
+  recovery_context?: {
+    requested_skill_code: string | null;
+    routed_skill_code: string | null;
+    attachment_ids: number[];
   } | null;
   status: string;
   target_turn_id?: number | null;

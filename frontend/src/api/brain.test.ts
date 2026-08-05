@@ -216,6 +216,8 @@ describe("brain api", () => {
         target_turn_id: null,
         requested_skill_code: "account_inspection",
         execution_preference: "AUTO",
+        start_new_turn: true,
+        attachment_ids: [91, 92],
       }),
     ).resolves.toEqual(submission);
     await expect(getConversation(21)).resolves.toEqual(thread);
@@ -233,7 +235,8 @@ describe("brain api", () => {
         target_turn_id: null,
         requested_skill_code: "account_inspection",
         execution_preference: "AUTO",
-        attachment_ids: [],
+        start_new_turn: true,
+        attachment_ids: [91, 92],
       },
     );
     expect(apiGet).toHaveBeenCalledWith("/brain/conversations/21");

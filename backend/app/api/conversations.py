@@ -32,6 +32,7 @@ from app.schemas.conversation import (
     ConversationThreadOut,
     ConversationThreadSummaryOut,
     ConversationTurnOut,
+    ConversationTurnRecoveryContextOut,
     CreateConversationThreadRequest,
     CreateConversationTurnRequest,
     TurnSubmissionOut,
@@ -65,6 +66,7 @@ def _turn_out(
     turn: ConversationTurn,
     projections: list[dict] | None = None,
     pending_interrupt: TurnInterrupt | None = None,
+    recovery_context: ConversationTurnRecoveryContextOut | None = None,
 ) -> ConversationTurnOut:
     return ConversationTurnOut.model_validate(
         {
@@ -78,6 +80,7 @@ def _turn_out(
             "steering_mode": turn.steering_mode,
             "assistant_response": turn.assistant_response,
             "intent": _safe_turn_intent(turn.intent),
+            "recovery_context": recovery_context,
             "status": turn.status,
             "route_ms": turn.route_ms,
             "first_token_ms": turn.first_token_ms,
@@ -120,6 +123,7 @@ async def _thread_out(
         session,
         tuple(turn.id for turn in turns),
     )
+    latest_run_by_turn = await _latest_agent_runs_by_turn(session, turns)
     projections_by_turn = await _turn_projections_by_turn(session, turns)
     return ConversationThreadOut(
         id=thread.id,
@@ -134,11 +138,60 @@ async def _thread_out(
                 turn,
                 projections_by_turn.get(turn.id, []),
                 pending_by_turn.get(turn.id),
+                _recovery_context(turn, latest_run_by_turn.get(turn.id)),
             )
             for turn in turns
         ],
         created_at=thread.created_at,
         updated_at=thread.updated_at,
+    )
+
+
+async def _latest_agent_runs_by_turn(
+    session: AsyncSession,
+    turns: list[ConversationTurn],
+) -> dict[int, AgentRun]:
+    if not turns:
+        return {}
+    rows = list(
+        await session.scalars(
+            select(AgentRun)
+            .where(AgentRun.turn_id.in_(tuple(turn.id for turn in turns)))
+            .order_by(AgentRun.turn_id, AgentRun.id.desc())
+        )
+    )
+    return _latest_by_turn(rows, lambda row: row.turn_id or 0)
+
+
+def _recovery_context(
+    turn: ConversationTurn,
+    run: AgentRun | None,
+) -> ConversationTurnRecoveryContextOut | None:
+    if run is None or not isinstance(run.request_payload, dict):
+        return None
+    raw_skill_code = run.request_payload.get("requested_skill_code")
+    requested_skill_code = (
+        raw_skill_code.strip()
+        if isinstance(raw_skill_code, str) and 0 < len(raw_skill_code.strip()) <= 120
+        else None
+    )
+    safe_intent = _safe_turn_intent(turn.intent)
+    routed_skill_code = safe_intent.skill_code if safe_intent is not None else None
+    attachment_ids: list[int] = []
+    raw_attachment_ids = run.request_payload.get("attachment_ids")
+    if isinstance(raw_attachment_ids, list):
+        for value in raw_attachment_ids:
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+                and value not in attachment_ids
+            ):
+                attachment_ids.append(value)
+    return ConversationTurnRecoveryContextOut(
+        requested_skill_code=requested_skill_code,
+        routed_skill_code=routed_skill_code,
+        attachment_ids=attachment_ids,
     )
 
 
@@ -610,7 +663,11 @@ async def submit_turn(
     await session.refresh(turn)
     await session.refresh(run)
     projections = await _turn_projections(session, turn)
-    turn_out = _turn_out(turn, projections)
+    turn_out = _turn_out(
+        turn,
+        projections,
+        recovery_context=_recovery_context(turn, run),
+    )
     return TurnSubmissionOut(
         turn=turn_out,
         run=ConversationAgentRunOut.model_validate(run),
@@ -645,8 +702,10 @@ async def get_turn(
         )
     await get_conversation_thread(session, user, turn.thread_id)
     pending = await _pending_interrupts_by_turn(session, (turn.id,))
+    latest_run_by_turn = await _latest_agent_runs_by_turn(session, [turn])
     return _turn_out(
         turn,
         await _turn_projections(session, turn),
         pending.get(turn.id),
+        _recovery_context(turn, latest_run_by_turn.get(turn.id)),
     )

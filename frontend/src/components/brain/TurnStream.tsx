@@ -1,5 +1,5 @@
 import { Button, Input } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import type {
   Artifact,
@@ -29,7 +29,7 @@ export function TurnStream({
   artifactRefreshKey = 0,
   revisionArtifacts = {},
   sourceArtifactOverrides = {},
-  onRetryTurn,
+  onRestartTurn,
 }: {
   thread: ConversationThread;
   approvingToolCallId?: number | null;
@@ -44,7 +44,7 @@ export function TurnStream({
   artifactRefreshKey?: number;
   revisionArtifacts?: Record<number, Artifact[]>;
   sourceArtifactOverrides?: Record<number, Artifact>;
-  onRetryTurn?: (turn: ConversationTurn) => void;
+  onRestartTurn?: (turn: ConversationTurn) => void;
 }) {
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
@@ -80,7 +80,7 @@ export function TurnStream({
               onApprove,
               resolvingInterruptId,
               onResolveInterrupt,
-              onRetryTurn,
+              onRestartTurn,
             })}
           />
         );
@@ -144,7 +144,7 @@ function renderBusinessActions({
   onApprove,
   resolvingInterruptId,
   onResolveInterrupt,
-  onRetryTurn,
+  onRestartTurn,
 }: {
   turn: ConversationTurn;
   recoveryStatus: string;
@@ -154,7 +154,7 @@ function renderBusinessActions({
   onApprove?: (approval: ConversationApproval, approved: boolean, comment?: string) => void;
   resolvingInterruptId: number | null;
   onResolveInterrupt?: (interrupt: TurnInterrupt, resolution: Record<string, unknown>) => void;
-  onRetryTurn?: (turn: ConversationTurn) => void;
+  onRestartTurn?: (turn: ConversationTurn) => void;
 }) {
   const interrupt = turn.pending_interrupt?.status === "pending"
     ? turn.pending_interrupt
@@ -182,11 +182,11 @@ function renderBusinessActions({
         />
       ) : null}
       {blocked?.type === "execution_blocked" ? (
-        <p>本次执行需要处理。{blocked.recovery_action ? ` ${blocked.recovery_action}` : ""}</p>
+        <BlockedRecoveryAction recoveryAction={blocked.recovery_action} />
       ) : null}
-      {recoveryLabel && onRetryTurn ? (
+      {recoveryLabel && onRestartTurn ? (
         <section className="tz-work-turn__recovery" aria-label="恢复操作">
-          <Button type="text" onClick={() => onRetryTurn(turn)}>{recoveryLabel}</Button>
+          <Button type="text" onClick={() => onRestartTurn(turn)}>{recoveryLabel}</Button>
         </section>
       ) : null}
     </>
@@ -194,10 +194,29 @@ function renderBusinessActions({
 }
 
 function recoveryActionLabel(status: string) {
-  if (status === "failed") return "重试未完成部分";
-  if (status === "blocked") return "查看如何继续";
+  if (status === "failed") return "重新开始本轮";
   if (status === "cancelled") return "重新开始本轮";
   return null;
+}
+
+function BlockedRecoveryAction({ recoveryAction }: { recoveryAction?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const guidanceId = useId();
+  const guidance = recoveryAction?.trim() || "请检查当前账号状态、权限和所需数据后再继续。";
+
+  return (
+    <section className="tz-work-turn__recovery" aria-label="恢复指引">
+      <Button
+        type="text"
+        aria-controls={guidanceId}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        查看如何继续
+      </Button>
+      {expanded ? <p id={guidanceId}>{guidance}</p> : null}
+    </section>
+  );
 }
 
 function InterruptAction({

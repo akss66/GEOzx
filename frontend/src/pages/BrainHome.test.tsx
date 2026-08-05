@@ -1865,12 +1865,17 @@ describe("BrainHome V3 conversation projection", () => {
     ));
   });
 
-  it("renders retry inside the failed work turn and does not append a global regenerate action", async () => {
+  it("restarts a failed work turn as a new turn while preserving its skill and attachments", async () => {
     const request = deferred<TurnSubmission>();
     saveThread(3, 81);
     vi.mocked(getConversation).mockResolvedValue(thread(81, [
       {
         ...persistedTurn(501, "failed-turn", "重新诊断账号", "诊断未完成", "failed"),
+        recovery_context: {
+          requested_skill_code: null,
+          routed_skill_code: "account_inspection",
+          attachment_ids: [91, 92],
+        },
         runtime_overlay: {
           lastEventId: 4,
           lastSequence: 4,
@@ -1889,10 +1894,10 @@ describe("BrainHome V3 conversation projection", () => {
 
     const failedTurnRoot = (await screen.findByText("重新诊断账号")).closest("article");
     expect(failedTurnRoot).not.toBeNull();
-    const retry = within(failedTurnRoot as HTMLElement).getByRole("button", {
-      name: "重试未完成部分",
+    const restart = within(failedTurnRoot as HTMLElement).getByRole("button", {
+      name: "重新开始本轮",
     });
-    expect(retry).toBeVisible();
+    expect(restart).toBeVisible();
     expect(screen.queryByRole("button", { name: "重新生成" })).not.toBeInTheDocument();
     expect(within(failedTurnRoot as HTMLElement).getByRole("region", { name: "已完成" }))
       .toHaveTextContent("读取账号数据");
@@ -1900,14 +1905,49 @@ describe("BrainHome V3 conversation projection", () => {
       .toHaveTextContent("质量审核");
     expect(sendConversationTurn).not.toHaveBeenCalled();
 
-    fireEvent.click(retry);
+    fireEvent.click(restart);
     await waitFor(() => expect(sendConversationTurn).toHaveBeenCalledWith(
       81,
       expect.objectContaining({
         message: "重新诊断账号",
-        target_turn_id: 501,
+        target_turn_id: null,
+        requested_skill_code: "account_inspection",
+        attachment_ids: [91, 92],
+        start_new_turn: true,
       }),
     ));
+  });
+
+  it("reveals blocked recovery guidance without submitting another turn", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [{
+      ...persistedTurn(501, "blocked-turn", "诊断账号", null, "blocked"),
+      projections: [{
+        type: "execution_blocked",
+        turn_id: 501,
+        skill_run_id: 401,
+        code: "ACCOUNT_AUTH_REQUIRED",
+        recovery_action: "请先重新授权当前抖音账号。",
+      }],
+    }]));
+
+    renderBrainHome();
+
+    const blockedTurnRoot = (await screen.findByText("诊断账号")).closest("article");
+    expect(blockedTurnRoot).not.toBeNull();
+    const guidanceButton = within(blockedTurnRoot as HTMLElement).getByRole("button", {
+      name: "查看如何继续",
+    });
+    expect(guidanceButton).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(guidanceButton);
+
+    expect(guidanceButton).toHaveAttribute("aria-expanded", "true");
+    expect(within(
+      within(blockedTurnRoot as HTMLElement).getByRole("region", { name: "恢复指引" }),
+    ).getByText("请先重新授权当前抖音账号。"))
+      .toBeVisible();
+    expect(sendConversationTurn).not.toHaveBeenCalled();
   });
 
   it("stops the newest active persisted Turn and never an older active Turn", async () => {

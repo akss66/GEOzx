@@ -159,23 +159,53 @@ describe("TurnStream", () => {
   });
 
   it.each([
-    ["failed", "重试未完成部分"],
-    ["dead_letter", "重试未完成部分"],
-    ["blocked", "查看如何继续"],
+    ["failed", "重新开始本轮"],
+    ["dead_letter", "重新开始本轮"],
     ["cancelled", "重新开始本轮"],
     ["stopped", "重新开始本轮"],
   ])("renders the %s recovery action inside its source work-turn", (status, label) => {
-    const onRetryTurn = vi.fn();
+    const onRestartTurn = vi.fn();
     const failedTurn = { ...thread.turns[0], status, projections: [] };
     render(<TurnStream
       thread={{ ...thread, turns: [failedTurn] }}
-      onRetryTurn={onRetryTurn}
+      onRestartTurn={onRestartTurn}
     />);
 
     const root = screen.getByTestId("work-turn");
     fireEvent.click(within(root).getByRole("button", { name: label }));
 
-    expect(onRetryTurn).toHaveBeenCalledWith(failedTurn);
+    expect(onRestartTurn).toHaveBeenCalledWith(failedTurn);
+  });
+
+  it("reveals blocked recovery guidance without calling the restart handler", () => {
+    const onRestartTurn = vi.fn();
+    render(<TurnStream
+      thread={{
+        ...thread,
+        turns: [{
+          ...thread.turns[0],
+          status: "blocked",
+          projections: [{
+            type: "execution_blocked",
+            turn_id: 101,
+            skill_run_id: 302,
+            code: "ACCOUNT_AUTH_REQUIRED",
+            recovery_action: "请先重新授权当前抖音账号。",
+          }],
+        }],
+      }}
+      onRestartTurn={onRestartTurn}
+    />);
+
+    const root = screen.getByTestId("work-turn");
+    const guidanceButton = within(root).getByRole("button", { name: "查看如何继续" });
+    expect(guidanceButton).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(guidanceButton);
+    expect(guidanceButton).toHaveAttribute("aria-expanded", "true");
+    expect(within(
+      within(root).getByRole("region", { name: "恢复指引" }),
+    ).getByText("请先重新授权当前抖音账号。")).toBeVisible();
+    expect(onRestartTurn).not.toHaveBeenCalled();
   });
 
   it.each(["queued", "running", "completed", "waiting_permission"])(
@@ -186,7 +216,7 @@ describe("TurnStream", () => {
           ...thread,
           turns: [{ ...thread.turns[0], status, projections: [] }],
         }}
-        onRetryTurn={vi.fn()}
+        onRestartTurn={vi.fn()}
       />);
 
       expect(screen.queryByRole("button", { name: "重试未完成部分" })).not.toBeInTheDocument();
