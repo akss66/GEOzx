@@ -213,6 +213,7 @@ describe("brain api", () => {
       sendConversationTurn(21, {
         client_message_id: "turn-1",
         message: "体检这个账号",
+        target_turn_id: null,
         requested_skill_code: "account_inspection",
         execution_preference: "AUTO",
       }),
@@ -229,12 +230,34 @@ describe("brain api", () => {
       {
         client_message_id: "turn-1",
         message: "体检这个账号",
+        target_turn_id: null,
         requested_skill_code: "account_inspection",
         execution_preference: "AUTO",
         attachment_ids: [],
       },
     );
     expect(apiGet).toHaveBeenCalledWith("/brain/conversations/21");
+  });
+
+  it("sends the active target turn for server-side steering", async () => {
+    const submission = {
+      turn: { id: 31, thread_id: 21, projections: [] },
+      run: { id: 41, thread_id: 21, turn_id: 31 },
+      task_id: null,
+      projections: [],
+    };
+    apiPost.mockResolvedValue({ data: submission });
+
+    await sendConversationTurn(21, {
+      client_message_id: "follow-up-1",
+      message: "补充：只分析最近 30 天",
+      target_turn_id: 502,
+    });
+
+    expect(apiPost).toHaveBeenCalledWith(
+      "/brain/conversations/21/turns",
+      expect.objectContaining({ target_turn_id: 502 }),
+    );
   });
 
   it("lists and permanently deletes owned conversation history", async () => {

@@ -467,6 +467,7 @@ export interface CreateConversationInput {
 export interface SendConversationTurnInput {
   client_message_id: string;
   message: string;
+  target_turn_id?: number | null;
   requested_skill_code?: string | null;
   execution_preference?: ConversationExecutionPreference;
   attachment_ids?: number[];

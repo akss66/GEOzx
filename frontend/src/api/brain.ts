@@ -57,6 +57,7 @@ export async function sendConversationTurn(
     {
       client_message_id: input.client_message_id,
       message: input.message,
+      target_turn_id: input.target_turn_id ?? null,
       requested_skill_code: input.requested_skill_code ?? null,
       execution_preference: input.execution_preference ?? "AUTO",
       attachment_ids: input.attachment_ids ?? [],
