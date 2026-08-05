@@ -62,7 +62,11 @@ export function WorkTurnCard({
         {view.presentation.showFinal && view.assistantText ? (
           <p className="tz-work-turn__response">{view.assistantText}</p>
         ) : null}
-        <WorkTurnProgress steps={view.steps} mode={view.presentation.progressMode} />
+        <WorkTurnProgress
+          steps={view.steps}
+          mode={view.presentation.progressMode}
+          isFailed={view.status === "failed"}
+        />
         <ProcessDisclosure
           label={view.presentation.processLabel}
           experts={view.experts}

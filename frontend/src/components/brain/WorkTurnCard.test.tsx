@@ -99,7 +99,7 @@ describe("WorkTurnCard", () => {
     expect(screen.getByText("读取账号数据")).toBeVisible();
   });
 
-  it("keeps failed progress expanded with completed and unfinished sections", () => {
+  it("groups unresolved steps as unfinished when the turn fails without a failed step event", () => {
     render(<WorkTurnCard view={{
       ...completedTurn,
       status: "failed",
@@ -115,7 +115,7 @@ describe("WorkTurnCard", () => {
       },
       steps: [
         { code: "read", label: "读取账号数据", state: "done" },
-        { code: "analyze", label: "分析主要问题", state: "failed" },
+        { code: "analyze", label: "分析主要问题", state: "active" },
         { code: "recommend", label: "整理运营建议", state: "waiting" },
       ],
     }} />);
@@ -125,6 +125,10 @@ describe("WorkTurnCard", () => {
     const unfinished = screen.getByRole("region", { name: "未完成" });
     expect(within(unfinished).getByText("分析主要问题")).toBeVisible();
     expect(within(unfinished).getByText("整理运营建议")).toBeVisible();
+    expect([...unfinished.querySelectorAll("small")].map((node) => node.textContent))
+      .toEqual(["未完成", "未完成"]);
+    expect(within(unfinished).queryByText("进行中")).not.toBeInTheDocument();
+    expect(within(unfinished).queryByText("待执行")).not.toBeInTheDocument();
   });
 
   it("shows steering inside the existing work card without creating a bubble or thinking copy", () => {

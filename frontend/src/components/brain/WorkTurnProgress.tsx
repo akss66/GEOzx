@@ -12,9 +12,11 @@ const STEP_STATE_COPY: Record<WorkTurnStep["state"], string> = {
 export function WorkTurnProgress({
   steps,
   mode,
+  isFailed,
 }: {
   steps: WorkTurnStep[];
   mode: WorkTurnPresentation["progressMode"];
+  isFailed: boolean;
 }) {
   const [summaryOpen, setSummaryOpen] = useState(false);
   const contentId = useId();
@@ -38,36 +40,51 @@ export function WorkTurnProgress({
     );
   }
 
-  const hasFailure = steps.some((step) => step.state === "failed");
-  const completed = hasFailure ? steps.filter((step) => step.state === "done") : [];
-  const unfinished = hasFailure ? steps.filter((step) => step.state !== "done") : steps;
+  const completed = isFailed ? steps.filter((step) => step.state === "done") : [];
+  const unfinished = isFailed ? steps.filter((step) => step.state !== "done") : steps;
 
   return (
     <section className="tz-work-turn__progress" aria-label="执行步骤">
       <h3>执行步骤</h3>
-      {hasFailure && completed.length > 0 ? <StepGroup title="已完成" steps={completed} /> : null}
-      {hasFailure ? <StepGroup title="未完成" steps={unfinished} /> : <StepList steps={steps} />}
+      {isFailed && completed.length > 0 ? <StepGroup title="已完成" steps={completed} /> : null}
+      {isFailed ? <StepGroup title="未完成" steps={unfinished} unresolved /> : <StepList steps={steps} />}
     </section>
   );
 }
 
-function StepGroup({ title, steps }: { title: string; steps: WorkTurnStep[] }) {
+function StepGroup({
+  title,
+  steps,
+  unresolved = false,
+}: {
+  title: string;
+  steps: WorkTurnStep[];
+  unresolved?: boolean;
+}) {
   if (steps.length === 0) return null;
   return (
     <section className="tz-work-turn__progress-group" aria-label={title}>
       <h4>{title}</h4>
-      <StepList steps={steps} />
+      <StepList steps={steps} unresolved={unresolved} />
     </section>
   );
 }
 
-function StepList({ id, steps }: { id?: string; steps: WorkTurnStep[] }) {
+function StepList({
+  id,
+  steps,
+  unresolved = false,
+}: {
+  id?: string;
+  steps: WorkTurnStep[];
+  unresolved?: boolean;
+}) {
   return (
     <ol id={id}>
       {steps.map((step) => (
         <li key={step.code} data-step-state={step.state}>
           <span>{step.label}</span>
-          <small>{STEP_STATE_COPY[step.state]}{step.detail ? `：${step.detail}` : ""}</small>
+          <small>{unresolved ? "未完成" : STEP_STATE_COPY[step.state]}{step.detail ? `：${step.detail}` : ""}</small>
         </li>
       ))}
     </ol>
