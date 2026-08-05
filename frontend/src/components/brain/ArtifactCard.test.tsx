@@ -62,8 +62,84 @@ const reviewArtifact = {
   created_at: "2026-07-28T00:00:00Z",
 } satisfies Artifact;
 
+const accountAnalysisArtifact = {
+  ...reviewArtifact,
+  id: 5002,
+  artifact_type: "account_analysis_answer",
+  status: "accepted",
+  summary: "近 30 天播放量较上一周期增长，但互动效率下降。",
+  next_actions: [],
+  sections: [
+    { key: "conclusion", title: "结论", content: "近 30 天播放量增长 24%，但互动率下降 0.8 个百分点。" },
+    {
+      key: "key_facts",
+      title: "关键事实",
+      content: [{
+        metric_code: "views",
+        label: "播放量",
+        unit: "次",
+        current_value: 12400,
+        previous_value: 10000,
+        relative_change: 0.24,
+        direction: "up",
+        sample_count: 14,
+        evidence_hashes: ["sha256:raw-secret"],
+      }],
+    },
+    { key: "interpretation", title: "数据解读", content: ["流量规模扩大，但内容互动承接变弱。"] },
+    {
+      key: "recommendations",
+      title: "建议",
+      content: [{
+        action: "连续 7 天测试强互动提问式结尾",
+        rationale: "当前互动率较上一周期下降",
+        validation_metric: "互动率",
+        observation_days: 7,
+      }],
+    },
+    { key: "data_limits", title: "数据限制", content: ["当前没有成交数据，不能判断商业转化。"] },
+    { key: "next_action", title: "下一步", content: "先执行 7 天互动率提升实验。" },
+    { key: "participating_experts", title: "参与专家", content: ["运营执行专家"] },
+    { key: "critic", title: "质量审核", content: { passed: true, score: 94 } },
+  ],
+  evidence_refs: [
+    { kind: "field_observation", id: 91, label: "content_hash=sha256:raw-secret" },
+    { kind: "field_observation", id: 92, label: "播放量 · 2026-07-01 至 2026-07-30" },
+  ],
+  evidence_summary: {
+    total: 14,
+    groups: [{
+      kind: "field_observation",
+      label: "账号数据字段",
+      count: 14,
+      metric_count: 2,
+      period: "2026-07-01 至 2026-07-30",
+    }],
+  },
+  quality: { score: 94, passed: true, issues: [] },
+} satisfies Artifact;
+
 describe("ArtifactCard", () => {
   afterEach(cleanup);
+
+  it("renders account analysis as a readable answer with evidence separated from technical details", () => {
+    render(<ArtifactCard artifact={accountAnalysisArtifact} onAction={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "账号数据分析" })).toBeInTheDocument();
+    expect(screen.getByText("近 30 天播放量增长 24%，但互动率下降 0.8 个百分点。")).toBeInTheDocument();
+    expect(screen.getByText("关键事实")).toBeInTheDocument();
+    expect(screen.getByText(/播放量.*12,400.*较上一周期.*24%/)).toBeInTheDocument();
+    expect(screen.getByText("数据解读")).toBeInTheDocument();
+    expect(screen.getByText("下一步建议")).toBeInTheDocument();
+    expect(screen.getByText("数据限制")).toBeInTheDocument();
+    expect(screen.getByText("下一步")).toBeInTheDocument();
+    expect(screen.queryByText("参与专家")).not.toBeInTheDocument();
+    expect(screen.queryByText(/采用成果|正式成果/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看分析依据" }));
+    expect(screen.getByText(/已核验 2 类指标、14 条数据记录/)).toBeInTheDocument();
+    expect(screen.queryByText(/raw-secret|content_hash|sha256/)).not.toBeInTheDocument();
+  });
 
   it("renders business sections and hides internal schema, checklist, and raw-log copy", () => {
     render(<ArtifactCard artifact={reviewArtifact} onAction={vi.fn()} />);

@@ -893,6 +893,38 @@
   gap: 10px;
 }
 
+.tz-artifact-card__sections--analysis {
+  display: block;
+}
+
+.tz-artifact-card__section--analysis {
+  padding: 12px 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.tz-artifact-card__section--analysis + .tz-artifact-card__section--analysis {
+  border-top: 1px solid var(--tz-line-subtle);
+}
+
+.tz-artifact-card__section--analysis h4 {
+  margin-bottom: 7px;
+  font-size: 13px;
+}
+
+.tz-artifact-card__section--conclusion > div {
+  color: var(--tz-ink);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.75;
+}
+
+.tz-artifact-card__section--analysis ol,
+.tz-artifact-card__section--analysis ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
 .tz-artifact-card__sections--remaining {
   padding-top: 14px;
   border-top: 1px solid var(--tz-line-subtle);

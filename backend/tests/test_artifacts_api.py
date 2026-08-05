@@ -263,6 +263,134 @@ async def test_account_inspection_uses_verified_business_artifact_type(
 
 
 @pytest.mark.asyncio
+async def test_account_data_analysis_projects_typed_business_sections(
+    client, session, admin
+) -> None:
+    payload = {
+        "artifact_type": "account_analysis_answer",
+        "account_id": 3,
+        "question": "近30天播放量为什么增长？",
+        "answerability": {
+            "status": "sufficient",
+            "confidence": 0.92,
+            "supported_claims": ["播放量趋势"],
+            "unsupported_claims": [],
+            "missing_metrics": [],
+            "missing_periods": [],
+            "reasons": [],
+        },
+        "conclusion": "近30天播放量较上一周期增长24%。",
+        "key_facts": [
+            {
+                "metric_code": "views",
+                "label": "播放量",
+                "unit": "次",
+                "current_value": 12400,
+                "previous_value": 10000,
+                "absolute_change": 2400,
+                "relative_change": 0.24,
+                "direction": "up",
+                "current_period": {
+                    "days": 30,
+                    "start": "2026-07-01",
+                    "end": "2026-07-30",
+                },
+                "comparison_period": {
+                    "days": 30,
+                    "start": "2026-06-01",
+                    "end": "2026-06-30",
+                },
+                "sample_count": 14,
+                "evidence_hashes": ["sha256:must-not-appear"],
+            }
+        ],
+        "interpretation": ["流量规模扩大。"],
+        "recommendations": [
+            {
+                "action": "继续测试高表现选题",
+                "rationale": "播放量已增长",
+                "validation_metric": "播放量",
+                "observation_days": 7,
+            }
+        ],
+        "data_limits": ["当前没有成交数据。"],
+        "next_action": "执行7天选题验证。",
+        "evidence_refs": [
+            {
+                "source_type": "field_observation",
+                "source_id": 91,
+                "batch_id": 12,
+                "metric_code": "views",
+                "period_start": "2026-07-01",
+                "period_end": "2026-07-30",
+                "observed_at": "2026-07-30",
+                "value": 12400,
+                "unit": "次",
+                "content_hash": "sha256:must-not-appear",
+            }
+        ],
+        "participating_experts": ["06-operator"],
+        "critic": {
+            "passed": True,
+            "score": 94,
+            "iterations": 1,
+            "issues": [],
+            "suggestions": [],
+        },
+    }
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="数据分析账号",
+        payload=payload,
+        skill_code="account_data_analysis",
+        status=DeliverableStatus.APPROVED,
+    )
+    account, deliverable = seeded[1], seeded[8]
+    token = await _token(client, admin.email, "admin-pw-123")
+    headers = _auth(token)
+
+    listing = await client.get(
+        f"/artifacts?account_id={account.id}&artifact_type=account_analysis_answer",
+        headers=headers,
+    )
+    detail = await client.get(f"/artifacts/{deliverable.id}", headers=headers)
+    legacy_filter = await client.get(
+        f"/artifacts?account_id={account.id}&artifact_type=review_report",
+        headers=headers,
+    )
+
+    assert listing.status_code == 200
+    assert detail.status_code == 200
+    projected = listing.json()["data"][0]
+    assert detail.json() == projected
+    assert projected["artifact_type"] == "account_analysis_answer"
+    assert projected["presentation"] == {
+        "type_label": "账号数据分析",
+        "completion_label": "已根据当前账号数据回答你的问题",
+        "status_label": "已完成",
+        "detail_action_label": "查看完整分析",
+    }
+    assert projected["title"] == "账号数据分析"
+    assert projected["status"] == "accepted"
+    assert projected["summary"] == payload["conclusion"]
+    assert [section["key"] for section in projected["sections"]] == [
+        "conclusion",
+        "key_facts",
+        "interpretation",
+        "recommendations",
+        "data_limits",
+        "next_action",
+        "participating_experts",
+        "critic",
+    ]
+    assert "must-not-appear" not in str(projected["sections"])
+    assert projected["evidence_summary"]["groups"][0]["metric_count"] == 1
+    assert legacy_filter.status_code == 200
+    assert legacy_filter.json()["pagination"]["total"] == 0
+
+
+@pytest.mark.asyncio
 async def test_artifact_list_detail_share_business_projection_and_provenance(
     client, session, admin
 ):

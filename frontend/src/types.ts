@@ -553,6 +553,45 @@ export interface ArtifactEvidenceSummary {
   }>;
 }
 
+export interface AccountAnalysisPeriod {
+  days: number;
+  start: string;
+  end: string;
+}
+
+export interface AccountAnalysisFact {
+  metric_code: string;
+  label: string;
+  unit: string;
+  current_value: number;
+  previous_value: number | null;
+  absolute_change: number | null;
+  relative_change: number | null;
+  direction: "up" | "down" | "flat" | "unavailable";
+  current_period: AccountAnalysisPeriod;
+  comparison_period: AccountAnalysisPeriod | null;
+  sample_count: number;
+}
+
+export interface AccountAnalysisRecommendation {
+  action: string;
+  rationale: string;
+  validation_metric: string;
+  observation_days: number;
+}
+
+export interface AccountAnalysisAnswerPayload {
+  artifact_type: "account_analysis_answer";
+  question: string;
+  conclusion: string;
+  key_facts: AccountAnalysisFact[];
+  interpretation: string[];
+  recommendations: AccountAnalysisRecommendation[];
+  data_limits: string[];
+  next_action: string;
+  participating_experts: string[];
+}
+
 export interface ArtifactQuality {
   score: number;
   passed: boolean;
@@ -567,6 +606,7 @@ export type ArtifactStatus =
   | "superseded";
 
 export const KNOWN_ARTIFACT_TYPES = [
+  "account_analysis_answer",
   "account_inspection_report",
   "account_positioning",
   "positioning_strategy",

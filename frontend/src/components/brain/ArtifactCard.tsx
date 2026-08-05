@@ -16,7 +16,7 @@ export type ArtifactAction =
     }
   | { type: "export"; artifact: Artifact };
 
-const INTERNAL = /(?:acceptance|checklist|debug|kernel|policy|prompt|trace|raw|tool[ _-]?log|credential|stack)/i;
+const INTERNAL = /(?:acceptance|checklist|content[ _-]?hash|debug|evidence[ _-]?hash|kernel|policy|prompt|sha256|source[ _-]?id|trace|raw|tool[ _-]?log|credential|stack)/i;
 const BANNED_BUSINESS_COPY = /脚本生成中|正式成果|采用成果|成果/g;
 
 const BUSINESS_TITLES: Record<string, string> = {
@@ -26,6 +26,10 @@ const BUSINESS_TITLES: Record<string, string> = {
   period: "数据周期",
   date_range: "数据周期",
   key_metrics: "关键数据",
+  key_facts: "关键事实",
+  interpretation: "数据解读",
+  data_limits: "数据限制",
+  next_action: "下一步",
   issues: "主要问题",
   optimization_suggestions: "优化建议",
   recommendations: "优化建议",
@@ -85,9 +89,22 @@ export function ArtifactCard({
   const [revisionDrafts, setRevisionDrafts] = useState<Record<string, string>>({});
   const [editingSchedule, setEditingSchedule] = useState(false);
   const [scheduledAt, setScheduledAt] = useState("");
+  const isAccountAnalysis = artifact.artifact_type === "account_analysis_answer";
   const sections = useMemo(() => artifact.sections.filter(isBusinessSection), [artifact.sections]);
-  const primarySections = sections.filter((section) => PRIMARY_KEYS.includes(section.key));
-  const remainingSections = sections.filter((section) => !PRIMARY_KEYS.includes(section.key));
+  const accountAnalysisSections = sections.filter((section) => [
+    "conclusion",
+    "key_facts",
+    "interpretation",
+    "recommendations",
+    "data_limits",
+    "next_action",
+  ].includes(section.key));
+  const primarySections = isAccountAnalysis
+    ? accountAnalysisSections
+    : sections.filter((section) => PRIMARY_KEYS.includes(section.key));
+  const remainingSections = isAccountAnalysis
+    ? []
+    : sections.filter((section) => !PRIMARY_KEYS.includes(section.key));
   const hasRemainingDetails = remainingSections.length > 0;
   const evidence = artifact.evidence_refs.filter((item) => isSafeText(item.kind) && isSafeText(item.label));
   const evidenceSummary = artifact.evidence_summary ?? fallbackEvidenceSummary(evidence);
@@ -125,10 +142,12 @@ export function ArtifactCard({
       </header>
 
       <p className="tz-artifact-card__completion">{presentation.completionLabel}</p>
-      <p className="tz-artifact-card__summary">{summary}</p>
+      {!isAccountAnalysis ? <p className="tz-artifact-card__summary">{summary}</p> : null}
 
-      <div className="tz-artifact-card__sections">
-        {primarySections.map((section) => <BusinessSection key={section.key} section={section} />)}
+      <div className={`tz-artifact-card__sections${isAccountAnalysis ? " tz-artifact-card__sections--analysis" : ""}`}>
+        {isAccountAnalysis
+          ? <AccountAnalysisBody sections={primarySections} />
+          : primarySections.map((section) => <BusinessSection key={section.key} section={section} />)}
       </div>
 
       {revisionInProgress ? (
@@ -136,7 +155,10 @@ export function ArtifactCard({
       ) : null}
 
       <p className="tz-artifact-card__evidence-summary">
-        调用专家 / 依据：{evidenceSummary.total > 0 ? `已核验 ${evidenceSummary.total} 条依据` : "暂无额外可核查依据"}
+        {isAccountAnalysis ? "分析依据：" : "调用专家 / 依据："}
+        {isAccountAnalysis
+          ? analysisEvidenceSummaryCopy(evidenceSummary)
+          : evidenceSummary.total > 0 ? `已核验 ${evidenceSummary.total} 条依据` : "暂无额外可核查依据"}
       </p>
 
       {hasRemainingDetails ? (
@@ -260,7 +282,9 @@ export function ArtifactCard({
       ) : null}
 
       <section className="tz-artifact-card__evidence">
-        <Button type="link" onClick={() => setEvidenceOpen((open) => !open)}>查看生成依据</Button>
+        <Button type="link" onClick={() => setEvidenceOpen((open) => !open)}>
+          {isAccountAnalysis ? "查看分析依据" : "查看生成依据"}
+        </Button>
         {evidenceOpen ? (
           <div className="tz-artifact-card__evidence-detail">
             <p>{artifact.quality ? `质量${artifact.quality.passed ? "通过" : "待复核"}（${Math.round(artifact.quality.score)} 分）` : "质量结果待补充"}</p>
@@ -276,7 +300,7 @@ export function ArtifactCard({
                 open={technicalEvidenceOpen}
                 onToggle={(event) => setTechnicalEvidenceOpen(event.currentTarget.open)}
               >
-                <summary>技术依据（{evidence.length} 条）</summary>
+                <summary>{isAccountAnalysis ? "技术详情" : "技术依据"}（{evidence.length} 条）</summary>
                 <ul>
                   {visibleEvidence.map((item) => (
                     <li key={`${item.kind}-${item.id}`}>{safeText(item.label)}</li>
@@ -377,6 +401,95 @@ function evidenceGroupCopy(group: NonNullable<Artifact["evidence_summary"]>["gro
   const period = group.period ? safeText(group.period) : "";
   const periodCopy = period ? `，${period}` : "";
   return `${safeText(group.label)}：${group.count} 条${metricCopy}${periodCopy}`;
+}
+
+function analysisEvidenceSummaryCopy(summary: NonNullable<Artifact["evidence_summary"]>) {
+  if (summary.total <= 0) return "当前没有可核查的数据记录";
+  const metricCount = summary.groups.reduce((total, group) => total + group.metric_count, 0);
+  return metricCount > 0
+    ? `已核验 ${metricCount} 类指标、${summary.total} 条数据记录`
+    : `已核验 ${summary.total} 条数据记录`;
+}
+
+function AccountAnalysisBody({ sections }: { sections: ArtifactSection[] }) {
+  return (
+    <>
+      {sections.map((section) => (
+        <section
+          key={section.key}
+          className={`tz-artifact-card__section tz-artifact-card__section--analysis tz-artifact-card__section--${section.key}`}
+        >
+          <h4>{accountAnalysisTitle(section.key)}</h4>
+          <div>{renderAccountAnalysisContent(section)}</div>
+        </section>
+      ))}
+    </>
+  );
+}
+
+function accountAnalysisTitle(key: string) {
+  return key === "recommendations" ? "下一步建议" : BUSINESS_TITLES[key] ?? "分析信息";
+}
+
+function renderAccountAnalysisContent(section: ArtifactSection) {
+  if (section.key === "key_facts" && Array.isArray(section.content)) {
+    const facts = section.content.map(formatAnalysisFact).filter(Boolean);
+    return facts.length > 0 ? <ul>{facts.map((fact) => <li key={fact}>{fact}</li>)}</ul> : "—";
+  }
+  if (section.key === "recommendations" && Array.isArray(section.content)) {
+    const recommendations = section.content.map(formatRecommendation).filter(Boolean);
+    return recommendations.length > 0
+      ? <ol>{recommendations.map((recommendation) => <li key={recommendation}>{recommendation}</li>)}</ol>
+      : "—";
+  }
+  return renderContent(section.content);
+}
+
+function formatAnalysisFact(value: unknown) {
+  if (!isRecord(value)) return "";
+  const label = typeof value.label === "string" ? safeText(value.label) : "";
+  const current = formatMetricValue(value.current_value, value.unit);
+  if (!label || !current) return "";
+  const comparison = formatMetricComparison(value);
+  return comparison ? `${label}：${current}，${comparison}` : `${label}：${current}`;
+}
+
+function formatMetricValue(value: unknown, unit: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  const formatted = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+  const safeUnit = typeof unit === "string" && isSafeText(unit) ? safeText(unit) : "";
+  return `${formatted}${safeUnit ? ` ${safeUnit}` : ""}`;
+}
+
+function formatMetricComparison(value: Record<string, unknown>) {
+  if (typeof value.previous_value !== "number" || !Number.isFinite(value.previous_value)) return "";
+  const direction = value.direction === "up" ? "上升" : value.direction === "down" ? "下降" : "基本持平";
+  if (typeof value.relative_change !== "number" || !Number.isFinite(value.relative_change)) {
+    return `较上一周期${direction}`;
+  }
+  const percent = new Intl.NumberFormat("zh-CN", {
+    style: "percent",
+    maximumFractionDigits: 1,
+  }).format(Math.abs(value.relative_change));
+  return `较上一周期${direction} ${percent}`;
+}
+
+function formatRecommendation(value: unknown) {
+  if (!isRecord(value)) return "";
+  const action = typeof value.action === "string" ? safeText(value.action) : "";
+  if (!action || !isSafeText(action)) return "";
+  const rationale = typeof value.rationale === "string" && isSafeText(value.rationale)
+    ? safeText(value.rationale)
+    : "";
+  const metric = typeof value.validation_metric === "string" && isSafeText(value.validation_metric)
+    ? safeText(value.validation_metric)
+    : "";
+  const days = typeof value.observation_days === "number" && Number.isInteger(value.observation_days)
+    ? value.observation_days
+    : null;
+  const rationaleCopy = rationale ? `原因：${rationale}` : "";
+  const validationCopy = metric ? `用${metric}${days ? `观察 ${days} 天` : "验证"}` : "";
+  return [action, rationaleCopy, validationCopy].filter(Boolean).join("；");
 }
 
 function BusinessSection({ section }: { section: ArtifactSection }) {

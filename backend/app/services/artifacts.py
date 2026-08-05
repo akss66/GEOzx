@@ -77,8 +77,10 @@ _ARTIFACT_STATUS_LABELS: dict[ArtifactStatus, str] = {
     "superseded": "历史版本",
 }
 _ACCOUNT_INSPECTION_ARTIFACT_TYPE = "account_inspection_report"
+_ACCOUNT_ANALYSIS_ARTIFACT_TYPE = "account_analysis_answer"
 _DELIVERABLE_ARTIFACT_TYPES = {item.value: item for item in DeliverableType}
 _BUSINESS_ARTIFACT_DATABASE_TYPES: dict[str, frozenset[DeliverableType]] = {
+    "account_analysis_answer": frozenset({DeliverableType.REVIEW_REPORT}),
     "account_inspection_report": frozenset({DeliverableType.REVIEW_REPORT}),
     "account_positioning": frozenset({DeliverableType.POSITIONING_STRATEGY}),
     "positioning_strategy": frozenset({DeliverableType.POSITIONING_STRATEGY}),
@@ -107,6 +109,17 @@ _ACCOUNT_INSPECTION_FIELDS = {
     "participating_experts",
     "critic",
 }
+_ACCOUNT_ANALYSIS_SECTION_FIELDS = (
+    "conclusion",
+    "key_facts",
+    "interpretation",
+    "recommendations",
+    "data_limits",
+    "next_action",
+    "participating_experts",
+    "critic",
+)
+_ACCOUNT_ANALYSIS_FIELDS = set(_ACCOUNT_ANALYSIS_SECTION_FIELDS)
 SafeBusinessValue: TypeAlias = str | list["SafeBusinessValue"] | dict[str, "SafeBusinessValue"]
 
 _SECTION_TITLES = {
@@ -153,6 +166,11 @@ _SECTION_TITLES = {
     "sentiment": "用户情绪",
     "response_guidelines": "回复指引",
     "content_opportunities": "内容机会",
+    "conclusion": "核心结论",
+    "key_facts": "关键事实",
+    "interpretation": "数据解读",
+    "data_limits": "数据限制",
+    "next_action": "下一步",
 }
 _SECTION_TITLES.update(
     {
@@ -175,6 +193,11 @@ _SCRIPT_PRESENTATIONS: dict[ScriptPresentationFormat, tuple[str, str, str]] = {
     "live_flow": ("直播流程与话术稿", "直播流程与话术稿", "查看直播流程与话术稿"),
 }
 _FIXED_PRESENTATIONS: dict[str, tuple[str, str, str]] = {
+    "account_analysis_answer": (
+        "账号数据分析",
+        "已根据当前账号数据回答你的问题",
+        "查看完整分析",
+    ),
     "account_inspection_report": ("账号诊断", "已完成当前账号运营诊断", "查看账号诊断"),
     "account_positioning": ("账号定位方案", "已整理当前账号定位方向", "查看账号定位方案"),
     "positioning_strategy": ("账号定位方案", "已整理当前账号定位方向", "查看账号定位方案"),
@@ -202,6 +225,7 @@ _INTERNAL_KEY_MARKERS = {
     "policy",
     "prompt",
     "trace",
+    "hash",
 }
 _INTERNAL_COMPOUND_KEYS = {
     "model_config",
@@ -221,6 +245,8 @@ _INTERNAL_COMPACT_MARKERS = {
     "rawtoollog",
     "toollog",
     "trace",
+    "evidencehash",
+    "contenthash",
 }
 _CONFIRMATION_PATTERNS = (
     re.compile(
@@ -273,8 +299,11 @@ async def _business_artifact_type(
 ) -> str:
     if deliverable.type == DeliverableType.REVIEW_REPORT and deliverable.skill_run_id is not None:
         skill_run = await session.get(SkillRun, deliverable.skill_run_id)
-        if skill_run is not None and skill_run.skill_code == "account_inspection":
-            return _ACCOUNT_INSPECTION_ARTIFACT_TYPE
+        if skill_run is not None:
+            if skill_run.skill_code == "account_inspection":
+                return _ACCOUNT_INSPECTION_ARTIFACT_TYPE
+            if skill_run.skill_code == "account_data_analysis":
+                return _ACCOUNT_ANALYSIS_ARTIFACT_TYPE
     return deliverable.type.value
 
 
@@ -908,7 +937,11 @@ def _artifact_presentation(
     return ArtifactPresentationOut(
         type_label=type_label,
         completion_label=completion_label,
-        status_label=_ARTIFACT_STATUS_LABELS[artifact_status],
+        status_label=(
+            "已完成"
+            if artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE
+            else _ARTIFACT_STATUS_LABELS[artifact_status]
+        ),
         detail_action_label=detail_action_label,
     )
 
@@ -968,6 +1001,8 @@ def _safe_payload(
     allowed_fields = set(schema.model_fields) if schema is not None else set()
     if business_artifact_type == _ACCOUNT_INSPECTION_ARTIFACT_TYPE:
         allowed_fields.update(_ACCOUNT_INSPECTION_FIELDS)
+    elif business_artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE:
+        allowed_fields.update(_ACCOUNT_ANALYSIS_FIELDS)
     safe: dict[str, Any] = {}
     for key in allowed_fields:
         if key not in payload:
@@ -977,6 +1012,11 @@ def _safe_payload(
             safe[key] = cleaned
     if isinstance(payload.get("evidence_refs"), list):
         safe["evidence_refs"] = payload["evidence_refs"]
+    if business_artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE:
+        safe["title"] = "账号数据分析"
+        conclusion = safe.get("conclusion")
+        if isinstance(conclusion, str) and conclusion.strip():
+            safe["summary"] = conclusion.strip()
     return safe
 
 
@@ -999,6 +1039,13 @@ def _artifact_sections(
                 "optimization_suggestions"
             ]
         section_payload.pop("optimization_suggestions", None)
+    elif business_artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE:
+        allowed_fields.update(_ACCOUNT_ANALYSIS_FIELDS)
+        section_payload = {
+            key: payload[key]
+            for key in _ACCOUNT_ANALYSIS_SECTION_FIELDS
+            if key in payload
+        }
     sections: list[ArtifactSection] = []
     for key, value in section_payload.items():
         if key not in allowed_fields or key in _NON_SECTION_KEYS or value is None:
@@ -1118,7 +1165,11 @@ def _evidence_summary(
             },
         )
         group["count"] += 1
-        metric = candidate.get("metric") or candidate.get("metric_name")
+        metric = (
+            candidate.get("metric")
+            or candidate.get("metric_name")
+            or candidate.get("metric_code")
+        )
         if isinstance(metric, str) and metric.strip():
             group["metrics"].add(metric.strip())
         period = _candidate_period(candidate)

@@ -1992,7 +1992,7 @@ class SkillRuntime:
                 else AgentCode.DECISION.value
             ),
             deliverable_type=DeliverableType.REVIEW_REPORT,
-            status=DeliverableStatus.PENDING_REVIEW,
+            status=DeliverableStatus.APPROVED,
             payload=report.model_dump(mode="json"),
             note=(
                 "business_artifact_type=account_analysis_answer; "

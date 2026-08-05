@@ -92,4 +92,12 @@ describe("presentDeliverable", () => {
       primaryAction: { kind: "open", label: "查看账号运营分析" },
     });
   });
+
+  it("presents an account analysis as a direct answer instead of a generic report", () => {
+    expect(presentDeliverable(artifact("account_analysis_answer"))).toMatchObject({
+      typeLabel: "账号数据分析",
+      completionLabel: "已根据当前账号数据回答你的问题",
+      primaryAction: { kind: "open", label: "查看完整分析" },
+    });
+  });
 });

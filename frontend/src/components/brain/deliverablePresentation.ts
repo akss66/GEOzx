@@ -22,6 +22,11 @@ const DEFAULT_SECONDARY_ACTIONS: DeliverablePresentation["secondaryActions"] = [
 ];
 
 const PRESENTATIONS: Partial<Record<KnownArtifactType, DeliverablePresentation>> = {
+  account_analysis_answer: presentation(
+    "账号数据分析",
+    "已根据当前账号数据回答你的问题",
+    "查看完整分析",
+  ),
   account_inspection_report: fixedPresentation("账号诊断", "已完成当前账号运营诊断"),
   account_positioning: fixedPresentation("账号定位方案", "已整理当前账号定位方向"),
   positioning_strategy: fixedPresentation("账号定位方案", "已整理当前账号定位方向"),

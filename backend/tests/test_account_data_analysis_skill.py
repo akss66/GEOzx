@@ -23,6 +23,7 @@ from app.models.enums import (
     AgentCode,
     AgentInvocationStatus,
     BrainTaskStatus,
+    DeliverableStatus,
     Platform,
     UserRole,
 )
@@ -363,6 +364,8 @@ async def test_grounded_analysis_uses_operator_once_and_preserves_tool_facts(
     assert result.report["key_facts"] == tool_result["facts"]
     assert result.report["evidence_refs"] == tool_result["evidence_refs"]
     assert result.report["participating_experts"] == ["06-operator"]
+    deliverable = (await session.scalars(select(Deliverable))).one()
+    assert deliverable.status is DeliverableStatus.APPROVED
 
 
 @pytest.mark.asyncio
