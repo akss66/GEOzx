@@ -51,7 +51,7 @@ from app.orchestrator.ai_coo_critic import (
     CriticDisposition,
     ai_coo_critic_service,
 )
-from app.orchestrator.brain_intelligence import brain_intelligence
+from app.orchestrator.brain_intelligence import IntelligenceUnavailable, brain_intelligence
 from app.orchestrator.checkpoint_graph_contracts import CheckpointGraphContract
 from app.orchestrator.composite_skill_runtime import composite_skill_runtime
 from app.orchestrator.operation_lineage import (
@@ -1804,16 +1804,60 @@ class SkillRuntime:
         )
         for iteration in range(_MAX_CRITIC_IMPROVEMENTS + 1):
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
-            review = await self._review(
-                session,
-                user=user,
-                task=task,
-                invocation=latest_result.invocation,
-                deliverable_id=None,
-                report=report,
-                evidence_refs=evidence_refs,
-                iteration=iteration,
-            )
+            try:
+                review = await self._review(
+                    session,
+                    user=user,
+                    task=task,
+                    invocation=latest_result.invocation,
+                    deliverable_id=None,
+                    report=report,
+                    evidence_refs=evidence_refs,
+                    iteration=iteration,
+                )
+            except IntelligenceUnavailable as exc:
+                log.warning(
+                    "Account-inspection quality review is unavailable; delivering "
+                    "the evidence-backed report for human review: %s",
+                    exc,
+                )
+                report = report.model_copy(
+                    update={
+                        "critic": AccountInspectionCriticOutcome(
+                            passed=False,
+                            score=0,
+                            iterations=iteration + 1,
+                            issues=["自动质量审核暂时不可用"],
+                            suggestions=["请人工核对报告中的数据依据与优化建议"],
+                        )
+                    }
+                )
+                await _complete_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="quality_review",
+                    attempt=attempt,
+                    commit=True,
+                )
+                await _start_skill_stage(
+                    session,
+                    scope=scope,
+                    step_code="prepare_deliverable",
+                    attempt=attempt,
+                )
+                return await self._complete_for_human_review(
+                    session,
+                    skill_run=skill_run,
+                    task=task,
+                    content=content,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    report=report,
+                    scope=scope,
+                    producer=latest_result.invocation,
+                    attempt=attempt,
+                )
             await self._heartbeat(session, run=run, lease_owner=lease_owner)
             critic_history.append(review)
             report = report.model_copy(

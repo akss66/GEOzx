@@ -33,6 +33,7 @@ from app.models.enums import (
     UserRole,
 )
 from app.orchestrator.agent_harness import AgentHarnessError
+from app.orchestrator.brain_intelligence import IntelligenceUnavailable
 from app.orchestrator.skill_runtime import SkillExecutionResult, SkillRuntime
 from app.orchestrator.skills.account_inspection import (
     ACCOUNT_INSPECTION_SKILL,
@@ -273,6 +274,11 @@ class _PassingCritic:
             issues=score.issues,
             suggestions=score.suggestions,
         )
+
+
+class _UnavailableCritic:
+    async def review(self, **_kwargs):
+        raise IntelligenceUnavailable("quality review returned empty output")
 
 
 @pytest.mark.asyncio
@@ -690,6 +696,45 @@ async def test_account_inspection_revision_failure_delivers_for_human_review(
         AgentCode.OPERATOR,
         AgentCode.OPERATOR,
     ]
+    assert await session.scalar(select(func.count(Deliverable.id))) == 1
+    assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_account_inspection_critic_unavailable_delivers_for_human_review(
+    session,
+    admin,
+) -> None:
+    _account, thread, turn, run = await _conversation_scope(
+        session, admin, key="inspection-critic-unavailable"
+    )
+    runtime = SkillRuntime(
+        tool_executor=_FakeTools(sufficient=True),
+        harness=_FakeHarness(),
+        critic=_UnavailableCritic(),
+    )
+
+    result = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="account_inspection",
+        days=30,
+    )
+
+    assert result.status == "needs_review"
+    assert result.error_code is None
+    assert result.artifact_id is not None
+    assert result.report["critic"] == {
+        "passed": False,
+        "score": 0,
+        "iterations": 1,
+        "issues": ["自动质量审核暂时不可用"],
+        "suggestions": ["请人工核对报告中的数据依据与优化建议"],
+    }
+    assert "人工确认" in result.response
     assert await session.scalar(select(func.count(Deliverable.id))) == 1
     assert await session.scalar(select(func.count(StrategyPlan.id))) == 0
 
