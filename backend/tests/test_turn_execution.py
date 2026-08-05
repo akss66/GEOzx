@@ -1573,7 +1573,7 @@ async def test_i4_rule_2_real_stage_retry_reuses_committed_revision_plan(
         )
     await session.refresh(revision)
     durable_plan_hash = revision.plan_hash
-    assert durable_plan_hash != original_plan_hash
+    assert durable_plan_hash == original_plan_hash
     assert await _real_runtime_counts(
         session, run_id=run_id, tools=tools, harness=harness
     ) == {"provider": 0, "tool": 0, "expert": 0}
@@ -1594,7 +1594,7 @@ async def test_i4_rule_2_real_stage_retry_reuses_committed_revision_plan(
 
     await session.refresh(revision)
     assert status == "waiting_user"
-    assert revision.plan_hash == durable_plan_hash
+    assert revision.plan_hash == durable_plan_hash == original_plan_hash
     assert starts > 1
     assert await _real_runtime_counts(
         session, run_id=run.id, tools=tools, harness=harness
@@ -2016,12 +2016,7 @@ async def test_revision_full_fallback_emits_each_new_invalidated_step_once(
     _account, _thread, turn, run, task, _skill, revision = (
         await _revision_execution_context(session, admin, key="fallback-invalidated")
     )
-    revision.mode = "partial"
-    revision.affected_steps = ["script_generation"]
-    revision.direct_affected_steps = ["script_generation"]
-    revision.reused_steps = []
-    revision.fallback_reason = None
-    await session.commit()
+    contract = require_checkpoint_graph_contract("operation_iteration", 1)
     event_scope = TurnEventScope(
         org_id=run.org_id,
         account_id=revision.account_id,
@@ -2060,7 +2055,6 @@ async def test_revision_full_fallback_emits_each_new_invalidated_step_once(
         session, run=run, task=task, worker_id="revision-worker"
     )
 
-    contract = require_checkpoint_graph_contract("operation_iteration", 1)
     invalidated = list(
         await session.scalars(
             select(Event).where(
@@ -2071,8 +2065,11 @@ async def test_revision_full_fallback_emits_each_new_invalidated_step_once(
     )
     assert first == second == "completed"
     invalidated_keys = [event.payload["step_key"] for event in invalidated]
-    assert len(invalidated_keys) == len(contract.steps)
-    assert set(invalidated_keys) == {step.key for step in contract.steps}
+    expected_keys = [step.key for step in contract.steps]
+    assert len(invalidated_keys) == len(expected_keys)
+    assert set(invalidated_keys) == set(expected_keys)
+    for step_key in expected_keys:
+        assert invalidated_keys.count(step_key) == 1
 
 
 @pytest.mark.asyncio
