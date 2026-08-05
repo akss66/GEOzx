@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -8,6 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getArtifact } from "../../api/brain";
 import type { Artifact, ConversationThread, TurnProjection } from "../../types";
 import { TurnStream } from "./TurnStream";
+
+const workTurnSource = readFileSync(resolve(process.cwd(), "src/components/brain/WorkTurnCard.tsx"), "utf8");
+const turnStreamSource = readFileSync(resolve(process.cwd(), "src/components/brain/TurnStream.tsx"), "utf8");
 
 vi.mock("../../api/brain", () => ({ getArtifact: vi.fn() }));
 
@@ -87,6 +93,13 @@ const thread: ConversationThread = {
 describe("TurnStream", () => {
   afterEach(cleanup);
   beforeEach(() => vi.mocked(getArtifact).mockResolvedValue(artifact));
+
+  it("keeps production work-turn sources free of legacy chat classes", () => {
+    expect(workTurnSource).toMatch(/className="tz-work-turn"/);
+    expect(workTurnSource).not.toMatch(/dy-chat-/);
+    expect(workTurnSource).not.toMatch(/dy-chat-(message|bubble|expert)/);
+    expect(turnStreamSource).not.toMatch(/dy-chat-(message|bubble|expert)/);
+  });
 
   it("renders one continuous work-turn card instead of segmented chat messages", () => {
     const runningThread: ConversationThread = {

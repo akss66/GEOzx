@@ -40,7 +40,7 @@ export function WorkTurnCard({
         data-thinking={view.presentation.isActive || undefined}
       >
         <header className="tz-work-turn__identity">
-          <AgentAvatar code="00-decision" className="dy-chat-avatar" label={view.assistant.identity} />
+          <AgentAvatar code="00-decision" className="tz-work-turn__avatar" label={view.assistant.identity} />
           <span>{view.assistant.identity}</span>
           {view.presentation.statusLabel ? <small>{view.presentation.statusLabel}</small> : null}
         </header>

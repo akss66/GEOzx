@@ -565,104 +565,8 @@
   color: var(--tz-muted);
 }
 
-.tz-brain-thread .dy-chat-message {
-  gap: 14px;
-  animation: tz-message-arrive 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.tz-brain-thread .dy-chat-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 11px;
-}
-
-.tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .dy-chat-avatar {
+.tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .tz-work-turn__avatar {
   animation: tz-agent-thinking 1.45s ease-in-out infinite;
-}
-
-.tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .dy-chat-avatar {
-  animation: tz-agent-thinking 1.45s ease-in-out infinite;
-}
-
-.tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .ant-typography {
-  color: var(--tz-ink-soft) !important;
-}
-
-.tz-brain-thread .dy-chat-bubble {
-  max-width: min(760px, 92%);
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.tz-brain-thread .dy-chat-message-user .dy-chat-bubble {
-  position: relative;
-  width: fit-content;
-  min-width: 72px;
-  max-width: min(660px, 82%);
-  padding: 11px 16px 11px 15px;
-  border: 1px solid var(--tz-line);
-  border-right: 3px solid var(--tz-brand-red);
-  border-radius: 15px 15px 5px 15px;
-  background: color-mix(in srgb, var(--tz-brand-frame) 34%, var(--tz-surface));
-  color: var(--tz-ink);
-  box-shadow: 0 1px 2px rgba(23, 22, 20, 0.04);
-}
-
-.tz-brain-thread .dy-chat-message-user .ant-typography {
-  overflow-wrap: anywhere;
-  font-size: 14px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-}
-
-.tz-brain-thread .dy-chat-message-agent[data-error="true"] .dy-chat-bubble {
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--tz-error) 34%, var(--tz-line));
-  border-radius: var(--tz-radius-object);
-  background: color-mix(in srgb, var(--tz-error) 5%, white);
-}
-
-.tz-brain-thread .dy-chat-title-line .ant-tag,
-.tz-brain-thread .dy-chat-expert-head .ant-tag {
-  border: 0;
-  background: var(--tz-surface-soft);
-}
-
-.tz-brain-thread .dy-chat-event-card {
-  margin-left: 50px;
-  padding: 12px 0;
-  border: 0;
-  border-top: 1px solid var(--tz-line-subtle);
-  border-radius: 0;
-  background: transparent;
-}
-
-.tz-brain-thread .dy-chat-expert-message {
-  margin-left: 50px;
-  grid-template-columns: 44px minmax(0, 1fr);
-  gap: 14px;
-  animation: tz-expert-arrive 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.tz-brain-thread .dy-chat-expert-mark {
-  width: 44px;
-  height: 44px;
-  border: 1px solid var(--tz-line);
-  border-radius: 13px;
-}
-
-.tz-brain-thread .dy-chat-expert-message[data-status="running"] .dy-chat-expert-mark,
-.tz-brain-thread .dy-chat-expert-message[data-status="pending"] .dy-chat-expert-mark {
-  animation: tz-expert-breathe 1.8s ease-in-out infinite;
-}
-
-.tz-brain-thread .dy-chat-expert-body {
-  padding: 15px 17px;
-  border: 1px solid var(--tz-line-subtle);
-  border-radius: var(--tz-radius-object);
-  background: var(--tz-surface);
 }
 
 .tz-coo-record {
@@ -790,17 +694,6 @@
   padding: 14px 15px;
   border-radius: var(--tz-radius-control);
   background: var(--tz-surface-soft);
-}
-
-.tz-brain-thread .dy-chat-expert-output.ant-typography {
-  color: var(--tz-ink-soft);
-}
-
-.tz-brain-thread .dy-chat-expert-lifecycle {
-  margin: 10px 0 0;
-  color: var(--tz-muted);
-  font-size: 11px;
-  line-height: 1.55;
 }
 
 .tz-brain-handoff {
@@ -1137,7 +1030,7 @@
   font-weight: 650;
 }
 
-.tz-work-turn__identity .dy-chat-avatar {
+.tz-work-turn__avatar {
   width: 32px;
   height: 32px;
   flex: 0 0 auto;
@@ -2215,14 +2108,10 @@
 @media (prefers-reduced-motion: reduce) {
   .tz-brain-details-drawer,
   .tz-brain-artifact,
-  .dy-chat-expert-message,
-  .dy-chat-expert-mark,
   .tz-brain-handoff,
   .tz-brain-permission-mode,
   .tz-brain-decision,
-  .tz-brain-thread .dy-chat-message,
-  .tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .dy-chat-avatar,
-  .tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .dy-chat-avatar {
+  .tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .tz-work-turn__avatar {
     animation: none !important;
     transition: none !important;
     transform: none !important;
@@ -2248,11 +2137,6 @@
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-@keyframes tz-expert-breathe {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(201, 22, 29, 0); }
-  50% { box-shadow: 0 0 0 4px rgba(201, 22, 29, 0.08); }
 }
 
 @keyframes tz-handoff-arrive {
