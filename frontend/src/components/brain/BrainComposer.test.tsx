@@ -253,12 +253,12 @@ describe("BrainComposer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("replaces the send action with a real stop action while generating", () => {
+  it("keeps text input and send available while a turn is running", () => {
     const onStop = vi.fn();
     render(
       <BrainComposer
-        value=""
-        disabled
+        value="补充：只看近30天"
+        disabled={false}
         loading
         pendingPermission={null}
         approvalComment=""
@@ -271,9 +271,35 @@ describe("BrainComposer", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "发送给运营大脑" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    const input = screen.getByRole("textbox", { name: "运营大脑消息" });
+    expect(input).toBeEnabled();
+    expect(input).toHaveAttribute("placeholder", "继续补充要求，或提出下一项问题…");
+    expect(screen.getByRole("button", { name: "补充或排队" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "停止当前任务" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "停止当前任务" }));
     expect(onStop).toHaveBeenCalledOnce();
+    expect(input).toHaveValue("补充：只看近30天");
+  });
+
+  it("submits a running-turn follow-up with Enter", () => {
+    const onSubmit = vi.fn();
+    render(
+      <BrainComposer
+        value="补充限制"
+        disabled={false}
+        loading
+        pendingPermission={null}
+        approvalComment=""
+        approving={false}
+        onChange={vi.fn()}
+        onApprovalCommentChange={vi.fn()}
+        onApprovePermission={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledOnce();
   });
 
   it("uses a business name instead of an internal tool name", () => {

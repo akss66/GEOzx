@@ -73,6 +73,8 @@ export function BrainComposer({
   }, [pendingPermission?.id]);
 
   const mode = pendingPermission ? "permission" : "message";
+  const canType = !disabled && !pendingPermission;
+  const canSubmit = canType && !attachmentBusy && value.trim().length > 0;
   const comment = approvalComment.trim() || undefined;
   const textAreaAutoSize = supportsMeasuredTextArea();
 
@@ -82,7 +84,11 @@ export function BrainComposer({
       aria-label="运营大脑输入区"
       data-mode={mode}
     >
-      <div className="dy-brain-composer-box" data-mode={mode}>
+      <div
+        className="dy-brain-composer-box"
+        data-mode={mode}
+        data-running={loading ? "true" : undefined}
+      >
         {pendingPermission ? (
           <div className="tz-brain-permission-mode">
             <div className="tz-brain-permission-copy">
@@ -170,8 +176,9 @@ export function BrainComposer({
             <Input.TextArea
               aria-label="运营大脑消息"
               value={value}
-              disabled={disabled || loading}
+              disabled={!canType}
               autoFocus
+              placeholder={loading ? "继续补充要求，或提出下一项问题…" : undefined}
               onChange={(event) => onChange(event.target.value)}
               autoSize={textAreaAutoSize ? { minRows: 1, maxRows: 6 } : false}
               rows={textAreaAutoSize ? undefined : 1}
@@ -185,15 +192,13 @@ export function BrainComposer({
                   event.key !== "Enter"
                   || event.shiftKey
                   || event.nativeEvent.isComposing
-                  || disabled
-                  || loading
-                  || attachmentBusy
+                  || !canSubmit
                 ) return;
                 event.preventDefault();
                 onSubmit();
               }}
             />
-            <div className="dy-brain-composer-tools">
+            <div className="dy-brain-composer-tools" data-running={loading ? "true" : undefined}>
               <div className="dy-brain-prompts">
                 {promptChips.map((item) => (
                   <button key={item} type="button" onClick={() => onChange(appendPrompt(value, item))}>
@@ -201,26 +206,26 @@ export function BrainComposer({
                   </button>
                 ))}
               </div>
-              {loading && onStop ? (
+              {loading ? (
                 <Button
                   type="primary"
                   size="large"
-                  aria-label="停止生成"
+                  aria-label="停止当前任务"
                   className="dy-brain-stop-button"
                   icon={<StopOutlined />}
+                  disabled={!onStop}
                   onClick={onStop}
                 />
-              ) : (
-                <Button
-                  type="primary"
-                  size="large"
-                  aria-label="发送给运营大脑"
-                  className="dy-brain-send-button"
-                  icon={<SendOutlined />}
-                  disabled={disabled || attachmentBusy || value.trim().length === 0}
-                  onClick={onSubmit}
-                />
-              )}
+              ) : null}
+              <Button
+                type="primary"
+                size="large"
+                aria-label={loading ? "补充或排队" : "发送给运营大脑"}
+                className="dy-brain-send-button"
+                icon={<SendOutlined />}
+                disabled={!canSubmit}
+                onClick={onSubmit}
+              />
             </div>
           </>
         )}

@@ -1492,6 +1492,10 @@
   box-shadow: 0 8px 24px rgba(42, 35, 27, 0.07);
 }
 
+.tz-brain-thread .dy-brain-composer-box[data-mode="message"][data-running="true"] {
+  padding-right: 100px;
+}
+
 .tz-brain-thread .dy-brain-capability-launcher {
   position: absolute;
   z-index: 2;
@@ -1854,6 +1858,10 @@
   right: 12px;
   padding: 0;
   transform: translateY(-50%);
+}
+
+.tz-brain-thread .dy-brain-composer-tools[data-running="true"] {
+  gap: 6px;
 }
 
 .tz-brain-thread .dy-brain-prompts {

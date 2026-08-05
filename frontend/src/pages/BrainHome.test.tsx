@@ -1525,7 +1525,7 @@ describe("BrainHome V3 conversation projection", () => {
     await screen.findByText("生成一份长报告");
     const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
 
-    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止当前任务" }));
 
     await waitFor(() => expect(vi.mocked(stopBrainGeneration).mock.calls[0]?.[0]).toEqual({
       clientMessageId,
@@ -1666,7 +1666,7 @@ describe("BrainHome V3 conversation projection", () => {
 
     expect(await screen.findByText("生成长报告")).toBeInTheDocument();
     expect(screen.getByLabelText("运营大脑消息")).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止当前任务" }));
     await waitFor(() => expect(stopConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
       threadId: 81,
       turnId: 501,
@@ -1685,7 +1685,7 @@ describe("BrainHome V3 conversation projection", () => {
     renderBrainHome();
 
     expect(await screen.findByText("Newest task")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止当前任务" }));
     await waitFor(() => expect(stopConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
       threadId: 81,
       turnId: 502,
