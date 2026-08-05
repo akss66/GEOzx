@@ -32,6 +32,7 @@ export function WorkTurnCard({
   sourceStatus?: string;
 }) {
   const steeringDetail = view.steeringNotice?.message ?? view.steeringNotice?.reason;
+  const isThinking = isActiveStatus(sourceStatus) || isActiveStatus(view.status);
   return (
     <article
       className="tz-work-turn"
@@ -47,7 +48,8 @@ export function WorkTurnCard({
       <section
         className="tz-work-turn__operator"
         aria-label="Assistant response"
-        aria-busy={isActiveStatus(sourceStatus ?? view.status)}
+        aria-busy={isThinking}
+        data-thinking={isThinking || undefined}
       >
         <header className="tz-work-turn__identity">
           <AgentAvatar code="00-decision" className="dy-chat-avatar" label={view.assistant.identity} />
@@ -83,6 +85,6 @@ export function WorkTurnCard({
   );
 }
 
-function isActiveStatus(status: string) {
-  return ["working", "claimed", "waiting_predecessor", "queued", "running", "retry_wait"].includes(status);
+function isActiveStatus(status?: string) {
+  return ["received", "working", "claimed", "waiting_predecessor", "queued", "running", "retry_wait"].includes(status ?? "");
 }

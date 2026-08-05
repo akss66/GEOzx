@@ -580,6 +580,10 @@
   animation: tz-agent-thinking 1.45s ease-in-out infinite;
 }
 
+.tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .dy-chat-avatar {
+  animation: tz-agent-thinking 1.45s ease-in-out infinite;
+}
+
 .tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .ant-typography {
   color: var(--tz-ink-soft) !important;
 }
@@ -2164,7 +2168,8 @@
   .tz-brain-permission-mode,
   .tz-brain-decision,
   .tz-brain-thread .dy-chat-message,
-  .tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .dy-chat-avatar {
+  .tz-brain-thread .dy-chat-message-agent[data-thinking="true"] .dy-chat-avatar,
+  .tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .dy-chat-avatar {
     animation: none !important;
     transition: none !important;
   }

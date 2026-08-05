@@ -28,16 +28,20 @@ describe("WorkTurnCard", () => {
   afterEach(cleanup);
 
   it("keeps one work-turn root while a working turn completes", () => {
-    const view = render(<WorkTurnCard view={workingTurn} />);
+    const view = render(<WorkTurnCard view={workingTurn} sourceStatus="received" />);
     const root = screen.getByTestId("work-turn");
+    const operator = screen.getByRole("region", { name: "Assistant response" });
 
     expect(screen.getAllByTestId("work-turn")).toHaveLength(1);
     expect(screen.getAllByText("运营大脑")).toHaveLength(1);
     expect(screen.queryByText("思考中")).not.toBeInTheDocument();
     expect(screen.getByText("正在咨询专家")).toBeInTheDocument();
+    expect(operator).toHaveAttribute("aria-busy", "true");
+    expect(operator).toHaveAttribute("data-thinking", "true");
 
     view.rerender(
       <WorkTurnCard
+        sourceStatus="completed"
         view={{
           ...workingTurn,
           status: "completed",
@@ -50,6 +54,8 @@ describe("WorkTurnCard", () => {
     expect(screen.getByTestId("work-turn")).toBe(root);
     expect(root).toHaveAttribute("data-turn-status", "completed");
     expect(screen.queryByText("正在咨询专家")).not.toBeInTheDocument();
+    expect(operator).toHaveAttribute("aria-busy", "false");
+    expect(operator).not.toHaveAttribute("data-thinking");
   });
 
   it("shows steering inside the existing work card without creating a bubble or thinking copy", () => {
