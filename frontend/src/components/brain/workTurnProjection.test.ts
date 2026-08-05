@@ -270,6 +270,17 @@ describe("projectWorkTurn", () => {
     expect(model.presentation.showFinal).toBe(true);
   });
 
+  it("treats assistant text as final even when persisted status lags", () => {
+    const model = projectWorkTurn(turn({
+      status: "running",
+      turn_phase: "reading_data",
+      assistant_response: "诊断已完成。",
+    }));
+
+    expect(model.presentation.showFinal).toBe(true);
+    expect(model.presentation.showActivity).toBe(false);
+  });
+
   it.each(["blocked", "cancelled", "stopped", "dead_letter"])(
     "marks a terminal execution summary with %s as failed",
     (status) => {

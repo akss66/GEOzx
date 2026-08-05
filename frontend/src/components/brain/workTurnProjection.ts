@@ -41,7 +41,7 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
     status,
     phase: turn.turn_phase,
     persistedStatus: turn.status,
-    hasFinal: status === "completed" && assistantText != null,
+    hasFinal: assistantText != null,
     steps,
   });
 
