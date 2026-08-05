@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -69,6 +70,10 @@ from app.orchestrator.operation_quality import (
 from app.orchestrator.runtime_scope import RuntimeScope
 from app.orchestrator.runtime_tools import build_runtime_tool_adapter
 from app.orchestrator.skill_tool_plan import SkillToolPlanError, build_skill_tool_plan
+from app.orchestrator.skills.account_data_analysis import (
+    AccountDataAnalysisAnswer,
+    AccountDataAnalysisCriticOutcome,
+)
 from app.orchestrator.skills.account_inspection import (
     AccountInspectionCriticOutcome,
     AccountInspectionMetric,
@@ -102,6 +107,7 @@ from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
 from app.schemas.skills import SkillDefinition
+from app.services.account_metric_analysis import AccountMetricAnalysis
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 from app.services.composite_skill_runs import pause_composite_parent_for_artifacts
 from app.services.runtime_deliverables import write_runtime_deliverable
@@ -116,6 +122,7 @@ from app.services.runtime_state import TERMINAL_STATUSES, RuntimeStateScope, clo
 from app.services.turn_events import TurnEventScope, append_turn_event
 
 _ACCOUNT_INSPECTION = "account_inspection"
+_ACCOUNT_DATA_ANALYSIS = "account_data_analysis"
 _MAX_CRITIC_IMPROVEMENTS = 2
 DataSufficiency = Literal["insufficient", "partial", "sufficient"]
 log = logging.getLogger("dyflow.skill_runtime")
@@ -237,9 +244,7 @@ async def _start_skill_stage(
         state="started",
     )
     await session.commit()
-    _ACTIVE_SKILL_STAGES.set(
-        (*_ACTIVE_SKILL_STAGES.get(), (step_code, attempt))
-    )
+    _ACTIVE_SKILL_STAGES.set((*_ACTIVE_SKILL_STAGES.get(), (step_code, attempt)))
 
 
 async def _complete_skill_stage(
@@ -332,9 +337,7 @@ def _validated_skill_input(
     fallback_days: int | None,
 ) -> Any:
     allowed_fields = definition.input_model.model_fields
-    input_payload = {
-        key: value for key, value in structured_input.items() if key in allowed_fields
-    }
+    input_payload = {key: value for key, value in structured_input.items() if key in allowed_fields}
     if fallback_days is not None and "days" in allowed_fields and "days" not in input_payload:
         input_payload["days"] = fallback_days
     return definition.input_model.model_validate(input_payload)
@@ -343,9 +346,7 @@ def _validated_skill_input(
 def _capability_attachment_snapshot(
     capability_request: CapabilityRequest,
 ) -> dict[str, Any]:
-    contexts = [
-        item.model_dump(mode="json") for item in capability_request.attachment_contexts
-    ]
+    contexts = [item.model_dump(mode="json") for item in capability_request.attachment_contexts]
     if not contexts:
         return {}
     return {
@@ -369,16 +370,14 @@ def _server_skill_context_snapshot(
     if context is None:
         return {}
     server_context: dict[str, Any] = {
-            "preloaded_tool_results": context.preloaded_tool_results,
-            "tool_audit_refs": context.tool_audit_refs,
+        "preloaded_tool_results": context.preloaded_tool_results,
+        "tool_audit_refs": context.tool_audit_refs,
     }
     if context.lineage_refs:
         server_context["lineage_refs"] = [asdict(ref) for ref in context.lineage_refs]
     if context.revision_id is not None:
         server_context["revision_id"] = context.revision_id
-        server_context["revision_parent_skill_run_id"] = (
-            context.revision_parent_skill_run_id
-        )
+        server_context["revision_parent_skill_run_id"] = context.revision_parent_skill_run_id
     return {"_server_context": server_context}
 
 
@@ -642,47 +641,31 @@ class SkillRuntime:
         creation_lock: RuntimeRootLock | None = None
         if existing is None:
             with session.no_autoflush:
-                discovered_task = (
-                    await session.get(BrainTask, run.task_id) if run.task_id else None
-                )
+                discovered_task = await session.get(BrainTask, run.task_id) if run.task_id else None
                 discovered_skills = list(
                     await session.scalars(
-                        select(SkillRun)
-                        .where(SkillRun.run_id == run_id)
-                        .order_by(SkillRun.id)
+                        select(SkillRun).where(SkillRun.run_id == run_id).order_by(SkillRun.id)
                     )
                 )
                 root_candidates = [
                     item
                     for item in discovered_skills
-                    if type(
-                        dict(item.output_snapshot or {}).get(
-                            "composite_parent_skill_run_id"
-                        )
-                    )
+                    if type(dict(item.output_snapshot or {}).get("composite_parent_skill_run_id"))
                     is not int
                 ]
                 root_candidate = next(
-                    (
-                        item
-                        for item in root_candidates
-                        if item.skill_code == "operation_iteration"
-                    ),
+                    (item for item in root_candidates if item.skill_code == "operation_iteration"),
                     root_candidates[0] if root_candidates else None,
                 )
                 root_id = root_candidate.id if root_candidate is not None else None
-                child_ids = tuple(
-                    item.id for item in discovered_skills if item.id != root_id
-                )
+                child_ids = tuple(item.id for item in discovered_skills if item.id != root_id)
                 creation_lock = await lock_runtime_root_scope(
                     session,
                     run_id=run_id,
                     expected_turn_id=turn.id,
                     expected_task_id=run.task_id,
                     expected_content_item_id=(
-                        discovered_task.content_item_id
-                        if discovered_task is not None
-                        else None
+                        discovered_task.content_item_id if discovered_task is not None else None
                     ),
                     root_skill_run_id=root_id,
                     child_skill_run_ids=child_ids,
@@ -820,6 +803,21 @@ class SkillRuntime:
         stage_context_token = _ACTIVE_SKILL_STAGES.set(())
         nested_parent_token = _NESTED_PARENT_SKILL_RUN_ID.set(parent_skill_run_id)
         try:
+            if definition.code == _ACCOUNT_DATA_ANALYSIS:
+                return await self._execute_account_data_analysis(
+                    session,
+                    user=user,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    content=content,
+                    skill_run=skill_run,
+                    scope=runtime_scope,
+                    definition=definition,
+                    frozen_input=dict(skill_run.input_snapshot or {}),
+                    lease_owner=lease_owner,
+                )
             if definition.code == _ACCOUNT_INSPECTION:
                 return await self._execute_account_inspection(
                     session,
@@ -928,11 +926,7 @@ class SkillRuntime:
             persisted_thread = await session.get(ConversationThread, thread_id)
             scope_mismatch = isinstance(failure, _ToolScopeMismatch)
             terminal_status = "blocked" if scope_mismatch else "failed"
-            error_code = (
-                "TOOL_RESULT_SCOPE_MISMATCH"
-                if scope_mismatch
-                else type(failure).__name__
-            )
+            error_code = "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(failure).__name__
             response = (
                 "工具返回的数据不属于当前账号，账号体检已停止。"
                 if scope_mismatch
@@ -1298,9 +1292,7 @@ class SkillRuntime:
             revision_bridge.previous_graph
             if revision_bridge is not None
             else (
-                dict(skill_run.output_snapshot or {})
-                .get("report", {})
-                .get("child_skill_graph")
+                dict(skill_run.output_snapshot or {}).get("report", {}).get("child_skill_graph")
                 if isinstance(dict(skill_run.output_snapshot or {}).get("report"), dict)
                 else None
             )
@@ -1324,9 +1316,7 @@ class SkillRuntime:
                 previous_graph=previous_graph,
             )
         ).model_dump(mode="json")
-        nodes_by_code = {
-            str(node["skill_code"]): node for node in report["child_skill_graph"]
-        }
+        nodes_by_code = {str(node["skill_code"]): node for node in report["child_skill_graph"]}
         parent_status = "completed"
         interrupt: dict[str, Any] | None = None
         for node in report["child_skill_graph"]:
@@ -1412,10 +1402,9 @@ class SkillRuntime:
                             version=artifacts_by_id[artifact_id][0].version,
                             source_skill_run_id=artifacts_by_id[artifact_id][1].id,
                             parent_skill_run_id=int(
-                                dict(
-                                    artifacts_by_id[artifact_id][1].output_snapshot
-                                    or {}
-                                ).get("composite_parent_skill_run_id")
+                                dict(artifacts_by_id[artifact_id][1].output_snapshot or {}).get(
+                                    "composite_parent_skill_run_id"
+                                )
                                 or skill_run.id
                             ),
                         )
@@ -1490,9 +1479,7 @@ class SkillRuntime:
             node["error_code"] = child_result.error_code
             if child_result.status == "needs_review":
                 artifact_ids = (
-                    [child_result.artifact_id]
-                    if child_result.artifact_id is not None
-                    else []
+                    [child_result.artifact_id] if child_result.artifact_id is not None else []
                 )
                 should_pause = await pause_composite_parent_for_artifacts(
                     session,
@@ -1643,13 +1630,408 @@ class SkillRuntime:
         if child_skill_run is None:
             raise SkillRecoveryConflict("COMPOSITE_CHILD_SKILL_RUN_MISSING")
         if (
-            dict(child_skill_run.output_snapshot or {}).get(
-                "composite_parent_skill_run_id"
-            )
+            dict(child_skill_run.output_snapshot or {}).get("composite_parent_skill_run_id")
             != parent_skill_run.id
         ):
             raise SkillRecoveryConflict("COMPOSITE_CHILD_PARENT_LINK_MISMATCH")
         return self._existing_result(child_skill_run)
+
+    async def _execute_account_data_analysis(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        content: ContentItem,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
+        frozen_input: dict[str, Any],
+        lease_owner: str,
+    ) -> SkillExecutionResult:
+        attempt = max(1, run.attempt)
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="read_data",
+            attempt=attempt,
+        )
+        await self._heartbeat(session, run=run, lease_owner=lease_owner)
+        comparison = str(frozen_input.get("comparison") or "auto")
+        metric_codes = [
+            str(item) for item in frozen_input.get("requested_metrics") or [] if str(item)
+        ] or ["play", "follower_delta", "follower_count", "engagement_rate"]
+        tool_executor = self._tool_executor or DurableToolExecutor(build_runtime_tool_adapter())
+        try:
+            outcome = await tool_executor.execute(
+                task=task,
+                user=user,
+                request=RuntimeToolCall(
+                    tool_code="account.metrics_analysis",
+                    arguments={
+                        "days": int(frozen_input.get("days") or 30),
+                        "comparison": ("previous_period" if comparison == "auto" else comparison),
+                        "metric_codes": metric_codes,
+                        "top_n": int(frozen_input.get("top_n") or 5),
+                    },
+                    purpose="读取当前账号已确认数据并生成确定性分析事实",
+                    idempotency_key=f"{skill_run.id}:account.metrics_analysis",
+                ),
+                project_id=thread.project_id,
+                agent_code=AgentCode.DECISION.value,
+                scope=scope,
+                execution_owner=lease_owner,
+            )
+        except Exception as exc:
+            raise _SkillStageFailure("read_data", attempt, exc) from exc
+        if outcome.status != "success" or outcome.result is None:
+            await _fail_skill_stage(
+                session,
+                scope=scope,
+                step_code="read_data",
+                attempt=attempt,
+                error_code="TOOL_EXECUTION_FAILED",
+            )
+            return await self._pause_for_tool(
+                session,
+                thread=thread,
+                turn=turn,
+                run=run,
+                skill_run=skill_run,
+                task=task,
+                status=outcome.status,
+                artifact_type="account_analysis_answer",
+            )
+        self._require_tool_scope(outcome.result, thread.account_id)
+        tool_result = AccountMetricAnalysis.model_validate(outcome.result).model_dump(mode="json")
+        if isinstance(outcome.tool_call, AgentToolCall):
+            outcome.tool_call.skill_run_id = skill_run.id
+            outcome.tool_call.thread_id = thread.id
+            outcome.tool_call.turn_id = turn.id
+            await session.commit()
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="read_data",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="specialist_work",
+            attempt=attempt,
+        )
+        question = str(frozen_input.get("question") or turn.user_input).strip()
+        if tool_result["answerability"]["status"] == "insufficient":
+            report = _build_account_analysis_answer(
+                account_id=thread.account_id,
+                question=question,
+                tool_result=tool_result,
+                expert_output={},
+                critic=_CriticResult(True, 100, [], []),
+                critic_iterations=1,
+                participating_experts=[],
+            )
+            await _complete_skill_stage(
+                session,
+                scope=scope,
+                step_code="specialist_work",
+                attempt=attempt,
+                commit=True,
+            )
+            return await self._persist_account_analysis_answer(
+                session,
+                thread=thread,
+                turn=turn,
+                run=run,
+                task=task,
+                content=content,
+                skill_run=skill_run,
+                scope=scope,
+                definition=definition,
+                report=report,
+                producer=None,
+                attempt=attempt,
+            )
+
+        expert_result: _ExpertResult | None = None
+        try:
+            expert_result = (
+                await self._execute_expert_stage(
+                    session,
+                    user=user,
+                    task=task,
+                    scope=scope,
+                    codes=(AgentCode.OPERATOR,),
+                    purpose=(
+                        "解释账号已确认数据并给出短周期验证建议；不得改写事实、"
+                        "伪造证据或把相关性表述为因果。"
+                    ),
+                    evidence_refs=[
+                        f"{item['source_type']}:{item['source_id']}"
+                        for item in tool_result["evidence_refs"]
+                    ],
+                    step_keys={AgentCode.OPERATOR: "account-data-analysis:operator"},
+                    upstream={
+                        "question": question,
+                        "answerability": tool_result["answerability"],
+                        "facts": tool_result["facts"],
+                        "content_rankings": tool_result["content_rankings"],
+                        "data_quality": tool_result["data_quality"],
+                        "evidence_refs": tool_result["evidence_refs"],
+                    },
+                    lease_owner=lease_owner,
+                )
+            )[0]
+        except AgentHarnessError as exc:
+            log.warning(
+                "Account data analysis expert failed; returning deterministic facts: %s",
+                exc,
+            )
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="specialist_work",
+            attempt=attempt,
+            commit=True,
+        )
+
+        if expert_result is None:
+            report = _build_account_analysis_answer(
+                account_id=thread.account_id,
+                question=question,
+                tool_result=tool_result,
+                expert_output={},
+                critic=_CriticResult(
+                    False,
+                    0,
+                    ["运营专家本轮未能完成解释"],
+                    ["当前先查看确定性事实，稍后可重新生成解释和建议"],
+                ),
+                critic_iterations=1,
+                participating_experts=[],
+            )
+            return await self._persist_account_analysis_answer(
+                session,
+                thread=thread,
+                turn=turn,
+                run=run,
+                task=task,
+                content=content,
+                skill_run=skill_run,
+                scope=scope,
+                definition=definition,
+                report=report,
+                producer=None,
+                attempt=attempt,
+            )
+
+        report = _build_account_analysis_answer(
+            account_id=thread.account_id,
+            question=question,
+            tool_result=tool_result,
+            expert_output=expert_result.output,
+            critic=_CriticResult(False, 0, [], []),
+            critic_iterations=1,
+            participating_experts=[AgentCode.OPERATOR.value],
+        )
+        validate_account_analysis_grounding(report, tool_result)
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="quality_review",
+            attempt=attempt,
+        )
+        try:
+            review = await self._review(
+                session,
+                user=user,
+                task=task,
+                invocation=expert_result.invocation,
+                deliverable_id=None,
+                report=report,
+                evidence_refs=list(tool_result["evidence_refs"]),
+                iteration=1,
+            )
+        except IntelligenceUnavailable:
+            review = _CriticResult(
+                False,
+                0,
+                ["自动质量审核暂时不可用"],
+                ["请人工核对解释和建议"],
+            )
+        critic_iterations = 1
+        if not review.passed:
+            try:
+                revised = (
+                    await self._execute_expert_stage(
+                        session,
+                        user=user,
+                        task=task,
+                        scope=scope,
+                        codes=(AgentCode.OPERATOR,),
+                        purpose="仅按质量意见修订解释和建议，不得修改 Tool 事实与证据。",
+                        evidence_refs=[
+                            f"{item['source_type']}:{item['source_id']}"
+                            for item in tool_result["evidence_refs"]
+                        ],
+                        step_keys={AgentCode.OPERATOR: "account-data-analysis:critic-revision"},
+                        upstream={
+                            "question": question,
+                            "facts": tool_result["facts"],
+                            "evidence_refs": tool_result["evidence_refs"],
+                            "previous_answer": report.model_dump(mode="json"),
+                            "critic": {
+                                "issues": review.issues,
+                                "suggestions": review.suggestions,
+                            },
+                        },
+                        lease_owner=lease_owner,
+                    )
+                )[0]
+                expert_result = revised
+                report = _build_account_analysis_answer(
+                    account_id=thread.account_id,
+                    question=question,
+                    tool_result=tool_result,
+                    expert_output=revised.output,
+                    critic=review,
+                    critic_iterations=2,
+                    participating_experts=[AgentCode.OPERATOR.value],
+                )
+                validate_account_analysis_grounding(report, tool_result)
+                review = await self._review(
+                    session,
+                    user=user,
+                    task=task,
+                    invocation=revised.invocation,
+                    deliverable_id=None,
+                    report=report,
+                    evidence_refs=list(tool_result["evidence_refs"]),
+                    iteration=2,
+                )
+                critic_iterations = 2
+            except (AgentHarnessError, IntelligenceUnavailable):
+                pass
+        report = report.model_copy(
+            update={
+                "critic": AccountDataAnalysisCriticOutcome(
+                    passed=review.passed,
+                    score=review.score,
+                    iterations=critic_iterations,
+                    issues=review.issues,
+                    suggestions=review.suggestions,
+                )
+            }
+        )
+        validate_account_analysis_grounding(report, tool_result)
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="quality_review",
+            attempt=attempt,
+            commit=True,
+        )
+        return await self._persist_account_analysis_answer(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            content=content,
+            skill_run=skill_run,
+            scope=scope,
+            definition=definition,
+            report=report,
+            producer=expert_result.invocation,
+            attempt=attempt,
+        )
+
+    async def _persist_account_analysis_answer(
+        self,
+        session: AsyncSession,
+        *,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        content: ContentItem,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        definition: SkillDefinition,
+        report: AccountDataAnalysisAnswer,
+        producer: AgentInvocation | None,
+        attempt: int,
+    ) -> SkillExecutionResult:
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+        )
+        if producer is not None:
+            self._require_formal_producer(
+                producer,
+                scope=scope,
+                definition=definition,
+            )
+        definition.output_model.model_validate(report.model_dump(mode="json"))
+        deliverable = await write_runtime_deliverable(
+            session,
+            scope=scope,
+            content=content,
+            agent_code=(
+                producer.agent_code.value
+                if producer is not None and isinstance(producer.agent_code, AgentCode)
+                else AgentCode.DECISION.value
+            ),
+            deliverable_type=DeliverableType.REVIEW_REPORT,
+            status=DeliverableStatus.PENDING_REVIEW,
+            payload=report.model_dump(mode="json"),
+            note=(
+                "business_artifact_type=account_analysis_answer; "
+                "deterministic facts and evidence owned by account.metrics_analysis"
+            ),
+        )
+        skill_run.quality_score = Decimal(str(report.critic.score / 100))
+        response = (
+            "当前数据不足，我已说明缺口和下一步补数方式。"
+            if report.answerability.status == "insufficient"
+            else "账号数据分析已完成，已给出结论、依据和下一步建议。"
+        )
+        output = {
+            "status": "completed",
+            "task_id": task.id,
+            "artifact_id": deliverable.id,
+            "artifact_type": "account_analysis_answer",
+            "report": report.model_dump(mode="json"),
+            "response": response,
+        }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="prepare_deliverable",
+            attempt=attempt,
+            commit=False,
+        )
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=response,
+            output_snapshot=output,
+        )
+        return self._existing_result(skill_run)
 
     async def _execute_account_inspection(
         self,
@@ -1913,9 +2295,7 @@ class SkillRuntime:
                     skill_run_id=skill_run.id,
                     thread_id=thread.id,
                     turn_id=turn.id,
-                    step_key=(
-                        f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"
-                    ),
+                    step_key=(f"account-inspection:critic-revision:{AgentCode.OPERATOR.value}"),
                     attempt=iteration + 1,
                     upstream={
                         "tool_results": {"items": tool_packet},
@@ -2096,16 +2476,13 @@ class SkillRuntime:
                     revision_bridge = await resolve_operation_revision_bridge(
                         session,
                         scope=scope,
-                        current_parent_skill_run_id=(
-                            server_context.revision_parent_skill_run_id
-                        ),
+                        current_parent_skill_run_id=(server_context.revision_parent_skill_run_id),
                     )
                     cross_run_audit_valid = (
                         revision_bridge is not None
                         and revision_bridge.revision_id == server_context.revision_id
                         and revision_bridge.source_turn_id == tool_call.turn_id
-                        and revision_bridge.source_parent_skill_run_id
-                        == source_skill_run_id
+                        and revision_bridge.source_parent_skill_run_id == source_skill_run_id
                     )
                 if (
                     tool_call is None
@@ -2247,9 +2624,7 @@ class SkillRuntime:
         requested_source_ids = list(frozen_input.get("source_artifact_ids") or [])
         if server_context is not None and server_context.lineage_refs:
             if not requested_source_ids:
-                requested_source_ids = [
-                    ref.artifact_id for ref in server_context.lineage_refs
-                ]
+                requested_source_ids = [ref.artifact_id for ref in server_context.lineage_refs]
             parent_skill_run_id = dict(skill_run.output_snapshot or {}).get(
                 "composite_parent_skill_run_id"
             )
@@ -2315,9 +2690,7 @@ class SkillRuntime:
                             for key, value in tool_results.items()
                         ]
                     },
-                    "attachment_contexts": list(
-                        frozen_input.get("attachment_contexts") or []
-                    ),
+                    "attachment_contexts": list(frozen_input.get("attachment_contexts") or []),
                     "source_artifacts": source_artifacts,
                     "expert_outputs": list(upstream_outputs),
                 },
@@ -2351,9 +2724,7 @@ class SkillRuntime:
 
         for step in tool_plan:
             if step.phase == "side_effect":
-                raise SkillToolPlanError(
-                    f"SKILL_SIDE_EFFECT_REQUIRES_APPROVAL:{step.tool_code}"
-                )
+                raise SkillToolPlanError(f"SKILL_SIDE_EFFECT_REQUIRES_APPROVAL:{step.tool_code}")
             if step.phase != "prepare":
                 continue
             paused = await execute_tool(
@@ -2364,12 +2735,7 @@ class SkillRuntime:
                 return paused
 
         operation_mode = (
-            type(
-                dict(skill_run.output_snapshot or {}).get(
-                    "composite_parent_skill_run_id"
-                )
-            )
-            is int
+            type(dict(skill_run.output_snapshot or {}).get("composite_parent_skill_run_id")) is int
         )
         report, deliverable_type, deliverable_payload = _build_operating_report(
             definition=definition,
@@ -2395,8 +2761,7 @@ class SkillRuntime:
         quality_payload = report.get("quality")
         if (
             operation_mode
-            and
-            definition.code
+            and definition.code
             in {
                 "topic_planning",
                 "script_generation",
@@ -2748,7 +3113,7 @@ class SkillRuntime:
         task: BrainTask,
         invocation: Any,
         deliverable_id: int | None,
-        report: AccountInspectionReport,
+        report: AccountInspectionReport | AccountDataAnalysisAnswer,
         evidence_refs: list[dict[str, Any]],
         iteration: int,
     ) -> _CriticResult:
@@ -2837,9 +3202,7 @@ class SkillRuntime:
                     select(AgentToolCall.id)
                     .where(
                         AgentToolCall.skill_run_id == skill_run.id,
-                        AgentToolCall.status.in_(
-                            {"planned", "running", "ambiguous"}
-                        ),
+                        AgentToolCall.status.in_({"planned", "running", "ambiguous"}),
                     )
                     .order_by(AgentToolCall.id)
                 )
@@ -3296,6 +3659,7 @@ class SkillRuntime:
             skill_name = skill_registry.get(skill_code).name
             task_type = {
                 "account_inspection": BrainTaskType.ACCOUNT_DIAGNOSIS,
+                "account_data_analysis": BrainTaskType.REVIEW_OPTIMIZATION,
                 "performance_review": BrainTaskType.REVIEW_OPTIMIZATION,
             }.get(skill_code, BrainTaskType.CONTENT_CREATION)
             content = ContentItem(
@@ -3425,9 +3789,7 @@ def _operating_tool_arguments(
         }
     if tool_code == "platform.content_publish":
         return {
-            "approved_publish_artifact_id": int(
-                frozen_input["approved_publish_artifact_id"]
-            ),
+            "approved_publish_artifact_id": int(frozen_input["approved_publish_artifact_id"]),
             "source_artifact_version": int(frozen_input["source_artifact_version"]),
             "scheduled_at": frozen_input.get("scheduled_at"),
             "visibility": str(frozen_input.get("visibility") or "public"),
@@ -3455,8 +3817,7 @@ async def _confirmed_source_artifacts(
         )
     )
     by_id = {
-        deliverable.id: (deliverable, source_account_id)
-        for deliverable, source_account_id in rows
+        deliverable.id: (deliverable, source_account_id) for deliverable, source_account_id in rows
     }
     if set(by_id) != set(unique_ids):
         raise PermissionError("SOURCE_ARTIFACT_NOT_FOUND")
@@ -3603,14 +3964,10 @@ def _build_operating_report(
             requirement = str(constraint.get("raw_requirement") or "").strip()
             indexes = dict(constraint.get("target_scope") or {}).get("item_indexes") or []
             for index in indexes:
-                if (
-                    requirement
-                    and type(index) is int
-                    and 1 <= index <= len(expected_topic_ids)
-                ):
-                    required_constraints.setdefault(
-                        expected_topic_ids[index - 1], []
-                    ).append(requirement)
+                if requirement and type(index) is int and 1 <= index <= len(expected_topic_ids):
+                    required_constraints.setdefault(expected_topic_ids[index - 1], []).append(
+                        requirement
+                    )
         quality = evaluate_script_quality(
             scripts,
             expected_topic_ids=expected_topic_ids,
@@ -3622,9 +3979,7 @@ def _build_operating_report(
             title=first.title if first is not None else "",
             hook=first.hook if first is not None else "",
             scenes=first.shot_list if first is not None else [],
-            duration_seconds=(
-                first.duration_seconds if first is not None else duration_seconds
-            ),
+            duration_seconds=(first.duration_seconds if first is not None else duration_seconds),
             presentation_format=frozen_input.get("presentation_format", "storyboard"),
             bgm_suggestion=latest.get("bgm_suggestion"),
             scripts=scripts,
@@ -3834,9 +4189,7 @@ def _build_operating_report(
                 slot_type="publish",
                 title=str(item.get("title") or user_input[:120]),
                 owner=str(item.get("owner") or "运营"),
-                readiness=(
-                    "ready" if str(item.get("readiness")) == "ready" else "review"
-                ),
+                readiness=("ready" if str(item.get("readiness")) == "ready" else "review"),
                 topic_id=str(item.get("topic_id") or f"topic-{index:02d}"),
                 script_id=str(item.get("script_id") or f"script-{index:02d}"),
                 scheduled_at=item.get("scheduled_at"),
@@ -4165,10 +4518,7 @@ def _build_operating_report(
                 "items": data["items"],
                 "operating_notes": data["operating_notes"],
                 "publish_package": dict(
-                    tool_results.get("publish_package_prepare", {}).get(
-                        "publish_package"
-                    )
-                    or {}
+                    tool_results.get("publish_package_prepare", {}).get("publish_package") or {}
                 ),
             },
         )
@@ -4217,6 +4567,142 @@ def _period_label(value: dict[str, Any]) -> str:
     if start and end:
         return f"{start} 至 {end}"
     return "当前周期"
+
+
+def _build_account_analysis_answer(
+    *,
+    account_id: int,
+    question: str,
+    tool_result: dict[str, Any],
+    expert_output: dict[str, Any],
+    critic: _CriticResult,
+    critic_iterations: int,
+    participating_experts: list[str],
+) -> AccountDataAnalysisAnswer:
+    answerability = dict(tool_result.get("answerability") or {})
+    reasons = [str(item) for item in answerability.get("reasons") or [] if str(item)]
+    status = str(answerability.get("status") or "insufficient")
+    if status == "insufficient":
+        missing = [str(item) for item in answerability.get("missing_metrics") or [] if str(item)]
+        missing_label = "、".join(missing) if missing else "所需指标"
+        conclusion = f"当前缺少已确认的{missing_label}数据，暂时不能可靠回答这个问题。"
+        interpretation: list[str] = []
+        recommendations: list[dict[str, Any]] = []
+        data_limits = reasons or ["当前周期没有足够的已确认数据"]
+        next_action = "补齐并确认对应账号数据后重新分析"
+    elif expert_output:
+        conclusion = str(expert_output.get("conclusion") or "").strip() or (
+            "已完成当前账号数据的事实核对。"
+        )
+        interpretation = [
+            str(item).strip()
+            for item in expert_output.get("interpretation") or []
+            if str(item).strip()
+        ]
+        recommendations = [
+            dict(item)
+            for item in expert_output.get("recommendations") or []
+            if isinstance(item, dict)
+        ]
+        data_limits = list(
+            dict.fromkeys(
+                [
+                    *reasons,
+                    *[
+                        str(item).strip()
+                        for item in expert_output.get("data_limits") or []
+                        if str(item).strip()
+                    ],
+                ]
+            )
+        )
+        next_action = str(expert_output.get("next_action") or "").strip() or (
+            "选择一项建议进行短周期验证"
+        )
+    else:
+        conclusion = "已读取当前账号的确定性指标事实，但本轮未生成专业解释。"
+        interpretation = []
+        recommendations = []
+        data_limits = list(
+            dict.fromkeys([*reasons, "运营专家本轮未能完成解释，当前仅展示确定性事实"])
+        )
+        next_action = "稍后重新生成解释，或直接查看关键事实"
+    return AccountDataAnalysisAnswer(
+        account_id=account_id,
+        question=question,
+        answerability=answerability,
+        conclusion=conclusion,
+        key_facts=list(tool_result.get("facts") or []),
+        interpretation=interpretation,
+        recommendations=recommendations,
+        data_limits=data_limits,
+        next_action=next_action,
+        evidence_refs=list(tool_result.get("evidence_refs") or []),
+        participating_experts=participating_experts,
+        critic=AccountDataAnalysisCriticOutcome(
+            passed=critic.passed,
+            score=critic.score,
+            iterations=critic_iterations,
+            issues=critic.issues,
+            suggestions=critic.suggestions,
+        ),
+    )
+
+
+def validate_account_analysis_grounding(
+    answer: AccountDataAnalysisAnswer,
+    tool_result: dict[str, Any],
+) -> None:
+    """Reject expert prose that changes Tool-owned facts or claim strength."""
+
+    serialized = answer.model_dump(mode="json")
+    if serialized["key_facts"] != list(tool_result.get("facts") or []):
+        raise ValueError("account analysis key facts differ from deterministic tool facts")
+    if serialized["evidence_refs"] != list(tool_result.get("evidence_refs") or []):
+        raise ValueError("account analysis evidence refs differ from deterministic tool refs")
+
+    statements = [answer.conclusion, *answer.interpretation]
+    if any(
+        causal_term in statement
+        for statement in statements
+        for causal_term in ("导致", "造成", "证明了", "必然引起", "直接带来")
+    ):
+        raise ValueError("unsupported causal claim in account analysis")
+
+    allowed_numbers: set[float] = set()
+    for fact in answer.key_facts:
+        for value in (
+            fact.current_value,
+            fact.previous_value,
+            fact.absolute_change,
+            fact.relative_change,
+        ):
+            if value is None:
+                continue
+            number = float(value)
+            allowed_numbers.add(round(abs(number), 6))
+            if abs(number) <= 1:
+                allowed_numbers.add(round(abs(number * 100), 6))
+        allowed_numbers.add(float(fact.current_period.days))
+        if fact.comparison_period is not None:
+            allowed_numbers.add(float(fact.comparison_period.days))
+
+    for statement in statements:
+        for raw_number in re.findall(r"-?\d+(?:\.\d+)?", statement):
+            number = round(abs(float(raw_number)), 6)
+            if number not in allowed_numbers:
+                raise ValueError(f"unsupported numeric claim in account analysis: {raw_number}")
+        for fact in answer.key_facts:
+            if fact.metric_code not in statement and fact.label not in statement:
+                continue
+            if fact.direction == "down" and any(
+                term in statement for term in ("上升", "增长", "提高", "增加")
+            ):
+                raise ValueError("reversed metric direction claim in account analysis")
+            if fact.direction == "up" and any(
+                term in statement for term in ("下降", "减少", "降低", "下滑")
+            ):
+                raise ValueError("reversed metric direction claim in account analysis")
 
 
 def _build_report(
@@ -4410,4 +4896,9 @@ def _evidence_label(ref: dict[str, Any]) -> str:
 
 skill_runtime = SkillRuntime()
 
-__all__ = ["SkillExecutionResult", "SkillRuntime", "skill_runtime"]
+__all__ = [
+    "SkillExecutionResult",
+    "SkillRuntime",
+    "skill_runtime",
+    "validate_account_analysis_grounding",
+]
