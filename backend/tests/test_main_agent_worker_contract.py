@@ -284,11 +284,13 @@ async def test_price_steering_creates_partial_revision_from_scripts_forward(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("approval_revision_mode", ["partial", "full_recompute"])
 async def test_price_steering_reuses_topics_and_reruns_only_downstream_artifacts(
     client,
     session,
     admin,
     monkeypatch,
+    approval_revision_mode,
 ) -> None:
     """A completed weekly package revises scripts forward without another data read."""
 
@@ -511,6 +513,8 @@ async def test_price_steering_reuses_topics_and_reruns_only_downstream_artifacts
         )
     )
     assert revised_final_call is not None
+    revision.mode = approval_revision_mode
+    await session.commit()
     source_package_artifact_id = source_package_artifact.id
     source_package_artifact_version = source_package_artifact.version
     published_source_row_id = source_schedule_rows[0].id
@@ -608,11 +612,24 @@ async def test_price_steering_reuses_topics_and_reruns_only_downstream_artifacts
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_revision_mode", "approval_conflict"),
+    [
+        ("partial", None),
+        ("full_recompute", None),
+        (
+            "manual_reconciliation",
+            "SKILL_APPROVAL_REVISION_SCOPE_CONFLICT",
+        ),
+    ],
+)
 async def test_unapproved_weekly_package_is_superseded_before_revision_runs(
     client,
     session,
     admin,
     monkeypatch,
+    approval_revision_mode,
+    approval_conflict,
 ) -> None:
     """Steering replaces the sole pending gate instead of waiting behind it."""
 
@@ -897,6 +914,12 @@ async def test_unapproved_weekly_package_is_superseded_before_revision_runs(
         )
     )
     assert revised_final_call is not None
+    revised_package_id = revised_package.id
+    revision.mode = approval_revision_mode
+    if approval_revision_mode == "manual_reconciliation":
+        revision.manual_reconciliation_reason = "external_write_ambiguous"
+        revision.fork_checkpoint_id = None
+    await session.commit()
     assert (
         await session.scalar(
             select(func.count(AgentToolCall.id)).where(
@@ -921,6 +944,26 @@ async def test_unapproved_weekly_package_is_superseded_before_revision_runs(
         tool_call=revised_final_call,
     )
     approval_lock.tool_call.status = "success"
+    if approval_conflict is not None:
+        with pytest.raises(SkillApprovalConflict, match=approval_conflict):
+            await finalize_skill_finish_approval(
+                session,
+                tool_call=approval_lock.tool_call,
+                task=source_task,
+                approved=True,
+                comment="确认修订周运营包",
+                prelocked=approval_lock.runtime_lock,
+            )
+        await session.rollback()
+        assert (
+            await session.scalar(
+                select(func.count(ContentScheduleEntry.id)).where(
+                    ContentScheduleEntry.source_artifact_id == revised_package_id,
+                )
+            )
+            == 0
+        )
+        return
     await finalize_skill_finish_approval(
         session,
         tool_call=approval_lock.tool_call,

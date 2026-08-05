@@ -418,7 +418,7 @@ async def _lock_revision_source_schedule_entries(
         else None
     )
     if (
-        revision.mode != "partial"
+        revision.mode not in {"partial", "full_recompute"}
         or revision.org_id != task.org_id
         or revision.account_id != thread.account_id
         or revision.thread_id != thread.id
