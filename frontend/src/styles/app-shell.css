@@ -109,8 +109,7 @@
   overflow: hidden;
 }
 
-.tz-agent-avatar.is-main-agent,
-.dy-agent-master-avatar.tz-agent-avatar.is-main-agent {
+.tz-agent-avatar.is-main-agent {
   border: 0;
   background: transparent;
 }

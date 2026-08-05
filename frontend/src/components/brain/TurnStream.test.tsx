@@ -14,6 +14,8 @@ import { TurnStream } from "./TurnStream";
 
 const workTurnSource = readFileSync(resolve(process.cwd(), "src/components/brain/WorkTurnCard.tsx"), "utf8");
 const turnStreamSource = readFileSync(resolve(process.cwd(), "src/components/brain/TurnStream.tsx"), "utf8");
+const indexStylesSource = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+const appShellStylesSource = readFileSync(resolve(process.cwd(), "src/styles/app-shell.css"), "utf8");
 
 vi.mock("../../api/brain", () => ({ getArtifact: vi.fn() }));
 
@@ -94,11 +96,13 @@ describe("TurnStream", () => {
   afterEach(cleanup);
   beforeEach(() => vi.mocked(getArtifact).mockResolvedValue(artifact));
 
-  it("keeps production work-turn sources free of legacy chat classes", () => {
+  it("keeps production work-turn sources free of legacy chat and agent presentation classes", () => {
     expect(workTurnSource).toMatch(/className="tz-work-turn"/);
     expect(workTurnSource).not.toMatch(/dy-chat-/);
     expect(workTurnSource).not.toMatch(/dy-chat-(message|bubble|expert)/);
     expect(turnStreamSource).not.toMatch(/dy-chat-(message|bubble|expert)/);
+    expect(indexStylesSource).not.toMatch(/dy-agent-/);
+    expect(appShellStylesSource).not.toMatch(/dy-agent-/);
   });
 
   it("renders one continuous work-turn card instead of segmented chat messages", () => {
