@@ -22,6 +22,7 @@ from app.models.enums import (
 from app.orchestrator.runtime_tools import (
     build_runtime_tool_adapter,
     runtime_tool_capabilities,
+    runtime_tool_phase,
 )
 from app.tools import ToolExecutionContext, ToolValidationError
 
@@ -331,6 +332,74 @@ async def test_account_data_context_reports_empty_when_no_data_or_import_exists(
 
 
 @pytest.mark.asyncio
+async def test_metrics_analysis_tool_uses_only_authenticated_account_data(
+    session,
+    admin,
+) -> None:
+    account = await _account(session, admin, nickname="分析目标账号")
+    other = await _account(session, admin, nickname="不可见账号")
+    session.add_all(
+        [
+            MetricSnapshot(
+                org_id=account.org_id,
+                account_id=account.id,
+                source=MetricSource.DOUYIN,
+                stat_date=date.today(),
+                title="目标作品",
+                play=320,
+                follower_delta=6,
+            ),
+            MetricSnapshot(
+                org_id=other.org_id,
+                account_id=other.id,
+                source=MetricSource.DOUYIN,
+                stat_date=date.today(),
+                title="其他账号作品",
+                play=9999,
+                follower_delta=999,
+            ),
+            DataImportBatch(
+                org_id=account.org_id,
+                account_id=account.id,
+                created_by_id=admin.id,
+                source_kind=DataSourceKind.PLATFORM_EXPORT,
+                status=ImportBatchStatus.PREVIEW_READY,
+                template_code="douyin_period_aggregate_v1",
+                content_sha256="9" * 64,
+                period_start=date.today() - timedelta(days=29),
+                period_end=date.today(),
+                row_count=1,
+            ),
+        ]
+    )
+    await session.commit()
+
+    result = await build_runtime_tool_adapter().invoke(
+        "account.metrics_analysis",
+        {
+            "days": 30,
+            "comparison": "previous_period",
+            "metric_codes": ["play", "follower_delta"],
+            "top_n": 5,
+        },
+        ToolExecutionContext(session=session, user=admin, account_id=account.id),
+    )
+
+    assert result["account_id"] == account.id
+    assert result["query_window"]["days"] == 30
+    assert (
+        next(item for item in result["facts"] if item["metric_code"] == "play")["current_value"]
+        == 320
+    )
+    assert all(item["value"] != 9999 for item in result["evidence_refs"])
+    assert all(item["value"] != 999 for item in result["evidence_refs"])
+
+
+def test_metrics_analysis_tool_is_read_phase() -> None:
+    assert runtime_tool_phase("account.metrics_analysis") == "read"
+
+
+@pytest.mark.asyncio
 async def test_runtime_tools_reject_model_supplied_account_id(session, admin) -> None:
     account = await _account(session, admin)
 
@@ -384,6 +453,7 @@ def test_runtime_tool_catalog_exposes_read_and_prepare_phases(admin) -> None:
     assert {item["code"] for item in catalog} == {
         "account.data_context",
         "account.engagement_context",
+        "account.metrics_analysis",
         "account.metrics_summary",
         "account.profile",
         "platform.content_publish",
@@ -392,11 +462,9 @@ def test_runtime_tool_catalog_exposes_read_and_prepare_phases(admin) -> None:
     assert all(item["kind"] == "tool" for item in catalog)
     assert all(item["permission_mode"] == "auto" for item in catalog)
     assert all(item["scope"] == "account" for item in catalog)
-    assert {
-        item["execution_phase"]
-        for item in catalog
-        if item["code"].startswith("account.")
-    } == {"read"}
+    assert {item["execution_phase"] for item in catalog if item["code"].startswith("account.")} == {
+        "read"
+    }
     prepare_tool = next(item for item in catalog if item["code"] == "publish_package_prepare")
     assert prepare_tool["execution_phase"] == "prepare"
     publish_tool = next(item for item in catalog if item["code"] == "platform.content_publish")

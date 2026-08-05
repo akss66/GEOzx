@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, datetime, timedelta
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -26,6 +26,7 @@ from app.services.account_data_view import (
     AccountDataView,
     AccountDataViewService,
 )
+from app.services.account_metric_analysis import analyze_account_metrics
 from app.services.publishing import publish_approved_artifact
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
@@ -40,6 +41,24 @@ class AccountMetricsParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     days: int = Field(default=30, ge=1, le=90)
+
+
+class AccountMetricsAnalysisParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    days: int = Field(default=30, ge=1, le=90)
+    comparison: Literal["previous_period", "none"] = "previous_period"
+    metric_codes: list[str] = Field(
+        default_factory=lambda: [
+            "play",
+            "follower_delta",
+            "follower_count",
+            "engagement_rate",
+        ],
+        min_length=1,
+        max_length=12,
+    )
+    top_n: int = Field(default=5, ge=1, le=20)
 
 
 class EngagementContextParams(BaseModel):
@@ -183,6 +202,38 @@ async def _account_metrics_summary(
     }
 
 
+async def _account_metrics_analysis(
+    params: AccountMetricsAnalysisParams,
+    context: ToolExecutionContext,
+) -> dict[str, Any]:
+    if context.account_id is None:
+        raise PermissionError("selected account is required")
+    account = await require_account_access(
+        context.session,
+        context.user,
+        context.account_id,
+    )
+    period_end = date.today()
+    comparison_days = params.days if params.comparison == "previous_period" else 0
+    period_start = period_end - timedelta(
+        days=params.days + comparison_days - 1,
+    )
+    view = await AccountDataViewService(context.session).load(
+        account,
+        period_start,
+        period_end,
+    )
+    return analyze_account_metrics(
+        view,
+        account_id=account.id,
+        days=params.days,
+        comparison=params.comparison,
+        metric_codes=params.metric_codes,
+        top_n=params.top_n,
+        today=period_end,
+    ).model_dump(mode="json")
+
+
 async def _account_engagement_context(
     params: EngagementContextParams,
     context: ToolExecutionContext,
@@ -212,10 +263,7 @@ async def _account_engagement_context(
         "like_count",
         "share_count",
     )
-    metrics = {
-        name: data_context["metrics"].get(name, {"value": None})
-        for name in metric_names
-    }
+    metrics = {name: data_context["metrics"].get(name, {"value": None}) for name in metric_names}
     # Current official/export inputs contain aggregate interaction metrics but
     # no comment bodies.  Keep this explicit so the expert cannot invent FAQs
     # or sentiment from counts alone.
@@ -263,9 +311,7 @@ async def _account_data_context(
         or view.benchmarks
     )
     data_status = (
-        "available"
-        if has_available_data
-        else ("pending_import" if pending_imports else "empty")
+        "available" if has_available_data else ("pending_import" if pending_imports else "empty")
     )
     metric_context = _aggregate_data_metrics(view.content_snapshots, view.account_snapshots)
     return {
@@ -522,6 +568,17 @@ _RUNTIME_TOOL_SPECS = (
         scope="account",
     ),
     ToolSpec(
+        name="account.metrics_analysis",
+        handler=_tool_handler(
+            AccountMetricsAnalysisParams,
+            _account_metrics_analysis,
+        ),
+        side_effect_level="read",
+        params_model=AccountMetricsAnalysisParams,
+        allowed_roles=frozenset({UserRole.ADMIN, UserRole.USER}),
+        scope="account",
+    ),
+    ToolSpec(
         name="account.engagement_context",
         handler=_tool_handler(EngagementContextParams, _account_engagement_context),
         side_effect_level="read",
@@ -609,6 +666,7 @@ def _tool_description(code: str) -> str:
         "account.profile": "读取当前已选账号的公开概况和接入状态",
         "account.data_context": "读取当前账号统一数据视图、指标证据、覆盖度、时效与冲突",
         "account.metrics_summary": "汇总当前已选账号最近 1-90 天的运营指标",
+        "account.metrics_analysis": ("分析当前账号已确认数据的趋势、对比、异常与作品表现"),
         "account.engagement_context": (
             "读取当前账号互动指标和可核验评论样本；没有评论正文时明确返回数据不足"
         ),

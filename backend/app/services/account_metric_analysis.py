@@ -79,6 +79,7 @@ class FrozenModel(BaseModel):
 
 
 class DateRange(FrozenModel):
+    days: int = Field(ge=1)
     start: date
     end: date
 
@@ -179,9 +180,10 @@ def analyze_account_metrics(
     requested_metrics = _validate_metric_codes(metric_codes)
     period_end = today or date.today()
     period_start = period_end - timedelta(days=days - 1)
-    current_period = DateRange(start=period_start, end=period_end)
+    current_period = DateRange(days=days, start=period_start, end=period_end)
     comparison_period = (
         DateRange(
+            days=days,
             start=period_start - timedelta(days=days),
             end=period_start - timedelta(days=1),
         )
