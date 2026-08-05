@@ -3,10 +3,24 @@
 ## 1. 文档状态
 
 - 日期：2026-08-05
-- 状态：产品方向已确认，等待产品负责人审阅本文
+- 状态：已实现，等待线上验收
 - 适用范围：运营大脑主对话、账号数据诊断、专家分析、实时进度、用户补充要求、停止、异常恢复与最终运营建议
 - 当前产品边界：只根据运营者已经导入的数据判断账号当前状态并给出建议；不负责自动发布、自动监测、效果归因或自动调整策略
 - 上游约束：不同账号的数据、会话、运行状态和诊断报告必须严格隔离
+
+### 本地验收证据（2026-08-05）
+
+| 范围 | 命令 | 结果 |
+| --- | --- | --- |
+| 前端单元与集成测试 | `npm test` | PASS，80 个测试文件、526 条测试通过 |
+| 前端静态检查 | `npm run lint` | PASS，无 ESLint 错误 |
+| 前端生产构建 | `npm run build` | PASS，TypeScript 检查和 Vite 构建完成；BrainHome 产物 107.75 kB（gzip 35.65 kB） |
+| 主代理包体门禁 | `npm run check:main-agent-bundle` | PASS，初始包 765867 B、BrainHome 107745 B、图表保持懒加载 |
+| 前端性能门禁 | `npm run perf:check` | PASS，初始 gzip 327313 B，低于 512000 B 预算 |
+| 浏览器用户旅程 | `npm run test:e2e -- main-agent-v2.spec.ts` | PASS，5 条 Chromium 用例通过；使用隔离端口 `PLAYWRIGHT_PORT=5196` 避免复用本地开发服务 |
+| 后端对话契约 | `uv run pytest tests/test_conversation_api.py tests/test_turn_steering.py tests/test_turn_events_api.py tests/test_main_agent_worker_contract.py -q` | PASS，110 条测试通过 |
+
+浏览器用例使用真实组件树检查了 1440×900 桌面端和 390×900 移动端：单一 WorkTurn、单一运行状态、单一呼吸头像、运行中输入与补充、原位停止/重试、刷新恢复、账号隔离，以及默认折叠的技术详情均符合设计。以上仅为本地验证；尚未执行生产部署、线上冒烟测试或回滚演练。
 
 ## 2. 目标
 

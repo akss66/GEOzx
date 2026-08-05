@@ -31,6 +31,13 @@ const account = {
   created_at: createdAt,
 };
 
+const secondaryAccount = {
+  ...account,
+  id: 2,
+  nickname: "次账号",
+  external_account_id: "douyin-2",
+};
+
 const inspectionSkill = {
   code: "account_inspection",
   version: 1,
@@ -169,6 +176,13 @@ const artifact = {
   skill_run_id: 9001,
   task_id: null,
   artifact_type: "account_inspection_report",
+  presentation: {
+    type_label: "账号诊断",
+    completion_label: "已完成当前账号运营诊断",
+    status_label: "待审核",
+    detail_action_label: "查看账号诊断",
+  },
+  next_actions: [],
   title: "账号体检报告",
   version: 1,
   status: "ready_for_review" as const,
@@ -215,10 +229,11 @@ test("main agent v2 preserves the completed Artifact on its source Turn after la
   const sourceTurn = page.locator(`[data-turn-id="${sourceTurnId}"]`);
   await expect(sourceTurn).toBeVisible();
   await expect(sourceTurn).toContainText(inspectionSkill.name);
-  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.title);
+  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.summary);
 
-  await sourceTurn.getByText("技术日志").click();
-  const technicalDetails = sourceTurn.locator(".tz-conversation-turn__technical");
+  await sourceTurn.getByRole("button", { name: /查看(已完成过程|分析过程)/ }).click();
+  await sourceTurn.getByRole("button", { name: "技术详情" }).click();
+  const technicalDetails = sourceTurn.locator(".tz-work-turn__technical-log");
   await expect(technicalDetails).toContainText(expertInvocation.agent_code);
   await expect(technicalDetails).not.toContainText(artifact.summary);
 
@@ -226,29 +241,173 @@ test("main agent v2 preserves the completed Artifact on its source Turn after la
   await expect(sourceTurn.locator(".tz-artifact-card__sections--remaining"))
     .toContainText("增加一个新选题测试");
 
-  await page.locator(".tz-brain-mode-switch button").nth(1).click();
-  const artifactRow = page.locator(".tz-artifact-center__row", { hasText: artifact.title }).first();
+  await page.getByRole("tab", { name: "方案与内容" }).click();
+  const artifactRow = page.locator(".tz-artifact-center__row", { hasText: "账号诊断" }).first();
   await expect(artifactRow).toBeVisible();
   await artifactRow.getByRole("button").click();
 
-  const artifactDetail = page.locator("section[aria-label='Artifact detail']");
-  await expect(artifactDetail.locator(".tz-artifact-card")).toContainText(artifact.title);
-  await artifactDetail.locator("button").last().click();
+  const artifactDetail = page.getByRole("region", { name: "方案与内容详情" });
+  await expect(artifactDetail.locator(".tz-artifact-card")).toContainText(artifact.summary);
+  await artifactDetail.getByRole("button", { name: "返回来源对话" }).click();
 
   await expect(sourceTurn).toBeVisible();
   await expect(sourceTurn).toBeFocused();
 
   const laterGreeting = "你好，继续普通对话";
-  await page.locator(".dy-brain-input textarea").fill(laterGreeting);
-  await page.locator(".dy-brain-send-button").click();
+  await page.getByLabel("运营大脑消息").fill(laterGreeting);
+  await page.getByRole("button", { name: "发送给运营大脑" }).click();
 
   const followUpTurn = page.locator(`[data-turn-id="${followUpTurnId}"]`);
   await expect(followUpTurn).toBeVisible();
   await expect(followUpTurn).toContainText(laterGreeting);
-  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.title);
+  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.summary);
   await expect(followUpTurn.locator(".tz-artifact-card")).toHaveCount(0);
 
   expect(unexpectedApiCalls).toEqual([]);
+  expect(
+    consoleErrors.filter((message) => !message.includes("There may be circular references")),
+  ).toEqual([]);
+});
+
+test("main agent v4 restores and isolates one streamed WorkTurn", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+
+  await installBrowserState(page);
+  const scenario = await mockCodexInteractionApi(page);
+  await loginAsAdmin(page);
+
+  await page.locator(".tz-account-trigger").click();
+  await page.locator(".tz-account-panel button", { hasText: account.nickname }).click();
+
+  const prompt = "分析这个账号最近30天的数据";
+  const composer = page.getByLabel("运营大脑消息");
+  await composer.fill(prompt);
+  await page.getByRole("button", { name: "发送给运营大脑" }).click();
+
+  const target = page.getByTestId("work-turn").filter({ hasText: prompt });
+  await expect(target).toHaveCount(1);
+  await expect(target.locator(".tz-work-turn__user")).toHaveText(prompt);
+  await expect(target.locator(
+    '.tz-work-turn__operator[data-thinking="true"] .tz-work-turn__avatar',
+  )).toHaveCount(1);
+  await expect(target.locator(".tz-work-turn__activity")).toHaveCount(1);
+
+  scenario.releaseInitialTurn();
+  await expect(target).toHaveAttribute("data-turn-id", String(scenario.targetTurnId));
+  await expect(composer).toBeEnabled();
+  await expect(page.getByRole("button", { name: "停止当前任务" })).toBeEnabled();
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __turnEventStreamRequests?: unknown[] }
+  ).__turnEventStreamRequests?.length ?? 0)).toBeGreaterThan(0);
+
+  const firstPartial = "已读取近 30 天数据";
+  scenario.setPartialAssistant(firstPartial);
+  await emitRuntimeFrame(
+    page,
+    scenario.threadId,
+    scenario.targetTurnId,
+    scenario.targetClientMessageId,
+    "brain.runtime.message_start",
+    0,
+  );
+  await emitRuntimeFrame(
+    page,
+    scenario.threadId,
+    scenario.targetTurnId,
+    scenario.targetClientMessageId,
+    "brain.runtime.message_delta",
+    1,
+    firstPartial,
+  );
+  const response = target.locator(".tz-work-turn__response");
+  await expect(response).toHaveText(firstPartial);
+  await response.evaluate((node) => node.setAttribute("data-same-node-probe", "true"));
+
+  const supplement = "补充：不要生成长期策略";
+  await composer.fill(supplement);
+  await page.getByRole("button", { name: "补充或排队" }).click();
+  await expect(page.getByTestId("work-turn").filter({ hasText: supplement })).toHaveCount(1);
+  await emitDurableTurnEvent(page, {
+    id: 1,
+    sequence: 1,
+    type: "turn.steered",
+    payload: {
+      message: "已收到补充要求。",
+      metadata: { category: "steering", label: "supplement", source_id: scenario.steeringTurnId },
+    },
+    thread_id: scenario.threadId,
+    turn_id: scenario.targetTurnId,
+    run_id: 5101,
+    skill_run_id: null,
+    created_at: createdAt,
+  });
+  scenario.recordSteeringEvent();
+  await expect(target.getByRole("note", { name: "任务调整" })).toContainText("已补充要求");
+
+  const secondPartial = "，正在核对异常。";
+  scenario.setPartialAssistant(`${firstPartial}${secondPartial}`);
+  await emitRuntimeFrame(
+    page,
+    scenario.threadId,
+    scenario.targetTurnId,
+    scenario.targetClientMessageId,
+    "brain.runtime.message_delta",
+    2,
+    secondPartial,
+  );
+  await expect(response).toHaveText(`${firstPartial}${secondPartial}`);
+  await expect(response).toHaveAttribute("data-same-node-probe", "true");
+  await expect(target.locator(".tz-work-turn__response")).toHaveCount(1);
+
+  const restoredTurnId = await target.getAttribute("data-turn-id");
+  await page.reload();
+  const restored = page.locator(`[data-turn-id="${restoredTurnId}"]`);
+  await expect(restored).toHaveCount(1);
+  await expect(restored.locator(".tz-work-turn__response"))
+    .toHaveText(`${firstPartial}${secondPartial}`);
+  await expect(restored.getByRole("note", { name: "任务调整" })).toContainText("已补充要求");
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __turnEventStreamRequests?: Array<{ threadId: number; afterId: number }>;
+    }
+  ).__turnEventStreamRequests ?? [])).toContainEqual({
+    threadId: scenario.threadId,
+    afterId: 1,
+  });
+
+  await page.getByRole("button", { name: "停止当前任务" }).click();
+  await expect(restored).toHaveAttribute("data-turn-status", "stopped");
+  await expect(restored.getByRole("region", { name: "执行步骤" })).toContainText("读取账号数据");
+  await expect(restored.locator('[data-step-state="done"]')).toContainText("读取账号数据");
+  await expect(restored).not.toContainText(/手动刷新|刷新页面/);
+
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(restored.locator(".tz-work-turn__user")).toHaveCount(1);
+    await expect(page.getByLabel("运营大脑消息")).toBeVisible();
+    await expect(restored.getByRole("button", { name: "查看分析过程" })).toBeVisible();
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await restored.getByRole("button", { name: "查看分析过程" }).click();
+  await expect(restored.getByRole("button", { name: "技术详情" })).toBeVisible();
+  await restored.getByRole("button", { name: "技术详情" }).click();
+  await expect(restored).toContainText(`消息编号：${scenario.targetTurnId}`);
+
+  await page.locator(".tz-account-trigger").click();
+  await page.locator(".tz-account-panel button", { hasText: secondaryAccount.nickname }).click();
+  await expect(page.getByRole("heading", { name: "今天，想推进什么？" })).toBeVisible();
+  await expect(page.getByText(prompt)).toHaveCount(0);
+  await expect(page.getByText(supplement)).toHaveCount(0);
+  await expect(page.locator(`[data-turn-id="${scenario.targetTurnId}"]`)).toHaveCount(0);
+  await expect.poll(() => page.evaluate((threadId) => (
+    window as typeof window & { __abortedTurnStreams?: number[] }
+  ).__abortedTurnStreams?.includes(threadId) ?? false, scenario.threadId)).toBe(true);
+
+  expect(scenario.unexpectedApiCalls).toEqual([]);
   expect(
     consoleErrors.filter((message) => !message.includes("There may be circular references")),
   ).toEqual([]);
@@ -273,18 +432,23 @@ test("main agent v2 remains usable with runtime details at responsive widths", a
   await page.getByRole("menuitem", { name: new RegExp(inspectionSkill.name) }).click();
 
   const sourceTurn = page.locator(`[data-turn-id="${sourceTurnId}"]`);
-  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.title);
+  await expect(sourceTurn.locator(".tz-artifact-card")).toContainText(artifact.summary);
 
   for (const width of [320, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
-    const technicalDetails = sourceTurn.locator(".tz-conversation-turn__technical");
-    if ((await technicalDetails.getAttribute("open")) == null) {
-      await sourceTurn.getByText("技术日志").click();
+    const processButton = sourceTurn.getByRole("button", { name: /查看(已完成过程|分析过程)/ });
+    if ((await processButton.getAttribute("aria-expanded")) !== "true") {
+      await processButton.click();
     }
+    const technicalButton = sourceTurn.getByRole("button", { name: "技术详情" });
+    if ((await technicalButton.getAttribute("aria-expanded")) !== "true") {
+      await technicalButton.click();
+    }
+    const technicalDetails = sourceTurn.locator(".tz-work-turn__technical-log");
     await expect(technicalDetails).toContainText(expertInvocation.agent_code);
     await expect(technicalDetails).toBeInViewport();
 
-    await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
+    await expect(page.getByLabel("运营大脑消息")).toBeVisible();
   }
 
   expect(unexpectedApiCalls).toEqual([]);
@@ -317,7 +481,7 @@ test("empty main agent workspace keeps actions compact and content above the fol
   expect(stageBox).not.toBeNull();
   expect(actionsBox!.height).toBeLessThanOrEqual(64);
   expect(stageBox!.y).toBeLessThanOrEqual(130);
-  await expect(page.locator(".dy-brain-input textarea")).toBeVisible();
+  await expect(page.getByLabel("运营大脑消息")).toBeVisible();
 });
 
 test("Turn UI renders ten mocked presentation states as a frontend-only contract", async ({
@@ -343,22 +507,23 @@ test("Turn UI renders ten mocked presentation states as a frontend-only contract
   ] as const;
 
   for (const [prompt, mode, status] of cases) {
-    await page.locator(".dy-brain-input textarea").fill(prompt);
-    await page.locator(".dy-brain-send-button").click();
-    await expect.poll(async () =>
-      page.locator(".tz-conversation-turn").count()
-    ).toBe(cases.findIndex(([item]) => item === prompt) + 1);
-    const turn = page.locator(".tz-conversation-turn").last();
+    await page.getByLabel("运营大脑消息").fill(prompt);
+    await page.getByRole("button", { name: "发送给运营大脑" }).click();
+    await expect(page.getByTestId("work-turn")).toHaveCount(
+      cases.findIndex(([item]) => item === prompt) + 1,
+    );
+    const turn = page.getByTestId("work-turn").last();
     await expect(turn).toContainText(prompt);
     await expect(turn).toHaveAttribute("data-turn-status", status);
-    await turn.getByText("技术日志").click();
+    await turn.getByRole("button", { name: /查看(已完成过程|分析过程)/ }).click();
+    await turn.getByRole("button", { name: "技术详情" }).click();
     await expect(turn).toContainText(`路由：${mode}`);
     await expect(turn).not.toContainText(/provider body|idempotency|Traceback|sk-secret/i);
   }
 
-  const approvalTurn = page.locator(".tz-conversation-turn").nth(7);
+  const approvalTurn = page.getByTestId("work-turn").nth(7);
   await expect(approvalTurn).toContainText("任务已暂停，等待你确认");
-  const failureTurn = page.locator(".tz-conversation-turn").nth(8);
+  const failureTurn = page.getByTestId("work-turn").nth(8);
   await expect(failureTurn).toContainText("执行失败，未生成伪造成果");
   expect(unexpectedApiCalls).toEqual([]);
 });
@@ -372,12 +537,29 @@ async function loginAsAdmin(page: Page) {
 
 async function installBrowserState(page: Page) {
   await page.addInitScript(({ taskId }) => {
-    localStorage.removeItem("tongzhouxing_current_workspace");
-    localStorage.removeItem("tongzhouxing_brain_active_conversation_threads");
-    localStorage.setItem(
-      "tongzhouxing_brain_active_tasks",
-      JSON.stringify({ version: 1, accounts: { 1: taskId } }),
-    );
+    if (sessionStorage.getItem("main-agent-e2e-state-ready") !== "true") {
+      localStorage.removeItem("tongzhouxing_current_workspace");
+      localStorage.removeItem("tongzhouxing_brain_active_conversation_threads");
+      localStorage.setItem(
+        "tongzhouxing_brain_active_tasks",
+        JSON.stringify({ version: 1, accounts: { 1: taskId } }),
+      );
+      sessionStorage.setItem("main-agent-e2e-state-ready", "true");
+    }
+
+    type BrowserSocket = MockWebSocket & { receive: (payload: unknown) => void };
+    const socketWindow = window as typeof window & {
+      __mockSockets?: BrowserSocket[];
+      __emitRuntimeEvent?: (payload: unknown) => void;
+      __emitTurnEvent?: (payload: {
+        id: number;
+        type: string;
+        thread_id: number;
+      }) => void;
+      __turnEventStreamRequests?: Array<{ threadId: number; afterId: number }>;
+      __abortedTurnStreams?: number[];
+    };
+    socketWindow.__mockSockets = [];
 
     class MockWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -390,9 +572,12 @@ async function installBrowserState(page: Page) {
       onclose: ((event: Event) => void) | null = null;
       onmessage: ((event: MessageEvent) => void) | null = null;
       onerror: ((event: Event) => void) | null = null;
+      readonly url: string;
 
-      constructor() {
+      constructor(url: string | URL) {
         super();
+        this.url = String(url);
+        socketWindow.__mockSockets?.push(this as BrowserSocket);
         window.setTimeout(() => {
           this.readyState = MockWebSocket.OPEN;
           const event = new Event("open");
@@ -401,7 +586,25 @@ async function installBrowserState(page: Page) {
         }, 0);
       }
 
-      send() {}
+      send(data: string) {
+        try {
+          const payload = JSON.parse(data) as { type?: string; thread_id?: number; account_id?: number };
+          if (payload.type !== "authenticate") return;
+          window.queueMicrotask(() => this.receive({
+            type: "authenticated",
+            ...(payload.thread_id != null ? { thread_id: payload.thread_id } : {}),
+            ...(payload.account_id != null ? { account_id: payload.account_id } : {}),
+          }));
+        } catch {
+          // Tests deliberately ignore non-JSON socket writes.
+        }
+      }
+
+      receive(payload: unknown) {
+        const event = new MessageEvent("message", { data: JSON.stringify(payload) });
+        this.onmessage?.(event);
+        this.dispatchEvent(event);
+      }
 
       close() {
         this.readyState = MockWebSocket.CLOSED;
@@ -412,6 +615,60 @@ async function installBrowserState(page: Page) {
     }
 
     window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    socketWindow.__emitRuntimeEvent = (payload: unknown) => {
+      const socket = socketWindow.__mockSockets
+        ?.filter((candidate) => candidate.url.endsWith("/ws/conversation-runtime"))
+        .at(-1);
+      if (!socket) throw new Error("No conversation runtime socket is connected");
+      socket.receive(payload);
+    };
+
+    const nativeFetch = window.fetch.bind(window);
+    const turnStreams = new Map<number, ReadableStreamDefaultController<Uint8Array>>();
+    const encoder = new TextEncoder();
+    socketWindow.__turnEventStreamRequests = [];
+    socketWindow.__abortedTurnStreams = [];
+    socketWindow.__emitTurnEvent = (payload) => {
+      const controller = turnStreams.get(payload.thread_id);
+      if (!controller) throw new Error(`No durable Turn stream for Thread ${payload.thread_id}`);
+      controller.enqueue(encoder.encode(
+        `id: ${payload.id}\nevent: ${payload.type}\ndata: ${JSON.stringify(payload)}\n\n`,
+      ));
+    };
+    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl = new URL(
+        typeof input === "string" || input instanceof URL ? String(input) : input.url,
+        window.location.origin,
+      );
+      const match = requestUrl.pathname.match(/^\/api\/conversation-threads\/(\d+)\/event-stream$/);
+      if (!match) return nativeFetch(input, init);
+      const threadId = Number(match[1]);
+      const afterId = Number(requestUrl.searchParams.get("after_id") ?? 0);
+      socketWindow.__turnEventStreamRequests?.push({ threadId, afterId });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          turnStreams.set(threadId, controller);
+          init?.signal?.addEventListener("abort", () => {
+            if (turnStreams.get(threadId) !== controller) return;
+            turnStreams.delete(threadId);
+            socketWindow.__abortedTurnStreams?.push(threadId);
+            try {
+              controller.close();
+            } catch {
+              // The reader may already have cancelled this stream.
+            }
+          }, { once: true });
+        },
+        cancel() {
+          turnStreams.delete(threadId);
+          socketWindow.__abortedTurnStreams?.push(threadId);
+        },
+      });
+      return Promise.resolve(new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }));
+    }) as typeof window.fetch;
   }, { taskId: inspectionTaskId });
 }
 
@@ -513,6 +770,9 @@ async function mockApi(page: Page) {
         projections,
       });
     }
+    if (method === "GET" && /^\/conversation-threads\/\d+\/events$/.test(path)) {
+      return json(route, { data: [] });
+    }
     if (method === "GET" && path === "/artifacts") {
       return json(route, {
         data: [artifact],
@@ -528,6 +788,288 @@ async function mockApi(page: Page) {
   });
 
   return unexpectedApiCalls;
+}
+
+async function mockCodexInteractionApi(page: Page) {
+  const threadId = 4001;
+  const targetTurnId = 4101;
+  const steeringTurnId = 4102;
+  const unexpectedApiCalls: string[] = [];
+  const durableEvents: Array<Record<string, unknown>> = [];
+  let releaseInitialTurn!: () => void;
+  const initialTurnGate = new Promise<void>((resolve) => {
+    releaseInitialTurn = resolve;
+  });
+  let initialTurnReleased = false;
+  let threadState: Record<string, unknown> | null = null;
+  let targetTurn: Record<string, unknown> | null = null;
+  let targetClientMessageId = "";
+
+  const makeThread = (selectedAccount: typeof account) => ({
+    id: selectedAccount.id === account.id ? threadId : threadId + selectedAccount.id,
+    org_id: 1,
+    created_by_id: user.id,
+    client_id: null,
+    project_id: null,
+    account_id: selectedAccount.id,
+    title: "Codex interaction recovery",
+    turns: [] as Array<Record<string, unknown>>,
+    created_at: createdAt,
+    updated_at: createdAt,
+  });
+  const runFor = (turn: Record<string, unknown>, status: string) => ({
+    id: Number(turn.id) + 5000,
+    org_id: 1,
+    requested_by_id: user.id,
+    task_id: null,
+    thread_id: turn.thread_id,
+    turn_id: turn.id,
+    client_message_id: turn.client_message_id,
+    status,
+    phase: status === "completed" ? "completed" : "execute",
+    created_at: createdAt,
+    updated_at: createdAt,
+  });
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (!url.pathname.startsWith("/api/")) return route.continue();
+    const path = url.pathname.replace(/^\/api/, "");
+    const method = request.method();
+
+    if (method === "POST" && path === "/auth/login") {
+      return json(route, { access_token: "test-token", token_type: "bearer", user });
+    }
+    if (method === "GET" && path === "/auth/me") return json(route, user);
+    if (method === "GET" && path === "/projects") return json(route, []);
+    if (method === "GET" && path === "/account-groups") return json(route, []);
+    if (method === "GET" && path === "/accounts") return json(route, [account, secondaryAccount]);
+    if (method === "GET" && path === "/clients") return json(route, []);
+    if (method === "GET" && path === "/skills") return json(route, { data: publicSkills });
+    if (method === "GET" && path === "/brain/tasks") return json(route, []);
+    if (method === "GET" && path === "/notifications") return json(route, []);
+    if (method === "GET" && path === "/notifications/unread-count") return json(route, { count: 0 });
+    if (method === "GET" && /^\/accounts\/\d+\/pending-work$/.test(path)) {
+      const selectedAccountId = Number(path.split("/")[2]);
+      return json(route, { account_id: selectedAccountId, groups: [] });
+    }
+    if (method === "GET" && path === "/workspace-context") {
+      return json(route, {
+        clients: [],
+        selected_client: null,
+        projects: [],
+        selected_project: null,
+        accounts: [account, secondaryAccount],
+      });
+    }
+    if (method === "GET" && path === "/brain/conversations") {
+      const selectedAccountId = Number(url.searchParams.get("account_id"));
+      const data = threadState && Number(threadState.account_id) === selectedAccountId
+        ? [{
+            id: threadState.id,
+            account_id: threadState.account_id,
+            title: threadState.title,
+            turn_count: (threadState.turns as unknown[]).length,
+            last_message: null,
+            created_at: threadState.created_at,
+            updated_at: threadState.updated_at,
+          }]
+        : [];
+      return json(route, { data });
+    }
+    if (method === "POST" && path === "/brain/conversations") {
+      const body = (await request.postDataJSON()) as { account_id: number };
+      const selectedAccount = body.account_id === account.id ? account : secondaryAccount;
+      threadState = makeThread(selectedAccount);
+      return json(route, threadState);
+    }
+    if (method === "GET" && path === `/brain/conversations/${threadId}`) {
+      return json(route, threadState);
+    }
+    if (method === "POST" && path === `/brain/conversations/${threadId}/turns`) {
+      const body = (await request.postDataJSON()) as {
+        client_message_id: string;
+        message: string;
+        target_turn_id: number | null;
+      };
+      if (body.target_turn_id === targetTurnId) {
+        const steeringTurn = {
+          id: steeringTurnId,
+          thread_id: threadId,
+          org_id: 1,
+          created_by_id: user.id,
+          client_message_id: body.client_message_id,
+          user_input: body.message,
+          assistant_response: "已补充到当前任务。",
+          target_turn_id: targetTurnId,
+          steering_mode: "supplement",
+          intent: { mode: "answer", route_source: "deterministic", skill_code: null },
+          status: "completed",
+          projections: [],
+          created_at: createdAt,
+          updated_at: createdAt,
+        };
+        (threadState?.turns as Array<Record<string, unknown>>).push(steeringTurn);
+        return json(route, {
+          turn: steeringTurn,
+          run: runFor(steeringTurn, "completed"),
+          task_id: null,
+          projections: [],
+          steering_explanation: "已补充到当前任务的要求中。",
+        });
+      }
+      targetTurn = {
+        id: targetTurnId,
+        thread_id: threadId,
+        org_id: 1,
+        created_by_id: user.id,
+        client_message_id: body.client_message_id,
+        user_input: body.message,
+        assistant_response: null,
+        intent: { mode: "skill", route_source: "deterministic", skill_code: "performance_review" },
+        status: "running",
+        turn_phase: "reading_data",
+        projections: [{
+          type: "progress",
+          turn_id: targetTurnId,
+          skill_run_id: 6101,
+          stages: [
+            { code: "read_data", name: "读取账号数据", status: "completed" },
+            { code: "quality_review", name: "质量审核", status: "running" },
+          ],
+        }],
+        created_at: createdAt,
+        updated_at: createdAt,
+      };
+      targetClientMessageId = body.client_message_id;
+      (threadState?.turns as Array<Record<string, unknown>>).push(targetTurn);
+      await initialTurnGate;
+      return json(route, {
+        turn: targetTurn,
+        run: runFor(targetTurn, "running"),
+        task_id: null,
+        projections: targetTurn.projections,
+      });
+    }
+    if (method === "POST" && path === `/brain/conversations/${threadId}/turns/${targetTurnId}/stop`) {
+      if (targetTurn) targetTurn.status = "stopped";
+      return json(route, {
+        thread_id: threadId,
+        turn_id: targetTurnId,
+        run_id: 9101,
+        stopped: true,
+        dispatch_deferred: false,
+      });
+    }
+    if (method === "GET" && path === `/conversation-threads/${threadId}/events`) {
+      const afterId = Number(url.searchParams.get("after_id") ?? 0);
+      return json(route, { data: durableEvents.filter((event) => Number(event.id) > afterId) });
+    }
+    if (method === "GET" && path === "/artifacts") {
+      return json(route, {
+        data: [],
+        pagination: { page: 1, page_size: 20, total: 0, pages: 0 },
+      });
+    }
+
+    unexpectedApiCalls.push(`${method} ${path}`);
+    return json(route, {});
+  });
+
+  return {
+    threadId,
+    targetTurnId,
+    steeringTurnId,
+    unexpectedApiCalls,
+    get targetClientMessageId() {
+      return targetClientMessageId;
+    },
+    releaseInitialTurn() {
+      if (initialTurnReleased) return;
+      initialTurnReleased = true;
+      releaseInitialTurn();
+    },
+    setPartialAssistant(value: string) {
+      if (targetTurn) targetTurn.assistant_response = value;
+    },
+    recordSteeringEvent() {
+      durableEvents.push({
+        id: 1,
+        sequence: 1,
+        type: "turn.steered",
+        payload: {
+          message: "已收到补充要求。",
+          metadata: { category: "steering", label: "supplement", source_id: steeringTurnId },
+        },
+        thread_id: threadId,
+        turn_id: targetTurnId,
+        run_id: 5101,
+        skill_run_id: null,
+        created_at: createdAt,
+      });
+    },
+  };
+}
+
+async function emitRuntimeFrame(
+  page: Page,
+  threadId: number,
+  turnId: number,
+  clientMessageId: string,
+  type: string,
+  streamSequence: number,
+  delta?: string,
+) {
+  await expect.poll(() => page.evaluate(() => {
+    const sockets = (window as typeof window & {
+      __mockSockets?: Array<{ url: string; readyState: number }>;
+    }).__mockSockets ?? [];
+    return sockets.some((socket) =>
+      socket.url.endsWith("/ws/conversation-runtime") && socket.readyState === WebSocket.OPEN
+    );
+  })).toBe(true);
+  await page.evaluate(({ eventType, thread, turn, clientId, sequence, content }) => {
+    const emit = (window as typeof window & {
+      __emitRuntimeEvent?: (payload: unknown) => void;
+    }).__emitRuntimeEvent;
+    if (!emit) throw new Error("Runtime event emitter is unavailable");
+    emit({
+      type: eventType,
+      payload: {
+        thread_id: thread,
+        turn_id: turn,
+        client_message_id: clientId,
+        message_id: `${turn}:00-decision:1`,
+        agent_code: "00-decision",
+        stream_seq: sequence,
+        ...(content != null ? { delta: content } : {}),
+      },
+    });
+  }, {
+    eventType: type,
+    thread: threadId,
+    turn: turnId,
+    clientId: clientMessageId,
+    sequence: streamSequence,
+    content: delta,
+  });
+}
+
+async function emitDurableTurnEvent(page: Page, event: Record<string, unknown>) {
+  await expect.poll(() => page.evaluate((threadId) => (
+    window as typeof window & {
+      __turnEventStreamRequests?: Array<{ threadId: number }>;
+    }
+  ).__turnEventStreamRequests?.some((request) => request.threadId === threadId) ?? false,
+  Number(event.thread_id))).toBe(true);
+  await page.evaluate((payload) => {
+    const emit = (window as typeof window & {
+      __emitTurnEvent?: (event: typeof payload & { id: number; type: string; thread_id: number }) => void;
+    }).__emitTurnEvent;
+    if (!emit) throw new Error("Durable Turn event emitter is unavailable");
+    emit(payload as typeof payload & { id: number; type: string; thread_id: number });
+  }, event);
 }
 
 function mockedUiContractTurn(message: string, turnId: number) {

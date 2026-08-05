@@ -188,11 +188,16 @@ export function applyConversationTurnEvent(
   const isSteering = event.type === "turn.steered";
   const status = isSteering ? null : durableTurnStatus(event.type, event.payload);
   const message = isSteering ? null : durableTurnMessage(event.type, event.payload);
+  const overlayIsTerminal = overlay?.terminalStatus != null
+    && isTerminalConversationTurnStatus(overlay.terminalStatus);
+  const turnIsTerminal = isTerminalConversationTurnStatus(turn.status);
+  const incomingIsTerminal = status != null && isTerminalConversationTurnStatus(status);
+  const preservesTerminalResult = (overlayIsTerminal || turnIsTerminal) && !incomingIsTerminal;
   const next: ConversationTurn = {
     ...turn,
     runtime_overlay: nextOverlay,
-    ...(status ? { status } : {}),
-    ...(message ? { assistant_response: message } : {}),
+    ...(status && !preservesTerminalResult ? { status } : {}),
+    ...(message && !preservesTerminalResult ? { assistant_response: message } : {}),
     ...(
       ["turn.interrupt_resolved", "turn.interrupt_cancelled", "turn.resuming"].includes(event.type)
         ? { pending_interrupt: null }

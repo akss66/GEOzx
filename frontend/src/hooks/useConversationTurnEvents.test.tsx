@@ -113,6 +113,25 @@ describe("useConversationTurnEvents", () => {
     expect(onEvent).toHaveBeenNthCalledWith(2, event(2));
   });
 
+  it("advances the durable cursor without redelivering the same turn sequence", async () => {
+    vi.useRealTimers();
+    const onEvent = vi.fn();
+    vi.mocked(listConversationEvents).mockResolvedValueOnce([event(1, 1, 10)]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponse(
+      `id: 2\nevent: brain.runtime.message_delta\ndata: ${JSON.stringify(event(2, 1, 10))}\n\n`,
+    )));
+
+    const { result } = renderHook(() => useConversationTurnEvents({
+      accountId: 7,
+      threadId: 12,
+      onEvent,
+    }));
+
+    await waitFor(() => expect(result.current.lastEventId).toBe(2));
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledWith(event(1, 1, 10));
+  });
+
   it("ignores a malformed stream event from another conversation thread", async () => {
     vi.useRealTimers();
     const onEvent = vi.fn();

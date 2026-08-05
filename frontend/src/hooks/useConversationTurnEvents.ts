@@ -141,6 +141,7 @@ export function useConversationTurnEvents({
       setLastEventId(candidate.id);
 
       const previous = turnSequences.get(candidate.turn_id);
+      if (previous && candidate.sequence <= previous.sequence) return false;
       const previousSequence = previous?.sequence ?? 0;
       const previousEventId = previous?.eventId ?? 0;
       if (candidate.sequence > previousSequence + 1) {
@@ -157,12 +158,10 @@ export function useConversationTurnEvents({
           });
         }
       }
-      if (!previous || candidate.sequence >= previous.sequence) {
-        turnSequences.set(candidate.turn_id, {
-          sequence: candidate.sequence,
-          eventId: candidate.id,
-        });
-      }
+      turnSequences.set(candidate.turn_id, {
+        sequence: candidate.sequence,
+        eventId: candidate.id,
+      });
       onEventRef.current?.(candidate);
       return true;
     };
