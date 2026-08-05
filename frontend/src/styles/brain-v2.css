@@ -1092,6 +1092,9 @@
 .tz-work-turn {
   display: grid;
   min-width: 0;
+  grid-template-areas:
+    "user"
+    "operator";
   grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   color: var(--tz-ink);
@@ -1100,6 +1103,8 @@
 .tz-work-turn__user {
   display: grid;
   min-width: 0;
+  grid-area: user;
+  align-self: start;
   justify-items: end;
   color: var(--tz-ink-soft);
 }
@@ -1117,6 +1122,8 @@
 .tz-work-turn__operator {
   display: grid;
   min-width: 0;
+  grid-area: operator;
+  align-content: start;
   gap: 12px;
 }
 
@@ -1196,6 +1203,13 @@
   font-size: 12px;
 }
 
+.tz-work-turn__progress h4 {
+  margin: 0 0 5px;
+  color: var(--tz-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .tz-work-turn__progress ol {
   display: grid;
   margin: 0;
@@ -1230,6 +1244,28 @@
   color: var(--tz-ink-soft);
 }
 
+.tz-work-turn__progress-group + .tz-work-turn__progress-group {
+  margin-top: 10px;
+}
+
+.tz-work-turn__progress--summary > button {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--tz-ink);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+
+.tz-work-turn__progress--summary > ol {
+  margin-top: 10px;
+}
+
 .tz-work-turn__process {
   color: var(--tz-ink-soft);
   font-size: 12px;
@@ -1253,6 +1289,7 @@
 
 .tz-work-turn__process > button:focus-visible,
 .tz-work-turn__technical-log > button:focus-visible,
+.tz-work-turn__progress--summary > button:focus-visible,
 .tz-artifact-card__evidence-detail summary:focus-visible {
   border-radius: 4px;
   outline: 2px solid color-mix(in srgb, var(--tz-brand-red) 52%, transparent);
@@ -2172,6 +2209,7 @@
   .tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .dy-chat-avatar {
     animation: none !important;
     transition: none !important;
+    transform: none !important;
   }
 }
 

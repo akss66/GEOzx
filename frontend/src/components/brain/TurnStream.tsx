@@ -154,7 +154,6 @@ function renderBusinessActions({
   const projections = projectionsForTurn(turn);
   const approval = projections.find((projection) => projection.type === "approval");
   const blocked = projections.find((projection) => projection.type === "execution_blocked");
-  const unknown = projections.some((projection) => !isKnownProjection(projection));
 
   return (
     <>
@@ -176,7 +175,6 @@ function renderBusinessActions({
       {blocked?.type === "execution_blocked" ? (
         <p>本次执行需要处理。{blocked.recovery_action ? ` ${blocked.recovery_action}` : ""}</p>
       ) : null}
-      {unknown ? <p>本轮有一条新进展，请刷新后查看。</p> : null}
     </>
   );
 }
@@ -195,10 +193,11 @@ function InterruptAction({
   const actionLabel = interrupt.action_label
     ?? (interrupt.kind === "approval" ? "允许" : "继续");
 
-  if (!onResolve) return null;
+  if (!onResolve) return <p>{interrupt.public_message}</p>;
   if (interrupt.kind === "clarification") {
     return (
       <section aria-label="Input required">
+        <p>{interrupt.public_message}</p>
         <Input.TextArea
           aria-label="Your answer"
           value={answer}
@@ -220,6 +219,7 @@ function InterruptAction({
   if (interrupt.kind === "approval") {
     return (
       <section aria-label="Approval required">
+        <p>{interrupt.public_message}</p>
         <Button
           type="primary"
           loading={resolving}
@@ -239,6 +239,7 @@ function InterruptAction({
   }
   return (
     <section aria-label="Paused task">
+      <p>{interrupt.public_message}</p>
       <Button
         type="primary"
         loading={resolving}
@@ -291,13 +292,13 @@ function businessEvidence(turn: ConversationTurn) {
   return projectionsForTurn(turn).flatMap((projection) => {
     if (projection.type === "execution_summary") {
       const evidence = [
-        ...projection.experts.map((expert) => `已调用 ${expert.agent_name}`),
-        ...projection.tools.map((tool) => `已使用 ${tool.tool_name}`),
+        ...projection.tools.map((tool) => `数据来源：${tool.tool_name}`),
       ];
       if (projection.quality_score != null) evidence.push(`质量评分：${Math.round(projection.quality_score * 100)} 分`);
+      if (projection.evidence_ids?.length) evidence.push(`业务依据：${projection.evidence_ids.length} 项`);
       return evidence;
     }
-    if (projection.type === "account_data") return [accountDataMessage(projection.data?.data_status)];
+    if (projection.type === "account_data") return accountDataSummary(projection.data);
     return [];
   });
 }
@@ -314,6 +315,10 @@ function technicalLog(turn: ConversationTurn) {
   if (turn.total_ms != null) lines.push(`总耗时：${turn.total_ms} ms`);
   if (turn.model_call_count != null) lines.push(`模型调用：${turn.model_call_count} 次`);
   for (const projection of projectionsForTurn(turn)) {
+    if (!isKnownProjection(projection)) {
+      lines.push(`未识别事件：${safeProjectionType(projection.type)}`);
+      continue;
+    }
     if (projection.type !== "execution_summary") continue;
     if (projection.run_id) lines.push(`Agent Run：${projection.run_id}`);
     if (projection.skill_code) lines.push(`Skill：${projection.skill_code}`);
@@ -330,10 +335,22 @@ function technicalLog(turn: ConversationTurn) {
   return lines;
 }
 
-function accountDataMessage(status?: "available" | "pending_import" | "empty") {
-  if (status === "pending_import") return "当前账号暂无已正式写入的数据；存在待确认导入，请先完成正式写入。";
-  if (status === "empty") return "当前账号暂无可分析数据，请先同步或导入账号数据。";
-  return "已读取当前账号的数据，可继续告诉我想分析的指标。";
+function accountDataSummary(data?: Extract<TurnProjection, { type: "account_data" }>["data"]) {
+  const completeness = data?.data_status === "pending_import"
+    ? "存在待确认导入"
+    : data?.data_status === "empty"
+      ? "暂无可分析数据"
+      : data?.data_status === "available"
+        ? "可用于分析"
+        : "状态未知";
+  const lines = [`数据完整性：${completeness}`];
+  for (const pendingImport of data?.pending_imports ?? []) {
+    lines.push(`数据来源：${pendingImport.template_code}（${pendingImport.row_count} 行）`);
+    if (pendingImport.period_start || pendingImport.period_end) {
+      lines.push(`数据周期：${pendingImport.period_start ?? "未知"} 至 ${pendingImport.period_end ?? "未知"}`);
+    }
+  }
+  return lines;
 }
 
 function projectionsForTurn(turn: ConversationTurn) {
@@ -351,4 +368,9 @@ function isKnownProjection(projection: TurnProjection) {
     "account_data",
     "execution_blocked",
   ].includes(projection.type);
+}
+
+function safeProjectionType(value: unknown) {
+  if (typeof value !== "string") return "unknown";
+  return value.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 64) || "unknown";
 }

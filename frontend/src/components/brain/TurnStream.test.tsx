@@ -6,7 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getArtifact } from "../../api/brain";
-import type { Artifact, ConversationThread } from "../../types";
+import type { Artifact, ConversationThread, TurnProjection } from "../../types";
 import { TurnStream } from "./TurnStream";
 
 vi.mock("../../api/brain", () => ({ getArtifact: vi.fn() }));
@@ -164,14 +164,47 @@ describe("TurnStream", () => {
 
     expect(screen.queryByLabelText("Expert update")).not.toBeInTheDocument();
     expect(screen.queryByText("Tool #8001 · account.data_context · completed")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "查看过程" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看分析过程" }));
     expect(within(screen.getByLabelText("调用专家摘要")).getByText(/账号定位专家/)).toBeVisible();
-    expect(screen.getByText("已使用 账号数据上下文")).toBeVisible();
+    expect(screen.getByText("数据来源：账号数据上下文")).toBeVisible();
     expect(screen.queryByText("Tool #8001 · account.data_context · completed")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "技术日志" }));
+    fireEvent.click(screen.getByRole("button", { name: "技术详情" }));
     expect(screen.getByText("Tool #8001 · account.data_context · completed")).toBeVisible();
     expect(screen.getByText("Agent Run：3002")).toBeVisible();
+  });
+
+  it("summarizes the data source, period, and completeness in the first disclosure", () => {
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        projections: [{
+          type: "account_data",
+          turn_id: 101,
+          account_id: 3,
+          skill_code: "account_inspection",
+          skill_run_id: 4001,
+          data: {
+            data_status: "pending_import",
+            pending_imports: [{
+              batch_id: 91,
+              status: "validated",
+              template_code: "douyin_account_daily",
+              row_count: 31,
+              period_start: "2026-07-01",
+              period_end: "2026-07-31",
+            }],
+          },
+        }],
+      }],
+    }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看分析过程" }));
+    const summary = screen.getByRole("region", { name: "数据与质量摘要" });
+    expect(summary).toHaveTextContent("数据完整性：存在待确认导入");
+    expect(summary).toHaveTextContent("数据来源：douyin_account_daily（31 行）");
+    expect(summary).toHaveTextContent("数据周期：2026-07-01 至 2026-07-31");
   });
 
   it("keeps the exact persisted Artifact in its source work turn", async () => {
@@ -383,6 +416,34 @@ describe("TurnStream", () => {
     );
   });
 
+  it("keeps a pending interrupt prompt visible when the action handler is unavailable", () => {
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        status: "waiting_permission",
+        pending_interrupt: {
+          id: 73,
+          account_id: 3,
+          thread_id: 81,
+          turn_id: 101,
+          run_id: 31,
+          kind: "approval",
+          status: "pending",
+          public_message: "请确认是否发布这份内容。",
+          action_label: "确认发布",
+          response_schema: {},
+          version: 1,
+          resolved_at: null,
+          created_at: "2026-08-04T00:00:00Z",
+          updated_at: "2026-08-04T00:00:00Z",
+        },
+      }],
+    }} />);
+
+    expect(screen.getByText("请确认是否发布这份内容。")).toBeVisible();
+  });
+
   it("submits a clarification answer through its canonical interrupt callback", () => {
     const onResolveInterrupt = vi.fn();
     render(<TurnStream thread={{
@@ -432,5 +493,24 @@ describe("TurnStream", () => {
     expect([...container.querySelectorAll<HTMLElement>("[data-turn-id]")].map((node) => node.dataset.turnId))
       .toEqual(["101", "102", "103"]);
     expect(screen.getByTestId("projection-artifact-5001")).toHaveAttribute("data-projection-key", "artifact-5001");
+  });
+
+  it("keeps an unknown projection out of business UI and exposes only a sanitized technical detail", () => {
+    const unknownProjection = {
+      type: "future_event<script>",
+      turn_id: 101,
+    } as unknown as TurnProjection;
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{ ...thread.turns[0], projections: [unknownProjection] }],
+    }} />);
+
+    expect(screen.queryByText(/请刷新后查看/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/未识别事件/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看分析过程" }));
+    expect(screen.queryByText(/未识别事件/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "技术详情" }));
+    expect(screen.getByText("未识别事件：future_eventscript")).toBeVisible();
+    expect(screen.queryByText(/<script>/)).not.toBeInTheDocument();
   });
 });

@@ -1,20 +1,9 @@
 import type { ReactNode } from "react";
 
-import type { WorkTurnStatus, WorkTurnViewModel } from "../../types";
+import type { WorkTurnViewModel } from "../../types";
 import { AgentAvatar } from "../agents/AgentAvatar";
 import { ProcessDisclosure } from "./ProcessDisclosure";
 import { WorkTurnProgress } from "./WorkTurnProgress";
-
-const STATUS_COPY: Record<Exclude<WorkTurnStatus, "working">, string> = {
-  needs_input: "等待你补充信息",
-  needs_approval: "等待你的确认",
-  paused: "已暂停",
-  waiting_user: "等待你的确认",
-  completed: "已完成",
-  blocked: "需要处理",
-  failed: "执行失败",
-  cancelled: "已停止",
-};
 
 export function WorkTurnCard({
   view,
@@ -32,7 +21,6 @@ export function WorkTurnCard({
   sourceStatus?: string;
 }) {
   const steeringDetail = view.steeringNotice?.message ?? view.steeringNotice?.reason;
-  const isThinking = isActiveStatus(sourceStatus) || isActiveStatus(view.status);
   return (
     <article
       className="tz-work-turn"
@@ -47,20 +35,20 @@ export function WorkTurnCard({
 
       <section
         className="tz-work-turn__operator"
-        aria-label="Assistant response"
-        aria-busy={isThinking}
-        data-thinking={isThinking || undefined}
+        aria-label="运营大脑工作回合"
+        aria-busy={view.presentation.isActive}
+        data-thinking={view.presentation.isActive || undefined}
       >
         <header className="tz-work-turn__identity">
           <AgentAvatar code="00-decision" className="dy-chat-avatar" label={view.assistant.identity} />
           <span>{view.assistant.identity}</span>
-          {view.status !== "working" ? <small>{STATUS_COPY[view.status]}</small> : null}
+          {view.presentation.statusLabel ? <small>{view.presentation.statusLabel}</small> : null}
         </header>
 
         {view.steeringNotice ? (
           <div
             className="tz-work-turn__steering-notice"
-            role="status"
+            role="note"
             aria-label="任务调整"
             data-steering-label={view.steeringNotice.label}
           >
@@ -68,12 +56,15 @@ export function WorkTurnCard({
             {steeringDetail ? <span>{steeringDetail}</span> : null}
           </div>
         ) : null}
-        {view.currentActivity ? (
-          <p className="tz-work-turn__activity" role="status" aria-live="polite">{view.currentActivity}</p>
+        {view.presentation.showActivity && view.presentation.activityLabel ? (
+          <p className="tz-work-turn__activity" role="status" aria-live="polite">{view.presentation.activityLabel}</p>
         ) : null}
-        {view.assistantText ? <p className="tz-work-turn__response">{view.assistantText}</p> : null}
-        <WorkTurnProgress steps={view.steps} />
+        {view.presentation.showFinal && view.assistantText ? (
+          <p className="tz-work-turn__response">{view.assistantText}</p>
+        ) : null}
+        <WorkTurnProgress steps={view.steps} mode={view.presentation.progressMode} />
         <ProcessDisclosure
+          label={view.presentation.processLabel}
           experts={view.experts}
           evidenceSummary={evidenceSummary}
           technicalLog={technicalLog}
@@ -83,8 +74,4 @@ export function WorkTurnCard({
       </section>
     </article>
   );
-}
-
-function isActiveStatus(status?: string) {
-  return ["received", "working", "claimed", "waiting_predecessor", "queued", "running", "retry_wait"].includes(status ?? "");
 }

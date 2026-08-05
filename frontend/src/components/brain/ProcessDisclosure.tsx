@@ -1,10 +1,14 @@
 import { useId, useState } from "react";
 
+import type { WorkTurnPresentation } from "../../types";
+
 export function ProcessDisclosure({
+  label,
   experts,
   evidenceSummary,
   technicalLog,
 }: {
+  label: WorkTurnPresentation["processLabel"];
   experts: Array<{ name: string; status: string }>;
   evidenceSummary: string[];
   technicalLog: string[];
@@ -22,7 +26,7 @@ export function ProcessDisclosure({
         aria-controls={processContentId}
         onClick={() => setProcessOpen((open) => !open)}
       >
-        查看过程
+        {label}
       </button>
       {processOpen ? (
         <div id={processContentId}>
@@ -35,8 +39,8 @@ export function ProcessDisclosure({
             </section>
           ) : null}
           {evidenceSummary.length > 0 ? (
-            <section aria-label="业务依据摘要">
-              <h3>业务依据</h3>
+            <section aria-label="数据与质量摘要">
+              <h3>数据与质量</h3>
               <ul>{evidenceSummary.map((item) => <li key={item}>{item}</li>)}</ul>
             </section>
           ) : null}
@@ -51,7 +55,7 @@ export function ProcessDisclosure({
                 aria-controls={technicalContentId}
                 onClick={() => setTechnicalOpen((open) => !open)}
               >
-                技术日志
+                技术详情
               </button>
               {technicalOpen ? <ul id={technicalContentId}>{technicalLog.map((item) => <li key={item}>{item}</li>)}</ul> : null}
             </section>
