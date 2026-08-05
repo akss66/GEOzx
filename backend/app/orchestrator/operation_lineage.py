@@ -45,6 +45,20 @@ class OperationRevisionBridge:
     reused_steps: tuple[str, ...]
 
 
+def _eligible_operation_revision_bridge(revision: RunRevision) -> bool:
+    affected = tuple(str(item) for item in revision.affected_steps)
+    return (
+        revision.mode == "partial"
+        and revision.changed_constraints == {"offer_terms": {"operation": "changed"}}
+        and tuple(revision.direct_affected_steps) == ("script_generation",)
+        and "script_generation" in affected
+        and not any(
+            step in affected
+            for step in ("read_account_data", "benchmark_analysis", "topic_planning")
+        )
+    )
+
+
 async def resolve_operation_revision_bridge(
     session: AsyncSession,
     *,
@@ -61,21 +75,15 @@ async def resolve_operation_revision_bridge(
     )
     if revision is None:
         return None
+    if not _eligible_operation_revision_bridge(revision):
+        return None
     affected = tuple(str(item) for item in revision.affected_steps)
     if (
-        revision.mode != "partial"
-        or revision.org_id != scope.org_id
+        revision.org_id != scope.org_id
         or revision.account_id != scope.account_id
         or revision.thread_id != scope.thread_id
         or revision.task_id != scope.task_id
         or revision.revision_turn_id != scope.turn_id
-        or revision.changed_constraints != {"offer_terms": {"operation": "changed"}}
-        or tuple(revision.direct_affected_steps) != ("script_generation",)
-        or "script_generation" not in affected
-        or any(
-            step in affected
-            for step in ("read_account_data", "benchmark_analysis", "topic_planning")
-        )
     ):
         raise PermissionError("OPERATION_REVISION_BRIDGE_SCOPE_MISMATCH")
     source_parent = await session.get(SkillRun, revision.source_skill_run_id)
