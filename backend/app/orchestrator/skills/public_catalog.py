@@ -25,6 +25,14 @@ class PublicSkillPolicy:
 
 
 PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
+    "account_data_analysis": PublicSkillPolicy(
+        code="account_data_analysis",
+        category="quick_operations",
+        icon="line-chart",
+        requires_account=True,
+        surfaces=frozenset({"composer"}),
+        aliases=("账号数据分析", "数据分析", "趋势分析", "作品表现分析"),
+    ),
     "account_positioning": PublicSkillPolicy(
         code="account_positioning",
         category="quick_operations",

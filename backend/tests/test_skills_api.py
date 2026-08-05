@@ -84,9 +84,7 @@ async def test_douyin_composer_exposes_only_stable_business_skill_fields(client,
 
 
 @pytest.mark.asyncio
-async def test_catalog_resolves_availability_for_the_authorized_account(
-    client, session, admin
-):
+async def test_catalog_resolves_availability_for_the_authorized_account(client, session, admin):
     account = Account(
         org_id=admin.org_id,
         platform=Platform.DOUYIN,
@@ -106,6 +104,35 @@ async def test_catalog_resolves_availability_for_the_authorized_account(
     item = next(row for row in response.json()["data"] if row["code"] == "account_inspection")
     assert item["availability"] == "available"
     assert item["reason"] is None
+    assert item["is_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_catalog_exposes_account_data_analysis_for_selected_douyin_account(
+    client,
+    session,
+    admin,
+) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="analysis-catalog-account",
+        auth={"auth_status": "manual"},
+    )
+    session.add(account)
+    await session.commit()
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/skills?platform=douyin&surface=composer&account_id={account.id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    item = next(row for row in response.json()["data"] if row["code"] == "account_data_analysis")
+    assert item["name"] == "账号数据分析"
+    assert item["description"] == ("根据已确认导入的数据回答趋势、对比、异常和作品表现问题")
+    assert item["availability"] == "available"
     assert item["is_available"] is True
 
 
@@ -158,7 +185,7 @@ async def test_disabled_skill_uses_generic_public_unavailability_reason(client, 
     )
 
     assert response.status_code == 200
-    item = response.json()["data"][0]
+    item = next(row for row in response.json()["data"] if row["code"] == "account_inspection")
     assert item["is_available"] is False
     assert item["availability"] == "coming_soon"
     assert item["reason"] == "暂不可用"
@@ -187,7 +214,7 @@ async def test_role_incompatible_skill_does_not_reveal_authorization_policy(
     )
 
     assert response.status_code == 200
-    item = response.json()["data"][0]
+    item = next(row for row in response.json()["data"] if row["code"] == "account_inspection")
     assert item["is_available"] is False
     assert item["availability"] == "coming_soon"
     assert item["reason"] == "暂不可用"

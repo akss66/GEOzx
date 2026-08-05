@@ -1,8 +1,9 @@
 from dataclasses import FrozenInstanceError
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from app.orchestrator.skills.account_data_analysis import AccountDataAnalysisInput
 from app.orchestrator.skills.registry import SkillRegistry, skill_registry
 from app.schemas.skills import SkillCatalogItem, SkillDefinition
 
@@ -132,6 +133,7 @@ def test_catalog_item_projects_stable_business_fields_without_python_model_types
 
 def test_production_registry_covers_the_first_account_operations_loop() -> None:
     expected = {
+        "account_data_analysis",
         "account_inspection",
         "account_positioning",
         "content_calendar_planning",
@@ -152,6 +154,24 @@ def test_production_registry_covers_the_first_account_operations_loop() -> None:
         if code not in {"content_publishing", "operation_iteration"}:
             assert definition.expert_codes
         assert definition.artifact_type
+
+
+def test_account_data_analysis_is_a_typed_public_douyin_skill() -> None:
+    definition = skill_registry.get("account_data_analysis")
+
+    assert definition.version == 1
+    assert definition.tool_codes == ("account.metrics_analysis",)
+    assert definition.expert_codes == ("06-operator",)
+    assert definition.critic_policy == "required"
+    assert definition.artifact_type == "account_analysis_answer"
+    assert definition.supported_platforms == frozenset({"douyin"})
+
+
+def test_account_data_analysis_input_is_strict_and_bounded() -> None:
+    with pytest.raises(ValidationError):
+        AccountDataAnalysisInput.model_validate(
+            {"question": "为什么", "days": 91, "extra_key": True}
+        )
 
 
 def test_skill_definition_rejects_expert_stage_drift() -> None:
