@@ -184,12 +184,15 @@ async def record_runtime_event_once(
 # —— 发布（API 侧入队）——
 
 _pool = None
+_pool_loop: asyncio.AbstractEventLoop | None = None
 
 
 async def get_arq_pool():
-    global _pool
-    if _pool is None:
+    global _pool, _pool_loop
+    loop = asyncio.get_running_loop()
+    if _pool is None or _pool_loop is not loop:
         _pool = await create_pool(redis_settings())
+        _pool_loop = loop
     return _pool
 
 

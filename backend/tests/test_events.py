@@ -1,10 +1,34 @@
 """事件总线测试：订阅/分发注册表 + 发布入队（mock arq pool，无需 Redis）。"""
 
+import asyncio
 import json
 
 import pytest
 
 from app.core import events as ev
+
+
+def test_arq_pool_is_recreated_for_a_new_event_loop(monkeypatch) -> None:
+    created_pools: list[object] = []
+
+    async def _fake_create_pool(_settings):
+        pool = object()
+        created_pools.append(pool)
+        return pool
+
+    monkeypatch.setattr(ev, "_pool", None)
+    monkeypatch.setattr(ev, "_pool_loop", None, raising=False)
+    monkeypatch.setattr(ev, "create_pool", _fake_create_pool)
+
+    async def _get_twice():
+        return await ev.get_arq_pool(), await ev.get_arq_pool()
+
+    first_pool, reused_pool = asyncio.run(_get_twice())
+    second_pool = asyncio.run(ev.get_arq_pool())
+
+    assert reused_pool is first_pool
+    assert first_pool is not second_pool
+    assert created_pools == [first_pool, second_pool]
 
 
 @pytest.mark.asyncio
