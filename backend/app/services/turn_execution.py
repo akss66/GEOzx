@@ -778,6 +778,12 @@ async def _execute_conversation_turn(
     )
 
 
+def _composite_closure_status(skill_status: str) -> tuple[str, str | None]:
+    if skill_status == "needs_review":
+        return "waiting_decision", "needs_review"
+    return skill_status, None
+
+
 async def _execute_composite_skill(
     session: AsyncSession,
     *,
@@ -847,6 +853,7 @@ async def _execute_composite_skill(
     await session.refresh(user)
     await session.refresh(turn)
     await session.refresh(run)
+    closure_status, skill_status_override = _composite_closure_status(executed.status)
     await close_runtime_state(
         session,
         scope=RuntimeStateScope(
@@ -860,9 +867,10 @@ async def _execute_composite_skill(
             project_id=project_id,
             content_item_id=task.content_item_id,
             result_payload=result.model_dump(mode="json"),
+            skill_status_override=skill_status_override,
             intent=decision.model_dump(mode="json"),
         ),
-        status=executed.status,
+        status=closure_status,
         message=executed.response,
         error_code=executed.error_code,
     )

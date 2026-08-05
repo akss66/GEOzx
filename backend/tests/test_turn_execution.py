@@ -80,8 +80,20 @@ from app.services.runtime_state import (
     close_runtime_state,
 )
 from app.services.turn_events import TurnEventScope, append_turn_event
-from app.services.turn_execution import execute_conversation_turn, execute_revision_task_run
+from app.services.turn_execution import (
+    _composite_closure_status,
+    execute_conversation_turn,
+    execute_revision_task_run,
+)
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
+
+
+def test_composite_needs_review_maps_to_waiting_decision_runtime() -> None:
+    assert _composite_closure_status("needs_review") == (
+        "waiting_decision",
+        "needs_review",
+    )
+    assert _composite_closure_status("completed") == ("completed", None)
 
 
 async def _turn_context(session, admin, *, key: str):
