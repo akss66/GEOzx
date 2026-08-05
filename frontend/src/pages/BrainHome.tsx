@@ -95,6 +95,11 @@ interface ConversationScopeToken {
   epoch: number;
 }
 
+interface LauncherRequestLock {
+  accountId: number;
+  epoch: number;
+}
+
 interface SourceReturnTarget {
   accountId: number;
   threadId: number;
@@ -182,7 +187,7 @@ export default function BrainHome() {
     events: ConversationTurnEvent[],
   ) => void>(() => undefined);
   const projectionRecoveryRequirementsRef = useRef(new Map<string, ProjectionRecoveryRequirements>());
-  const launcherRequestInFlight = useRef(false);
+  const launcherRequestInFlight = useRef<LauncherRequestLock | null>(null);
   const effectiveAccountIdRef = useRef<number | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
   const followLatestMessage = useRef(true);
@@ -202,6 +207,43 @@ export default function BrainHome() {
 
   const failedOptimisticScopeKey = useCallback((accountId: number, threadId: number) =>
     `${accountId}:${threadId}`, []);
+
+  const abandonConversationScope = useCallback((accountId: number | null, epoch: number) => {
+    if (accountId == null) return;
+    for (const [clientMessageId, request] of conversationRequestsRef.current) {
+      if (request.accountId !== accountId || request.scopeEpoch !== epoch) continue;
+      if (request.threadId != null) {
+        qc.setQueryData<ConversationThread>(
+          ["brain-conversation", request.threadId],
+          (current) => current ? removeOptimisticTurn(current, clientMessageId) : current,
+        );
+      }
+      conversationRequestsRef.current.delete(clientMessageId);
+    }
+    const launcherRequest = launcherRequestInFlight.current;
+    if (launcherRequest?.accountId === accountId && launcherRequest.epoch === epoch) {
+      launcherRequestInFlight.current = null;
+      setLauncherPending(false);
+    }
+  }, [qc]);
+
+  const beginLauncherRequest = useCallback(() => {
+    const accountId = effectiveAccountIdRef.current;
+    if (accountId == null) return null;
+    const epoch = conversationScopeEpochRef.current;
+    const current = launcherRequestInFlight.current;
+    if (current?.accountId === accountId && current.epoch === epoch) return null;
+    const lock = { accountId, epoch };
+    launcherRequestInFlight.current = lock;
+    setLauncherPending(true);
+    return lock;
+  }, []);
+
+  const finishLauncherRequest = useCallback((lock: LauncherRequestLock) => {
+    if (launcherRequestInFlight.current !== lock) return;
+    launcherRequestInFlight.current = null;
+    setLauncherPending(false);
+  }, []);
 
   const applyDurableTurnEventEffects = useCallback((
     events: ConversationTurnEvent[],
@@ -448,6 +490,7 @@ export default function BrainHome() {
     const nextThreadId = effectiveAccountId != null
       ? getActiveConversationThreadId(effectiveAccountId)
       : null;
+    abandonConversationScope(previousAccountId, conversationScopeEpochRef.current);
     conversationScopeEpochRef.current += 1;
     activeConversationThreadIdRef.current = nextThreadId;
     setActiveConversationThreadId(nextThreadId);
@@ -462,7 +505,7 @@ export default function BrainHome() {
     setSelectedArtifact(null);
     setSourceReturnTarget(null);
     setSourceReturnError(null);
-  }, [effectiveAccountId, qc]);
+  }, [abandonConversationScope, effectiveAccountId, qc]);
 
   const conversationQuery = useQuery({
     queryKey: ["brain-conversation", activeConversationThreadId],
@@ -529,6 +572,7 @@ export default function BrainHome() {
       return;
     }
     clearActiveConversationThreadId(effectiveAccount.id);
+    abandonConversationScope(effectiveAccount.id, conversationScopeEpochRef.current);
     conversationScopeEpochRef.current += 1;
     activeConversationThreadIdRef.current = null;
     setActiveConversationThreadId(null);
@@ -536,6 +580,7 @@ export default function BrainHome() {
     pendingClientMessageId.current = null;
   }, [
     activeConversationThreadId,
+    abandonConversationScope,
     conversationQuery.data,
     effectiveAccount,
   ]);
@@ -573,6 +618,7 @@ export default function BrainHome() {
       attachmentIds: number[];
       targetTurnId?: number | null;
       accountId: number;
+      scopeEpoch: number;
     }) => sendConversationTurn(
       threadId,
       requestedSkillCode == null
@@ -597,7 +643,7 @@ export default function BrainHome() {
         activeThreadId: activeConversationThreadIdRef.current,
         accountId: variables.accountId,
         threadId: variables.threadId,
-      })) {
+      }) || conversationScopeEpochRef.current !== variables.scopeEpoch) {
         conversationRequestsRef.current.delete(variables.clientMessageId);
         return;
       }
@@ -644,7 +690,7 @@ export default function BrainHome() {
         activeThreadId: activeConversationThreadIdRef.current,
         accountId: variables.accountId,
         threadId: variables.threadId,
-      })) {
+      }) || conversationScopeEpochRef.current !== variables.scopeEpoch) {
         const scopeKey = failedOptimisticScopeKey(variables.accountId, variables.threadId);
         const failed = failedOptimisticTurnIdsRef.current.get(scopeKey) ?? new Set<string>();
         failed.add(variables.clientMessageId);
@@ -824,8 +870,18 @@ export default function BrainHome() {
         "Conversation history is temporarily unavailable.",
       )
     : null;
+  const pendingMutationVariables = conversationTurnMutation.variables;
+  const hasScopedPendingMutation = conversationTurnMutation.isPending
+    && pendingMutationVariables != null
+    && conversationScopeEpochRef.current === pendingMutationVariables.scopeEpoch
+    && isCurrentConversationRequest({
+      activeAccountId: effectiveAccountId,
+      activeThreadId: activeConversationThreadId,
+      accountId: pendingMutationVariables.accountId,
+      threadId: pendingMutationVariables.threadId,
+    });
   const isGenerating =
-    conversationTurnMutation.isPending
+    hasScopedPendingMutation
     || launcherPending
     || activeTurn != null;
 
@@ -945,6 +1001,7 @@ export default function BrainHome() {
         .filter((item) => item.status === "ready" && item.id != null)
         .map((item) => item.id as number),
       accountId: account.id,
+      scopeEpoch: request.scopeEpoch,
     });
   }, [conversationTurnMutation, draftAttachments, effectiveAccount, ensureAccountThread, matchesConversationScope, qc]);
 
@@ -1046,7 +1103,6 @@ export default function BrainHome() {
   }, []);
 
   const startWorkflow = async () => {
-    if (launcherRequestInFlight.current) return;
     const content = goal.trim();
     if (!content) {
       message.warning("先写下要交给运营大脑的运营目标");
@@ -1064,8 +1120,8 @@ export default function BrainHome() {
       message.warning("当前账号尚未完成授权，请先到账号矩阵完成抖音授权");
       return;
     }
-    launcherRequestInFlight.current = true;
-    setLauncherPending(true);
+    const launcherRequest = beginLauncherRequest();
+    if (!launcherRequest) return;
     setGoal("");
     const targetTurnId = activeTurn?.id ?? null;
     try {
@@ -1073,13 +1129,12 @@ export default function BrainHome() {
     } catch {
       // submitTurn restores the captured goal only if its original scope remains active.
     } finally {
-      launcherRequestInFlight.current = false;
-      setLauncherPending(false);
+      finishLauncherRequest(launcherRequest);
     }
   };
 
   const launchComposerSkill = useCallback(async (skillCode: string) => {
-    if (launcherRequestInFlight.current || isGenerating) return;
+    if (isGenerating) return;
     const skill = composerSkillsQuery.data?.find((item) => item.code === skillCode);
     if (!skill || !skill.is_available) return;
     if (!effectiveAccount) {
@@ -1090,8 +1145,8 @@ export default function BrainHome() {
       message.warning("当前账号尚未完成授权，请先完成账号授权后再执行");
       return;
     }
-    launcherRequestInFlight.current = true;
-    setLauncherPending(true);
+    const launcherRequest = beginLauncherRequest();
+    if (!launcherRequest) return;
     try {
       await submitTurn({
         content: skill.name,
@@ -1100,13 +1155,14 @@ export default function BrainHome() {
     } catch {
       // The mutation owns the user-facing error and restores the composer.
     } finally {
-      launcherRequestInFlight.current = false;
-      setLauncherPending(false);
+      finishLauncherRequest(launcherRequest);
     }
   }, [
     accountReady,
+    beginLauncherRequest,
     composerSkillsQuery.data,
     effectiveAccount,
+    finishLauncherRequest,
     isGenerating,
     message,
     requestAccountSelection,
@@ -1114,11 +1170,11 @@ export default function BrainHome() {
   ]);
 
   const retryTurn = useCallback(async (turn: ConversationTurn) => {
-    if (launcherRequestInFlight.current || turn.id == null) return;
+    if (turn.id == null) return;
     const content = turn.user_input.trim();
     if (!content || !effectiveAccount || !accountReady) return;
-    launcherRequestInFlight.current = true;
-    setLauncherPending(true);
+    const launcherRequest = beginLauncherRequest();
+    if (!launcherRequest) return;
     try {
       await submitTurn({
         content,
@@ -1128,16 +1184,16 @@ export default function BrainHome() {
     } catch {
       // submitTurn owns scoped draft recovery and user-facing error feedback.
     } finally {
-      launcherRequestInFlight.current = false;
-      setLauncherPending(false);
+      finishLauncherRequest(launcherRequest);
     }
-  }, [accountReady, effectiveAccount, submitTurn]);
+  }, [accountReady, beginLauncherRequest, effectiveAccount, finishLauncherRequest, submitTurn]);
 
   const resetConversation = () => {
     if (effectiveAccount) {
       clearActiveBrainTaskId(effectiveAccount.id);
       clearActiveConversationThreadId(effectiveAccount.id);
     }
+    abandonConversationScope(effectiveAccount?.id ?? null, conversationScopeEpochRef.current);
     conversationScopeEpochRef.current += 1;
     activeConversationThreadIdRef.current = null;
     setActiveConversationThreadId(null);
@@ -1169,6 +1225,7 @@ export default function BrainHome() {
     }
     clearActiveBrainTaskId(effectiveAccount.id);
     persistActiveConversationThreadId(effectiveAccount.id, threadId);
+    abandonConversationScope(effectiveAccount.id, conversationScopeEpochRef.current);
     conversationScopeEpochRef.current += 1;
     activeConversationThreadIdRef.current = threadId;
     setActiveConversationThreadId(threadId);
@@ -1183,6 +1240,7 @@ export default function BrainHome() {
   const handleConversationDeleted = (threadId: number) => {
     if (threadId !== activeConversationThreadId || !effectiveAccount) return;
     clearActiveConversationThreadId(effectiveAccount.id);
+    abandonConversationScope(effectiveAccount.id, conversationScopeEpochRef.current);
     conversationScopeEpochRef.current += 1;
     activeConversationThreadIdRef.current = null;
     setActiveConversationThreadId(null);
@@ -1237,6 +1295,7 @@ export default function BrainHome() {
     if (!effectiveAccount || target.accountId !== effectiveAccount.id) return;
     setSourceReturnError(null);
     persistActiveConversationThreadId(effectiveAccount.id, target.threadId);
+    abandonConversationScope(effectiveAccount.id, conversationScopeEpochRef.current);
     conversationScopeEpochRef.current += 1;
     activeConversationThreadIdRef.current = target.threadId;
     setActiveConversationThreadId(target.threadId);

@@ -883,11 +883,55 @@ describe("BrainHome V3 conversation projection", () => {
     fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
     fireEvent.click(screen.getByRole("tab", { name: "对话" }));
     await waitFor(() => expect(screen.queryByText("账号 A 的补充要求")).not.toBeInTheDocument());
+    const accountBComposer = screen.getByLabelText("运营大脑消息");
+    expect(accountBComposer).toBeEnabled();
+    fireEvent.change(accountBComposer, { target: { value: "账号 B 的新请求" } });
+    expect(screen.getByRole("button", { name: "发送给运营大脑" })).toBeEnabled();
+
+    mocks.workspace.accountId = 3;
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
+    await waitFor(() => expect(screen.queryByText("账号 A 的补充要求")).not.toBeInTheDocument());
 
     await act(async () => request.reject(new Error("account A request failed")));
 
     await waitFor(() => expect(screen.getByLabelText("运营大脑消息")).toHaveValue(""));
     expect(screen.queryByText("账号 A 的补充要求")).not.toBeInTheDocument();
+  });
+
+  it("ignores a delayed success after returning to the same account and Thread with a new scope epoch", async () => {
+    const request = deferred<TurnSubmission>();
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockImplementation(async (threadId) =>
+      thread(threadId, [persistedTurn(501, "account-a-base", "Account A base turn", "Base reply")]),
+    );
+    vi.mocked(sendConversationTurn).mockReturnValue(request.promise);
+
+    renderBrainHome();
+    await screen.findByText("Account A base turn");
+    fireEvent.change(screen.getByLabelText("运营大脑消息"), {
+      target: { value: "Old ABA follow-up" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+    await screen.findByText("Old ABA follow-up");
+    const clientMessageId = vi.mocked(sendConversationTurn).mock.calls[0][1].client_message_id;
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
+    await waitFor(() => expect(screen.queryByText("Old ABA follow-up")).not.toBeInTheDocument());
+
+    mocks.workspace.accountId = 3;
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
+    await screen.findByText("Account A base turn");
+
+    await act(async () => request.resolve(submission(
+      persistedTurn(502, clientMessageId, "Old ABA follow-up", "Old ABA success"),
+    )));
+
+    expect(screen.queryByText("Old ABA follow-up")).not.toBeInTheDocument();
+    expect(screen.queryByText("Old ABA success")).not.toBeInTheDocument();
   });
 
   it("preserves streamed text when a delayed stale conversation response reconciles", async () => {
@@ -1112,7 +1156,7 @@ describe("BrainHome V3 conversation projection", () => {
     expect(screen.queryAllByRole("article")).toHaveLength(0);
   });
 
-  it("does not remove a fresh retry when an old off-scope failure is reconciled", async () => {
+  it("removes a fresh retry after its scope is abandoned even when an older failure settles", async () => {
     const first = deferred<TurnSubmission>();
     const retry = deferred<TurnSubmission>();
     vi.mocked(sendConversationTurn)
@@ -1166,7 +1210,7 @@ describe("BrainHome V3 conversation projection", () => {
     fireEvent.click(await screen.findByRole("button", { name: "账号运营周会" }));
     fireEvent.click(screen.getByRole("button", { name: /历史会话/ }));
     fireEvent.click(await screen.findByRole("button", { name: "刚才的会话" }));
-    expect(await screen.findByText("新的重试请求")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("新的重试请求")).not.toBeInTheDocument());
   });
 
   it("replaces an incomplete live overlay with the durable Thread after reconnect", async () => {
