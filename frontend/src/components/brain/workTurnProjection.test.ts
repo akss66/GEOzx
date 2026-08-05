@@ -259,6 +259,17 @@ describe("projectWorkTurn", () => {
     })).currentActivity).toBeNull();
   });
 
+  it("never shows activity copy after a final answer", () => {
+    const model = projectWorkTurn(turn({
+      status: "completed",
+      turn_phase: "reading_data",
+      assistant_response: "诊断已完成。",
+    }));
+
+    expect(model.presentation.showActivity).toBe(false);
+    expect(model.presentation.showFinal).toBe(true);
+  });
+
   it.each(["blocked", "cancelled", "stopped", "dead_letter"])(
     "marks a terminal execution summary with %s as failed",
     (status) => {

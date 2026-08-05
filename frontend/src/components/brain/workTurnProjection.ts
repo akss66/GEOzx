@@ -6,6 +6,7 @@ import type {
   WorkTurnStep,
   WorkTurnViewModel,
 } from "../../types";
+import { presentWorkTurn } from "./workTurnPresentation";
 
 const TERMINAL_WORK_TURN_STATUSES: Record<string, WorkTurnStatus> = {
   blocked: "blocked",
@@ -22,13 +23,6 @@ const PAUSED_WORK_TURN_STATUSES = new Set([
   "waiting_user",
 ]);
 
-const TERMINAL_WORK_TURN_VIEW_STATUSES = new Set<WorkTurnStatus>([
-  "completed",
-  "blocked",
-  "failed",
-  "cancelled",
-]);
-
 const FAILED_STEP_STATUSES = new Set([
   "failed",
   "error",
@@ -42,6 +36,14 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
   const projections = projectionsForTurn(turn);
   const steps = overlayRuntimeSteps(projectSteps(projections), turn);
   const status = projectStatus(turn.status, turn.turn_phase, turn.pending_interrupt);
+  const assistantText = turn.assistant_response ?? latestAnswer(projections);
+  const presentation = presentWorkTurn({
+    status,
+    phase: turn.turn_phase,
+    persistedStatus: turn.status,
+    hasFinal: status === "completed" && assistantText != null,
+    steps,
+  });
 
   return {
     key: workTurnKey(turn),
@@ -50,8 +52,9 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
     status,
     currentActivity: turn.pending_interrupt?.status === "pending"
       ? turn.pending_interrupt.public_message
-      : projectCurrentActivity(status, turn.turn_phase, turn.status, steps),
-    assistantText: turn.assistant_response ?? latestAnswer(projections),
+      : presentation.activityLabel,
+    assistantText,
+    presentation,
     steeringNotice: projectSteeringNotice(turn),
     steps,
     experts: projectExperts(projections),
@@ -85,10 +88,10 @@ function projectSteeringNotice(turn: ConversationTurn): WorkTurnViewModel["steer
 
 const RUNTIME_STEP_LABELS: Record<string, string> = {
   read_data: "读取账号数据",
+  check_completeness: "核对数据完整性",
   specialist_work: "专家分析",
   quality_review: "质量审核",
-  prepare_deliverable: "整理交付内容",
-  publish_content: "执行发布",
+  prepare_recommendation: "整理运营建议",
 };
 
 function overlayRuntimeSteps(
@@ -182,31 +185,6 @@ function projectStatus(
   if (phase === "failed") return "failed";
   if (phase === "completed") return "completed";
   return "working";
-}
-
-function projectCurrentActivity(
-  status: WorkTurnStatus,
-  phase: TurnPhase | undefined,
-  persistedStatus: string,
-  steps: WorkTurnStep[],
-) {
-  if (TERMINAL_WORK_TURN_VIEW_STATUSES.has(status)) return null;
-  const phaseActivity: Partial<Record<TurnPhase, string>> = {
-    understanding: "正在理解需求",
-    reading_data: "正在读取账号数据",
-    consulting_experts: "正在咨询专家",
-    quality_review: "正在质量审核",
-    waiting_approval: "等待你的确认",
-    composing_artifact: "正在整理回复",
-  };
-  if (phase && phaseActivity[phase]) return phaseActivity[phase];
-  const activeStep = steps.find((step) => step.state === "active" || step.state === "waiting");
-  if (activeStep) return activeStep.label;
-  if (["queued", "claimed", "waiting_predecessor"].includes(persistedStatus)) {
-    return "等待执行";
-  }
-  if (persistedStatus === "retry_wait") return "正在恢复执行";
-  return null;
 }
 
 function projectSteps(projections: TurnProjection[]): WorkTurnStep[] {

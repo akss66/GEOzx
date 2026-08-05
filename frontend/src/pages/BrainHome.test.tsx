@@ -955,7 +955,7 @@ describe("BrainHome V3 conversation projection", () => {
 
     await waitFor(() => expect(within(article as HTMLElement).getByText("账号情况正常")).toBeInTheDocument());
     expect(screen.getByRole("article")).toBe(article);
-    expect(within(article as HTMLElement).getByText("正在咨询专家")).toBeInTheDocument();
+    expect(within(article as HTMLElement).getByText("正在分析账号的主要问题")).toBeInTheDocument();
     expect(screen.queryByText("思考中")).not.toBeInTheDocument();
   });
 

@@ -877,6 +877,16 @@ export interface WorkTurnAssistant {
   steps: WorkTurnStep[];
 }
 
+export interface WorkTurnPresentation {
+  isActive: boolean;
+  statusLabel: string | null;
+  activityLabel: string | null;
+  showActivity: boolean;
+  showFinal: boolean;
+  progressMode: "expanded" | "summary" | "hidden";
+  processLabel: "查看分析过程" | "查看已完成过程";
+}
+
 export interface WorkTurnViewModel {
   key: string;
   turnId: number | null;
@@ -884,6 +894,7 @@ export interface WorkTurnViewModel {
   status: WorkTurnStatus;
   currentActivity: string | null;
   assistantText: string | null;
+  presentation: WorkTurnPresentation;
   steeringNotice?: {
     label: ConversationTurnSteeringNoticeLabel;
     copy: string;
