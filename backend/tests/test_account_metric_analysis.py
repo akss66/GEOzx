@@ -126,6 +126,26 @@ def test_metric_registry_freezes_supported_aggregation_and_units() -> None:
     assert METRIC_REGISTRY["completion_rate"].unit == "percent"
 
 
+def test_rate_fact_discloses_simple_average_when_no_weighting_denominator_exists() -> None:
+    result = analyze_account_metrics(
+        _view(
+            account_rows=[
+                ("2026-08-01", {"completion_rate": 0.2}),
+                ("2026-08-02", {"completion_rate": 0.4}),
+            ]
+        ),
+        account_id=7,
+        days=7,
+        comparison="none",
+        metric_codes=["completion_rate"],
+        top_n=5,
+        today=date(2026, 8, 5),
+    )
+
+    assert result.facts[0].current_value == pytest.approx(0.3)
+    assert result.facts[0].aggregation_note == "缺少可核验分母，采用已确认样本的简单均值"
+
+
 def test_analysis_refuses_trend_claim_without_previous_period() -> None:
     result = analyze_account_metrics(
         _view(account_rows=[("2026-08-01", {"play": 120})]),
@@ -166,6 +186,57 @@ def test_equal_length_period_comparison_is_deterministic() -> None:
     assert fact.relative_change == 0.5
     assert fact.direction == "up"
     assert result.answerability.status == "sufficient"
+
+
+def test_daily_trend_change_start_metric_rank_and_threshold_anomaly_are_deterministic() -> None:
+    result = analyze_account_metrics(
+        _view(
+            account_rows=[
+                ("2026-07-25", {"play": 300, "like_count": 10}),
+                ("2026-08-01", {"play": 100, "like_count": 5}),
+                ("2026-08-02", {"play": 90, "like_count": 10}),
+                ("2026-08-03", {"play": 80, "like_count": 15}),
+            ]
+        ),
+        account_id=7,
+        days=7,
+        comparison="previous_period",
+        metric_codes=["play", "like_count"],
+        top_n=5,
+        require_daily_trend=True,
+        today=date(2026, 8, 5),
+    )
+
+    by_code = {fact.metric_code: fact for fact in result.facts}
+    play = by_code["play"]
+    likes = by_code["like_count"]
+    assert [(point.stat_date, point.value) for point in play.daily_trend] == [
+        (date(2026, 8, 1), 100),
+        (date(2026, 8, 2), 90),
+        (date(2026, 8, 3), 80),
+    ]
+    assert play.latest_direction == "down"
+    assert play.latest_direction_started_at == date(2026, 8, 2)
+    assert play.change_rank == 2
+    assert likes.change_rank == 1
+    assert likes.anomaly_flags == ["period_relative_change_ge_20_percent"]
+    assert "play:daily_trend" in result.answerability.supported_claims
+
+
+def test_required_daily_trend_is_not_claimed_from_one_sample() -> None:
+    result = analyze_account_metrics(
+        _view(account_rows=[("2026-08-01", {"play": 100})]),
+        account_id=7,
+        days=7,
+        comparison="none",
+        metric_codes=["play"],
+        top_n=5,
+        require_daily_trend=True,
+        today=date(2026, 8, 5),
+    )
+
+    assert result.answerability.status == "partial"
+    assert "play:daily_trend" in result.answerability.unsupported_claims
 
 
 def test_empty_confirmed_view_is_insufficient() -> None:
@@ -240,6 +311,32 @@ def test_content_rankings_are_scoped_to_the_current_period() -> None:
     assert [(item.title, item.rank_kind, item.value) for item in result.content_rankings] == [
         ("高播放作品", "top", 360),
         ("低播放作品", "bottom", 80),
+    ]
+
+
+def test_bottom_content_ranking_returns_the_requested_number_of_worst_items() -> None:
+    result = analyze_account_metrics(
+        _view(
+            content_rows=[
+                ("2026-08-01", f"作品 {value}", {"play": value})
+                for value in (10, 20, 30, 40, 50, 60)
+            ]
+        ),
+        account_id=7,
+        days=7,
+        comparison="none",
+        metric_codes=["play"],
+        top_n=5,
+        ranking_mode="bottom",
+        today=date(2026, 8, 5),
+    )
+
+    assert [(item.title, item.rank_kind, item.value) for item in result.content_rankings] == [
+        ("作品 10", "bottom", 10),
+        ("作品 20", "bottom", 20),
+        ("作品 30", "bottom", 30),
+        ("作品 40", "bottom", 40),
+        ("作品 50", "bottom", 50),
     ]
 
 

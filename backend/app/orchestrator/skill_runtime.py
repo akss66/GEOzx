@@ -107,7 +107,7 @@ from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
 from app.schemas.skills import SkillDefinition
-from app.services.account_metric_analysis import AccountMetricAnalysis
+from app.services.account_metric_analysis import METRIC_REGISTRY, AccountMetricAnalysis
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 from app.services.composite_skill_runs import pause_composite_parent_for_artifacts
 from app.services.runtime_deliverables import write_runtime_deliverable
@@ -928,9 +928,9 @@ class SkillRuntime:
             terminal_status = "blocked" if scope_mismatch else "failed"
             error_code = "TOOL_RESULT_SCOPE_MISMATCH" if scope_mismatch else type(failure).__name__
             response = (
-                "工具返回的数据不属于当前账号，账号体检已停止。"
+                f"工具返回的数据不属于当前账号，{definition.name}已停止。"
                 if scope_mismatch
-                else "账号体检执行失败，请稍后重试。"
+                else f"{definition.name}执行失败，请稍后重试。"
             )
             if persisted is not None:
                 output_snapshot = {
@@ -1676,6 +1676,10 @@ class SkillRuntime:
                         "comparison": ("previous_period" if comparison == "auto" else comparison),
                         "metric_codes": metric_codes,
                         "top_n": int(frozen_input.get("top_n") or 5),
+                        "ranking_mode": str(frozen_input.get("ranking_mode") or "both"),
+                        "require_daily_trend": (
+                            frozen_input.get("analysis_focus") == "change_onset"
+                        ),
                     },
                     purpose="读取当前账号已确认数据并生成确定性分析事实",
                     idempotency_key=f"{skill_run.id}:account.metrics_analysis",
@@ -1992,7 +1996,11 @@ class SkillRuntime:
                 else AgentCode.DECISION.value
             ),
             deliverable_type=DeliverableType.REVIEW_REPORT,
-            status=DeliverableStatus.APPROVED,
+            status=(
+                DeliverableStatus.APPROVED
+                if report.critic.passed
+                else DeliverableStatus.PENDING_REVIEW
+            ),
             payload=report.model_dump(mode="json"),
             note=(
                 "business_artifact_type=account_analysis_answer; "
@@ -2003,7 +2011,11 @@ class SkillRuntime:
         response = (
             "当前数据不足，我已说明缺口和下一步补数方式。"
             if report.answerability.status == "insufficient"
-            else "账号数据分析已完成，已给出结论、依据和下一步建议。"
+            else (
+                "账号数据分析已完成，已给出结论、依据和下一步建议。"
+                if report.critic.passed
+                else "已整理当前可核验的数据事实，但专业解释仍需复核。"
+            )
         )
         output = {
             "status": "completed",
@@ -4656,9 +4668,12 @@ def validate_account_analysis_grounding(
     """Reject expert prose that changes Tool-owned facts or claim strength."""
 
     serialized = answer.model_dump(mode="json")
-    if serialized["key_facts"] != list(tool_result.get("facts") or []):
+    canonical_tool_result = AccountMetricAnalysis.model_validate(tool_result).model_dump(
+        mode="json"
+    )
+    if serialized["key_facts"] != canonical_tool_result["facts"]:
         raise ValueError("account analysis key facts differ from deterministic tool facts")
-    if serialized["evidence_refs"] != list(tool_result.get("evidence_refs") or []):
+    if serialized["evidence_refs"] != canonical_tool_result["evidence_refs"]:
         raise ValueError("account analysis evidence refs differ from deterministic tool refs")
 
     statements = [answer.conclusion, *answer.interpretation]
@@ -4668,6 +4683,21 @@ def validate_account_analysis_grounding(
         for causal_term in ("导致", "造成", "证明了", "必然引起", "直接带来")
     ):
         raise ValueError("unsupported causal claim in account analysis")
+
+    available_metric_codes = {fact.metric_code for fact in answer.key_facts}
+    available_metric_labels = {fact.label for fact in answer.key_facts}
+    for statement in statements:
+        for metric_code, definition in METRIC_REGISTRY.items():
+            if metric_code in available_metric_codes or definition.label not in statement:
+                continue
+            if any(
+                available_label in statement and definition.label in available_label
+                for available_label in available_metric_labels
+            ):
+                continue
+            raise ValueError(
+                f"unsupported metric claim in account analysis: {metric_code}"
+            )
 
     allowed_numbers: set[float] = set()
     for fact in answer.key_facts:
@@ -4684,8 +4714,39 @@ def validate_account_analysis_grounding(
             if abs(number) <= 1:
                 allowed_numbers.add(round(abs(number * 100), 6))
         allowed_numbers.add(float(fact.current_period.days))
+        allowed_numbers.add(float(fact.sample_count))
+        for period_date in (fact.current_period.start, fact.current_period.end):
+            allowed_numbers.update(
+                {float(period_date.year), float(period_date.month), float(period_date.day)}
+            )
         if fact.comparison_period is not None:
             allowed_numbers.add(float(fact.comparison_period.days))
+            for period_date in (
+                fact.comparison_period.start,
+                fact.comparison_period.end,
+            ):
+                allowed_numbers.update(
+                    {float(period_date.year), float(period_date.month), float(period_date.day)}
+                )
+        if fact.change_rank is not None:
+            allowed_numbers.add(float(fact.change_rank))
+        if fact.latest_direction_started_at is not None:
+            change_date = fact.latest_direction_started_at
+            allowed_numbers.update(
+                {float(change_date.year), float(change_date.month), float(change_date.day)}
+            )
+        for point in fact.daily_trend:
+            point_value = float(point.value)
+            allowed_numbers.add(round(abs(point_value), 6))
+            allowed_numbers.update(
+                {
+                    float(point.stat_date.year),
+                    float(point.stat_date.month),
+                    float(point.stat_date.day),
+                }
+            )
+        if fact.anomaly_flags:
+            allowed_numbers.add(20.0)
 
     for statement in statements:
         for raw_number in re.findall(r"-?\d+(?:\.\d+)?", statement):
@@ -4695,11 +4756,17 @@ def validate_account_analysis_grounding(
         for fact in answer.key_facts:
             if fact.metric_code not in statement and fact.label not in statement:
                 continue
-            if fact.direction == "down" and any(
+            direction = (
+                fact.latest_direction
+                if fact.latest_direction != "unavailable"
+                and any(term in statement for term in ("开始", "始于", "从"))
+                else fact.direction
+            )
+            if direction == "down" and any(
                 term in statement for term in ("上升", "增长", "提高", "增加")
             ):
                 raise ValueError("reversed metric direction claim in account analysis")
-            if fact.direction == "up" and any(
+            if direction == "up" and any(
                 term in statement for term in ("下降", "减少", "降低", "下滑")
             ):
                 raise ValueError("reversed metric direction claim in account analysis")

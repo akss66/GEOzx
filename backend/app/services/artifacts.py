@@ -1,5 +1,6 @@
 """Account-authorized Artifact projection, versioning, and acceptance."""
 
+import hashlib
 import re
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -940,6 +941,7 @@ def _artifact_presentation(
         status_label=(
             "已完成"
             if artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE
+            and artifact_status == "accepted"
             else _ARTIFACT_STATUS_LABELS[artifact_status]
         ),
         detail_action_label=detail_action_label,
@@ -1119,7 +1121,12 @@ def _evidence_refs(payload: dict[str, Any], quality: AgentQualityScore | None) -
         if identity in seen:
             continue
         seen.add(identity)
-        label = candidate.get("label") or candidate.get("metric") or f"{kind} #{evidence_id}"
+        label = (
+            candidate.get("label")
+            or candidate.get("metric")
+            or candidate.get("metric_code")
+            or f"{kind} #{evidence_id}"
+        )
         safe_label = str(label)
         if _looks_like_internal_confirmation(safe_label):
             safe_label = f"{kind} #{evidence_id}"
@@ -1143,6 +1150,7 @@ def _evidence_summary(
 ) -> ArtifactEvidenceSummary:
     groups: dict[str, dict[str, Any]] = {}
     seen: set[tuple[str, int]] = set()
+    all_metrics: set[str] = set()
     for candidate in _evidence_candidates(payload, quality):
         if not isinstance(candidate, dict):
             continue
@@ -1171,7 +1179,9 @@ def _evidence_summary(
             or candidate.get("metric_code")
         )
         if isinstance(metric, str) and metric.strip():
-            group["metrics"].add(metric.strip())
+            normalized_metric = metric.strip()
+            group["metrics"].add(normalized_metric)
+            all_metrics.add(normalized_metric)
         period = _candidate_period(candidate)
         if period:
             group["periods"].add(period)
@@ -1187,7 +1197,11 @@ def _evidence_summary(
         for group in groups.values()
     ]
     summaries.sort(key=lambda item: (-item.count, item.label, item.kind))
-    return ArtifactEvidenceSummary(total=len(seen), groups=summaries)
+    return ArtifactEvidenceSummary(
+        total=len(seen),
+        metric_count=len(all_metrics),
+        groups=summaries,
+    )
 
 
 def _evidence_candidates(
@@ -1230,7 +1244,16 @@ def _safe_evidence_id(value: object) -> int | None:
         try:
             return int(value)
         except ValueError:
-            return None
+            try:
+                normalized = value.decode() if isinstance(value, (bytes, bytearray)) else value
+            except UnicodeDecodeError:
+                return None
+            if not re.fullmatch(r"[a-zA-Z0-9_.-]+:\d+", normalized):
+                return None
+            return int.from_bytes(
+                hashlib.sha256(normalized.encode("utf-8")).digest()[:8],
+                "big",
+            ) & ((1 << 63) - 1)
     return None
 
 

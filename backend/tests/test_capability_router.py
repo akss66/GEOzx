@@ -203,6 +203,29 @@ def test_analysis_questions_route_to_typed_analysis_skill(message: str) -> None:
     assert decision.skill_code == "account_data_analysis"
 
 
+def test_analysis_input_preserves_requested_bottom_ranking_direction() -> None:
+    assert capability_router.extract_account_analysis_input(
+        "表现最差的5条作品是什么？"
+    ) == {
+        "question": "表现最差的5条作品是什么？",
+        "comparison": "auto",
+        "top_n": 5,
+        "ranking_mode": "bottom",
+        "analysis_focus": "content_ranking",
+    }
+
+
+def test_analysis_input_marks_change_onset_as_a_required_daily_trend() -> None:
+    assert capability_router.extract_account_analysis_input(
+        "播放量从什么时候开始下降？"
+    ) == {
+        "question": "播放量从什么时候开始下降？",
+        "comparison": "auto",
+        "requested_metrics": ["play"],
+        "analysis_focus": "change_onset",
+    }
+
+
 def test_explicit_one_click_inspection_stays_account_inspection() -> None:
     decision = capability_router.route_deterministic_request(
         "给我做一次一键账号体检",

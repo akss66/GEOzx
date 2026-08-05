@@ -204,6 +204,113 @@ const artifact = {
   created_at: createdAt,
 };
 
+function accountAnalysisArtifact(turnId: number) {
+  return {
+    ...artifact,
+    id: 700000 + turnId,
+    turn_id: turnId,
+    run_id: 800000 + turnId,
+    skill_run_id: 900000 + turnId,
+    artifact_type: "account_analysis_answer",
+    presentation: {
+      type_label: "账号数据分析",
+      completion_label: "已根据当前账号数据回答你的问题",
+      status_label: "已完成",
+      detail_action_label: "查看完整分析",
+    },
+    title: "账号数据分析",
+    status: "accepted" as const,
+    summary: "近 30 天播放量增长，但互动效率下降。",
+    sections: [
+      { key: "conclusion", title: "核心结论", content: "近 30 天播放量增长 24%，但互动率下降 0.8 个百分点。" },
+      {
+        key: "key_facts",
+        title: "关键事实",
+        content: [{
+          metric_code: "play",
+          label: "播放量",
+          unit: "次",
+          current_value: 12400,
+          previous_value: 10000,
+          absolute_change: 2400,
+          relative_change: 0.24,
+          direction: "up",
+          current_period: { days: 30, start: "2026-07-01", end: "2026-07-30" },
+          comparison_period: { days: 30, start: "2026-06-01", end: "2026-06-30" },
+          sample_count: 14,
+          evidence_hashes: ["sha256:must-not-appear"],
+        }],
+      },
+      { key: "interpretation", title: "数据解读", content: ["流量规模扩大，但互动承接变弱。"] },
+      {
+        key: "recommendations",
+        title: "下一步建议",
+        content: [{
+          action: "连续 7 天测试强互动提问式结尾",
+          rationale: "当前互动率较上一周期下降",
+          validation_metric: "互动率",
+          observation_days: 7,
+        }],
+      },
+      { key: "data_limits", title: "数据限制", content: ["当前没有成交数据，不能判断商业转化。"] },
+      { key: "next_action", title: "下一步", content: "先执行 7 天互动率提升实验。" },
+      { key: "participating_experts", title: "参与专家", content: ["运营专家"] },
+      { key: "critic", title: "质量审核", content: { passed: true, score: 94 } },
+    ],
+    evidence_refs: [
+      { kind: "field_observation", id: 91, label: "content_hash=sha256:must-not-appear" },
+      { kind: "field_observation", id: 92, label: "播放量 · 2026-07-01 至 2026-07-30" },
+    ],
+    evidence_summary: {
+      total: 14,
+      metric_count: 2,
+      groups: [{
+        kind: "field_observation",
+        label: "账号数据字段",
+        count: 14,
+        metric_count: 2,
+        period: "2026-07-01 至 2026-07-30",
+      }],
+    },
+    quality: { score: 94, passed: true, issues: [] },
+  };
+}
+
+test("account analysis finishes in place as a grounded readable answer", async ({ page }) => {
+  await installBrowserState(page);
+  const unexpectedApiCalls = await mockApi(page);
+  await loginAsAdmin(page);
+
+  await page.locator(".tz-account-trigger").click();
+  await page.locator(".tz-account-panel button", { hasText: account.nickname }).click();
+
+  const prompt = "最近30天账号表现怎么样？";
+  await page.getByLabel("运营大脑消息").fill(prompt);
+  await page.getByRole("button", { name: "发送给运营大脑" }).click();
+
+  const turn = page.getByTestId("work-turn").filter({ hasText: prompt });
+  await expect(turn).toHaveCount(1);
+  await expect(turn).toHaveAttribute("data-turn-status", "completed");
+  await expect(turn.getByRole("heading", { name: "账号数据分析" })).toBeVisible();
+  await expect(turn).toContainText("近 30 天播放量增长 24%");
+  await expect(turn).toContainText("下一步建议");
+  await expect(turn).not.toContainText(/采用成果|正式成果|sha256|content_hash/);
+
+  await turn.getByRole("button", { name: "查看分析依据" }).click();
+  await expect(turn).toContainText("已核验 2 类指标、14 条数据记录");
+  await turn.getByRole("button", { name: "查看已完成过程" }).click();
+  await expect(turn.getByRole("region", { name: "调用专家摘要" })).toContainText("运营专家");
+  await expect(turn).not.toContainText(/sha256|content_hash/);
+
+  const turnId = await turn.getAttribute("data-turn-id");
+  await page.reload();
+  await expect(page.locator(`[data-turn-id="${turnId}"]`)).toHaveCount(1);
+  await expect(page.locator(`[data-turn-id="${turnId}"]`).getByRole("heading", {
+    name: "账号数据分析",
+  })).toBeVisible();
+  expect(unexpectedApiCalls).toEqual([]);
+});
+
 test("main agent v2 preserves the completed Artifact on its source Turn after later chat", async ({
   page,
 }) => {
@@ -676,6 +783,7 @@ async function mockApi(page: Page) {
   let sourceTurnSubmitted = false;
   const unexpectedApiCalls: string[] = [];
   const turns: Array<Record<string, unknown>> = [];
+  const analysisArtifacts: Array<ReturnType<typeof accountAnalysisArtifact>> = [];
   const threadState = { ...threadBase, turns };
 
   await page.route("**/api/**", async (route) => {
@@ -728,6 +836,9 @@ async function mockApi(page: Page) {
       const isSourceTurn = !sourceTurnSubmitted && body.requested_skill_code === inspectionSkill.code;
       const turnId = sourceTurnId + turns.length;
       const capability = mockedUiContractTurn(body.message, turnId);
+      if (body.message === "最近30天账号表现怎么样？") {
+        analysisArtifacts.push(accountAnalysisArtifact(turnId));
+      }
       const projections = isSourceTurn ? sourceTurnProjections() : capability.projections;
       const turn = {
         id: turnId,
@@ -750,7 +861,7 @@ async function mockApi(page: Page) {
         updated_at: createdAt,
       };
       turns.push(turn);
-      sourceTurnSubmitted = true;
+      sourceTurnSubmitted = sourceTurnSubmitted || isSourceTurn;
       return json(route, {
         turn,
         run: {
@@ -774,13 +885,22 @@ async function mockApi(page: Page) {
       return json(route, { data: [] });
     }
     if (method === "GET" && path === "/artifacts") {
+      const data = [
+        ...(sourceTurnSubmitted ? [artifact] : []),
+        ...analysisArtifacts,
+      ];
       return json(route, {
-        data: [artifact],
-        pagination: { page: 1, page_size: 20, total: 1, pages: 1 },
+        data,
+        pagination: { page: 1, page_size: 20, total: data.length, pages: data.length ? 1 : 0 },
       });
     }
     if (method === "GET" && path === `/artifacts/${artifact.id}`) {
       return json(route, artifact);
+    }
+    const analysisArtifactMatch = path.match(/^\/artifacts\/(\d+)$/);
+    if (method === "GET" && analysisArtifactMatch) {
+      const selected = analysisArtifacts.find((item) => item.id === Number(analysisArtifactMatch[1]));
+      if (selected) return json(route, selected);
     }
 
     unexpectedApiCalls.push(`${method} ${path}`);
@@ -1100,6 +1220,47 @@ function mockedUiContractTurn(message: string, turnId: number) {
     artifact_ids: [],
     evidence_ids: [],
   });
+  if (message === "最近30天账号表现怎么样？") {
+    const analysis = accountAnalysisArtifact(turnId);
+    return {
+      mode: "skill",
+      status: "completed",
+      skillCode: "account_data_analysis",
+      response: "账号数据分析已完成，已给出结论、依据和下一步建议。",
+      projections: [
+        {
+          ...baseSummary("account_data_analysis", "completed"),
+          tools: [{
+            id: turnId + 8000,
+            tool_code: "account.metrics_analysis",
+            tool_name: "账号指标分析",
+            status: "completed",
+            retry_count: 0,
+          }],
+          artifact_ids: [analysis.id],
+          evidence_ids: [91, 92],
+        },
+        {
+          type: "progress",
+          turn_id: turnId,
+          skill_run_id: analysis.skill_run_id,
+          stages: [
+            { code: "metrics", name: "计算账号指标", status: "completed" },
+            { code: "grounding", name: "核对结论与依据", status: "completed" },
+          ],
+        },
+        {
+          type: "artifact",
+          turn_id: turnId,
+          artifact_id: analysis.id,
+          artifact_type: analysis.artifact_type,
+          skill_run_id: analysis.skill_run_id,
+          account_id: account.id,
+          report: { summary: analysis.summary },
+        },
+      ],
+    };
+  }
   if (message.includes("只查询")) {
     return {
       mode: "query",

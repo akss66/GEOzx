@@ -27,6 +27,7 @@ async def test_runtime_capabilities_include_role_scoped_tools(session, admin) ->
     assert tool_codes == {
         "account.data_context",
         "account.engagement_context",
+        "account.metrics_analysis",
         "account.metrics_summary",
         "account.profile",
         "platform.content_publish",

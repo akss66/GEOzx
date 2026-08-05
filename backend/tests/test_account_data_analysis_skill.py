@@ -38,6 +38,7 @@ from app.orchestrator.skills.account_data_analysis import (
 )
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.capability_request import CapabilityRequest
+from app.services.account_metric_analysis import AccountMetricAnalysis
 from app.tools import ToolAdapter, ToolExecutionContext, ToolSpec
 
 
@@ -195,6 +196,8 @@ class _FakeTools:
             comparison: str
             metric_codes: list[str]
             top_n: int
+            ranking_mode: str
+            require_daily_trend: bool
 
         async def analyze(_params: Params, context: ToolExecutionContext) -> dict:
             calls.append("account.metrics_analysis")
@@ -361,7 +364,9 @@ async def test_grounded_analysis_uses_operator_once_and_preserves_tool_facts(
     assert result.status == "completed"
     assert harness.calls == [AgentCode.OPERATOR]
     assert critic.calls == 1
-    assert result.report["key_facts"] == tool_result["facts"]
+    assert result.report["key_facts"] == AccountMetricAnalysis.model_validate(
+        tool_result
+    ).model_dump(mode="json")["facts"]
     assert result.report["evidence_refs"] == tool_result["evidence_refs"]
     assert result.report["participating_experts"] == ["06-operator"]
     deliverable = (await session.scalars(select(Deliverable))).one()
@@ -435,9 +440,14 @@ async def test_expert_failure_returns_fact_only_answer_and_closes_terminal_state
     )
 
     assert result.status == "completed"
-    assert result.report["key_facts"] == tool_result["facts"]
+    assert result.report["key_facts"] == AccountMetricAnalysis.model_validate(
+        tool_result
+    ).model_dump(mode="json")["facts"]
     assert result.report["recommendations"] == []
     assert result.report["participating_experts"] == []
+    deliverable = await session.get(Deliverable, result.artifact_id)
+    assert deliverable is not None
+    assert deliverable.status is DeliverableStatus.PENDING_REVIEW
     skill_run = await session.get(SkillRun, result.skill_run_id)
     task = await session.get(BrainTask, result.task_id)
     await session.refresh(run)
@@ -476,6 +486,7 @@ def _answer(tool_result: dict) -> AccountDataAnalysisAnswer:
         ("interpretation", ["播放量从1000上升到1700。"], "numeric claim"),
         ("interpretation", ["播放量上升30%。"], "direction claim"),
         ("interpretation", ["低完播率导致播放下降。"], "causal claim"),
+        ("interpretation", ["完播率偏低。"], "unsupported metric claim"),
     ],
 )
 def test_grounding_rejects_modified_or_unsupported_interpretation(
@@ -503,3 +514,32 @@ def test_grounding_rejects_invented_evidence() -> None:
 
     with pytest.raises(ValueError, match="evidence refs"):
         validate_account_analysis_grounding(answer, tool_result)
+
+
+def test_grounding_allows_tool_owned_daily_change_start_date() -> None:
+    tool_result = _tool_result()
+    tool_result["facts"][0].update(
+        {
+            "daily_trend": [
+                {
+                    "stat_date": "2026-08-01",
+                    "value": 800,
+                    "direction_from_previous": "unavailable",
+                    "evidence_hash": "a" * 64,
+                },
+                {
+                    "stat_date": "2026-08-02",
+                    "value": 700,
+                    "direction_from_previous": "down",
+                    "evidence_hash": "a" * 64,
+                },
+            ],
+            "latest_direction": "down",
+            "latest_direction_started_at": "2026-08-02",
+        }
+    )
+    answer = _answer(tool_result).model_copy(
+        update={"interpretation": ["播放量从2026年8月2日开始下降。"]}
+    )
+
+    validate_account_analysis_grounding(answer, tool_result)

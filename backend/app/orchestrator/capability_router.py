@@ -80,6 +80,7 @@ _ANALYSIS_MARKERS = (
     "最差",
     "最好",
     "哪个指标",
+    "够不够判断",
 )
 _ANALYSIS_CONTEXT = (
     "账号",
@@ -88,6 +89,8 @@ _ANALYSIS_CONTEXT = (
     "指标",
     "表现",
     "作品",
+    "现状",
+    "留存",
     *_QUERY_TARGETS,
 )
 _UNSUPPORTED_BENCHMARK_TERMS = ("行业平均", "行业基准", "行业水平", "大盘平均")
@@ -98,6 +101,8 @@ _ALLOWED_NEGATED_OUTPUTS = (
     "不生成策略",
     "无需生成策略",
     "不用生成策略",
+    "不要生成30天策略",
+    "不生成30天策略",
 )
 _ANALYSIS_DAY_PATTERN = re.compile(r"(?:最近|近|过去)?(?P<value>\d{1,3})天")
 _ANALYSIS_TOP_N_PATTERN = re.compile(r"(?:最差|最好).{0,8}?(?P<value>\d{1,2})条")
@@ -114,6 +119,7 @@ _METRIC_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("profile_visit_count", ("主页访问量", "主页访问")),
     ("engagement_rate", ("互动率", "互动")),
     ("unfollow_count", ("取关粉丝", "取关")),
+    ("retention_rate", ("留存率", "留存")),
 )
 _FRESH_OPERATION_REQUESTS = frozenset({"结合最近数据和对标内容，规划并制作下周抖音内容"})
 _MIGRATED_OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -447,6 +453,16 @@ def extract_account_analysis_input(message: str) -> dict[str, object]:
         top_n = int(top_n_match.group("value"))
         if 1 <= top_n <= 20:
             result["top_n"] = top_n
+    if "最差" in normalized:
+        result["ranking_mode"] = "bottom"
+        result["analysis_focus"] = "content_ranking"
+    elif "最好" in normalized:
+        result["ranking_mode"] = "top"
+        result["analysis_focus"] = "content_ranking"
+    elif "从什么时候开始" in normalized or "什么时候开始" in normalized:
+        result["analysis_focus"] = "change_onset"
+    elif "哪个指标" in normalized:
+        result["analysis_focus"] = "metric_comparison"
     return result
 
 

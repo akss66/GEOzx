@@ -335,7 +335,10 @@ function businessEvidence(turn: ConversationTurn) {
         ...projection.tools.map((tool) => `数据来源：${tool.tool_name}`),
       ];
       if (projection.quality_score != null) evidence.push(`质量评分：${Math.round(projection.quality_score * 100)} 分`);
-      if (projection.evidence_ids?.length) evidence.push(`业务依据：${projection.evidence_ids.length} 项`);
+      if (projection.evidence_ids?.length) {
+        const label = projection.skill_code === "account_data_analysis" ? "分析依据" : "业务依据";
+        evidence.push(`${label}：${projection.evidence_ids.length} 项`);
+      }
       return evidence;
     }
     if (projection.type === "account_data") return accountDataSummary(projection.data);

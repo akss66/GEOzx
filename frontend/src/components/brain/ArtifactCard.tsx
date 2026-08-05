@@ -405,7 +405,8 @@ function evidenceGroupCopy(group: NonNullable<Artifact["evidence_summary"]>["gro
 
 function analysisEvidenceSummaryCopy(summary: NonNullable<Artifact["evidence_summary"]>) {
   if (summary.total <= 0) return "当前没有可核查的数据记录";
-  const metricCount = summary.groups.reduce((total, group) => total + group.metric_count, 0);
+  const metricCount = summary.metric_count
+    ?? summary.groups.reduce((total, group) => total + group.metric_count, 0);
   return metricCount > 0
     ? `已核验 ${metricCount} 类指标、${summary.total} 条数据记录`
     : `已核验 ${summary.total} 条数据记录`;
@@ -451,7 +452,25 @@ function formatAnalysisFact(value: unknown) {
   const current = formatMetricValue(value.current_value, value.unit);
   if (!label || !current) return "";
   const comparison = formatMetricComparison(value);
-  return comparison ? `${label}：${current}，${comparison}` : `${label}：${current}`;
+  const latestTrend = formatLatestTrend(value);
+  const aggregationNote = typeof value.aggregation_note === "string"
+    && value.aggregation_note.includes("简单均值")
+    ? `口径：${safeText(value.aggregation_note)}`
+    : "";
+  return [`${label}：${current}`, comparison, latestTrend, aggregationNote]
+    .filter(Boolean)
+    .join("，");
+}
+
+function formatLatestTrend(value: Record<string, unknown>) {
+  const startedAt = typeof value.latest_direction_started_at === "string"
+    ? safeText(value.latest_direction_started_at)
+    : "";
+  if (!startedAt) return "";
+  if (value.latest_direction === "down") return `最近一段连续下降始于 ${startedAt}`;
+  if (value.latest_direction === "up") return `最近一段连续上升始于 ${startedAt}`;
+  if (value.latest_direction === "flat") return `自 ${startedAt} 起基本持平`;
+  return "";
 }
 
 function formatMetricValue(value: unknown, unit: unknown) {

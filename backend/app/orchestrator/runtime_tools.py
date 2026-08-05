@@ -59,6 +59,8 @@ class AccountMetricsAnalysisParams(BaseModel):
         max_length=12,
     )
     top_n: int = Field(default=5, ge=1, le=20)
+    ranking_mode: Literal["top", "bottom", "both"] = "both"
+    require_daily_trend: bool = False
 
 
 class EngagementContextParams(BaseModel):
@@ -230,6 +232,8 @@ async def _account_metrics_analysis(
         comparison=params.comparison,
         metric_codes=params.metric_codes,
         top_n=params.top_n,
+        ranking_mode=params.ranking_mode,
+        require_daily_trend=params.require_daily_trend,
         today=period_end,
     ).model_dump(mode="json")
 

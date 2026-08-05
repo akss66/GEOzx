@@ -291,6 +291,33 @@ describe("TurnStream", () => {
     expect(summary).toHaveTextContent("数据周期：2026-07-01 至 2026-07-31");
   });
 
+  it("labels grounded account-analysis evidence as analysis evidence", () => {
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [{
+        ...thread.turns[0],
+        status: "completed",
+        projections: [{
+          type: "execution_summary",
+          turn_id: 101,
+          run_id: 3003,
+          skill_code: "account_data_analysis",
+          skill_run_id: 4003,
+          status: "completed",
+          quality_score: 0.94,
+          experts: [],
+          tools: [],
+          evidence_ids: [91, 92],
+        }],
+      }],
+    }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看已完成过程" }));
+    const summary = screen.getByRole("region", { name: "数据与质量摘要" });
+    expect(summary).toHaveTextContent("分析依据：2 项");
+    expect(summary).not.toHaveTextContent("业务依据：2 项");
+  });
+
   it("keeps the exact persisted Artifact in its source work turn", async () => {
     render(<TurnStream thread={thread} />);
 

@@ -318,7 +318,7 @@ async def test_account_data_analysis_projects_typed_business_sections(
         "evidence_refs": [
             {
                 "source_type": "field_observation",
-                "source_id": 91,
+                "source_id": "field_observation:91",
                 "batch_id": 12,
                 "metric_code": "views",
                 "period_start": "2026-07-01",
@@ -385,9 +385,66 @@ async def test_account_data_analysis_projects_typed_business_sections(
         "critic",
     ]
     assert "must-not-appear" not in str(projected["sections"])
+    assert len(projected["evidence_refs"]) == 1
+    assert projected["evidence_refs"][0]["kind"] == "field_observation"
+    assert projected["evidence_refs"][0]["label"] == "views"
+    assert projected["evidence_summary"]["metric_count"] == 1
     assert projected["evidence_summary"]["groups"][0]["metric_count"] == 1
     assert legacy_filter.status_code == 200
     assert legacy_filter.json()["pagination"]["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_account_data_analysis_needing_review_does_not_claim_completion(
+    client, session, admin
+) -> None:
+    payload = {
+        "artifact_type": "account_analysis_answer",
+        "account_id": 3,
+        "question": "最近30天表现怎么样？",
+        "answerability": {
+            "status": "partial",
+            "confidence": 0.55,
+            "supported_claims": ["play:current"],
+            "unsupported_claims": ["play:trend"],
+            "missing_metrics": [],
+            "missing_periods": ["play:previous_period"],
+            "reasons": ["缺少上一周期数据"],
+        },
+        "conclusion": "当前仅能确认本周期播放量。",
+        "key_facts": [],
+        "interpretation": [],
+        "recommendations": [],
+        "data_limits": ["专业解释需要复核"],
+        "next_action": "补齐数据后重新分析",
+        "evidence_refs": [],
+        "participating_experts": [],
+        "critic": {
+            "passed": False,
+            "score": 0,
+            "iterations": 1,
+            "issues": ["专家暂不可用"],
+            "suggestions": [],
+        },
+    }
+    seeded = await _seed_artifact(
+        session,
+        admin,
+        account_name="待复核分析账号",
+        payload=payload,
+        skill_code="account_data_analysis",
+        status=DeliverableStatus.PENDING_REVIEW,
+    )
+    deliverable = seeded[8]
+    token = await _token(client, admin.email, "admin-pw-123")
+
+    response = await client.get(
+        f"/artifacts/{deliverable.id}",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["presentation"]["status_label"] == "待确认"
 
 
 @pytest.mark.asyncio
@@ -446,6 +503,7 @@ async def test_artifact_list_detail_share_business_projection_and_provenance(
     ]
     assert listed["evidence_summary"] == {
         "total": 1,
+        "metric_count": 0,
         "groups": [
             {
                 "kind": "account_metric_snapshot",
@@ -778,6 +836,7 @@ async def test_artifact_aggregates_raw_field_observations_for_operator_summary(
     assert len(body["evidence_refs"]) == 79
     assert body["evidence_summary"] == {
         "total": 79,
+        "metric_count": 2,
         "groups": [
             {
                 "kind": "field_observation",

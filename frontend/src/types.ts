@@ -544,6 +544,7 @@ export interface ArtifactEvidenceRef {
 
 export interface ArtifactEvidenceSummary {
   total: number;
+  metric_count?: number;
   groups: Array<{
     kind: string;
     label: string;
@@ -571,6 +572,16 @@ export interface AccountAnalysisFact {
   current_period: AccountAnalysisPeriod;
   comparison_period: AccountAnalysisPeriod | null;
   sample_count: number;
+  aggregation_note: string;
+  daily_trend: Array<{
+    stat_date: string;
+    value: number;
+    direction_from_previous: "up" | "down" | "flat" | "unavailable";
+  }>;
+  latest_direction: "up" | "down" | "flat" | "unavailable";
+  latest_direction_started_at: string | null;
+  change_rank: number | null;
+  anomaly_flags: string[];
 }
 
 export interface AccountAnalysisRecommendation {

@@ -83,6 +83,8 @@ const accountAnalysisArtifact = {
         relative_change: 0.24,
         direction: "up",
         sample_count: 14,
+        latest_direction: "down",
+        latest_direction_started_at: "2026-07-24",
         evidence_hashes: ["sha256:raw-secret"],
       }],
     },
@@ -108,6 +110,7 @@ const accountAnalysisArtifact = {
   ],
   evidence_summary: {
     total: 14,
+    metric_count: 2,
     groups: [{
       kind: "field_observation",
       label: "账号数据字段",
@@ -129,6 +132,7 @@ describe("ArtifactCard", () => {
     expect(screen.getByText("近 30 天播放量增长 24%，但互动率下降 0.8 个百分点。")).toBeInTheDocument();
     expect(screen.getByText("关键事实")).toBeInTheDocument();
     expect(screen.getByText(/播放量.*12,400.*较上一周期.*24%/)).toBeInTheDocument();
+    expect(screen.getByText(/最近一段连续下降始于 2026-07-24/)).toBeInTheDocument();
     expect(screen.getByText("数据解读")).toBeInTheDocument();
     expect(screen.getByText("下一步建议")).toBeInTheDocument();
     expect(screen.getByText("数据限制")).toBeInTheDocument();

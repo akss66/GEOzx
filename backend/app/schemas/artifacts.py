@@ -67,6 +67,7 @@ class ArtifactEvidenceGroup(BaseModel):
 
 class ArtifactEvidenceSummary(BaseModel):
     total: int = Field(ge=0)
+    metric_count: int = Field(default=0, ge=0)
     groups: list[ArtifactEvidenceGroup] = Field(default_factory=list)
 
 

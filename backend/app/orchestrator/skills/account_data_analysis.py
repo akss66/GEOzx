@@ -22,6 +22,10 @@ class AccountDataAnalysisInput(BaseModel):
     comparison: Literal["auto", "previous_period", "none"] = "auto"
     requested_metrics: list[str] = Field(default_factory=list, max_length=12)
     top_n: int = Field(default=5, ge=1, le=20)
+    ranking_mode: Literal["top", "bottom", "both"] = "both"
+    analysis_focus: Literal["summary", "change_onset", "metric_comparison", "content_ranking"] = (
+        "summary"
+    )
 
 
 class Recommendation(BaseModel):

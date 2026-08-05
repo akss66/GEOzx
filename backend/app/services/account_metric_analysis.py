@@ -21,7 +21,9 @@ from app.services.account_data_view import (
 Aggregation = Literal["sum", "latest", "average"]
 ComparisonMode = Literal["none", "previous_period"]
 Direction = Literal["up", "down", "flat", "unavailable"]
+RankingMode = Literal["top", "bottom", "both"]
 AnswerabilityStatus = Literal["sufficient", "partial", "insufficient"]
+ANOMALY_RELATIVE_CHANGE_THRESHOLD = 0.2
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +58,7 @@ METRIC_REGISTRY: Mapping[str, MetricDefinition] = MappingProxyType(
         "engagement_rate": _metric("engagement_rate", "互动率", "percent", "average"),
         "profile_visit_count": _metric("profile_visit_count", "主页访问", "count", "sum"),
         "unfollow_count": _metric("unfollow_count", "取关粉丝", "count", "sum"),
+        "retention_rate": _metric("retention_rate", "留存率", "percent", "average"),
         "like_count": _metric("like_count", "点赞量", "count", "sum"),
         "comment_count": _metric("comment_count", "评论量", "count", "sum"),
         "share_count": _metric("share_count", "分享量", "count", "sum"),
@@ -98,6 +101,13 @@ class BusinessEvidenceRef(FrozenModel):
     content_hash: str
 
 
+class TrendPoint(FrozenModel):
+    stat_date: date
+    value: int | float
+    direction_from_previous: Direction
+    evidence_hash: str
+
+
 class AnalysisFact(FrozenModel):
     metric_code: str
     label: str
@@ -111,6 +121,12 @@ class AnalysisFact(FrozenModel):
     comparison_period: DateRange | None = None
     sample_count: int = Field(ge=1)
     evidence_hashes: list[str]
+    aggregation_note: str = ""
+    daily_trend: list[TrendPoint] = Field(default_factory=list)
+    latest_direction: Direction = "unavailable"
+    latest_direction_started_at: date | None = None
+    change_rank: int | None = Field(default=None, ge=1)
+    anomaly_flags: list[str] = Field(default_factory=list)
 
 
 class ContentRanking(FrozenModel):
@@ -168,6 +184,8 @@ def analyze_account_metrics(
     comparison: ComparisonMode,
     metric_codes: Sequence[str],
     top_n: int,
+    ranking_mode: RankingMode = "both",
+    require_daily_trend: bool = False,
     today: date | None = None,
 ) -> AccountMetricAnalysis:
     if days < 1:
@@ -176,6 +194,8 @@ def analyze_account_metrics(
         raise ValueError("top_n must be at least 1")
     if comparison not in {"none", "previous_period"}:
         raise ValueError(f"unsupported comparison: {comparison}")
+    if ranking_mode not in {"top", "bottom", "both"}:
+        raise ValueError(f"unsupported ranking mode: {ranking_mode}")
 
     requested_metrics = _validate_metric_codes(metric_codes)
     period_end = today or date.today()
@@ -244,6 +264,19 @@ def analyze_account_metrics(
                 unsupported_claims.append(f"{metric_code}:trend")
                 missing_periods.append(f"{metric_code}:previous_period")
 
+        daily_trend = _daily_trend(
+            current_samples,
+            account_id=account_id,
+            metric=definition,
+        )
+        latest_direction, latest_direction_started_at = _latest_direction_start(daily_trend)
+        if require_daily_trend:
+            claim = f"{metric_code}:daily_trend"
+            if len(daily_trend) >= 2:
+                supported_claims.append(claim)
+            else:
+                unsupported_claims.append(claim)
+
         facts.append(
             AnalysisFact(
                 metric_code=metric_code,
@@ -258,9 +291,20 @@ def analyze_account_metrics(
                 comparison_period=comparison_period,
                 sample_count=len(current_samples),
                 evidence_hashes=[item.content_hash for item in fact_evidence],
+                aggregation_note=_aggregation_note(definition.aggregation),
+                daily_trend=daily_trend,
+                latest_direction=latest_direction,
+                latest_direction_started_at=latest_direction_started_at,
+                anomaly_flags=(
+                    ["period_relative_change_ge_20_percent"]
+                    if relative_change is not None
+                    and abs(relative_change) >= ANOMALY_RELATIVE_CHANGE_THRESHOLD
+                    else []
+                ),
             )
         )
 
+    facts = _rank_metric_changes(facts)
     evidence_refs = _unique_sorted_evidence(evidence_refs)
     content_rankings = _content_rankings(
         view,
@@ -268,6 +312,7 @@ def analyze_account_metrics(
         metric_codes=requested_metrics,
         current_period=current_period,
         top_n=top_n,
+        ranking_mode=ranking_mode,
     )
     for ranking in content_rankings:
         for content_hash in ranking.evidence_hashes:
@@ -402,6 +447,14 @@ def _aggregate(samples: Sequence[_MetricSample], aggregation: Aggregation) -> in
     return total
 
 
+def _aggregation_note(aggregation: Aggregation) -> str:
+    return {
+        "sum": "周期内已确认样本求和",
+        "latest": "采用周期末最新确认值",
+        "average": "缺少可核验分母，采用已确认样本的简单均值",
+    }[aggregation]
+
+
 def _direction(change: int | float | None) -> Direction:
     if change is None:
         return "unavailable"
@@ -410,6 +463,53 @@ def _direction(change: int | float | None) -> Direction:
     if change < 0:
         return "down"
     return "flat"
+
+
+def _daily_trend(
+    samples: Sequence[_MetricSample],
+    *,
+    account_id: int,
+    metric: MetricDefinition,
+) -> list[TrendPoint]:
+    points: list[TrendPoint] = []
+    previous_value: int | float | None = None
+    for sample in samples:
+        evidence = _evidence_ref(sample, account_id=account_id, metric=metric)
+        points.append(
+            TrendPoint(
+                stat_date=sample.stat_date,
+                value=sample.value,
+                direction_from_previous=_direction(
+                    sample.value - previous_value if previous_value is not None else None
+                ),
+                evidence_hash=evidence.content_hash,
+            )
+        )
+        previous_value = sample.value
+    return points
+
+
+def _latest_direction_start(points: Sequence[TrendPoint]) -> tuple[Direction, date | None]:
+    if len(points) < 2:
+        return "unavailable", None
+    latest_direction = points[-1].direction_from_previous
+    if latest_direction == "unavailable":
+        return latest_direction, None
+    started_at = points[-1].stat_date
+    for point in reversed(points[1:-1]):
+        if point.direction_from_previous != latest_direction:
+            break
+        started_at = point.stat_date
+    return latest_direction, started_at
+
+
+def _rank_metric_changes(facts: Sequence[AnalysisFact]) -> list[AnalysisFact]:
+    ranked = sorted(
+        (fact for fact in facts if fact.relative_change is not None),
+        key=lambda fact: (-abs(float(fact.relative_change or 0)), fact.metric_code),
+    )
+    ranks = {fact.metric_code: index for index, fact in enumerate(ranked, start=1)}
+    return [fact.model_copy(update={"change_rank": ranks.get(fact.metric_code)}) for fact in facts]
 
 
 def _evidence_ref(
@@ -471,6 +571,7 @@ def _content_rankings(
     metric_codes: Sequence[str],
     current_period: DateRange,
     top_n: int,
+    ranking_mode: RankingMode,
 ) -> list[ContentRanking]:
     candidates: list[tuple[ContentMetricSnapshotView, str, _MetricSample]] = []
     for metric_code in metric_codes:
@@ -486,21 +587,23 @@ def _content_rankings(
     if not candidates:
         return []
 
-    per_side = max(1, top_n // 2)
     descending = sorted(candidates, key=lambda item: item[2].value, reverse=True)
-    selected: list[tuple[ContentMetricSnapshotView, str, _MetricSample, str]] = [
-        (*item, "top") for item in descending[:per_side]
-    ]
-    selected_ids = {_content_identity(item[0]) for item in selected}
-    for item in reversed(descending):
-        if len(selected) >= top_n:
-            break
-        if _content_identity(item[0]) in selected_ids:
-            continue
-        selected.append((*item, "bottom"))
-        selected_ids.add(_content_identity(item[0]))
-        if sum(entry[3] == "bottom" for entry in selected) >= per_side:
-            break
+    if ranking_mode == "top":
+        selected = [(*item, "top") for item in descending[:top_n]]
+    elif ranking_mode == "bottom":
+        selected = [(*item, "bottom") for item in reversed(descending[-top_n:])]
+    else:
+        top_count = (top_n + 1) // 2
+        bottom_count = top_n - top_count
+        selected = [(*item, "top") for item in descending[:top_count]]
+        selected_ids = {_content_identity(item[0]) for item in selected}
+        for item in reversed(descending):
+            if sum(entry[3] == "bottom" for entry in selected) >= bottom_count:
+                break
+            if _content_identity(item[0]) in selected_ids:
+                continue
+            selected.append((*item, "bottom"))
+            selected_ids.add(_content_identity(item[0]))
 
     results: list[ContentRanking] = []
     for snapshot, metric_code, sample, rank_kind in selected:
