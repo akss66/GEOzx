@@ -50,6 +50,28 @@ from app.schemas.deliverable import (
 
 
 @pytest.mark.asyncio
+async def test_manual_data_account_is_valid_expert_scope(session, admin) -> None:
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.DOUYIN,
+        nickname="Manual import account",
+        auth={"auth_status": "manual"},
+    )
+    session.add(account)
+    await session.commit()
+
+    project, resolved = await AgentHarness._require_scope(
+        session,
+        user=admin,
+        project_id=None,
+        account_id=account.id,
+    )
+
+    assert project is None
+    assert resolved.id == account.id
+
+
+@pytest.mark.asyncio
 async def test_isolated_trace_entry_uses_distinct_sessions_and_frozen_stage_input(
     monkeypatch,
 ) -> None:

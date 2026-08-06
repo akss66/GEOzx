@@ -103,6 +103,12 @@ _ALLOWED_NEGATED_OUTPUTS = (
     "不用生成策略",
     "不要生成30天策略",
     "不生成30天策略",
+    "不要猜测",
+    "不猜测",
+    "别猜测",
+    "不要编造",
+    "不编造",
+    "别编造",
 )
 _ANALYSIS_DAY_PATTERN = re.compile(r"(?:最近|近|过去)?(?P<value>\d{1,3})天")
 _ANALYSIS_TOP_N_PATTERN = re.compile(r"(?:最差|最好).{0,8}?(?P<value>\d{1,2})条")
@@ -453,7 +459,10 @@ def extract_account_analysis_input(message: str) -> dict[str, object]:
         top_n = int(top_n_match.group("value"))
         if 1 <= top_n <= 20:
             result["top_n"] = top_n
-    if "最差" in normalized:
+    if "最差" in normalized and "最好" in normalized:
+        result["ranking_mode"] = "both"
+        result["analysis_focus"] = "content_ranking"
+    elif "最差" in normalized:
         result["ranking_mode"] = "bottom"
         result["analysis_focus"] = "content_ranking"
     elif "最好" in normalized:

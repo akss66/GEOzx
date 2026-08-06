@@ -177,13 +177,19 @@ async def provider_runtime(
 def _environment_provider_key(provider: ModelProvider) -> str | None:
     if (
         provider.credential_source != "environment"
-        or provider.code != "deepseek"
-        or provider.template_code != "deepseek"
-        or provider.base_url != "https://api.deepseek.com"
+        or not _is_official_deepseek_provider(provider)
     ):
         return None
     value = os.environ.get("DEEPSEEK_API_KEY") or settings.deepseek_api_key
     return value or None
+
+
+def _is_official_deepseek_provider(provider: ModelProvider) -> bool:
+    return (
+        provider.code == "deepseek"
+        and provider.template_code == "deepseek"
+        and provider.base_url == "https://api.deepseek.com"
+    )
 
 
 def _provider_api_key(provider: ModelProvider) -> str | None:
@@ -202,7 +208,7 @@ async def provider_runtime_for_target(
     org_id: int | None,
     provider_id: int,
     model: str,
-) -> dict[str, str | None]:
+) -> dict[str, str | bool | None]:
     if org_id is None:
         raise ModelRouteConfigurationError("model provider routes require an organization")
     provider = await session.scalar(
@@ -234,6 +240,7 @@ async def provider_runtime_for_target(
         "provider_code": provider.code,
         "api_key": _provider_api_key(provider),
         "base_url": provider.base_url,
+        "allow_mixed_dns": _is_official_deepseek_provider(provider),
     }
 
 

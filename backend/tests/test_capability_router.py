@@ -280,6 +280,25 @@ def test_analysis_constraint_does_not_trigger_a_long_term_strategy_route() -> No
     assert decision.skill_code == "account_data_analysis"
 
 
+def test_analysis_evidence_constraint_does_not_cancel_the_request() -> None:
+    message = (
+        "请只根据当前账号已确认导入的数据，告诉我最近30天表现如何："
+        "列出表现最好和最差的内容、关键趋势、异常，以及3条下一步建议。"
+        "不要生成30天策略；没有数据就明确说没有，不要猜测。"
+    )
+    decision = capability_router.route_deterministic_request(
+        message,
+        platform="douyin",
+        registry=production_skill_registry,
+        has_account=True,
+    )
+
+    assert decision is not None
+    assert decision.mode is TurnExecutionMode.SKILL
+    assert decision.skill_code == "account_data_analysis"
+    assert capability_router.extract_account_analysis_input(message)["ranking_mode"] == "both"
+
+
 @pytest.mark.parametrize(
     "message",
     [

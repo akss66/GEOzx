@@ -805,6 +805,59 @@ async def test_gateway_stream_preserves_observer_semantics_with_provider_backed_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("template_code", "expected_allow_mixed_dns"),
+    [("deepseek", True), (None, False)],
+)
+async def test_gateway_limits_mixed_dns_to_the_official_deepseek_template(
+    session,
+    monkeypatch,
+    template_code: str | None,
+    expected_allow_mixed_dns: bool,
+) -> None:
+    org = Org(name=f"DeepSeek DNS {template_code or 'custom'}")
+    session.add(org)
+    await session.flush()
+    provider = _provider(
+        org_id=org.id,
+        code="deepseek",
+        base_url="https://api.deepseek.com",
+        models=["deepseek-chat"],
+    )
+    provider.template_code = template_code
+    session.add(provider)
+    await session.commit()
+    captured: dict[str, object] = {}
+
+    class RuntimeAdapter:
+        provider = "deepseek"
+
+        def __init__(self, **options):
+            captured.update(options)
+
+        async def complete(self, model, messages, options=None):
+            return CompletionResult("ok", model, 1, 1, 2)
+
+        async def stream(self, model, messages, options=None):
+            if False:
+                yield ""
+
+    monkeypatch.setattr("app.llm.gateway.OpenAICompatibleAdapter", RuntimeAdapter)
+
+    await LLMGateway()._adapter(
+        session,
+        org.id,
+        ModelTarget(
+            provider_id=provider.id,
+            provider_code="deepseek",
+            model="deepseek-chat",
+        ),
+    )
+
+    assert captured.get("allow_mixed_dns", False) is expected_allow_mixed_dns
+
+
+@pytest.mark.asyncio
 async def test_gateway_rejects_unverified_provider_backed_route(session, monkeypatch) -> None:
     org = Org(name="Pending Provider")
     session.add(org)

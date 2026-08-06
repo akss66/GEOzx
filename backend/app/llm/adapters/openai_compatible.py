@@ -26,10 +26,12 @@ class OpenAICompatibleAdapter:
         provider_code: str,
         api_key: str | None,
         base_url: str,
+        allow_mixed_dns: bool = False,
     ) -> None:
         self._provider_code = provider_code
         self._key = api_key
         self._base = base_url.rstrip("/")
+        self._allow_mixed_dns = allow_mixed_dns
 
     async def complete(
         self,
@@ -47,6 +49,7 @@ class OpenAICompatibleAdapter:
                 **_request_options(options),
             },
             policy=_request_policy(options),
+            _allow_mixed_dns=self._allow_mixed_dns,
         )
         if response.status_code >= 400:
             raise RuntimeError(
@@ -86,6 +89,7 @@ class OpenAICompatibleAdapter:
                 **_request_options(options),
             },
             policy=_request_policy(options),
+            _allow_mixed_dns=self._allow_mixed_dns,
         ) as response:
             if response.status_code >= 400:
                 raise RuntimeError(

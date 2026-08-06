@@ -797,10 +797,10 @@ class AgentHarness:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The selected account is inactive",
             )
-        if account.auth_status != "authorized":
+        if account.auth_status not in {"authorized", "manual"}:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="The selected account is not authorized",
+                detail="The selected account is not connected or configured for manual data",
             )
         if project_id is None:
             return None, account

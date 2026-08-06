@@ -135,7 +135,7 @@ class LLMGateway:
         ):
             return DeterministicTestAdapter()
         if target.provider_id is not None:
-            runtime = await provider_runtime_for_target(
+            provider_runtime_data = await provider_runtime_for_target(
                 session,
                 org_id,
                 target.provider_id,
@@ -143,18 +143,23 @@ class LLMGateway:
             )
             if self._custom_adapters:
                 return self._adapters[target.provider_code]
+            adapter_options: dict[str, Any] = {
+                "provider_code": target.provider_code,
+                "api_key": provider_runtime_data["api_key"],
+                "base_url": str(provider_runtime_data["base_url"]),
+            }
+            if provider_runtime_data["allow_mixed_dns"]:
+                adapter_options["allow_mixed_dns"] = True
             return OpenAICompatibleAdapter(
-                provider_code=target.provider_code,
-                api_key=runtime["api_key"],
-                base_url=str(runtime["base_url"]),
+                **adapter_options,
             )
         if self._custom_adapters:
             return self._adapters[target.provider_code]
-        runtime = await provider_runtime(session, org_id, target.provider_code)
+        legacy_runtime = await provider_runtime(session, org_id, target.provider_code)
         if target.provider_code == "deepseek":
             return DeepSeekAdapter(
-                api_key=runtime["api_key"],
-                base_url=runtime["base_url"],
+                api_key=legacy_runtime["api_key"],
+                base_url=legacy_runtime["base_url"],
             )
         return self._adapters[target.provider_code]
 

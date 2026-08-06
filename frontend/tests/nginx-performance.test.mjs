@@ -6,6 +6,10 @@ const nginxConfig = readFileSync(
   new URL("../nginx.conf", import.meta.url),
   "utf8",
 );
+const localNginxConfig = readFileSync(
+  new URL("../nginx.local.conf", import.meta.url),
+  "utf8",
+);
 
 test("compresses and caches content-addressed frontend assets", () => {
   assert.match(nginxConfig, /\bgzip\s+on\s*;/);
@@ -28,4 +32,17 @@ test("requires the application shell to revalidate after a release", () => {
     /\/index\.html\s+"no-cache"\s*;/,
   );
   assert.match(nginxConfig, /location\s+=\s+\/index\.html\s*\{/);
+});
+
+test("re-resolves the Docker backend after container replacement", () => {
+  for (const config of [nginxConfig, localNginxConfig]) {
+    assert.match(config, /resolver\s+127\.0\.0\.11\s+valid=\d+s\s+ipv6=off\s*;/);
+    assert.match(config, /upstream\s+backend_upstream\s*\{[^}]*zone\s+backend_upstream\s+64k\s*;/s);
+    assert.match(config, /upstream\s+backend_upstream\s*\{[^}]*server\s+backend:8000\s+resolve\s*;/s);
+    assert.doesNotMatch(config, /proxy_pass\s+http:\/\/backend:8000/);
+    assert.equal(
+      [...config.matchAll(/proxy_pass\s+http:\/\/backend_upstream/g)].length,
+      3,
+    );
+  }
 });

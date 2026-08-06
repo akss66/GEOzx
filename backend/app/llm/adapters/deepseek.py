@@ -13,10 +13,12 @@ class DeepSeekAdapter(OpenAICompatibleAdapter):
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
         self._resolved_key = api_key if api_key is not None else settings.deepseek_api_key
+        resolved_base_url = (base_url or settings.deepseek_base_url).rstrip("/")
         super().__init__(
             provider_code="deepseek",
             api_key=self._resolved_key,
-            base_url=(base_url or settings.deepseek_base_url).rstrip("/"),
+            base_url=resolved_base_url,
+            allow_mixed_dns=resolved_base_url == "https://api.deepseek.com",
         )
 
     async def complete(

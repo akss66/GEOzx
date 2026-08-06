@@ -652,6 +652,32 @@ describe("BrainHome V3 conversation projection", () => {
     expect(getConversation).not.toHaveBeenCalled();
   });
 
+  it("submits a new conversation after leaving an existing terminal turn", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [
+      persistedTurn(
+        501,
+        "blocked-client",
+        "旧会话请求",
+        "旧会话需要处理",
+        "blocked",
+      ),
+    ]));
+
+    renderBrainHome();
+    await screen.findByText("旧会话需要处理");
+    fireEvent.click(screen.getByRole("button", { name: /新对话/ }));
+    const composer = await screen.findByLabelText("运营大脑消息");
+    fireEvent.change(composer, { target: { value: "新会话分析请求" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送给运营大脑" }));
+
+    await waitFor(() => expect(createConversation).toHaveBeenCalledWith({ account_id: 3 }));
+    expect(sendConversationTurn).toHaveBeenCalledWith(82, expect.objectContaining({
+      message: "新会话分析请求",
+      target_turn_id: null,
+    }));
+  });
+
   it("restores the composer when the typed runtime rollout gate is closed", async () => {
     vi.mocked(sendConversationTurn).mockRejectedValue({
       response: { status: 503, headers: {} },

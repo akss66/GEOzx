@@ -5,7 +5,7 @@ import re
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from math import ceil
+from math import ceil, isfinite
 from typing import Any, TypeAlias
 
 from fastapi import HTTPException, status
@@ -121,7 +121,9 @@ _ACCOUNT_ANALYSIS_SECTION_FIELDS = (
     "critic",
 )
 _ACCOUNT_ANALYSIS_FIELDS = set(_ACCOUNT_ANALYSIS_SECTION_FIELDS)
-SafeBusinessValue: TypeAlias = str | list["SafeBusinessValue"] | dict[str, "SafeBusinessValue"]
+SafeBusinessValue: TypeAlias = (
+    str | int | float | bool | list["SafeBusinessValue"] | dict[str, "SafeBusinessValue"]
+)
 
 _SECTION_TITLES = {
     "period": "复盘周期",
@@ -1067,6 +1069,12 @@ def _safe_business_value(value: Any) -> SafeBusinessValue | None:
         if _looks_like_internal_confirmation(value):
             return None
         return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if isfinite(value) else None
     if isinstance(value, list):
         cleaned: list[SafeBusinessValue] = [
             item for item in (_safe_business_value(item) for item in value) if item is not None
@@ -1083,7 +1091,7 @@ def _safe_business_value(value: Any) -> SafeBusinessValue | None:
                 continue
             cleaned_dict[key_str] = cleaned_item
         return cleaned_dict
-    return str(value)
+    return None
 
 
 def _is_internal_key(key: str) -> bool:

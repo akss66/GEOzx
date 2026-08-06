@@ -674,7 +674,7 @@ def _answerability(
 ) -> Answerability:
     reasons: list[str] = []
     if not facts:
-        reasons.append("No confirmed values exist for the requested metrics and period.")
+        reasons.append("当前指标和时间范围内没有已确认数据。")
         return Answerability(
             status="insufficient",
             confidence=0,
@@ -690,13 +690,13 @@ def _answerability(
     if unsupported_claims or missing_metrics or missing_periods:
         status = "partial"
         confidence = min(confidence, 0.55)
-        reasons.append("Some requested claims lack confirmed evidence.")
+        reasons.append("部分分析要求缺少已确认数据，当前只能给出有限结论。")
     if conflict_count:
         confidence = max(0, confidence - 0.15)
-        reasons.append(f"{conflict_count} unresolved data conflict(s) affect confidence.")
+        reasons.append(f"仍有 {conflict_count} 项数据冲突未解决，会降低结论可信度。")
     if days_since_observed is not None and days_since_observed > 7:
         confidence = max(0, confidence - 0.15)
-        reasons.append("The latest confirmed observation is older than seven days.")
+        reasons.append("最新一条已确认数据距今超过 7 天，结论可能无法反映当前状态。")
     return Answerability(
         status=status,
         confidence=round(confidence, 2),

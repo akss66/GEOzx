@@ -48,7 +48,7 @@ class DeliverableActionOut(BaseModel):
 class ArtifactSection(BaseModel):
     key: str
     title: str
-    content: str | list[Any] | dict[str, Any]
+    content: str | int | float | bool | list[Any] | dict[str, Any]
 
 
 class EvidenceRef(BaseModel):

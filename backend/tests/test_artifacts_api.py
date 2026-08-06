@@ -384,6 +384,14 @@ async def test_account_data_analysis_projects_typed_business_sections(
         "participating_experts",
         "critic",
     ]
+    key_facts = next(
+        section["content"]
+        for section in projected["sections"]
+        if section["key"] == "key_facts"
+    )
+    assert key_facts[0]["current_value"] == 12400
+    assert isinstance(key_facts[0]["current_value"], int)
+    assert key_facts[0]["relative_change"] == 0.24
     assert "must-not-appear" not in str(projected["sections"])
     assert len(projected["evidence_refs"]) == 1
     assert projected["evidence_refs"][0]["kind"] == "field_observation"

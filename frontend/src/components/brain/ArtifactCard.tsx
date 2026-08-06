@@ -449,7 +449,7 @@ function renderAccountAnalysisContent(section: ArtifactSection) {
 function formatAnalysisFact(value: unknown) {
   if (!isRecord(value)) return "";
   const label = typeof value.label === "string" ? safeText(value.label) : "";
-  const current = formatMetricValue(value.current_value, value.unit);
+  const current = formatMetricValue(value.current_value, value.unit, value.metric_code);
   if (!label || !current) return "";
   const comparison = formatMetricComparison(value);
   const latestTrend = formatLatestTrend(value);
@@ -473,11 +473,25 @@ function formatLatestTrend(value: Record<string, unknown>) {
   return "";
 }
 
-function formatMetricValue(value: unknown, unit: unknown) {
+function formatMetricValue(value: unknown, unit: unknown, metricCode: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
   const formatted = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
-  const safeUnit = typeof unit === "string" && isSafeText(unit) ? safeText(unit) : "";
+  const safeUnit = metricUnitLabel(unit, metricCode);
   return `${formatted}${safeUnit ? ` ${safeUnit}` : ""}`;
+}
+
+function metricUnitLabel(unit: unknown, metricCode: unknown) {
+  if (typeof unit !== "string" || !isSafeText(unit)) return "";
+  const normalizedUnit = unit.trim().toLowerCase();
+  const normalizedMetric = typeof metricCode === "string" ? metricCode.trim().toLowerCase() : "";
+  if (normalizedUnit === "count") {
+    return normalizedMetric.includes("follower") || normalizedMetric.includes("unfollow")
+      ? "人"
+      : "次";
+  }
+  if (normalizedUnit === "percent") return "%";
+  if (normalizedUnit === "seconds") return "秒";
+  return safeText(unit);
 }
 
 function formatMetricComparison(value: Record<string, unknown>) {

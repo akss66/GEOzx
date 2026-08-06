@@ -77,7 +77,7 @@ const accountAnalysisArtifact = {
       content: [{
         metric_code: "views",
         label: "播放量",
-        unit: "次",
+        unit: "count",
         current_value: 12400,
         previous_value: 10000,
         relative_change: 0.24,
@@ -131,6 +131,7 @@ describe("ArtifactCard", () => {
     expect(screen.getByRole("heading", { name: "账号数据分析" })).toBeInTheDocument();
     expect(screen.getByText("近 30 天播放量增长 24%，但互动率下降 0.8 个百分点。")).toBeInTheDocument();
     expect(screen.getByText("关键事实")).toBeInTheDocument();
+    expect(screen.getByText(/播放量：12,400 次/)).toBeInTheDocument();
     expect(screen.getByText(/播放量.*12,400.*较上一周期.*24%/)).toBeInTheDocument();
     expect(screen.getByText(/最近一段连续下降始于 2026-07-24/)).toBeInTheDocument();
     expect(screen.getByText("数据解读")).toBeInTheDocument();
