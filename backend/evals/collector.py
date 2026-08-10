@@ -54,6 +54,7 @@ _EVIDENCE_FIELDS = (
     "period_start",
     "period_end",
 )
+_QUERY_SKILL_CODES = frozenset({"account_data_query", "account.data_context"})
 
 
 class EvaluationScopeError(RuntimeError):
@@ -252,9 +253,12 @@ async def _scoped_deliverables(
     return tuple(rows)
 
 
-def _preferred_payload(deliverables: tuple[Deliverable, ...]) -> Mapping[str, Any]:
+def _preferred_payload(
+    deliverables: tuple[Deliverable, ...],
+    skill_runs: tuple[SkillRun, ...],
+) -> Mapping[str, Any]:
     payloads = [item.payload for item in deliverables if isinstance(item.payload, Mapping)]
-    return next(
+    deliverable_payload = next(
         (
             payload
             for payload in payloads
@@ -262,6 +266,14 @@ def _preferred_payload(deliverables: tuple[Deliverable, ...]) -> Mapping[str, An
         ),
         payloads[0] if payloads else {},
     )
+    if deliverable_payload:
+        return deliverable_payload
+    output_payloads = [
+        row.output_snapshot
+        for row in reversed(skill_runs)
+        if isinstance(row.output_snapshot, Mapping) and row.output_snapshot
+    ]
+    return output_payloads[0] if output_payloads else {}
 
 
 def _tool_observations(tool_calls: tuple[AgentToolCall, ...]) -> tuple[dict[str, Any], ...]:
@@ -275,6 +287,29 @@ def _tool_observations(tool_calls: tuple[AgentToolCall, ...]) -> tuple[dict[str,
             "requires_human_confirmation": call.requires_human_confirmation,
         }
         for call in tool_calls
+    )
+
+
+def _effective_tool_observations(
+    tool_calls: tuple[AgentToolCall, ...],
+    skill_runs: tuple[SkillRun, ...],
+) -> tuple[dict[str, Any], ...]:
+    persisted = _tool_observations(tool_calls)
+    if persisted:
+        return persisted
+    query_runs = [row for row in skill_runs if row.skill_code in _QUERY_SKILL_CODES]
+    if not query_runs:
+        return ()
+    query_run = query_runs[-1]
+    return (
+        {
+            "tool_code": "account.data_context",
+            "status": query_run.status,
+            "latency_ms": None,
+            "retry_count": 0,
+            "side_effect_level": "read",
+            "requires_human_confirmation": False,
+        },
     )
 
 
@@ -346,7 +381,7 @@ async def collect_observation(
         user_id=user_id,
         account_id=account_id,
     )
-    payload = _preferred_payload(deliverables)
+    payload = _preferred_payload(deliverables, skill_runs)
     intent = turn.intent if isinstance(turn.intent, Mapping) else {}
     route_skill_code = intent.get("skill_code")
     if route_skill_code is None and skill_runs:
@@ -367,7 +402,7 @@ async def collect_observation(
         turn_id=turn_id,
         route_mode=(str(intent.get("mode")) if intent.get("mode") is not None else None),
         route_skill_code=(str(route_skill_code) if route_skill_code is not None else None),
-        tool_calls=_tool_observations(tool_calls),
+        tool_calls=_effective_tool_observations(tool_calls, skill_runs),
         skill_runs=_skill_observations(skill_runs),
         expert_invocations=_expert_observations(invocations),
         evidence_refs=evidence_refs,

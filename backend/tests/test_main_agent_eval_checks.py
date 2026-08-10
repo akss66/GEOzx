@@ -312,6 +312,21 @@ def test_terminal_check_rejects_dead_letter_run_with_running_turn() -> None:
     assert result.passed is False
 
 
+def test_terminal_check_accepts_waiting_decision_as_needs_review_closure() -> None:
+    case = _case(allowed_terminal_statuses=["needs_review", "completed"])
+    observation = _observation(
+        terminal_states={
+            "turn": "waiting_decision",
+            "run": "waiting_decision",
+            "skill": "needs_review",
+        }
+    )
+
+    result = check_terminals(case, observation)
+
+    assert result.passed is True
+
+
 def test_latency_check_is_report_only_when_budget_is_exceeded() -> None:
     result = check_latency(_case(), _observation(timings_ms={"total": 2_001}))
 

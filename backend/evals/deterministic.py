@@ -23,6 +23,7 @@ TERMINAL_CONSISTENCY = "terminal.consistency"
 LATENCY_BUDGET = "latency.budget"
 
 _ACTIVE_STATUSES = frozenset({"pending", "queued", "running", "retrying"})
+_TERMINAL_STATUS_ALIASES = {"waiting_decision": "needs_review"}
 _UNIT_ALIASES = {
     "%": "percent",
     "pct": "percent",
@@ -331,7 +332,10 @@ def check_terminals(
     case: EvaluationCase,
     observation: EvaluationObservation,
 ) -> CheckResult:
-    states = dict(observation.terminal_states)
+    states = {
+        name: _TERMINAL_STATUS_ALIASES.get(status, status)
+        for name, status in observation.terminal_states.items()
+    }
     allowed = set(case.expectation.allowed_terminal_statuses)
     active = sorted(name for name, status in states.items() if status in _ACTIVE_STATUSES)
     disallowed = {
