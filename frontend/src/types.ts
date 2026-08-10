@@ -949,6 +949,7 @@ export interface WorkTurnViewModel {
   turnId: number | null;
   userMessage: string;
   status: WorkTurnStatus;
+  phase?: TurnPhase;
   currentActivity: string | null;
   assistantText: string | null;
   presentation: WorkTurnPresentation;

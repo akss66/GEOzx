@@ -50,6 +50,7 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
     turnId: turn.id,
     userMessage: turn.user_input,
     status,
+    phase: turn.turn_phase,
     currentActivity: turn.pending_interrupt?.status === "pending"
       ? turn.pending_interrupt.public_message
       : presentation.activityLabel,

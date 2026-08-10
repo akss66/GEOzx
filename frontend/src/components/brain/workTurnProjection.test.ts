@@ -181,6 +181,13 @@ describe("projectWorkTurn", () => {
       experts: [{ name: "Positioning expert", status: "done" }],
       deliverableIds: [88],
     });
+    expect(projectWorkTurn(turn({
+      status: "running",
+      turn_phase: "reading_data",
+    }))).toMatchObject({
+      status: "working",
+      phase: "reading_data",
+    });
     expect(projectWorkTurn(completedTurn).deliverableIds).toEqual([88]);
   });
 
