@@ -1073,8 +1073,8 @@
 
 .tz-main-agent-status-avatar canvas {
   display: block;
-  width: 32px;
-  height: 32px;
+  width: 32px !important;
+  height: 32px !important;
 }
 
 .tz-work-turn__identity small {

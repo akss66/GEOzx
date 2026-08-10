@@ -16,6 +16,7 @@ const workTurnSource = readFileSync(resolve(process.cwd(), "src/components/brain
 const turnStreamSource = readFileSync(resolve(process.cwd(), "src/components/brain/TurnStream.tsx"), "utf8");
 const indexStylesSource = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
 const appShellStylesSource = readFileSync(resolve(process.cwd(), "src/styles/app-shell.css"), "utf8");
+const brainV2StylesSource = readFileSync(resolve(process.cwd(), "src/styles/brain-v2.css"), "utf8");
 
 vi.mock("../../api/brain", () => ({ getArtifact: vi.fn() }));
 vi.mock("thinking-orbs", () => ({
@@ -108,6 +109,27 @@ describe("TurnStream", () => {
     expect(turnStreamSource).not.toMatch(/dy-chat-(message|bubble|expert)/);
     expect(indexStylesSource).not.toMatch(/dy-agent-/);
     expect(appShellStylesSource).not.toMatch(/dy-agent-/);
+  });
+
+  it("constrains the third-party orb canvas to the existing avatar footprint", () => {
+    const style = document.createElement("style");
+    style.textContent = brainV2StylesSource;
+    document.head.append(style);
+    const avatar = document.createElement("span");
+    avatar.className = "tz-main-agent-status-avatar tz-work-turn__avatar";
+    const canvas = document.createElement("canvas");
+    canvas.style.width = "64px";
+    canvas.style.height = "64px";
+    avatar.append(canvas);
+    document.body.append(avatar);
+
+    expect(getComputedStyle(avatar).width).toBe("32px");
+    expect(getComputedStyle(avatar).height).toBe("32px");
+    expect(getComputedStyle(canvas).width).toBe("32px");
+    expect(getComputedStyle(canvas).height).toBe("32px");
+
+    style.remove();
+    avatar.remove();
   });
 
   it("renders one continuous work-turn card instead of segmented chat messages", () => {
