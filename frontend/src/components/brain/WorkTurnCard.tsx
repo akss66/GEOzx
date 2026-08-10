@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { WorkTurnViewModel } from "../../types";
-import { AgentAvatar } from "../agents/AgentAvatar";
+import { MainAgentStatusAvatar } from "./MainAgentStatusAvatar";
 import { ProcessDisclosure } from "./ProcessDisclosure";
 import { WorkTurnProgress } from "./WorkTurnProgress";
 
@@ -12,6 +12,7 @@ export function WorkTurnCard({
   deliverables,
   businessActions,
   sourceStatus,
+  showThinkingOrb = false,
 }: {
   view: WorkTurnViewModel;
   evidenceSummary?: string[];
@@ -19,6 +20,7 @@ export function WorkTurnCard({
   deliverables?: ReactNode;
   businessActions?: ReactNode;
   sourceStatus?: string;
+  showThinkingOrb?: boolean;
 }) {
   const steeringDetail = view.steeringNotice?.message ?? view.steeringNotice?.reason;
   return (
@@ -28,6 +30,7 @@ export function WorkTurnCard({
       data-turn-id={view.turnId ?? undefined}
       data-turn-key={view.key}
       data-turn-status={sourceStatus ?? view.status}
+      data-has-thinking-orb={showThinkingOrb || undefined}
     >
       <section className="tz-work-turn__user" aria-label="用户消息">
         <p>{view.userMessage}</p>
@@ -40,7 +43,13 @@ export function WorkTurnCard({
         data-thinking={view.presentation.isActive || undefined}
       >
         <header className="tz-work-turn__identity">
-          <AgentAvatar code="00-decision" className="tz-work-turn__avatar" label={view.assistant.identity} />
+          <MainAgentStatusAvatar
+            showThinkingOrb={showThinkingOrb && view.presentation.isActive}
+            phase={view.phase}
+            identity={view.assistant.identity}
+            activityLabel={view.presentation.activityLabel}
+            className="tz-work-turn__avatar"
+          />
           <span>{view.assistant.identity}</span>
           {view.presentation.statusLabel ? <small>{view.presentation.statusLabel}</small> : null}
         </header>

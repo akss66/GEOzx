@@ -3,7 +3,13 @@
 import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("thinking-orbs", () => ({
+  ThinkingOrb: ({ state, ...props }: { state: string; [key: string]: unknown }) => (
+    <canvas data-testid="thinking-orb" data-state={state} aria-label={String(props["aria-label"])} />
+  ),
+}));
 
 import type { WorkTurnViewModel } from "../../types";
 import { WorkTurnCard } from "./WorkTurnCard";
@@ -59,20 +65,35 @@ describe("WorkTurnCard", () => {
   afterEach(cleanup);
 
   it("keeps one assistant surface from activity through final answer", () => {
-    const view = render(<WorkTurnCard view={workingTurn} sourceStatus="completed" />);
+    const view = render(
+      <WorkTurnCard
+        view={{ ...workingTurn, phase: "reading_data" }}
+        sourceStatus="completed"
+        showThinkingOrb
+      />,
+    );
     const root = screen.getByTestId("work-turn");
     const operator = screen.getByRole("region", { name: "运营大脑工作回合" });
 
     expect(screen.getAllByTestId("work-turn")).toHaveLength(1);
+    expect(screen.getAllByTestId("thinking-orb")).toHaveLength(1);
     expect(within(operator).getAllByText("运营大脑")).toHaveLength(1);
     expect(operator).toHaveAttribute("aria-busy", "true");
     expect(operator).toHaveAttribute("data-thinking", "true");
 
-    view.rerender(<WorkTurnCard sourceStatus="running" view={completedTurn} />);
+    view.rerender(
+      <WorkTurnCard
+        sourceStatus="running"
+        view={{ ...completedTurn, phase: "completed" }}
+        showThinkingOrb={false}
+      />,
+    );
 
     expect(screen.getByTestId("work-turn")).toBe(root);
     expect(screen.getByRole("region", { name: "运营大脑工作回合" })).toBe(operator);
     expect(root).toHaveAttribute("data-turn-status", "running");
+    expect(screen.queryByTestId("thinking-orb")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "运营大脑" })).toBeVisible();
     expect(within(operator).queryByText(/正在/)).not.toBeInTheDocument();
     expect(within(operator).getByText(completedTurn.assistantText!)).toBeVisible();
     expect(operator).toHaveAttribute("aria-busy", "false");

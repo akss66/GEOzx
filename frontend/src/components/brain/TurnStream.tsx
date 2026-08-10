@@ -46,47 +46,59 @@ export function TurnStream({
   sourceArtifactOverrides?: Record<number, Artifact>;
   onRestartTurn?: (turn: ConversationTurn) => void;
 }) {
+  const projectedTurns = thread.turns.map((turn) => ({ turn, view: projectWorkTurn(turn) }));
+  const orbOwnerKey = lastActiveWorkTurnKey(projectedTurns);
+
   return (
     <div className="tz-turn-stream" aria-label="Conversation turns">
-      {thread.turns.map((turn) => {
-        const view = projectWorkTurn(turn);
-        return (
-          <WorkTurnCard
-            key={turnReactKey({
-              threadId: thread.id,
-              turnId: turn.id,
-              clientMessageId: turn.client_message_id ?? `turn-${turn.id ?? "pending"}`,
-            })}
-            view={view}
-            sourceStatus={turn.status}
-            evidenceSummary={businessEvidence(turn)}
-            technicalLog={technicalLog(turn)}
-            deliverables={renderDeliverables({
-              turn,
-              thread,
-              onArtifactAction,
-              revisingArtifactId,
-              actionPendingArtifactId,
-              artifactRefreshKey,
-              revisionArtifacts,
-              sourceArtifactOverrides,
-            })}
-            businessActions={renderBusinessActions({
-              turn,
-              recoveryStatus: view.status,
-              approvingToolCallId,
-              approvalComment,
-              onApprovalCommentChange,
-              onApprove,
-              resolvingInterruptId,
-              onResolveInterrupt,
-              onRestartTurn,
-            })}
-          />
-        );
-      })}
+      {projectedTurns.map(({ turn, view }) => (
+        <WorkTurnCard
+          key={turnReactKey({
+            threadId: thread.id,
+            turnId: turn.id,
+            clientMessageId: turn.client_message_id ?? `turn-${turn.id ?? "pending"}`,
+          })}
+          view={view}
+          showThinkingOrb={view.key === orbOwnerKey}
+          sourceStatus={turn.status}
+          evidenceSummary={businessEvidence(turn)}
+          technicalLog={technicalLog(turn)}
+          deliverables={renderDeliverables({
+            turn,
+            thread,
+            onArtifactAction,
+            revisingArtifactId,
+            actionPendingArtifactId,
+            artifactRefreshKey,
+            revisionArtifacts,
+            sourceArtifactOverrides,
+          })}
+          businessActions={renderBusinessActions({
+            turn,
+            recoveryStatus: view.status,
+            approvingToolCallId,
+            approvalComment,
+            onApprovalCommentChange,
+            onApprove,
+            resolvingInterruptId,
+            onResolveInterrupt,
+            onRestartTurn,
+          })}
+        />
+      ))}
     </div>
   );
+}
+
+function lastActiveWorkTurnKey(
+  projectedTurns: Array<{ view: ReturnType<typeof projectWorkTurn> }>,
+) {
+  for (let index = projectedTurns.length - 1; index >= 0; index -= 1) {
+    if (projectedTurns[index].view.presentation.isActive) {
+      return projectedTurns[index].view.key;
+    }
+  }
+  return null;
 }
 
 function renderDeliverables({

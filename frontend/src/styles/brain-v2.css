@@ -565,10 +565,6 @@
   color: var(--tz-muted);
 }
 
-.tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .tz-work-turn__avatar {
-  animation: tz-agent-thinking 1.45s ease-in-out infinite;
-}
-
 .tz-coo-record {
   display: grid;
   align-items: start;
@@ -1067,6 +1063,18 @@
   height: 32px;
   flex: 0 0 auto;
   border-radius: 10px;
+}
+
+.tz-main-agent-status-avatar {
+  display: inline-grid;
+  overflow: hidden;
+  place-items: center;
+}
+
+.tz-main-agent-status-avatar canvas {
+  display: block;
+  width: 32px;
+  height: 32px;
 }
 
 .tz-work-turn__identity small {
@@ -2142,8 +2150,7 @@
   .tz-brain-artifact,
   .tz-brain-handoff,
   .tz-brain-permission-mode,
-  .tz-brain-decision,
-  .tz-brain-thread .tz-work-turn__operator[data-thinking="true"] .tz-work-turn__avatar {
+  .tz-brain-decision {
     animation: none !important;
     transition: none !important;
     transform: none !important;
@@ -2153,11 +2160,6 @@
 @keyframes tz-message-arrive {
   from { opacity: 0.45; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes tz-agent-thinking {
-  0%, 100% { opacity: 0.72; box-shadow: 0 0 0 0 rgba(201, 22, 29, 0); }
-  50% { opacity: 1; box-shadow: 0 0 0 5px rgba(201, 22, 29, 0.09); }
 }
 
 @keyframes tz-expert-arrive {

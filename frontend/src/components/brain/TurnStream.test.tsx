@@ -18,6 +18,11 @@ const indexStylesSource = readFileSync(resolve(process.cwd(), "src/index.css"), 
 const appShellStylesSource = readFileSync(resolve(process.cwd(), "src/styles/app-shell.css"), "utf8");
 
 vi.mock("../../api/brain", () => ({ getArtifact: vi.fn() }));
+vi.mock("thinking-orbs", () => ({
+  ThinkingOrb: ({ state, ...props }: { state: string; [key: string]: unknown }) => (
+    <canvas data-testid="thinking-orb" data-state={state} aria-label={String(props["aria-label"])} />
+  ),
+}));
 
 const artifact = {
   id: 5001,
@@ -138,6 +143,40 @@ describe("TurnStream", () => {
 
     expect(screen.getByTestId("work-turn")).toBe(root);
     expect(root).toHaveAttribute("data-turn-status", "completed");
+  });
+
+  it("gives the thinking orb only to the last active work-turn", () => {
+    render(<TurnStream thread={{
+      ...thread,
+      turns: [
+        {
+          ...thread.turns[0],
+          id: 102,
+          client_message_id: "turn-102",
+          status: "running",
+          turn_phase: "reading_data",
+          assistant_response: null,
+          projections: [],
+        },
+        {
+          ...thread.turns[0],
+          id: 103,
+          client_message_id: "turn-103",
+          status: "running",
+          turn_phase: "consulting_experts",
+          assistant_response: null,
+          projections: [],
+        },
+      ],
+    }} />);
+
+    expect(screen.getAllByTestId("thinking-orb")).toHaveLength(1);
+    expect(screen.getAllByTestId("work-turn").at(-1))
+      .toHaveAttribute("data-has-thinking-orb", "true");
+    for (const workTurn of screen.getAllByTestId("work-turn")) {
+      expect(within(workTurn).getAllByText("运营大脑")).toHaveLength(1);
+    }
+    expect(screen.queryByText("思考中")).not.toBeInTheDocument();
   });
 
   it("keeps an optimistic work-turn root when the server binds its id", () => {
