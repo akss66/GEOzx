@@ -10,7 +10,7 @@ const orbMock = vi.hoisted(() => ({ shouldThrow: false }));
 vi.mock("thinking-orbs", () => ({
   ThinkingOrb: (props: Record<string, unknown>) => {
     if (orbMock.shouldThrow) throw new Error("canvas unavailable");
-    return <canvas data-testid="thinking-orb" data-state={props.state} data-theme={props.theme} aria-label={String(props["aria-label"])} />;
+    return <canvas data-testid="thinking-orb" data-state={props.state} data-theme={props.theme} aria-label={typeof props["aria-label"] === "string" ? props["aria-label"] : undefined} />;
   },
 }));
 
@@ -38,5 +38,11 @@ describe("MainAgentStatusAvatar", () => {
     orbMock.shouldThrow = true;
     render(<MainAgentStatusAvatar showThinkingOrb phase="quality_review" identity="杩愯惀澶ц剳" activityLabel="姝ｅ湪鏍搁獙缁撹涓庢暟鎹緷鎹?" />);
     expect(screen.getByRole("img", { name: "杩愯惀澶ц剳" })).toBeVisible();
+  });
+
+  it("does not synthesize an orb label when activityLabel is missing", () => {
+    render(<MainAgentStatusAvatar showThinkingOrb phase="understanding" identity="main agent" />);
+
+    expect(screen.getByTestId("thinking-orb")).not.toHaveAttribute("aria-label");
   });
 });

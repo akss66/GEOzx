@@ -38,7 +38,7 @@ export function MainAgentStatusAvatar({
           state={workTurnOrbState(phase)}
           size={64}
           theme="light"
-          aria-label={activityLabel || `${identity}姝ｅ湪宸ヤ綔`}
+          aria-label={activityLabel ?? undefined}
         />
       </span>
     </OrbRenderBoundary>
