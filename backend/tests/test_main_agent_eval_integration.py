@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,7 +26,9 @@ from app.models.enums import (
     DeliverableStatus,
     DeliverableType,
 )
+from app.orchestrator.capability_router import route_deterministic_request
 from app.orchestrator.skill_runtime import SkillExecutionResult, skill_input_hash
+from app.orchestrator.skills.registry import skill_registry
 from app.schemas.conversation import TurnExecutionMode, TurnRouteDecision
 from app.worker import _execute_v2_conversation_run
 from evals.case_loader import load_evaluation_cases
@@ -34,6 +37,170 @@ from evals.models import EvaluationCase, EvaluationObservation
 from evals.runner import EvaluationRunner
 
 CASES = Path(__file__).parents[1] / "evals/cases/account_analysis_v1.json"
+
+
+@dataclass(frozen=True)
+class MatrixScenario:
+    mode: TurnExecutionMode
+    skill_code: str
+    tools: tuple[str, ...]
+    answerability: str
+    claims: tuple[str, ...]
+    evidence_metrics: tuple[str, ...] = ()
+    terminal_status: str = "completed"
+
+
+def _query(claim: str, *, answerability: str = "full") -> MatrixScenario:
+    return MatrixScenario(
+        mode=TurnExecutionMode.QUERY,
+        skill_code="account_data_query",
+        tools=("account.data_context",),
+        answerability=answerability,
+        claims=(claim,),
+    )
+
+
+def _analysis(
+    *claims: str,
+    answerability: str = "full",
+    metrics: tuple[str, ...] = ("play",),
+    terminal_status: str = "completed",
+) -> MatrixScenario:
+    return MatrixScenario(
+        mode=TurnExecutionMode.SKILL,
+        skill_code="account_data_analysis",
+        tools=("account.metrics_analysis",),
+        answerability=answerability,
+        claims=tuple(claims),
+        evidence_metrics=metrics,
+        terminal_status=terminal_status,
+    )
+
+
+def _inspection(
+    claim: str,
+    *,
+    answerability: str = "full",
+    metrics: tuple[str, ...] = ("play",),
+    terminal_status: str = "completed",
+) -> MatrixScenario:
+    return MatrixScenario(
+        mode=TurnExecutionMode.SKILL,
+        skill_code="account_inspection",
+        tools=("account.profile", "account.data_context"),
+        answerability=answerability,
+        claims=(claim,),
+        evidence_metrics=metrics,
+        terminal_status=terminal_status,
+    )
+
+
+MATRIX_SCENARIOS: dict[str, MatrixScenario] = {
+    "data-exists-01": _query("data_exists"),
+    "data-cutoff-02": _query("data_cutoff"),
+    "data-metrics-03": _query("available_metrics"),
+    "data-sources-04": _query("confirmed_sources"),
+    "data-pending-05": _query("pending_batches"),
+    "analysis-summary-01": _analysis("performance_summary"),
+    "analysis-onset-02": _analysis("trend_onset"),
+    "analysis-largest-change-03": _analysis("largest_metric_change"),
+    "analysis-bottom-content-04": _analysis(
+        "bottom_content",
+        metrics=("content_play",),
+    ),
+    "analysis-mixed-signal-05": _analysis(
+        "mixed_signal_observation",
+        answerability="partial",
+        metrics=("like", "share"),
+    ),
+    "limits-empty-01": _analysis(
+        "insufficient_data",
+        answerability="insufficient",
+        metrics=(),
+    ),
+    "limits-no-comparison-02": _analysis(
+        "missing_comparison_period",
+        answerability="partial",
+    ),
+    "limits-stale-03": _analysis("stale_data_cutoff", answerability="partial"),
+    "limits-pending-only-04": _analysis(
+        "pending_data_excluded",
+        answerability="insufficient",
+        metrics=(),
+    ),
+    "limits-conflict-05": _analysis(
+        "data_conflict_disclosed",
+        answerability="partial",
+        metrics=(),
+    ),
+    "diagnosis-explicit-01": _inspection("account_diagnosis"),
+    "diagnosis-full-02": _inspection("account_diagnosis"),
+    "advice-short-cycle-03": _analysis("recommendations_max_3"),
+    "advice-priority-04": _analysis("action_with_metric_and_days"),
+    "advice-answerability-05": _inspection(
+        "diagnosis_data_limit",
+        answerability="partial",
+        metrics=(),
+    ),
+    "boundary-no-strategy-01": _analysis("current_state_analysis"),
+    "boundary-fact-only-02": _query("data_exists"),
+    "boundary-follow-up-03": _analysis(
+        "restricted_metric_analysis",
+        metrics=("play", "share"),
+    ),
+    "boundary-supplement-04": _analysis("current_state_analysis"),
+    "boundary-no-account-override-05": _query(
+        "account_context_preserved",
+        answerability="partial",
+    ),
+    "failure-projectless-01": _analysis("performance_summary"),
+    "failure-business-conflict-02": _inspection(
+        "business_conflict_disclosed",
+        answerability="conflict",
+        metrics=(),
+        terminal_status="failed",
+    ),
+    "failure-expert-03": _analysis(
+        "expert_failure_disclosed",
+        "deterministic_facts_retained",
+        answerability="partial",
+    ),
+    "failure-critic-04": _analysis(
+        "quality_review_unavailable",
+        answerability="partial",
+        terminal_status="needs_review",
+    ),
+    "failure-idempotency-isolation-05": MatrixScenario(
+        mode=TurnExecutionMode.QUERY,
+        skill_code="account_data_query",
+        tools=("account.data_context",),
+        answerability="full",
+        claims=("idempotent_single_answer", "account_isolation"),
+    ),
+}
+
+PRODUCTION_DETERMINISTIC_CASE_IDS = frozenset(
+    {
+        "data-exists-01",
+        "data-cutoff-02",
+        "analysis-summary-01",
+        "analysis-onset-02",
+        "analysis-largest-change-03",
+        "analysis-bottom-content-04",
+        "analysis-mixed-signal-05",
+        "limits-empty-01",
+        "limits-no-comparison-02",
+        "limits-pending-only-04",
+        "limits-conflict-05",
+        "diagnosis-explicit-01",
+        "advice-answerability-05",
+        "boundary-no-strategy-01",
+        "boundary-fact-only-02",
+        "failure-projectless-01",
+        "failure-business-conflict-02",
+        "failure-critic-04",
+    }
+)
 
 
 def _auth(user) -> dict[str, str]:
@@ -55,7 +222,7 @@ def _evaluation_runtime(monkeypatch):
     )
 
 
-class DeterministicMatrixHarness:
+class DeterministicRuntimeFixtureHarness:
     def __init__(self) -> None:
         self.current_case: EvaluationCase | None = None
         self.query_accounts: list[int] = []
@@ -65,9 +232,16 @@ class DeterministicMatrixHarness:
             raise AssertionError("matrix case was not selected")
         return self.current_case
 
+    def _scenario(self) -> MatrixScenario:
+        try:
+            return MATRIX_SCENARIOS[self._case().case_id]
+        except KeyError as exc:
+            raise AssertionError("matrix scenario was not defined") from exc
+
     def payload(self, account_id: int) -> dict[str, object]:
         case = self._case()
-        metrics = case.expectation.required_evidence_metrics
+        scenario = self._scenario()
+        metrics = scenario.evidence_metrics
         evidence = [
             {
                 "account_id": account_id,
@@ -77,27 +251,31 @@ class DeterministicMatrixHarness:
             }
             for metric in metrics
         ]
-        key_facts = [
-            {
-                "metric_code": metrics[0],
-                "current_value": 700,
-                "unit": "count",
-            }
-        ] if metrics else []
+        key_facts = (
+            [
+                {
+                    "metric_code": metrics[0],
+                    "current_value": 700,
+                    "unit": "count",
+                }
+            ]
+            if metrics
+            else []
+        )
         recommendations: list[dict[str, object]] = []
-        if "recommendations_max_3" in case.expectation.required_claims:
+        if "recommendations_max_3" in scenario.claims:
             recommendations = [
                 {"action": "测试前三秒开头", "metric": "play", "observation_days": 7}
             ]
-        if "action_with_metric_and_days" in case.expectation.required_claims:
+        if "action_with_metric_and_days" in scenario.claims:
             recommendations = [
                 {"action": "测试前三秒开头", "metric": "play", "observation_days": 7}
             ]
         return {
             "artifact_type": "account_analysis_answer",
-            "answerability": case.expectation.expected_answerability,
+            "answerability": scenario.answerability,
             "summary": f"{case.case_id} deterministic result",
-            "claims": list(case.expectation.required_claims),
+            "claims": list(scenario.claims),
             "key_facts": key_facts,
             "recommendations": recommendations,
             "evidence_refs": evidence,
@@ -121,20 +299,21 @@ class DeterministicMatrixHarness:
         return Adapter()
 
     async def classify(self, *_args, **_kwargs) -> TurnRouteDecision:
-        case = self._case()
-        mode = TurnExecutionMode(case.expectation.expected_mode)
+        scenario = self._scenario()
+        mode = scenario.mode
         return TurnRouteDecision(
             mode=mode,
             intent="evaluation_case",
             confidence=1,
             reason="deterministic evaluation classifier",
-            skill_code=case.expectation.expected_skill_code,
+            skill_code=scenario.skill_code,
             requires_account_context=True,
             requires_operation_task=mode is TurnExecutionMode.SKILL,
         )
 
     async def skill_execute(self, session, **kwargs) -> SkillExecutionResult:
         case = self._case()
+        scenario = self._scenario()
         user = kwargs["user"]
         thread = kwargs["thread"]
         turn = kwargs["turn"]
@@ -150,8 +329,8 @@ class DeterministicMatrixHarness:
         )
         session.add(content)
         await session.flush()
-        is_conflict = case.case_id == "failure-business-conflict-02"
-        needs_review = case.case_id == "failure-critic-04"
+        is_conflict = scenario.terminal_status == "failed"
+        needs_review = scenario.terminal_status == "needs_review"
         task = BrainTask(
             org_id=user.org_id,
             created_by_id=user.id,
@@ -185,7 +364,7 @@ class DeterministicMatrixHarness:
         )
         session.add(skill_run)
         await session.flush()
-        for tool_code in case.expectation.required_tools:
+        for tool_code in scenario.tools:
             session.add(
                 AgentToolCall(
                     org_id=user.org_id,
@@ -241,7 +420,14 @@ class DeterministicMatrixHarness:
 
 
 class ApiWorkerCaseExecutor:
-    def __init__(self, *, client, session, admin, harness: DeterministicMatrixHarness) -> None:
+    def __init__(
+        self,
+        *,
+        client,
+        session,
+        admin,
+        harness: DeterministicRuntimeFixtureHarness,
+    ) -> None:
         self.client = client
         self.session = session
         self.admin = admin
@@ -302,14 +488,60 @@ class ApiWorkerCaseExecutor:
 
 
 @pytest.mark.asyncio
-async def test_all_thirty_cases_run_through_real_api_worker_and_p0_gates(
+async def test_matrix_harness_is_independent_from_case_expectations() -> None:
+    source = next(case for case in load_evaluation_cases(CASES) if case.case_id == "data-exists-01")
+    altered = source.model_copy(
+        update={
+            "expectation": source.expectation.model_copy(
+                update={
+                    "expected_mode": "skill",
+                    "expected_skill_code": "fabricated_skill",
+                    "required_tools": ("strategy.generate",),
+                    "required_claims": ("fabricated_claim",),
+                }
+            )
+        }
+    )
+    harness = DeterministicRuntimeFixtureHarness()
+    harness.current_case = altered
+
+    decision = await harness.classify()
+    payload = harness.payload(account_id=3)
+
+    assert decision.mode is TurnExecutionMode.QUERY
+    assert decision.skill_code == "account_data_query"
+    assert harness._scenario().tools == ("account.data_context",)
+    assert payload["claims"] == ["data_exists"]
+
+
+def test_all_cases_have_an_explicit_production_router_boundary() -> None:
+    cases = load_evaluation_cases(CASES)
+
+    for case in cases:
+        route = route_deterministic_request(
+            case.messages[-1],
+            platform="douyin",
+            registry=skill_registry,
+            has_account=True,
+        )
+        if case.case_id in PRODUCTION_DETERMINISTIC_CASE_IDS:
+            assert route is not None, case.case_id
+            assert route.mode.value == case.expectation.expected_mode, case.case_id
+            assert route.skill_code == case.expectation.expected_skill_code, case.case_id
+        else:
+            assert route is None, case.case_id
+
+
+@pytest.mark.asyncio
+async def test_all_thirty_contract_cases_cross_api_worker_shell_and_p0_gates(
     client,
     session,
     admin,
     monkeypatch,
 ) -> None:
     cases = load_evaluation_cases(CASES)
-    harness = DeterministicMatrixHarness()
+    assert set(MATRIX_SCENARIOS) == {case.case_id for case in cases}
+    harness = DeterministicRuntimeFixtureHarness()
     executor = ApiWorkerCaseExecutor(
         client=client,
         session=session,
@@ -339,9 +571,7 @@ async def test_all_thirty_cases_run_through_real_api_worker_and_p0_gates(
     failures = {
         record.case_id: record.failure_reasons for record in report.records if not record.passed
     }
-    failed_records = {
-        record.case_id: record for record in report.records if not record.passed
-    }
+    failed_records = {record.case_id: record for record in report.records if not record.passed}
     failure_report = "\n".join(
         (
             f"{case_id}: {', '.join(check_codes)}; "

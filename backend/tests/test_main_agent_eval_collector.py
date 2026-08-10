@@ -15,6 +15,7 @@ from app.models import (
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    Event,
     SkillRun,
     ToolExecutionAttempt,
 )
@@ -268,9 +269,7 @@ async def _persist_completed_analysis(session, admin) -> PersistedScope:
                     "answerability": "full",
                     "summary": "当前账号播放量为700",
                     "claims": ["performance_summary"],
-                    "key_facts": [
-                        {"metric_code": "play", "current_value": 700, "unit": "count"}
-                    ],
+                    "key_facts": [{"metric_code": "play", "current_value": 700, "unit": "count"}],
                     "recommendations": [
                         {"action": "继续测试开头", "metric": "play", "observation_days": 7}
                     ],
@@ -307,7 +306,12 @@ async def _persist_completed_analysis(session, admin) -> PersistedScope:
     return PersistedScope(account_id=account.id, thread_id=thread.id, turn_id=turn.id)
 
 
-async def _persist_completed_query(session, admin) -> PersistedScope:
+async def _persist_completed_query(
+    session,
+    admin,
+    *,
+    persist_tool_event: bool = True,
+) -> PersistedScope:
     account = Account(
         org_id=admin.org_id,
         platform=Platform.DOUYIN,
@@ -351,36 +355,52 @@ async def _persist_completed_query(session, admin) -> PersistedScope:
     session.add(run)
     await session.flush()
     query_input = {"account_id": account.id, "days": 30}
-    session.add(
-        SkillRun(
-            org_id=admin.org_id,
-            thread_id=thread.id,
-            turn_id=turn.id,
-            run_id=run.id,
-            task_id=None,
-            idempotency_key="account-data-query:v1",
-            skill_code="account_data_query",
-            skill_version=1,
-            status="completed",
-            input_snapshot=query_input,
-            input_hash=skill_input_hash(query_input),
-            output_snapshot={
-                "artifact_type": "account_analysis_answer",
-                "answerability": "full",
-                "summary": "当前账号已有可用数据。",
-                "claims": ["data_exists"],
-                "evidence_refs": [
-                    {
-                        "account_id": account.id,
-                        "metric_code": "play",
-                        "value": 700,
-                        "unit": "count",
-                    }
-                ],
-                "provider_body": "PROVIDER_BODY_SECRET",
-            },
-        )
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread.id,
+        turn_id=turn.id,
+        run_id=run.id,
+        task_id=None,
+        idempotency_key="account-data-query:v1",
+        skill_code="account_data_query",
+        skill_version=1,
+        status="completed",
+        input_snapshot=query_input,
+        input_hash=skill_input_hash(query_input),
+        output_snapshot={
+            "artifact_type": "account_analysis_answer",
+            "answerability": "full",
+            "summary": "当前账号已有可用数据。",
+            "claims": ["data_exists"],
+            "evidence_refs": [
+                {
+                    "account_id": account.id,
+                    "metric_code": "play",
+                    "value": 700,
+                    "unit": "count",
+                }
+            ],
+            "provider_body": "PROVIDER_BODY_SECRET",
+        },
     )
+    session.add(skill_run)
+    await session.flush()
+    if persist_tool_event:
+        session.add(
+            Event(
+                type="brain.runtime.tool_completed",
+                thread_id=thread.id,
+                turn_id=turn.id,
+                run_id=run.id,
+                skill_run_id=skill_run.id,
+                payload={
+                    "org_id": admin.org_id,
+                    "account_id": account.id,
+                    "tool_code": "account.data_context",
+                },
+                idempotency_key=f"eval-query-tool:{turn.id}",
+            )
+        )
     await session.commit()
     return PersistedScope(account_id=account.id, thread_id=thread.id, turn_id=turn.id)
 
@@ -400,9 +420,7 @@ async def test_collector_normalizes_one_scoped_turn(session, admin) -> None:
 
     assert observation.route_mode == "skill"
     assert observation.route_skill_code == "account_data_analysis"
-    assert [item["tool_code"] for item in observation.tool_calls] == [
-        "account.metrics_analysis"
-    ]
+    assert [item["tool_code"] for item in observation.tool_calls] == ["account.metrics_analysis"]
     assert observation.answer_payload["artifact_type"] == "account_analysis_answer"
     assert observation.answer_payload["summary"] == "当前账号播放量为700"
     assert observation.evidence_refs == (
@@ -520,8 +538,27 @@ async def test_collector_derives_query_payload_and_tool_from_scoped_skill_run(
             "status": "completed",
             "latency_ms": None,
             "retry_count": 0,
-            "side_effect_level": "read",
-            "requires_human_confirmation": False,
+            "side_effect_level": None,
+            "requires_human_confirmation": None,
         },
     )
     assert "PROVIDER_BODY_SECRET" not in observation.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_collector_does_not_invent_query_tool_without_persisted_event(
+    session,
+    admin,
+) -> None:
+    scope = await _persist_completed_query(session, admin, persist_tool_event=False)
+
+    observation = await collect_observation(
+        session,
+        case_id="data-exists-01",
+        user_id=admin.id,
+        account_id=scope.account_id,
+        thread_id=scope.thread_id,
+        turn_id=scope.turn_id,
+    )
+
+    assert observation.tool_calls == ()

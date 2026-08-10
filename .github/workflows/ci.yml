@@ -34,6 +34,16 @@ jobs:
           tests/test_conversation_api.py
           tests/test_conversation_models.py
           tests/test_migrations.py
+      - name: Main Agent V4.1 deterministic quality baseline
+        run: >-
+          uv run pytest -q
+          tests/test_main_agent_eval_models.py
+          tests/test_main_agent_eval_cases.py
+          tests/test_main_agent_eval_checks.py
+          tests/test_main_agent_eval_collector.py
+          tests/test_main_agent_eval_runner.py
+          tests/test_main_agent_eval_integration.py
+          tests/test_main_agent_deepeval_adapter.py
 
   backend:
     runs-on: ubuntu-latest

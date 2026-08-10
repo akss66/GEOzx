@@ -63,6 +63,7 @@ class EvaluationRunner:
             mode=mode,
             git_commit=git_commit,
             records=tuple(records),
+            semantic_cost_cny=_semantic_cost_cny(self._semantic),
         )
 
     async def _run_case(
@@ -130,3 +131,12 @@ def _failed_observation(case_id: str) -> EvaluationObservation:
         final_answer="Evaluation case execution failed.",
         terminal_states={"runner": "failed"},
     )
+
+
+def _semantic_cost_cny(semantic: SemanticEvaluator | None) -> float | None:
+    if semantic is None or not hasattr(semantic, "spent_cost_cny"):
+        return None
+    value = semantic.spent_cost_cny  # type: ignore[attr-defined]
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        raise ValueError("semantic evaluator exposed an invalid spent_cost_cny")
+    return float(value)

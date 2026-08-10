@@ -157,6 +157,44 @@ def test_semantic_score_derives_passed_from_score_and_threshold() -> None:
     assert failing.passed is False
 
 
+def test_batch_report_accounts_for_semantic_cost() -> None:
+    scored_record = EvaluationRecord.from_results(
+        case_id="data-exists-01",
+        case_version="1.0.0",
+        mode="live-model",
+        started_at=datetime(2026, 8, 10, tzinfo=UTC),
+        duration_ms=20,
+        observation=_observation(),
+        deterministic_checks=(),
+        semantic_scores=(
+            SemanticScore.from_score(
+                metric="faithfulness",
+                score=0.9,
+                threshold=0.8,
+                reason="grounded",
+                cost_cny=0.12,
+            ),
+            SemanticScore.from_score(
+                metric="actionability",
+                score=0.9,
+                threshold=0.8,
+                reason="actionable",
+                cost_cny=0.08,
+            ),
+        ),
+    )
+
+    report = EvaluationBatchReport.from_records(
+        suite_id="account-analysis-v1",
+        suite_version="1.0.0",
+        mode="live-model",
+        git_commit="abc1234",
+        records=(scored_record,),
+    )
+
+    assert report.semantic_cost_cny == pytest.approx(0.2)
+
+
 def test_record_factory_derives_failure_reasons_from_blocking_results() -> None:
     record = EvaluationRecord.from_results(
         case_id="data-exists-01",

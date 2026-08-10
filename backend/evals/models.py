@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from math import fsum
 from statistics import mean
 from typing import Any, Literal, Self
 
@@ -115,6 +116,7 @@ class SemanticScore(FrozenModel):
     threshold: float = Field(default=0.8, ge=0, le=1)
     passed: bool
     reason: str = Field(min_length=1, max_length=1_000)
+    cost_cny: float | None = Field(default=None, ge=0)
 
     @classmethod
     def from_score(
@@ -124,6 +126,7 @@ class SemanticScore(FrozenModel):
         score: float,
         threshold: float = 0.8,
         reason: str,
+        cost_cny: float | None = None,
     ) -> Self:
         return cls(
             metric=metric,
@@ -131,6 +134,7 @@ class SemanticScore(FrozenModel):
             threshold=threshold,
             passed=score >= threshold,
             reason=reason,
+            cost_cny=cost_cny,
         )
 
     @model_validator(mode="after")
@@ -211,6 +215,7 @@ class EvaluationBatchReport(FrozenModel):
     passed_count: int = Field(ge=0)
     failed_count: int = Field(ge=0)
     semantic_average: float | None = Field(default=None, ge=0, le=1)
+    semantic_cost_cny: float = Field(default=0, ge=0)
 
     @classmethod
     def from_records(
@@ -221,16 +226,19 @@ class EvaluationBatchReport(FrozenModel):
         mode: EvaluationMode,
         git_commit: str,
         records: tuple[EvaluationRecord, ...],
+        semantic_cost_cny: float | None = None,
     ) -> Self:
-        semantic_values = [
-            score.score for record in records for score in record.semantic_scores
-        ]
+        semantic_values = [score.score for record in records for score in record.semantic_scores]
         semantic_average = mean(semantic_values) if semantic_values else None
+        score_cost_cny = fsum(
+            score.cost_cny or 0 for record in records for score in record.semantic_scores
+        )
+        reported_cost_cny = score_cost_cny if semantic_cost_cny is None else semantic_cost_cny
+        if reported_cost_cny < score_cost_cny:
+            raise ValueError("reported semantic cost cannot be less than scored cost")
         passed_count = sum(record.passed for record in records)
         failed_count = len(records) - passed_count
-        passed = failed_count == 0 and (
-            semantic_average is None or semantic_average >= 0.85
-        )
+        passed = failed_count == 0 and (semantic_average is None or semantic_average >= 0.85)
         return cls(
             suite_id=suite_id,
             suite_version=suite_version,
@@ -241,6 +249,7 @@ class EvaluationBatchReport(FrozenModel):
             passed_count=passed_count,
             failed_count=failed_count,
             semantic_average=semantic_average,
+            semantic_cost_cny=reported_cost_cny,
         )
 
     @model_validator(mode="after")
@@ -251,6 +260,9 @@ class EvaluationBatchReport(FrozenModel):
             score.score for record in self.records for score in record.semantic_scores
         ]
         expected_average = mean(semantic_values) if semantic_values else None
+        minimum_cost_cny = fsum(
+            score.cost_cny or 0 for record in self.records for score in record.semantic_scores
+        )
         expected_passed = expected_failed_count == 0 and (
             expected_average is None or expected_average >= 0.85
         )
@@ -258,6 +270,7 @@ class EvaluationBatchReport(FrozenModel):
             self.passed_count != expected_passed_count
             or self.failed_count != expected_failed_count
             or self.semantic_average != expected_average
+            or self.semantic_cost_cny < minimum_cost_cny
             or self.passed != expected_passed
         ):
             raise ValueError("batch status must be derived from records")

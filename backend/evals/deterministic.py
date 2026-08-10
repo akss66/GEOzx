@@ -128,9 +128,7 @@ def check_tools(
     observation: EvaluationObservation,
 ) -> tuple[CheckResult, CheckResult]:
     invoked = {
-        str(item.get("tool_code") or "")
-        for item in observation.tool_calls
-        if item.get("tool_code")
+        str(item.get("tool_code") or "") for item in observation.tool_calls if item.get("tool_code")
     }
     missing = sorted(set(case.expectation.required_tools) - invoked)
     forbidden = sorted(set(case.expectation.forbidden_tools) & invoked)
@@ -199,12 +197,8 @@ def check_evidence(
         for account_id in _normalized_account_ids(observation.evidence_refs)
         if str(account_id) != str(observation.account_id)
     ]
-    observed_metrics = {
-        str(item.get("metric_code") or "") for item in observation.evidence_refs
-    }
-    missing_metrics = sorted(
-        set(case.expectation.required_evidence_metrics) - observed_metrics
-    )
+    observed_metrics = {str(item.get("metric_code") or "") for item in observation.evidence_refs}
+    missing_metrics = sorted(set(case.expectation.required_evidence_metrics) - observed_metrics)
     allowed = {
         key
         for item in observation.evidence_refs
@@ -338,9 +332,7 @@ def check_terminals(
     }
     allowed = set(case.expectation.allowed_terminal_statuses)
     active = sorted(name for name, status in states.items() if status in _ACTIVE_STATUSES)
-    disallowed = {
-        name: status for name, status in states.items() if status not in allowed
-    }
+    disallowed = {name: status for name, status in states.items() if status not in allowed}
     passed = bool(states) and not active and not disallowed
     return _result(
         TERMINAL_CONSISTENCY,

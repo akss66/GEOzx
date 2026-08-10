@@ -17,6 +17,7 @@ from app.models import (
     ConversationThread,
     ConversationTurn,
     Deliverable,
+    Event,
     SkillRun,
 )
 from evals.models import EvaluationObservation
@@ -230,6 +231,32 @@ async def _scoped_invocations(
     return tuple(rows)
 
 
+async def _scoped_tool_events(
+    session: AsyncSession,
+    *,
+    turn: ConversationTurn,
+    run: AgentRun,
+    account_id: int,
+) -> tuple[Event, ...]:
+    rows = await session.scalars(
+        select(Event)
+        .where(
+            Event.type == "brain.runtime.tool_completed",
+            Event.thread_id == turn.thread_id,
+            Event.turn_id == turn.id,
+            Event.run_id == run.id,
+        )
+        .order_by(Event.sequence, Event.id)
+    )
+    scoped: list[Event] = []
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, Mapping) else {}
+        if payload.get("org_id") != turn.org_id or payload.get("account_id") != account_id:
+            continue
+        scoped.append(row)
+    return tuple(scoped)
+
+
 async def _scoped_deliverables(
     session: AsyncSession,
     *,
@@ -292,25 +319,31 @@ def _tool_observations(tool_calls: tuple[AgentToolCall, ...]) -> tuple[dict[str,
 
 def _effective_tool_observations(
     tool_calls: tuple[AgentToolCall, ...],
-    skill_runs: tuple[SkillRun, ...],
+    tool_events: tuple[Event, ...],
 ) -> tuple[dict[str, Any], ...]:
     persisted = _tool_observations(tool_calls)
-    if persisted:
-        return persisted
-    query_runs = [row for row in skill_runs if row.skill_code in _QUERY_SKILL_CODES]
-    if not query_runs:
-        return ()
-    query_run = query_runs[-1]
-    return (
-        {
-            "tool_code": "account.data_context",
-            "status": query_run.status,
-            "latency_ms": None,
-            "retry_count": 0,
-            "side_effect_level": "read",
-            "requires_human_confirmation": False,
-        },
-    )
+    persisted_codes = {str(item["tool_code"]) for item in persisted}
+    from_events: list[dict[str, Any]] = []
+    for event in tool_events:
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        tool_code = payload.get("tool_code")
+        if not isinstance(tool_code, str) or not tool_code.strip():
+            continue
+        normalized_code = tool_code.strip()
+        if normalized_code in persisted_codes:
+            continue
+        from_events.append(
+            {
+                "tool_code": normalized_code,
+                "status": "completed",
+                "latency_ms": None,
+                "retry_count": 0,
+                "side_effect_level": None,
+                "requires_human_confirmation": None,
+            }
+        )
+        persisted_codes.add(normalized_code)
+    return persisted + tuple(from_events)
 
 
 def _skill_observations(skill_runs: tuple[SkillRun, ...]) -> tuple[dict[str, Any], ...]:
@@ -319,9 +352,7 @@ def _skill_observations(skill_runs: tuple[SkillRun, ...]) -> tuple[dict[str, Any
             "skill_code": row.skill_code,
             "skill_version": row.skill_version,
             "status": row.status,
-            "quality_score": (
-                float(row.quality_score) if row.quality_score is not None else None
-            ),
+            "quality_score": (float(row.quality_score) if row.quality_score is not None else None),
             "error_code": row.error_code,
         }
         for row in skill_runs
@@ -373,6 +404,12 @@ async def collect_observation(
     run = await _scoped_run(session, turn=turn, user_id=user_id)
     skill_runs = await _scoped_skill_runs(session, turn=turn, run=run)
     tool_calls = await _scoped_tool_calls(session, turn=turn, run=run)
+    tool_events = await _scoped_tool_events(
+        session,
+        turn=turn,
+        run=run,
+        account_id=account_id,
+    )
     invocations = await _scoped_invocations(session, turn=turn, run=run)
     deliverables = await _scoped_deliverables(
         session,
@@ -402,7 +439,7 @@ async def collect_observation(
         turn_id=turn_id,
         route_mode=(str(intent.get("mode")) if intent.get("mode") is not None else None),
         route_skill_code=(str(route_skill_code) if route_skill_code is not None else None),
-        tool_calls=_effective_tool_observations(tool_calls, skill_runs),
+        tool_calls=_effective_tool_observations(tool_calls, tool_events),
         skill_runs=_skill_observations(skill_runs),
         expert_invocations=_expert_observations(invocations),
         evidence_refs=evidence_refs,

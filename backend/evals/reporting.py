@@ -30,11 +30,7 @@ def _is_sensitive_key(key: object) -> bool:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
-        return {
-            key: _redact(item)
-            for key, item in value.items()
-            if not _is_sensitive_key(key)
-        }
+        return {key: _redact(item) for key, item in value.items() if not _is_sensitive_key(key)}
     if isinstance(value, (list, tuple)):
         return [_redact(item) for item in value]
     return value

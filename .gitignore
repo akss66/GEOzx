@@ -12,6 +12,7 @@ htmlcov/
 .coverage
 *.log
 backend/*.db
+backend/.eval-results/
 ruff-*.txt
 
 # ── Node / frontend ──────────────────────────────

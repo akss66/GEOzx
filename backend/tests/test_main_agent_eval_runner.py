@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import anyio
@@ -14,6 +16,9 @@ from evals.models import (
 )
 from evals.reporting import write_report
 from evals.runner import EvaluationRunner
+
+BACKEND = Path(__file__).parents[1]
+CLI = BACKEND / "scripts/run_main_agent_evals.py"
 
 
 def _case(case_id: str) -> EvaluationCase:
@@ -116,6 +121,18 @@ class SemanticEvaluatorSpy:
         )
 
 
+class RaisingCostEvaluator:
+    spent_cost_cny = 0.12
+
+    async def evaluate(
+        self,
+        case: EvaluationCase,
+        observation: EvaluationObservation,
+    ) -> tuple[SemanticScore, ...]:
+        del case, observation
+        raise RuntimeError("provider response must be redacted")
+
+
 @pytest.mark.asyncio
 async def test_runner_marks_batch_failed_when_one_p0_check_fails() -> None:
     runner = EvaluationRunner(executor=FakeExecutor(foreign_case="bad-case"))
@@ -160,6 +177,78 @@ async def test_runner_converts_executor_exception_to_redacted_failed_record() ->
     assert "API_KEY_SECRET" not in report.model_dump_json()
 
 
+def test_live_mode_requires_explicit_model_call_consent() -> None:
+    result = subprocess.run(
+        [sys.executable, str(CLI), "--mode", "live-model"],
+        cwd=BACKEND,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--allow-model-calls" in result.stderr
+
+
+def test_live_mode_requires_explicit_currency_conversion_rate() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "--mode",
+            "live-model",
+            "--allow-model-calls",
+            "--max-cost-cny",
+            "2",
+        ],
+        cwd=BACKEND,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--usd-cny-rate" in result.stderr
+
+
+def test_deterministic_mode_writes_a_local_json_report(tmp_path: Path) -> None:
+    case = _case("cli-case")
+    cases = tmp_path / "cases.json"
+    observations = tmp_path / "observations.json"
+    cases.write_text(
+        json.dumps([case.model_dump(mode="json")], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    observations.write_text(
+        json.dumps([_matching_observation(case).model_dump(mode="json")], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "--mode",
+            "deterministic",
+            "--cases",
+            str(cases),
+            "--observations",
+            str(observations),
+            "--output-dir",
+            str(tmp_path),
+            "--allow-external-output",
+        ],
+        cwd=BACKEND,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = next(tmp_path.glob("main-agent-eval-*.json"))
+    assert json.loads(report.read_text(encoding="utf-8"))["records"]
+
+
 @pytest.mark.asyncio
 async def test_deterministic_mode_never_calls_semantic_evaluator() -> None:
     semantic = SemanticEvaluatorSpy()
@@ -188,6 +277,22 @@ async def test_live_mode_collects_semantic_scores() -> None:
     assert semantic.calls == ["live-case"]
     assert report.semantic_average == 0.9
     assert report.passed is True
+
+
+@pytest.mark.asyncio
+async def test_live_mode_preserves_known_cost_when_semantic_evaluation_fails() -> None:
+    report = await EvaluationRunner(
+        executor=FakeExecutor(),
+        semantic=RaisingCostEvaluator(),
+    ).run(
+        (_case("failed-live-case"),),
+        mode="live-model",
+        git_commit="abc1234",
+    )
+
+    assert report.passed is False
+    assert report.records[0].failure_reasons == ("semantic.exception",)
+    assert report.semantic_cost_cny == pytest.approx(0.12)
 
 
 @pytest.mark.asyncio

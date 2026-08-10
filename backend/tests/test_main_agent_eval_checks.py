@@ -68,15 +68,11 @@ def _observation(**overrides: Any) -> EvaluationObservation:
         "tool_calls": ({"tool_code": "account.metrics_analysis", "retry_count": 0},),
         "skill_runs": (),
         "expert_invocations": (),
-        "evidence_refs": (
-            {"account_id": 3, "metric_code": "play", "value": 700, "unit": "count"},
-        ),
+        "evidence_refs": ({"account_id": 3, "metric_code": "play", "value": 700, "unit": "count"},),
         "answer_payload": {
             "answerability": "full",
             "claims": ["performance_summary"],
-            "key_facts": [
-                {"metric_code": "play", "current_value": 700, "unit": "count"}
-            ],
+            "key_facts": [{"metric_code": "play", "current_value": 700, "unit": "count"}],
             "recommendations": [],
         },
         "final_answer": "最近30天播放量为700。",
@@ -119,9 +115,7 @@ def test_tool_checks_reject_missing_required_and_invoked_forbidden_tools() -> No
         _observation(tool_calls=({"tool_code": "strategy.generate", "retry_count": 0},)),
     )
 
-    assert _by_code(results, TOOLS_REQUIRED).details["missing"] == [
-        "account.metrics_analysis"
-    ]
+    assert _by_code(results, TOOLS_REQUIRED).details["missing"] == ["account.metrics_analysis"]
     assert _by_code(results, TOOLS_FORBIDDEN).details["invoked"] == ["strategy.generate"]
 
 
@@ -155,9 +149,7 @@ def test_evidence_check_rejects_numeric_fact_without_matching_value_and_unit() -
         answer_payload={
             "answerability": "full",
             "claims": ["performance_summary"],
-            "key_facts": [
-                {"metric_code": "play", "current_value": 701, "unit": "count"}
-            ],
+            "key_facts": [{"metric_code": "play", "current_value": 701, "unit": "count"}],
         },
     )
 
@@ -259,8 +251,7 @@ def test_boundary_check_requires_explicit_missing_comparison_claim() -> None:
 def test_recommendation_check_enforces_maximum_three_when_requested() -> None:
     case = _case(required_claims=["recommendations_max_3"])
     recommendations = [
-        {"action": f"action-{index}", "metric": "play", "observation_days": 7}
-        for index in range(4)
+        {"action": f"action-{index}", "metric": "play", "observation_days": 7} for index in range(4)
     ]
     observation = _observation(
         answer_payload={

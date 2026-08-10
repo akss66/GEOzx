@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a versioned 30-case evaluation baseline that proves the main Agent routes account questions correctly, grounds every material claim in the selected account's confirmed data, degrades safely, preserves terminal consistency, and can optionally add DeepEval semantic scores without becoming a production dependency.
+**Goal:** Build a versioned 30-case evaluation baseline that checks observed main-Agent routes and outputs against explicit contracts, grounds every material claim in the selected account's confirmed data, degrades safely, preserves terminal consistency, and can optionally add DeepEval semantic scores without becoming a production dependency.
 
-**Architecture:** Keep all evaluation-only code in `backend/evals/`. A real API-to-worker executor produces a normalized `EvaluationObservation`; deterministic business gates evaluate scope, route, tools, evidence, recommendations, idempotency, terminal state, and latency; an optional lazy-loaded DeepEval adapter evaluates semantic quality. Pytest remains the execution entry point and JSON reports remain local build artifacts.
+**Architecture:** Keep all evaluation-only code in `backend/evals/`. A deterministic API-to-worker shell fixture verifies transport, persistence, collection, and business-gate composition without pretending to validate model behavior; separate production-router tests cover deterministic routes, while model-routed cases consume captured observations. Deterministic business gates evaluate scope, route, tools, evidence, recommendations, idempotency, terminal state, and latency; an optional lazy-loaded DeepEval adapter evaluates semantic quality. Pytest remains the execution entry point and JSON reports remain local build artifacts.
 
 **Tech Stack:** Python 3.11, Pydantic 2, Pytest 8, SQLAlchemy asyncio, existing FastAPI/LangGraph worker runtime, optional DeepEval 3.x, uv, GitHub Actions.
 
@@ -616,7 +616,7 @@ git commit -m "feat: collect scoped main agent evaluation observations"
 
 ---
 
-### Task 5: Case Runner, Batch Report, and Real API-to-Worker Deterministic Matrix
+### Task 5: Case Runner, Batch Report, and API-to-Worker Runtime Contract Matrix
 
 **Files:**
 - Create: `backend/evals/runner.py`
@@ -706,7 +706,7 @@ batch_passed = (
 
 P1 failures remain visible in the report but do not block the first baseline. P0 failures and below-threshold semantic scores block the record; a live suite semantic average below `0.85` blocks the batch.
 
-- [ ] **Step 4: Add the real API-to-worker deterministic executor in the integration test**
+- [ ] **Step 4: Add the API-to-worker deterministic shell executor in the integration test**
 
 Copy no production logic. Reuse test fixtures and public API:
 
@@ -924,7 +924,14 @@ Document exact commands for:
 # Deterministic CI-equivalent suite
 cd backend
 uv sync --frozen --extra dev
-uv run pytest -q tests/test_main_agent_eval_*.py -m "not live_model"
+uv run python -m pytest -q `
+  tests/test_main_agent_eval_models.py `
+  tests/test_main_agent_eval_cases.py `
+  tests/test_main_agent_eval_checks.py `
+  tests/test_main_agent_eval_collector.py `
+  tests/test_main_agent_eval_runner.py `
+  tests/test_main_agent_eval_integration.py `
+  tests/test_main_agent_deepeval_adapter.py
 
 # Optional semantic environment
 uv sync --frozen --extra dev --extra eval
@@ -933,6 +940,7 @@ uv run python scripts/run_main_agent_evals.py `
   --mode live-model `
   --allow-model-calls `
   --max-cost-cny 2 `
+  --usd-cny-rate 7.0 `
   --observations .eval-inputs/redacted-live-observations.json
 ```
 
@@ -982,7 +990,7 @@ Before marking the implementation complete, verify each design requirement maps 
 | 30 versioned cases | `test_account_analysis_v1_contains_exactly_thirty_versioned_cases` |
 | CI without model/network | GitHub Actions deterministic job and base dependency sync |
 | P0 deterministic gates | `test_main_agent_eval_checks.py` plus 30-case integration report |
-| Real API-to-worker path | `test_main_agent_eval_integration.py` |
+| API-to-worker transport/persistence/collector path | `test_main_agent_eval_integration.py` |
 | Account/user/thread isolation | collector scope tests and two-account cases |
 | Projectless account support | `failure-projectless-01` |
 | Non-retryable business conflict | `failure-business-conflict-02` |
