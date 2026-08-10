@@ -34,6 +34,9 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
+eval = [
+    "deepeval>=3,<4",
+]
 
 [build-system]
 requires = ["hatchling"]
