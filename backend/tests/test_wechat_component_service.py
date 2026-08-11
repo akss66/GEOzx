@@ -114,6 +114,10 @@ def _session_maker(session):
     return async_sessionmaker(session.bind, expire_on_commit=False)
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 async def test_component_token_refreshes_five_minutes_before_expiry(session) -> None:
     integration, credential = await _seed_component(
         session,
@@ -629,10 +633,134 @@ async def test_revoked_authorizer_is_not_resurrected_by_stale_refresh(session) -
             )
 
     await session.refresh(auth)
-    assert captured.value.code == "token_state_changed"
+    assert captured.value.code == "authorizer_not_authorized"
     assert auth.auth_status == "unauthorized"
     assert decrypt_credential(auth.access_token_encrypted or "") == "revoked-access-token"
     assert decrypt_credential(auth.refresh_token_encrypted or "") == "revoked-refresh-token"
+
+
+async def test_preexisting_unauthorized_authorizer_rejects_fresh_cached_token(
+    session,
+) -> None:
+    _integration, _component, account, auth = await _seed_authorizer(session)
+    auth.auth_status = "unauthorized"
+    auth.token_expires_at = datetime.now(UTC) + timedelta(hours=2)
+    await session.commit()
+    original_access = auth.access_token_encrypted
+    original_refresh = auth.refresh_token_encrypted
+    original_expiry = auth.token_expires_at
+
+    async def reject_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("unauthorized authorizer must not call WeChat")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reject_request)) as http_client:
+        with pytest.raises(WechatIntegrationError) as captured:
+            await WechatOpenPlatformClient(client=http_client).get_authorizer_access_token(
+                session, account.id
+            )
+
+    await session.refresh(auth)
+    assert captured.value.code == "authorizer_not_authorized"
+    assert captured.value.retryable is False
+    assert captured.value.endpoint == "/cgi-bin/component/api_authorizer_token"
+    assert auth.auth_status == "unauthorized"
+    assert auth.access_token_encrypted == original_access
+    assert auth.refresh_token_encrypted == original_refresh
+    assert auth.token_expires_at is not None
+    assert original_expiry is not None
+    assert _as_utc(auth.token_expires_at) == _as_utc(original_expiry)
+
+
+async def test_preexisting_unauthorized_authorizer_rejects_expired_token(
+    session,
+) -> None:
+    _integration, _component, account, auth = await _seed_authorizer(session)
+    auth.auth_status = "unauthorized"
+    auth.token_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    await session.commit()
+    original_access = auth.access_token_encrypted
+    original_refresh = auth.refresh_token_encrypted
+    original_expiry = auth.token_expires_at
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "authorizer_access_token": "must-not-be-used",
+                "expires_in": 7200,
+                "authorizer_refresh_token": "must-not-be-rotated",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(WechatIntegrationError) as captured:
+            await WechatOpenPlatformClient(client=http_client).get_authorizer_access_token(
+                session, account.id
+            )
+
+    await session.refresh(auth)
+    assert captured.value.code == "authorizer_not_authorized"
+    assert "/cgi-bin/component/api_authorizer_token" not in calls
+    assert auth.auth_status == "unauthorized"
+    assert auth.access_token_encrypted == original_access
+    assert auth.refresh_token_encrypted == original_refresh
+    assert auth.token_expires_at is not None
+    assert original_expiry is not None
+    assert _as_utc(auth.token_expires_at) == _as_utc(original_expiry)
+
+
+async def test_revocation_before_locked_reread_blocks_authorizer_refresh(session) -> None:
+    _integration, _component, account, auth = await _seed_authorizer(session)
+    original_access = auth.access_token_encrypted
+    original_refresh = auth.refresh_token_encrypted
+    original_expiry = auth.token_expires_at
+    maker = _session_maker(session)
+    calls: list[str] = []
+
+    class RevokingCoordinator:
+        @asynccontextmanager
+        async def transaction(self, token_session, kind: str, _identifier: int):
+            if kind == "authorizer":
+                async with maker() as writer:
+                    current = await writer.scalar(
+                        select(PlatformAccountAuth).where(
+                            PlatformAccountAuth.account_id == account.id
+                        )
+                    )
+                    assert current is not None
+                    current.auth_status = "unauthorized"
+                    await writer.commit()
+            async with token_session.begin():
+                yield
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "authorizer_access_token": "must-not-be-used",
+                "expires_in": 7200,
+                "authorizer_refresh_token": "must-not-be-rotated",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        service = WechatOpenPlatformClient(client=http_client)
+        service._coordinator = RevokingCoordinator()
+        with pytest.raises(WechatIntegrationError) as captured:
+            await service.get_authorizer_access_token(session, account.id)
+
+    await session.refresh(auth)
+    assert captured.value.code == "authorizer_not_authorized"
+    assert "/cgi-bin/component/api_authorizer_token" not in calls
+    assert auth.auth_status == "unauthorized"
+    assert auth.access_token_encrypted == original_access
+    assert auth.refresh_token_encrypted == original_refresh
+    assert auth.token_expires_at is not None
+    assert original_expiry is not None
+    assert _as_utc(auth.token_expires_at) == _as_utc(original_expiry)
 
 
 async def test_nonzero_errcode_survives_malformed_optional_metadata(session) -> None:

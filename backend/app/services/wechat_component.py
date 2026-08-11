@@ -209,6 +209,14 @@ def _safe_error(
     )
 
 
+def _authorizer_not_authorized_error() -> WechatIntegrationError:
+    return _safe_error(
+        "WeChat authorizer is not authorized",
+        code="authorizer_not_authorized",
+        endpoint=AUTHORIZER_TOKEN_ENDPOINT,
+    )
+
+
 def _validate_response(
     model: type[_ResponseT],
     payload: dict[str, Any],
@@ -435,6 +443,8 @@ class WechatOpenPlatformClient:
                         code="authorizer_not_configured",
                         endpoint=AUTHORIZER_TOKEN_ENDPOINT,
                     )
+                if auth.auth_status != "authorized":
+                    raise _authorizer_not_authorized_error()
                 if _token_is_fresh(auth.access_token_encrypted, auth.token_expires_at):
                     return _decrypt(
                         auth.access_token_encrypted or "",
@@ -480,6 +490,8 @@ class WechatOpenPlatformClient:
                         code="authorizer_not_configured",
                         endpoint=AUTHORIZER_TOKEN_ENDPOINT,
                     )
+                if auth.auth_status != "authorized":
+                    raise _authorizer_not_authorized_error()
                 if _token_is_fresh(auth.access_token_encrypted, auth.token_expires_at):
                     token = _decrypt(
                         auth.access_token_encrypted or "",
@@ -511,7 +523,6 @@ class WechatOpenPlatformClient:
                     old_access_token = auth.access_token_encrypted
                     old_refresh_token = auth.refresh_token_encrypted
                     old_expiry = auth.token_expires_at
-                    old_auth_status = auth.auth_status
                     try:
                         refresh_token = _decrypt(
                             auth.refresh_token_encrypted,
@@ -568,13 +579,12 @@ class WechatOpenPlatformClient:
                                 access_match,
                                 refresh_match,
                                 expiry_match,
-                                PlatformAccountAuth.auth_status == old_auth_status,
+                                PlatformAccountAuth.auth_status == "authorized",
                             )
                             .values(
                                 access_token_encrypted=encrypted_access_token,
                                 refresh_token_encrypted=encrypted_refresh_token,
                                 token_expires_at=new_expiry,
-                                auth_status="authorized",
                                 last_error=None,
                             )
                             .execution_options(synchronize_session=False)
@@ -587,9 +597,10 @@ class WechatOpenPlatformClient:
                                 auth.id,
                                 populate_existing=True,
                             )
-                            if (
+                            if fresh is not None and fresh.auth_status != "authorized":
+                                failure = _authorizer_not_authorized_error()
+                            elif (
                                 fresh is not None
-                                and fresh.auth_status == "authorized"
                                 and _token_is_fresh(
                                     fresh.access_token_encrypted,
                                     fresh.token_expires_at,
