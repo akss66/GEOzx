@@ -64,7 +64,13 @@ from app.models.identity import (
     User,
     UserDeletionPreviewReservation,
 )
-from app.models.knowledge import KnowledgeCitation, KnowledgeEntry, KnowledgeSuggestion
+from app.models.knowledge import (
+    AccountKnowledgeBinding,
+    KnowledgeBase,
+    KnowledgeCitation,
+    KnowledgeEntry,
+    KnowledgeSuggestion,
+)
 from app.models.llm import LLMCall
 from app.models.material import MaterialAsset
 from app.models.memory import RuntimeMemory
@@ -138,6 +144,8 @@ __all__ = [
     "Event",
     "GateApproval",
     "KnowledgeEntry",
+    "KnowledgeBase",
+    "AccountKnowledgeBinding",
     "KnowledgeSuggestion",
     "KnowledgeCitation",
     "ModelConfig",
