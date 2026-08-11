@@ -77,6 +77,23 @@ class WechatAuthorizationGrant(BaseModel):
     func_info: list[int]
 
 
+class WechatAuthorizationSessionRequest(BaseModel):
+    client_id: int | None = Field(default=None, gt=0)
+    project_id: int | None = Field(default=None, gt=0)
+    knowledge_base_id: int | None = Field(default=None, gt=0)
+
+
+class WechatAuthorizationSessionOut(BaseModel):
+    authorization_url: str
+    expires_at: datetime
+    state_id: str
+
+
+class WechatPreAuthCodeResponse(BaseModel):
+    pre_auth_code: str = Field(min_length=1, max_length=512)
+    expires_in: int = Field(gt=0)
+
+
 class DouyinAuthorizeRequest(BaseModel):
     account_id: int
 
