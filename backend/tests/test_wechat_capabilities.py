@@ -28,11 +28,109 @@ def test_capability_snapshot_never_enables_publish_in_v1() -> None:
     snapshot = normalize_capabilities(
         func_info=[1, 7, 11, 100],
         account_profile={"service_type_info": {"id": 0}, "verify_type_info": {"id": 0}},
+        component_permission_ids={7, 11, 100},
     )
 
     assert snapshot.draft_add.can_use is True
     assert snapshot.freepublish.can_use is False
     assert snapshot.freepublish.reason == "disabled_by_product_policy"
+
+
+def test_content_capabilities_require_a_shared_recognized_permission_id() -> None:
+    """Disjoint legacy and current content grants must not authorize writes or reads."""
+    snapshot = normalize_capabilities(
+        func_info=[100],
+        component_permission_ids={11},
+        account_profile={"service_type_info": {"id": 0}, "verify_type_info": {"id": 0}},
+    )
+
+    assert snapshot.upload_article_image.reason == "account_permission_missing"
+    assert snapshot.draft_add.reason == "account_permission_missing"
+
+
+def test_missing_component_scopes_fail_closed() -> None:
+    """Removing component-scope evidence must not grant any content capability."""
+    snapshot = normalize_capabilities(
+        func_info=[7, 11, 100],
+        account_profile={"service_type_info": {"id": 0}, "verify_type_info": {"id": 0}},
+    )
+
+    assert snapshot.upload_article_image.reason == "component_permission_missing"
+    assert snapshot.draft_add.reason == "component_permission_missing"
+    assert snapshot.analytics.reason == "component_permission_missing"
+
+
+@pytest.mark.asyncio
+async def test_probe_rejects_stale_local_grants_when_live_authorizer_info_fails(
+    session, admin, monkeypatch
+) -> None:
+    """A failed live authorization check must gate content even when count probes succeed."""
+    integration = PlatformIntegration(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT.value,
+        status="configured",
+        client_key="component-appid",
+        client_secret_ref="env:WECHAT_COMPONENT_APP_SECRET",
+        scopes=["7", "11", "100"],
+    )
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        external_account_id="authorizer-appid",
+        nickname="WeChat account",
+    )
+    session.add_all((integration, account))
+    await session.flush()
+    session.add(
+        PlatformAccountAuth(
+            org_id=admin.org_id,
+            account_id=account.id,
+            platform=Platform.WECHAT_OFFICIAL_ACCOUNT.value,
+            external_open_id="authorizer-appid",
+            auth_status="authorized",
+            scopes=["7", "11", "100"],
+            raw_profile={
+                "service_type_info": {"id": 0},
+                "verify_type_info": {"id": 0},
+            },
+        )
+    )
+    await session.commit()
+
+    from app.services import wechat_capabilities
+
+    async def fake_authorizer_token(*_args, **_kwargs) -> str:
+        return "authorizer-token"
+
+    async def fake_component_token(*_args, **_kwargs) -> str:
+        return "component-token"
+
+    async def fake_wechat_request(endpoint: str, **_kwargs) -> dict:
+        if endpoint == wechat_capabilities.AUTHORIZER_INFO_ENDPOINT:
+            raise wechat_capabilities.WechatCapabilityError("live_probe_failed")
+        if endpoint == wechat_capabilities.MATERIAL_COUNT_ENDPOINT:
+            return {"image_count": 0}
+        if endpoint == wechat_capabilities.DRAFT_COUNT_ENDPOINT:
+            return {"total_count": 0}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(
+        wechat_capabilities.WechatOpenPlatformClient,
+        "get_authorizer_access_token",
+        fake_authorizer_token,
+    )
+    monkeypatch.setattr(
+        wechat_capabilities.WechatOpenPlatformClient,
+        "get_component_access_token",
+        fake_component_token,
+    )
+    monkeypatch.setattr(wechat_capabilities, "_request_wechat_json", fake_wechat_request)
+
+    snapshot = await wechat_capabilities.probe_wechat_capabilities(session, account.id)
+
+    assert snapshot.upload_article_image.reason == "live_probe_failed"
+    assert snapshot.draft_add.reason == "live_probe_failed"
+    assert snapshot.analytics.reason == "live_probe_failed"
 
 
 @pytest.mark.asyncio

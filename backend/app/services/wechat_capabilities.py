@@ -58,13 +58,14 @@ def _state(
     probe_ok: bool,
 ) -> CapabilityState:
     permission_ids = sorted(required_ids)
-    if not required_ids.intersection(component_permission_ids):
+    component_required = required_ids.intersection(component_permission_ids)
+    if not component_required:
         return CapabilityState(
             can_use=False,
             reason="component_permission_missing",
             permission_ids=permission_ids,
         )
-    if not required_ids.intersection(account_permission_ids):
+    if not component_required.intersection(account_permission_ids):
         return CapabilityState(
             can_use=False,
             reason="account_permission_missing",
@@ -97,11 +98,7 @@ def normalize_capabilities(
     checked_at: datetime | None = None,
 ) -> WechatCapabilitySnapshot:
     """Build a stable, fail-closed snapshot from permission and probe facts."""
-    component_permissions = (
-        set(component_permission_ids)
-        if component_permission_ids is not None
-        else set(CONTENT_PERMISSION_IDS | ANALYTICS_PERMISSION_IDS)
-    )
+    component_permissions = set(component_permission_ids or set())
     account_permissions = set(func_info)
     qualification_reason = _qualification_reason(account_profile)
     content_material = _state(
@@ -109,14 +106,14 @@ def normalize_capabilities(
         component_permission_ids=component_permissions,
         account_permission_ids=account_permissions,
         qualification_reason=qualification_reason,
-        probe_ok=material_probe_ok,
+        probe_ok=authorizer_info_probe_ok and material_probe_ok,
     )
     content_draft = _state(
         required_ids=CONTENT_PERMISSION_IDS,
         component_permission_ids=component_permissions,
         account_permission_ids=account_permissions,
         qualification_reason=qualification_reason,
-        probe_ok=draft_probe_ok,
+        probe_ok=authorizer_info_probe_ok and draft_probe_ok,
     )
     return WechatCapabilitySnapshot(
         account_id=account_id,
