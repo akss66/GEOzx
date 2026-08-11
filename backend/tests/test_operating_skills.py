@@ -699,6 +699,7 @@ async def test_concurrent_weekly_approval_requests_create_exactly_five_schedule_
     original_override = app.dependency_overrides[get_session]
     app.dependency_overrides[get_session] = independent_session
     published: list[tuple[str, dict[str, object]]] = []
+    enqueued_run_ids: list[int] = []
 
     async def capture_publish(
         event_type: str,
@@ -707,10 +708,14 @@ async def test_concurrent_weekly_approval_requests_create_exactly_five_schedule_
     ) -> None:
         published.append((event_type, payload))
 
+    async def capture_enqueue(*, run_id: int) -> None:
+        enqueued_run_ids.append(run_id)
+
     monkeypatch.setattr(
         "app.orchestrator.brain_runtime.publish_realtime_event",
         capture_publish,
     )
+    monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", capture_enqueue)
     try:
         requests = [
             client.post(
@@ -735,6 +740,7 @@ async def test_concurrent_weekly_approval_requests_create_exactly_five_schedule_
         app.dependency_overrides[get_session] = original_override
 
     assert sorted(item.status_code for item in responses) == [200, 200]
+    assert enqueued_run_ids == [run.id]
     assert any(
         event_type == "pending_work.updated"
         and payload == {"account_id": account.id}

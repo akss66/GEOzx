@@ -1653,7 +1653,7 @@ async def test_brain_runtime_recovers_invalid_controller_decision_with_dynamic_p
 
 
 @pytest.mark.asyncio
-async def test_brain_runtime_manual_project_bound_account_fails_terminal_409_without_retry(
+async def test_brain_runtime_manual_project_bound_account_runs_expert_and_waits_acceptance(
     client,
     session,
     admin,
@@ -1662,7 +1662,7 @@ async def test_brain_runtime_manual_project_bound_account_fails_terminal_409_wit
     token = await _token(client, "admin@test.com", "admin-pw-123")
     headers = _auth(token)
     project_id, account_id = await _project_bound_douyin_account(client, headers)
-    client_message_id = "manual-project-bound-account-terminal-409"
+    client_message_id = "manual-project-bound-account-positioning"
     decide_next_calls = 0
 
     async def fake_classify(*args, **kwargs):
@@ -1708,9 +1708,14 @@ async def test_brain_runtime_manual_project_bound_account_fails_terminal_409_wit
     run = await session.scalar(
         select(AgentRun).where(AgentRun.client_message_id == client_message_id)
     )
-    assert response.status_code == 409
-    assert response.json() == {"detail": "任务因业务冲突未能继续，请处理后重试"}
-    assert decide_next_calls == 1
+    assert response.status_code == 201, response.text
+    runtime = response.json()
+    assert runtime["status"] == "running"
+    assert [row["agent_code"] for row in runtime["invocations"]] == ["01-positioning"]
+    assert runtime["invocations"][0]["status"] == "done"
+    assert runtime["acceptances"][0]["status"] == "pending"
+    assert runtime["task"]["status"] == "pending_acceptance"
+    assert decide_next_calls >= 1
     assert run is not None
     task = await session.get(BrainTask, run.task_id)
     failures = [
@@ -1720,13 +1725,13 @@ async def test_brain_runtime_manual_project_bound_account_fails_terminal_409_wit
         )
         if (event.payload or {}).get("agent_run_id") == run.id
     ]
-    assert run.status == "failed"
+    assert run.status == "running"
     assert run.next_retry_at is None
-    assert run.error_code == "runtime.http_409"
+    assert run.error_code is None
     assert task is not None
-    assert task.status == BrainTaskStatus.FAILED
-    assert len(failures) == 1
-    assert failures[0].payload["error_code"] == "runtime.http_409"
+    await session.refresh(task)
+    assert task.status == BrainTaskStatus.RUNNING
+    assert failures == []
 
 
 @pytest.mark.asyncio

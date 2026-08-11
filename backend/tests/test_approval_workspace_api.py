@@ -369,13 +369,21 @@ async def test_only_reviewer_or_lead_can_decide_project_approval(
     session,
     monkeypatch,
 ):
+    async def capture_emit(*_args, **_kwargs):
+        return None
+
     async def fake_rerun_stage(*_args, **_kwargs):
         return None
 
+    async def capture_enqueue(*, run_id: int) -> None:
+        return None
+
+    monkeypatch.setattr("app.api.orchestrator.engine._emit", capture_emit)
     monkeypatch.setattr(
         "app.orchestrator.brain_adapter._engine.rerun_stage",
         fake_rerun_stage,
     )
+    monkeypatch.setattr("app.api.brain.enqueue_agent_runtime", capture_enqueue)
     _, _, _, gate, tool, acceptance, membership = await _approval_data(admin, member, session)
     token = await _token(client, "user@test.com", "user-pw-123")
     membership.role = WorkspaceRole.EDITOR

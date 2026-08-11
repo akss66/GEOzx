@@ -14,7 +14,9 @@ def test_local_frontend_uses_http_only_nginx_config() -> None:
     assert "listen 80;" in nginx_config
     assert "ssl_certificate" not in nginx_config
     assert "https://tzxai.top" not in nginx_config
-    assert "proxy_pass http://backend:8000/" in nginx_config
+    assert "resolver 127.0.0.11" in nginx_config
+    assert "server backend:8000 resolve;" in nginx_config
+    assert "proxy_pass http://backend_upstream/" in nginx_config
 
 
 def test_production_frontend_keeps_https_certificate_mount() -> None:

@@ -8,11 +8,29 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+import app.core.events as runtime_events
 from app.core.security import hash_password
 from app.db import Base, get_session
 from app.main import app
 from app.models import Org, User
 from app.models.enums import UserRole
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def block_unmocked_external_redis(monkeypatch):
+    """Keep unit tests deterministic and fail fast on accidental Redis access."""
+
+    class RealtimeRedisStub:
+        async def publish(self, *_args, **_kwargs) -> int:
+            return 0
+
+    async def reject_external_pool(*_args, **_kwargs):
+        raise AssertionError("unit tests must inject a Redis/ARQ test double")
+
+    monkeypatch.setattr(runtime_events, "_pool", None)
+    monkeypatch.setattr(runtime_events, "_pool_loop", None)
+    monkeypatch.setattr(runtime_events, "create_pool", reject_external_pool)
+    monkeypatch.setattr(runtime_events, "get_redis", lambda: RealtimeRedisStub())
 
 
 @pytest_asyncio.fixture
