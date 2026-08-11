@@ -69,6 +69,14 @@ class PlatformAccountAuthOut(BaseModel):
     updated_at: datetime
 
 
+class WechatAuthorizationGrant(BaseModel):
+    authorizer_appid: str
+    authorizer_access_token: str | None
+    authorizer_refresh_token: str | None
+    expires_in: int | None
+    func_info: list[int]
+
+
 class DouyinAuthorizeRequest(BaseModel):
     account_id: int
 
