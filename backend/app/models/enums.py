@@ -30,6 +30,7 @@ class Platform(enum.StrEnum):
     DOUYIN = "douyin"
     XIAOHONGSHU = "xiaohongshu"
     SHIPINHAO = "shipinhao"
+    WECHAT_OFFICIAL_ACCOUNT = "wechat_official_account"
 
 
 class ProjectStatus(enum.StrEnum):
