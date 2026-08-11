@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import os
+import re
 import secrets
 import struct
 from binascii import Error as BinasciiError
@@ -19,7 +20,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, status
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,9 +105,7 @@ DEFAULT_DOUYIN_SCOPES = ["user_info"]
 DOUYIN_TRIAL_WHITELIST_SCOPE = "trial.whitelist"
 DOUYIN_TRIAL_WHITELIST_SCOPES = [DOUYIN_TRIAL_WHITELIST_SCOPE, "user_info"]
 
-WECHAT_PRE_AUTH_CODE_ENDPOINT = (
-    "https://api.weixin.qq.com/cgi-bin/component/api_create_preauthcode"
-)
+WECHAT_PRE_AUTH_CODE_ENDPOINT = "https://api.weixin.qq.com/cgi-bin/component/api_create_preauthcode"
 WECHAT_COMPONENT_LOGIN_URL = "https://mp.weixin.qq.com/cgi-bin/componentloginpage"
 WECHAT_AUTHORIZATION_STATE_TTL = timedelta(minutes=10)
 WECHAT_CALLBACK_TIMESTAMP_WINDOW_SECONDS = 300
@@ -320,9 +319,7 @@ def _apply_platform_status_defaults(row: PlatformIntegration) -> None:
         row.auth_status = "unauthorized"
 
 
-async def _get_owned_douyin_account(
-    session: AsyncSession, account_id: int, org_id: int
-) -> Account:
+async def _get_owned_douyin_account(session: AsyncSession, account_id: int, org_id: int) -> Account:
     account = await session.get(Account, account_id)
     if account is None or account.org_id != org_id or account.platform != Platform.DOUYIN:
         raise HTTPException(
@@ -437,9 +434,14 @@ async def _request_wechat_pre_auth_code(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="WeChat returned an invalid pre-authorization response",
         ) from exc
-    if response.is_error or not isinstance(payload, dict) or payload.get("errcode") not in (
-        None,
-        0,
+    if (
+        response.is_error
+        or not isinstance(payload, dict)
+        or payload.get("errcode")
+        not in (
+            None,
+            0,
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -466,9 +468,14 @@ async def _validate_wechat_authorization_targets(
     project = await session.get(Project, body.project_id) if body.project_id else None
     if body.project_id and (project is None or project.org_id != org_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
-    if client is not None and project is not None and project.client_id not in (
-        None,
-        client.id,
+    if (
+        client is not None
+        and project is not None
+        and project.client_id
+        not in (
+            None,
+            client.id,
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -494,15 +501,11 @@ async def create_wechat_authorization_session(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="component AppID and redirect URI are required",
         )
-    await _validate_wechat_authorization_targets(
-        session, org_id=admin.org_id, body=body
-    )
+    await _validate_wechat_authorization_targets(session, org_id=admin.org_id, body=body)
     component_token = await WechatOpenPlatformClient().get_component_access_token(
         session, integration.id
     )
-    pre_auth_code = await _request_wechat_pre_auth_code(
-        integration.client_key, component_token
-    )
+    pre_auth_code = await _request_wechat_pre_auth_code(integration.client_key, component_token)
 
     now = datetime.now(UTC)
     expires_at = now + WECHAT_AUTHORIZATION_STATE_TTL
@@ -533,7 +536,7 @@ async def create_wechat_authorization_session(
         "component_appid": integration.client_key,
         "pre_auth_code": pre_auth_code,
         "redirect_uri": callback_url,
-        "auth_type": "3",
+        "auth_type": "1",
     }
     authorization_url = f"{WECHAT_COMPONENT_LOGIN_URL}?{urlencode(login_params)}"
     return WechatAuthorizationSessionOut(
@@ -594,6 +597,48 @@ async def _consume_wechat_authorization_state(
     return payload
 
 
+def _wechat_authorization_source_time(state_payload: dict) -> int:
+    try:
+        issued_at = datetime.fromisoformat(str(state_payload["issued_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid state"
+        ) from exc
+    if issued_at.tzinfo is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid state")
+    return int(issued_at.timestamp())
+
+
+async def _latest_wechat_lifecycle_source_time(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    component_appid: str,
+    authorizer_appid: str,
+    org_id: int,
+    include_global: bool = False,
+) -> int | None:
+    org_scope = (
+        or_(Event.org_id == org_id, Event.org_id.is_(None))
+        if include_global
+        else Event.org_id == org_id
+    )
+    events = (
+        await session.scalars(
+            select(Event).where(
+                Event.type == event_type,
+                org_scope,
+                Event.payload["component_appid"].as_string() == component_appid,
+                Event.payload["authorizer_appid"].as_string() == authorizer_appid,
+            )
+        )
+    ).all()
+    source_key = "create_time" if event_type == "wechat.unauthorized" else "source_time"
+    values = [event.payload.get(source_key) for event in events if isinstance(event.payload, dict)]
+    normalized = [value for value in values if type(value) is int and value > 0]
+    return max(normalized) if normalized else None
+
+
 async def _upsert_wechat_authorization(
     session: AsyncSession,
     *,
@@ -601,6 +646,17 @@ async def _upsert_wechat_authorization(
     state_payload: dict,
     grant,
 ) -> None:
+    locked_integration = await session.scalar(
+        select(PlatformIntegration)
+        .where(PlatformIntegration.id == integration.id)
+        .with_for_update()
+    )
+    if locked_integration is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="platform integration is not configured",
+        )
+    integration = locked_integration
     org_id = integration.org_id
     account = await session.scalar(
         select(Account).where(
@@ -626,7 +682,9 @@ async def _upsert_wechat_authorization(
         if state_payload.get("project_id") is not None:
             account.project_id = int(state_payload["project_id"])
     auth = await session.scalar(
-        select(PlatformAccountAuth).where(PlatformAccountAuth.account_id == account.id)
+        select(PlatformAccountAuth)
+        .where(PlatformAccountAuth.account_id == account.id)
+        .with_for_update()
     )
     if auth is None:
         auth = PlatformAccountAuth(
@@ -635,6 +693,21 @@ async def _upsert_wechat_authorization(
             platform=Platform.WECHAT_OFFICIAL_ACCOUNT.value,
         )
         session.add(auth)
+    authorization_source_time = _wechat_authorization_source_time(state_payload)
+    latest_revocation_time = await _latest_wechat_lifecycle_source_time(
+        session,
+        event_type="wechat.unauthorized",
+        component_appid=integration.client_key or "",
+        authorizer_appid=grant.authorizer_appid,
+        org_id=org_id,
+        include_global=True,
+    )
+    if latest_revocation_time is not None and latest_revocation_time >= authorization_source_time:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="WeChat authorization was superseded by revocation",
+        )
     try:
         access_token = (
             encrypt_credential(grant.authorizer_access_token)
@@ -684,7 +757,9 @@ async def _upsert_wechat_authorization(
             account_id=account.id,
             payload={
                 "authorizer_appid": grant.authorizer_appid,
+                "component_appid": integration.client_key,
                 "scopes": scopes,
+                "source_time": authorization_source_time,
                 "state_id": state_payload["state_id"],
             },
         )
@@ -696,9 +771,7 @@ async def _upsert_wechat_authorization(
 async def handle_wechat_oauth_callback(
     state: Annotated[str, Query(min_length=1, max_length=512)],
     session: SessionDep,
-    authorization_code: Annotated[
-        str | None, Query(min_length=1, max_length=1024)
-    ] = None,
+    authorization_code: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
     auth_code: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
 ) -> RedirectResponse:
     if authorization_code and auth_code and authorization_code != auth_code:
@@ -769,16 +842,34 @@ def _wechat_callback_config() -> tuple[str, bytes]:
 
 
 def _parse_wechat_xml(value: bytes) -> ElementTree.Element:
-    if b"<!DOCTYPE" in value.upper() or b"<!ENTITY" in value.upper():
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid WeChat callback"
+        ) from exc
+    upper = text.upper()
+    if (
+        "<!DOCTYPE" in upper
+        or "<!ENTITY" in upper
+        or re.search(r"\sxmlns(?:\s*=|:[^\s=]+\s*=)", text, re.IGNORECASE)
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid WeChat callback"
         )
     try:
-        return ElementTree.fromstring(value)
+        root = ElementTree.fromstring(text)
     except ElementTree.ParseError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid WeChat callback"
         ) from exc
+    if root.tag != "xml" or any(
+        not isinstance(element.tag, str) or "}" in element.tag for element in root.iter()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid WeChat callback"
+        )
+    return root
 
 
 def _wechat_xml_text(
@@ -800,9 +891,7 @@ def _decrypt_wechat_callback(ciphertext: str, aes_key: bytes) -> tuple[bytes, st
         encrypted = base64.b64decode(ciphertext, validate=True)
         if not encrypted or len(encrypted) % 16:
             raise ValueError("invalid ciphertext length")
-        decryptor = Cipher(
-            algorithms.AES(aes_key), modes.CBC(aes_key[:16])
-        ).decryptor()
+        decryptor = Cipher(algorithms.AES(aes_key), modes.CBC(aes_key[:16])).decryptor()
         padded = decryptor.update(encrypted) + decryptor.finalize()
     except (BinasciiError, ValueError) as exc:
         raise HTTPException(
@@ -861,8 +950,7 @@ async def _wechat_integrations_for_appid(
     rows = (
         await session.scalars(
             select(PlatformIntegration).where(
-                PlatformIntegration.platform
-                == Platform.WECHAT_OFFICIAL_ACCOUNT.value,
+                PlatformIntegration.platform == Platform.WECHAT_OFFICIAL_ACCOUNT.value,
                 PlatformIntegration.client_key == component_appid,
             )
         )
@@ -903,20 +991,12 @@ async def _apply_wechat_callback_event(
     authorizer_appid: str | None = None
     secret_fingerprint_value = ""
     if info_type == "component_verify_ticket":
-        secret_fingerprint_value = _wechat_xml_text(
-            root, "ComponentVerifyTicket", max_length=1024
-        )
+        secret_fingerprint_value = _wechat_xml_text(root, "ComponentVerifyTicket", max_length=1024)
     elif info_type in {"authorized", "updateauthorized"}:
-        authorizer_appid = _wechat_xml_text(
-            root, "AuthorizerAppid", max_length=128
-        )
-        secret_fingerprint_value = _wechat_xml_text(
-            root, "AuthorizationCode", max_length=1024
-        )
+        authorizer_appid = _wechat_xml_text(root, "AuthorizerAppid", max_length=128)
+        secret_fingerprint_value = _wechat_xml_text(root, "AuthorizationCode", max_length=1024)
     else:
-        authorizer_appid = _wechat_xml_text(
-            root, "AuthorizerAppid", max_length=128
-        )
+        authorizer_appid = _wechat_xml_text(root, "AuthorizerAppid", max_length=128)
 
     fingerprint = _wechat_hash(
         "\x00".join(
@@ -933,6 +1013,20 @@ async def _apply_wechat_callback_event(
     if await session.scalar(select(Event.id).where(Event.idempotency_key == fingerprint)):
         return PlainTextResponse("success")
 
+    if info_type == "unauthorized":
+        integration_ids = sorted(integration.id for integration in integrations)
+        integrations = list(
+            (
+                await session.scalars(
+                    select(PlatformIntegration)
+                    .where(PlatformIntegration.id.in_(integration_ids))
+                    .order_by(PlatformIntegration.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+        integration_org_ids = {integration.org_id for integration in integrations}
+
     if info_type == "component_verify_ticket":
         try:
             encrypted_ticket = encrypt_credential(secret_fingerprint_value)
@@ -941,50 +1035,82 @@ async def _apply_wechat_callback_event(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="credential encryption is unavailable",
             ) from exc
-        received_at = datetime.now(UTC)
+        try:
+            source_received_at = datetime.fromtimestamp(create_time, tz=UTC)
+        except (OSError, OverflowError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid WeChat callback",
+            ) from exc
+        integrations = sorted(integrations, key=lambda integration: integration.id)
         integration_ids = [integration.id for integration in integrations]
         existing_credentials = (
             await session.scalars(
                 select(WechatComponentCredential).where(
-                    WechatComponentCredential.platform_integration_id.in_(
-                        integration_ids
-                    )
+                    WechatComponentCredential.platform_integration_id.in_(integration_ids)
                 )
             )
         ).all()
         credentials_by_integration = {
-            credential.platform_integration_id: credential
-            for credential in existing_credentials
+            credential.platform_integration_id: credential for credential in existing_credentials
         }
         for integration in integrations:
             credential = credentials_by_integration.get(integration.id)
             if credential is None:
                 credential = WechatComponentCredential(
-                    platform_integration_id=integration.id
+                    platform_integration_id=integration.id,
+                    component_verify_ticket_encrypted=encrypted_ticket,
+                    ticket_received_at=source_received_at,
                 )
                 session.add(credential)
-            credential.component_verify_ticket_encrypted = encrypted_ticket
-            credential.ticket_received_at = received_at
+            else:
+                await session.execute(
+                    update(WechatComponentCredential)
+                    .where(
+                        WechatComponentCredential.id == credential.id,
+                        or_(
+                            WechatComponentCredential.ticket_received_at.is_(None),
+                            WechatComponentCredential.ticket_received_at < source_received_at,
+                        ),
+                    )
+                    .values(
+                        component_verify_ticket_encrypted=encrypted_ticket,
+                        ticket_received_at=source_received_at,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
 
     matched_auths: list[PlatformAccountAuth] = []
     if authorizer_appid:
         matched_auths = list(
             (
                 await session.scalars(
-                    select(PlatformAccountAuth).where(
+                    select(PlatformAccountAuth)
+                    .where(
                         PlatformAccountAuth.org_id.in_(integration_org_ids),
-                        PlatformAccountAuth.platform
-                        == Platform.WECHAT_OFFICIAL_ACCOUNT.value,
+                        PlatformAccountAuth.platform == Platform.WECHAT_OFFICIAL_ACCOUNT.value,
                         PlatformAccountAuth.external_open_id == authorizer_appid,
                     )
+                    .with_for_update()
                 )
             ).all()
         )
     if info_type == "unauthorized":
         for auth in matched_auths:
+            latest_authorization_time = await _latest_wechat_lifecycle_source_time(
+                session,
+                event_type="wechat.authorization.completed",
+                component_appid=component_appid,
+                authorizer_appid=authorizer_appid or "",
+                org_id=auth.org_id,
+            )
+            if latest_authorization_time is not None and create_time < latest_authorization_time:
+                continue
             auth.auth_status = "unauthorized"
             auth.access_token_encrypted = None
             auth.refresh_token_encrypted = None
+            auth.token_secret_ref = None
+            auth.refresh_secret_ref = None
             auth.token_expires_at = None
             auth.refresh_expires_at = None
             auth.last_error = "WeChat authorization revoked"
@@ -1020,9 +1146,7 @@ async def _apply_wechat_callback_event(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        if not await session.scalar(
-            select(Event.id).where(Event.idempotency_key == fingerprint)
-        ):
+        if not await session.scalar(select(Event.id).where(Event.idempotency_key == fingerprint)):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="WeChat callback could not be persisted",
@@ -1116,9 +1240,7 @@ async def handle_wechat_encrypted_event(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid WeChat callback",
         )
-    return await _apply_wechat_callback_event(
-        session, integrations=integrations, root=inner
-    )
+    return await _apply_wechat_callback_event(session, integrations=integrations, root=inner)
 
 
 @router.get("/platform-integrations/{platform}", response_model=PlatformIntegrationOut)
@@ -1141,6 +1263,11 @@ async def upsert_platform_integration(
     admin: AdminUser,
     session: SessionDep,
 ) -> PlatformIntegrationOut:
+    if platform == Platform.WECHAT_OFFICIAL_ACCOUNT and "auth_status" in body.model_fields_set:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="WeChat authorization status is lifecycle managed",
+        )
     row = await session.scalar(
         select(PlatformIntegration).where(
             PlatformIntegration.org_id == admin.org_id,
@@ -1319,9 +1446,7 @@ async def create_douyin_incremental_authorize_url(
     account = await _get_owned_douyin_account(session, body.account_id, admin.org_id)
     integration = await _get_integration_or_404(session, admin.org_id, Platform.DOUYIN)
     _require_douyin_app(integration)
-    auth = await _get_douyin_account_auth_or_conflict(
-        session, account.id, admin.org_id
-    )
+    auth = await _get_douyin_account_auth_or_conflict(session, account.id, admin.org_id)
     capability = DOUYIN_CAPABILITY_BY_KEY[body.capability_key]
     configured = set(integration.scopes or [])
     missing_app = [scope for scope in capability.app_scopes if scope not in configured]
@@ -1704,9 +1829,7 @@ async def _upsert_platform_account_auth(
     _apply_authorized_account_meta(account, row.scopes)
     try:
         row.access_token_encrypted = encrypt_credential(access_token)
-        row.refresh_token_encrypted = (
-            encrypt_credential(refresh_token) if refresh_token else None
-        )
+        row.refresh_token_encrypted = encrypt_credential(refresh_token) if refresh_token else None
     except CredentialEncryptionError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
