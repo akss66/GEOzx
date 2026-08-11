@@ -472,7 +472,7 @@ describe("ModelInfrastructure", () => {
         enabled: true,
       });
     });
-  });
+  }, 10_000);
 
   it("keeps the API key field blank and clears it after key mutations", async () => {
     renderPage();

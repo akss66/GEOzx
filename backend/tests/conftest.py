@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.core.events as runtime_events
+from app.config import settings
 from app.core.security import hash_password
 from app.db import Base, get_session
 from app.main import app
@@ -31,6 +32,7 @@ async def block_unmocked_external_redis(monkeypatch):
     monkeypatch.setattr(runtime_events, "_pool_loop", None)
     monkeypatch.setattr(runtime_events, "create_pool", reject_external_pool)
     monkeypatch.setattr(runtime_events, "get_redis", lambda: RealtimeRedisStub())
+    monkeypatch.setattr(settings, "agent_runtime_async_enabled", False)
 
 
 @pytest_asyncio.fixture

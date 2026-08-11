@@ -30,6 +30,10 @@ export default defineConfig({
     },
   },
   test: {
+    include: [
+      "src/**/*.test.{ts,tsx}",
+      "src/**/*.spec.{ts,tsx}",
+    ],
     exclude: ["e2e/**", "tests/**", "node_modules/**", "dist/**"],
   },
   server: {
