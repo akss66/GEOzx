@@ -77,6 +77,24 @@ class WechatAuthorizationGrant(BaseModel):
     func_info: list[int]
 
 
+class CapabilityState(BaseModel):
+    can_use: bool
+    reason: str | None = None
+    permission_ids: list[int] = Field(default_factory=list)
+
+
+class WechatCapabilitySnapshot(BaseModel):
+    account_id: int
+    upload_article_image: CapabilityState
+    add_permanent_material: CapabilityState
+    draft_add: CapabilityState
+    draft_get: CapabilityState
+    draft_update: CapabilityState
+    analytics: CapabilityState
+    freepublish: CapabilityState
+    checked_at: datetime
+
+
 class WechatAuthorizationSessionRequest(BaseModel):
     client_id: int | None = Field(default=None, gt=0)
     project_id: int | None = Field(default=None, gt=0)

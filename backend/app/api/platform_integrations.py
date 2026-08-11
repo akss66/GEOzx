@@ -31,6 +31,7 @@ from app.core.credential_crypto import (
     decrypt_credential,
     encrypt_credential,
 )
+from app.core.workspace_access import require_account_access
 from app.db import get_session
 from app.integrations.douyin import (
     DEFAULT_DOUYIN_SECRET_REF,
@@ -77,8 +78,10 @@ from app.schemas.platform import (
     UpsertPlatformIntegrationRequest,
     WechatAuthorizationSessionOut,
     WechatAuthorizationSessionRequest,
+    WechatCapabilitySnapshot,
     WechatPreAuthCodeResponse,
 )
+from app.services.wechat_capabilities import WechatCapabilityError, probe_wechat_capabilities
 from app.services.wechat_component import WechatIntegrationError, WechatOpenPlatformClient
 
 router = APIRouter(tags=["platform-integrations"])
@@ -324,6 +327,26 @@ async def _get_owned_douyin_account(session: AsyncSession, account_id: int, org_
     if account is None or account.org_id != org_id or account.platform != Platform.DOUYIN:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Douyin account not found"
+        )
+    return account
+
+
+async def _get_accessible_wechat_account(
+    session: AsyncSession, user: CurrentUser, account_id: int
+) -> Account:
+    try:
+        account = await require_account_access(session, user, account_id)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="account_inaccessible",
+            ) from exc
+        raise
+    if account.platform != Platform.WECHAT_OFFICIAL_ACCOUNT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="account_not_authorized",
         )
     return account
 
@@ -1432,6 +1455,37 @@ async def get_douyin_account_capabilities(
         capabilities=capabilities,
         next_recommended=next_recommended,
     )
+
+
+@router.get(
+    "/accounts/{account_id}/platform-capabilities",
+    response_model=WechatCapabilitySnapshot,
+)
+async def get_wechat_account_capabilities(
+    account_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> WechatCapabilitySnapshot:
+    account = await _get_accessible_wechat_account(session, user, account_id)
+    auth = await session.scalar(
+        select(PlatformAccountAuth).where(
+            PlatformAccountAuth.account_id == account.id,
+            PlatformAccountAuth.org_id == user.org_id,
+            PlatformAccountAuth.platform == Platform.WECHAT_OFFICIAL_ACCOUNT.value,
+        )
+    )
+    if auth is None or auth.auth_status != "authorized":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="account_not_authorized",
+        )
+    try:
+        return await probe_wechat_capabilities(session, account.id)
+    except WechatCapabilityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.code,
+        ) from exc
 
 
 @router.post(
