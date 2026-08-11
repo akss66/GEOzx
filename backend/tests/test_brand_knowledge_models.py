@@ -1,17 +1,90 @@
 """Database invariants for account-scoped brand knowledge."""
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.db import Base
+
+
+async def _seed_binding_scope(session):
+    """Create real rows so binding checks exercise relational database behavior."""
+
+    await session.execute(text("PRAGMA foreign_keys = ON"))
+
+    tables = Base.metadata.tables
+    await session.execute(tables["orgs"].insert(), {"id": 1, "name": "Knowledge org"})
+    await session.execute(
+        tables["clients"].insert(),
+        [
+            {"id": 10, "org_id": 1, "name": "Client A", "status": "active"},
+            {"id": 11, "org_id": 1, "name": "Client B", "status": "active"},
+        ],
+    )
+    await session.execute(
+        tables["accounts"].insert(),
+        {
+            "id": 100,
+            "org_id": 1,
+            "client_id": 10,
+            "platform": "wechat_official_account",
+            "nickname": "Client A account",
+            "status": "active",
+        },
+    )
+    await session.execute(
+        tables["knowledge_bases"].insert(),
+        [
+            {
+                "id": 1000,
+                "org_id": 1,
+                "client_id": 10,
+                "kind": "brand",
+                "name": "Client A brand",
+                "status": "active",
+                "version": 1,
+            },
+            {
+                "id": 1001,
+                "org_id": 1,
+                "client_id": 11,
+                "kind": "brand",
+                "name": "Client B brand",
+                "status": "active",
+                "version": 1,
+            },
+            {
+                "id": 1002,
+                "org_id": 1,
+                "client_id": None,
+                "kind": "organization_shared",
+                "name": "Shared policy",
+                "status": "active",
+                "version": 1,
+            },
+            {
+                "id": 1003,
+                "org_id": 1,
+                "client_id": 10,
+                "kind": "brand",
+                "name": "Client A second brand",
+                "status": "active",
+                "version": 1,
+            },
+        ],
+    )
+    await session.commit()
+
+    binding_table = tables["account_knowledge_bindings"]
+    assert {"knowledge_base_kind", "client_id"} <= set(binding_table.c.keys())
+    return binding_table
 
 
 @pytest.mark.asyncio
 async def test_account_has_only_one_active_primary_brand_binding(session):
     """Removing the partial unique index would allow conflicting account scopes."""
 
-    binding_table = Base.metadata.tables.get("account_knowledge_bindings")
-    assert binding_table is not None
+    binding_table = await _seed_binding_scope(session)
 
     with pytest.raises(IntegrityError):
         await session.execute(
@@ -19,15 +92,19 @@ async def test_account_has_only_one_active_primary_brand_binding(session):
             [
                 {
                     "org_id": 1,
-                    "account_id": 4,
-                    "knowledge_base_id": 10,
+                    "account_id": 100,
+                    "knowledge_base_id": 1000,
+                    "knowledge_base_kind": "brand",
+                    "client_id": 10,
                     "binding_type": "primary_brand",
                     "status": "active",
                 },
                 {
                     "org_id": 1,
-                    "account_id": 4,
-                    "knowledge_base_id": 11,
+                    "account_id": 100,
+                    "knowledge_base_id": 1003,
+                    "knowledge_base_kind": "brand",
+                    "client_id": 10,
                     "binding_type": "primary_brand",
                     "status": "active",
                 },
@@ -37,15 +114,87 @@ async def test_account_has_only_one_active_primary_brand_binding(session):
 
 
 @pytest.mark.asyncio
-async def test_knowledge_base_kind_requires_the_matching_client_scope(session):
-    """Removing the kind/client check would permit cross-brand knowledge leakage."""
+async def test_shared_binding_rejects_a_brand_knowledge_base(session):
+    """A shared label must not make a brand base readable by another account scope."""
 
-    knowledge_base_table = Base.metadata.tables.get("knowledge_bases")
-    assert knowledge_base_table is not None
+    binding_table = await _seed_binding_scope(session)
 
     with pytest.raises(IntegrityError):
         await session.execute(
-            knowledge_base_table.insert(),
+            binding_table.insert(),
+            {
+                "org_id": 1,
+                "account_id": 100,
+                "knowledge_base_id": 1000,
+                "knowledge_base_kind": "brand",
+                "client_id": None,
+                "binding_type": "shared",
+                "status": "active",
+            },
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_primary_brand_binding_rejects_an_organization_shared_base(session):
+    """The primary brand slot must not point at the organization shared library."""
+
+    binding_table = await _seed_binding_scope(session)
+
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            binding_table.insert(),
+            {
+                "org_id": 1,
+                "account_id": 100,
+                "knowledge_base_id": 1002,
+                "knowledge_base_kind": "organization_shared",
+                "client_id": None,
+                "binding_type": "primary_brand",
+                "status": "active",
+            },
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_primary_brand_binding_rejects_a_different_client_brand_base(session):
+    """A raw insert must not attach Client B's brand to Client A's account."""
+
+    binding_table = await _seed_binding_scope(session)
+
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            binding_table.insert(),
+            {
+                "org_id": 1,
+                "account_id": 100,
+                "knowledge_base_id": 1001,
+                "knowledge_base_kind": "brand",
+                "client_id": 11,
+                "binding_type": "primary_brand",
+                "status": "active",
+            },
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_kind_requires_the_matching_client_scope(session):
+    """Removing the kind/client check would permit cross-brand knowledge leakage."""
+
+    await session.execute(text("PRAGMA foreign_keys = ON"))
+    tables = Base.metadata.tables
+    await session.execute(tables["orgs"].insert(), {"id": 1, "name": "Knowledge org"})
+    await session.execute(
+        tables["clients"].insert(),
+        {"id": 10, "org_id": 1, "name": "Client A", "status": "active"},
+    )
+    await session.commit()
+
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            tables["knowledge_bases"].insert(),
             [
                 {
                     "org_id": 1,
@@ -57,7 +206,7 @@ async def test_knowledge_base_kind_requires_the_matching_client_scope(session):
                 },
                 {
                     "org_id": 1,
-                    "client_id": 1,
+                    "client_id": 10,
                     "kind": "organization_shared",
                     "name": "Invalid shared base",
                     "status": "active",

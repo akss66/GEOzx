@@ -10,10 +10,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -117,6 +119,8 @@ class KnowledgeBase(Base, TimestampMixin):
             "kind IN ('brand', 'organization_shared')",
             name="ck_knowledge_bases_kind",
         ),
+        UniqueConstraint("id", "org_id", "kind", name="uq_knowledge_bases_id_org_kind"),
+        UniqueConstraint("id", "client_id", name="uq_knowledge_bases_id_client"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
@@ -145,6 +149,37 @@ class AccountKnowledgeBinding(Base, TimestampMixin):
             "binding_type IN ('primary_brand', 'shared')",
             name="ck_account_knowledge_bindings_type",
         ),
+        CheckConstraint(
+            "(binding_type = 'primary_brand' AND knowledge_base_kind = 'brand' "
+            "AND client_id IS NOT NULL) OR "
+            "(binding_type = 'shared' AND knowledge_base_kind = 'organization_shared' "
+            "AND client_id IS NULL)",
+            name="ck_account_knowledge_bindings_scope_type",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "org_id"],
+            ["accounts.id", "accounts.org_id"],
+            name="fk_account_knowledge_bindings_account_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "org_id", "knowledge_base_kind"],
+            ["knowledge_bases.id", "knowledge_bases.org_id", "knowledge_bases.kind"],
+            name="fk_account_knowledge_bindings_base_org_kind",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "client_id"],
+            ["accounts.id", "accounts.client_id"],
+            name="fk_account_knowledge_bindings_account_client",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "client_id"],
+            ["knowledge_bases.id", "knowledge_bases.client_id"],
+            name="fk_account_knowledge_bindings_base_client",
+            ondelete="CASCADE",
+        ),
         Index(
             "uq_account_knowledge_bindings_active_primary_brand",
             "account_id",
@@ -164,6 +199,8 @@ class AccountKnowledgeBinding(Base, TimestampMixin):
     knowledge_base_id: Mapped[int] = mapped_column(
         ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    knowledge_base_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    client_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
     binding_type: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="active", index=True, nullable=False)
     bound_by_id: Mapped[int | None] = mapped_column(

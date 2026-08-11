@@ -19,6 +19,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.create_unique_constraint("uq_accounts_id_client", "accounts", ["id", "client_id"])
+
     op.create_table(
         "knowledge_bases",
         sa.Column("id", BigIntPK, nullable=False),
@@ -49,6 +51,8 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["client_id"], ["clients.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["created_by_id"], ["users.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("id", "org_id", "kind", name="uq_knowledge_bases_id_org_kind"),
+        sa.UniqueConstraint("id", "client_id", name="uq_knowledge_bases_id_client"),
     )
     for column in ("org_id", "client_id", "status"):
         op.create_index(op.f(f"ix_knowledge_bases_{column}"), "knowledge_bases", [column])
@@ -59,6 +63,8 @@ def upgrade() -> None:
         sa.Column("org_id", BigIntPK, nullable=False),
         sa.Column("account_id", BigIntPK, nullable=False),
         sa.Column("knowledge_base_id", BigIntPK, nullable=False),
+        sa.Column("knowledge_base_kind", sa.String(length=40), nullable=False),
+        sa.Column("client_id", BigIntPK, nullable=True),
         sa.Column("binding_type", sa.String(length=40), nullable=False),
         sa.Column("status", sa.String(length=40), server_default="active", nullable=False),
         sa.Column("bound_by_id", BigIntPK, nullable=True),
@@ -75,15 +81,46 @@ def upgrade() -> None:
             "binding_type IN ('primary_brand', 'shared')",
             name="ck_account_knowledge_bindings_type",
         ),
+        sa.CheckConstraint(
+            "(binding_type = 'primary_brand' AND knowledge_base_kind = 'brand' "
+            "AND client_id IS NOT NULL) OR "
+            "(binding_type = 'shared' AND knowledge_base_kind = 'organization_shared' "
+            "AND client_id IS NULL)",
+            name="ck_account_knowledge_bindings_scope_type",
+        ),
         sa.ForeignKeyConstraint(["org_id"], ["orgs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["knowledge_base_id"], ["knowledge_bases.id"], ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(["bound_by_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["account_id", "org_id"],
+            ["accounts.id", "accounts.org_id"],
+            name="fk_account_knowledge_bindings_account_org",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["knowledge_base_id", "org_id", "knowledge_base_kind"],
+            ["knowledge_bases.id", "knowledge_bases.org_id", "knowledge_bases.kind"],
+            name="fk_account_knowledge_bindings_base_org_kind",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["account_id", "client_id"],
+            ["accounts.id", "accounts.client_id"],
+            name="fk_account_knowledge_bindings_account_client",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["knowledge_base_id", "client_id"],
+            ["knowledge_bases.id", "knowledge_bases.client_id"],
+            name="fk_account_knowledge_bindings_base_client",
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
-    for column in ("org_id", "account_id", "knowledge_base_id", "status"):
+    for column in ("org_id", "account_id", "knowledge_base_id", "client_id", "status"):
         op.create_index(
             op.f(f"ix_account_knowledge_bindings_{column}"),
             "account_knowledge_bindings",
@@ -195,7 +232,7 @@ def downgrade() -> None:
         "uq_account_knowledge_bindings_active_primary_brand",
         table_name="account_knowledge_bindings",
     )
-    for column in ("status", "knowledge_base_id", "account_id", "org_id"):
+    for column in ("status", "client_id", "knowledge_base_id", "account_id", "org_id"):
         op.drop_index(
             op.f(f"ix_account_knowledge_bindings_{column}"),
             table_name="account_knowledge_bindings",
@@ -205,3 +242,4 @@ def downgrade() -> None:
     for column in ("status", "client_id", "org_id"):
         op.drop_index(op.f(f"ix_knowledge_bases_{column}"), table_name="knowledge_bases")
     op.drop_table("knowledge_bases")
+    op.drop_constraint("uq_accounts_id_client", "accounts", type_="unique")
