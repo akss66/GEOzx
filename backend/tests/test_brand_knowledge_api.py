@@ -2,7 +2,9 @@
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
+import app.api.knowledge as knowledge_api
 from app.core.security import hash_password
 from app.models import (
     Account,
@@ -266,6 +268,17 @@ async def test_entry_role_matrix_separates_write_and_fact_review(client, session
     )
     assert denied.status_code == 403
 
+    mixed_review = await client.patch(
+        f"/knowledge-bases/{base.id}/entries/{created_ids[0]}",
+        headers=await _token(client, reviewer.email, "member-pw-123"),
+        json={"verification_status": "verified", "content": "Reviewer tampering"},
+    )
+    assert mixed_review.status_code == 422
+    unchanged = await session.get(KnowledgeEntry, created_ids[0])
+    assert unchanged is not None
+    assert unchanged.content == entry_body["content"]
+    assert unchanged.payload == entry_body["payload"]
+
     operator_review = await client.patch(
         f"/knowledge-bases/{base.id}/entries/{created_ids[0]}",
         headers=await _token(client, operator.email, "member-pw-123"),
@@ -279,6 +292,135 @@ async def test_entry_role_matrix_separates_write_and_fact_review(client, session
     )
     assert reviewer_review.status_code == 200
     assert reviewer_review.json()["verification_status"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_product_fact_claim_flag_is_derived_only_from_its_payload(client, session, admin):
+    """A second top-level flag must not contradict the reviewed fact payload."""
+
+    lead, workspace, _account = await _member(
+        session, admin, email="claim-lead@test.com", role=WorkspaceRole.LEAD
+    )
+    base = await _brand_base(
+        session, org_id=admin.org_id, client_id=workspace.id, name="Claims", creator_id=lead.id
+    )
+    headers = await _token(client, lead.email, "member-pw-123")
+    created = await client.post(
+        f"/knowledge-bases/{base.id}/entries",
+        headers=headers,
+        json={
+            "title": "Warranty",
+            "content": "Ten years.",
+            "category": "prompt_library",
+            "source_label": "Policy",
+            "entry_kind": "product_fact",
+            "payload": {
+                "schema_version": 1,
+                "kind": "product_fact",
+                "product_code": "YH-001",
+                "fact_key": "warranty_years",
+                "value": 10,
+                "claim_text": "10 year warranty",
+                "allowed_for_external_claim": False,
+            },
+        },
+    )
+    assert created.status_code == 201
+    entry_id = created.json()["id"]
+
+    payload_only = await client.patch(
+        f"/knowledge-bases/{base.id}/entries/{entry_id}",
+        headers=headers,
+        json={
+            "payload": {
+                "schema_version": 1,
+                "kind": "product_fact",
+                "product_code": "YH-001",
+                "fact_key": "warranty_years",
+                "value": 10,
+                "claim_text": "10 year warranty",
+                "allowed_for_external_claim": True,
+            }
+        },
+    )
+    assert payload_only.status_code == 200
+    assert payload_only.json()["payload"]["allowed_for_external_claim"] is True
+    assert payload_only.json()["allowed_for_external_claim"] is True
+
+    contradiction = await client.patch(
+        f"/knowledge-bases/{base.id}/entries/{entry_id}",
+        headers=headers,
+        json={
+            "payload": {
+                "schema_version": 1,
+                "kind": "product_fact",
+                "product_code": "YH-001",
+                "fact_key": "warranty_years",
+                "value": 10,
+                "claim_text": "10 year warranty",
+                "allowed_for_external_claim": True,
+            },
+            "allowed_for_external_claim": False,
+        },
+    )
+    assert contradiction.status_code == 422
+    unchanged = await session.get(KnowledgeEntry, entry_id)
+    assert unchanged is not None
+    assert unchanged.allowed_for_external_claim is True
+    assert unchanged.payload["allowed_for_external_claim"] is True
+
+    policy = await client.post(
+        f"/knowledge-bases/{base.id}/entries",
+        headers=headers,
+        json={
+            "title": "Policy",
+            "content": "No external promise.",
+            "category": "prompt_library",
+            "source_label": "Policy",
+            "entry_kind": "policy",
+            "payload": {"schema_version": 1, "kind": "policy"},
+        },
+    )
+    assert policy.status_code == 201
+    non_product_flag = await client.patch(
+        f"/knowledge-bases/{base.id}/entries/{policy.json()['id']}",
+        headers=headers,
+        json={"allowed_for_external_claim": True},
+    )
+    assert non_product_flag.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_binding_returns_conflict_after_a_partial_unique_failure(
+    client, session, admin, monkeypatch
+):
+    """A remaining uniqueness race must roll back and surface a stable 409, never a 500."""
+
+    lead, workspace, account = await _member(
+        session, admin, email="conflict-lead@test.com", role=WorkspaceRole.LEAD
+    )
+    base = await _brand_base(
+        session, org_id=admin.org_id, client_id=workspace.id, name="Conflict", creator_id=lead.id
+    )
+    account_id = account.id
+    headers = await _token(client, lead.email, "member-pw-123")
+
+    async def raise_partial_unique(*_args, **_kwargs):
+        raise IntegrityError("insert", {}, Exception("uq_account_knowledge_bindings_active_primary_brand"))
+
+    monkeypatch.setattr(knowledge_api, "bind_account_primary_knowledge_base", raise_partial_unique)
+    response = await client.put(
+        f"/accounts/{account_id}/knowledge-binding",
+        headers=headers,
+        json={"knowledge_base_id": base.id},
+    )
+    assert response.status_code == 409
+    assert await session.scalar(
+        select(func.count()).select_from(AccountKnowledgeBinding).where(
+            AccountKnowledgeBinding.account_id == account_id,
+            AccountKnowledgeBinding.status == "active",
+        )
+    ) == 0
 
 
 @pytest.mark.asyncio

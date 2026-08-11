@@ -236,6 +236,8 @@ class CreateKnowledgeBaseEntryRequest(BaseModel):
 
 
 class UpdateKnowledgeBaseEntryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=1, max_length=300)
     content: str | None = Field(default=None, min_length=1, max_length=50_000)
     payload: KnowledgeEntryPayload | None = None
@@ -245,7 +247,16 @@ class UpdateKnowledgeBaseEntryRequest(BaseModel):
     verification_status: KnowledgeVerificationStatus | None = None
     effective_at: datetime | None = None
     expires_at: datetime | None = None
-    allowed_for_external_claim: bool | None = None
+
+    @model_validator(mode="after")
+    def forbid_review_and_edit_in_one_request(self) -> "UpdateKnowledgeBaseEntryRequest":
+        is_mixed_review = (
+            self.verification_status is not None
+            and self.model_fields_set != {"verification_status"}
+        )
+        if is_mixed_review:
+            raise ValueError("verification_status cannot be combined with entry edits")
+        return self
 
 
 class KnowledgeBaseEntryOut(BaseModel):

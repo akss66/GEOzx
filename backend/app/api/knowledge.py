@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
@@ -120,14 +121,17 @@ async def update_knowledge(
     entry_id: int, body: UpdateKnowledgeRequest, user: CurrentUser, session: SessionDep
 ) -> KnowledgeOut:
     entry = await get_scoped_entry(session, user, entry_id, writable=True)
-    if body.payload is not None and entry.entry_kind == "product_fact":
+    data = body.model_dump(exclude_unset=True)
+    if entry.entry_kind == "product_fact" and data:
         try:
-            ProductFactPayload.model_validate(body.payload)
+            payload = ProductFactPayload.model_validate(body.payload or entry.payload)
         except ValidationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="产品事实格式无效"
             ) from exc
-    data = body.model_dump(exclude_unset=True)
+        if body.payload is not None:
+            data["payload"] = payload.model_dump()
+        data["allowed_for_external_claim"] = payload.allowed_for_external_claim
     if "source_url" in data and data["source_url"] is not None:
         data["source_url"] = str(data["source_url"])
     if data:
@@ -371,6 +375,16 @@ async def update_knowledge_base_entry(
         )
     if "payload" in data and data["payload"] is not None:
         data["payload"] = body.payload.model_dump() if body.payload is not None else None
+    if entry.entry_kind == "product_fact":
+        try:
+            fact_payload = ProductFactPayload.model_validate(data.get("payload", entry.payload))
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="产品事实格式无效"
+            ) from exc
+        data["allowed_for_external_claim"] = fact_payload.allowed_for_external_claim
+    else:
+        data["allowed_for_external_claim"] = False
     if "source_url" in data and data["source_url"] is not None:
         data["source_url"] = str(data["source_url"])
     if verification_change:
@@ -411,10 +425,17 @@ async def bind_account_knowledge(
     user: CurrentUser,
     session: SessionDep,
 ) -> AccountKnowledgeBindingOut:
-    binding = await bind_account_primary_knowledge_base(
-        session, user, account_id=account_id, knowledge_base_id=body.knowledge_base_id
-    )
-    await session.commit()
+    try:
+        binding = await bind_account_primary_knowledge_base(
+            session, user, account_id=account_id, knowledge_base_id=body.knowledge_base_id
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="品牌知识库绑定正在更新，请重试",
+        ) from exc
     await session.refresh(binding)
     return AccountKnowledgeBindingOut.model_validate(binding)
 

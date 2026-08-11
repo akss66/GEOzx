@@ -135,6 +135,14 @@ async def bind_account_primary_knowledge_base(
     """Upsert the sole active primary binding with server-derived scope fields."""
 
     account = await require_account_knowledge_scope(session, user, account_id, writable=True)
+    locked_account = await session.scalar(
+        select(Account)
+        .where(Account.id == account.id, Account.org_id == user.org_id)
+        .with_for_update()
+    )
+    if locked_account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+    account = locked_account
     base = await session.get(KnowledgeBase, knowledge_base_id)
     if (
         base is None
