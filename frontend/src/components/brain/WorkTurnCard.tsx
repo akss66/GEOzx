@@ -23,6 +23,8 @@ export function WorkTurnCard({
   showThinkingOrb?: boolean;
 }) {
   const steeringDetail = view.steeringNotice?.message ?? view.steeringNotice?.reason;
+  const hasActions = view.articleWorkspaceAction != null || businessActions != null;
+
   return (
     <article
       className="tz-work-turn"
@@ -66,7 +68,9 @@ export function WorkTurnCard({
           </div>
         ) : null}
         {view.presentation.showActivity && view.presentation.activityLabel ? (
-          <p className="tz-work-turn__activity" role="status" aria-live="polite">{view.presentation.activityLabel}</p>
+          <p className="tz-work-turn__activity" role="status" aria-live="polite">
+            {view.presentation.activityLabel}
+          </p>
         ) : null}
         {view.presentation.showFinal && view.assistantText ? (
           <p className="tz-work-turn__response">{view.assistantText}</p>
@@ -82,8 +86,21 @@ export function WorkTurnCard({
           evidenceSummary={evidenceSummary}
           technicalLog={technicalLog}
         />
-        {deliverables ? <section className="tz-work-turn__deliverables" aria-label="运营内容">{deliverables}</section> : null}
-        {businessActions ? <section className="tz-work-turn__actions" aria-label="业务动作">{businessActions}</section> : null}
+        {deliverables ? (
+          <section className="tz-work-turn__deliverables" aria-label="运营内容">
+            {deliverables}
+          </section>
+        ) : null}
+        {hasActions ? (
+          <section className="tz-work-turn__actions" aria-label="业务动作">
+            {view.articleWorkspaceAction ? (
+              <a href={view.articleWorkspaceAction.href}>
+                {view.articleWorkspaceAction.label}
+              </a>
+            ) : null}
+            {businessActions}
+          </section>
+        ) : null}
       </section>
     </article>
   );

@@ -962,6 +962,12 @@ export interface WorkTurnViewModel {
   steps: WorkTurnStep[];
   experts: Array<{ name: string; status: string }>;
   deliverableIds: number[];
+  articleWorkspaceAction: {
+    articleId: number;
+    href: string;
+    label: string;
+    title: string;
+  } | null;
   assistant: WorkTurnAssistant;
 }
 
@@ -1001,7 +1007,7 @@ export interface ConversationTurnEvent {
   created_at: string;
 }
 
-export type TurnInterruptKind = "clarification" | "approval" | "manual_pause";
+export type TurnInterruptKind = "clarification" | "approval" | "manual_pause" | "article_action";
 export type TurnInterruptStatus =
   | "pending"
   | "resolved"
