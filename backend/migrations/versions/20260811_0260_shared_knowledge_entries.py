@@ -61,9 +61,9 @@ def upgrade() -> None:
         "(knowledge_base_id IS NULL AND knowledge_base_kind IS NULL "
         "AND client_id IS NOT NULL) OR "
         "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'brand' "
-        "AND client_id IS NOT NULL) OR "
+        "AND knowledge_base_kind IS NOT NULL AND client_id IS NOT NULL) OR "
         "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'organization_shared' "
-        "AND client_id IS NULL)",
+        "AND knowledge_base_kind IS NOT NULL AND client_id IS NULL)",
     )
     op.create_foreign_key(
         "fk_knowledge_entries_base_org_kind",

@@ -565,6 +565,7 @@ async def test_binding_fails_closed_then_rebinds_and_unbinds_without_removing_ci
         source_label="Policy",
         created_by_id=lead.id,
         knowledge_base_id=first.id,
+        knowledge_base_kind="brand",
         entry_kind="policy",
         verification_status="verified",
     )

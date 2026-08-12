@@ -52,9 +52,9 @@ class KnowledgeEntry(Base, TimestampMixin):
             "(knowledge_base_id IS NULL AND knowledge_base_kind IS NULL "
             "AND client_id IS NOT NULL) OR "
             "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'brand' "
-            "AND client_id IS NOT NULL) OR "
+            "AND knowledge_base_kind IS NOT NULL AND client_id IS NOT NULL) OR "
             "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'organization_shared' "
-            "AND client_id IS NULL)",
+            "AND knowledge_base_kind IS NOT NULL AND client_id IS NULL)",
             name="ck_knowledge_entries_scope_kind_client",
         ),
         ForeignKeyConstraint(

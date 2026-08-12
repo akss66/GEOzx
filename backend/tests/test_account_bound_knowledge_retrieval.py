@@ -25,7 +25,7 @@ async def _entry(
     session,
     *,
     org_id: int,
-    client_id: int,
+    client_id: int | None,
     project_id: int | None,
     title: str,
     knowledge_base_id: int | None = None,
@@ -44,6 +44,11 @@ async def _entry(
         client_id=client_id,
         project_id=project_id,
         knowledge_base_id=knowledge_base_id,
+        knowledge_base_kind=(
+            "organization_shared"
+            if knowledge_base_id is not None and client_id is None
+            else "brand" if knowledge_base_id is not None else None
+        ),
         category=KnowledgeCategory.PROMPT_LIBRARY,
         title=title,
         content=content or f"{title} content",
@@ -186,7 +191,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
     shared_policy = await _entry(
         session,
         org_id=admin.org_id,
-        client_id=client.id,
+        client_id=None,
         project_id=None,
         knowledge_base_id=shared.id,
         title="Verified shared policy",
@@ -372,7 +377,7 @@ async def test_disallowed_local_claims_cannot_starve_later_authorized_base_evide
     shared_entry = await _entry(
         session,
         org_id=admin.org_id,
-        client_id=client.id,
+        client_id=None,
         project_id=None,
         knowledge_base_id=shared.id,
         title="Permitted shared evidence",

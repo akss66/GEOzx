@@ -275,6 +275,8 @@ async def test_knowledge_entry_scope_constraints_allow_shared_rows_and_reject_ra
         ("Null local", None, None, None, 1),
         ("Null brand", None, 1000, "brand", 1),
         ("Client shared", 10, 1002, "organization_shared", 1),
+        ("Null kind brand", 10, 1000, None, 1),
+        ("Null kind shared", None, 1002, None, 1),
         ("Mismatched brand client", 11, 1000, "brand", 1),
         ("Mismatched base kind", 10, 1000, "organization_shared", 1),
         ("Mismatched base org", 10, 1000, "brand", 2),
@@ -293,6 +295,27 @@ async def test_knowledge_entry_scope_constraints_allow_shared_rows_and_reject_ra
             )
             await session.commit()
         await session.rollback()
+
+    inserted = await session.execute(
+        entry_table.insert().returning(entry_table.c.id),
+        {
+            **common,
+            "title": "Valid brand before null-kind update",
+            "client_id": 10,
+            "knowledge_base_id": 1000,
+            "knowledge_base_kind": "brand",
+        },
+    )
+    valid_brand_id = inserted.scalar_one()
+    await session.commit()
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            entry_table.update()
+            .where(entry_table.c.id == valid_brand_id)
+            .values(knowledge_base_kind=None)
+        )
+        await session.commit()
+    await session.rollback()
 
 
 def test_shared_entry_migration_refuses_a_destructive_downgrade() -> None:
