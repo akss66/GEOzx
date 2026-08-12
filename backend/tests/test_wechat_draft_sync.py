@@ -12,7 +12,10 @@ from sqlalchemy import select
 from app.config import settings
 from app.models import (
     Account,
+    AccountClient,
     ArticleImageSlot,
+    Client,
+    ClientMembership,
     ConversationThread,
     ConversationTurn,
     Event,
@@ -20,7 +23,7 @@ from app.models import (
     PlatformPublishJob,
     WechatDraftMapping,
 )
-from app.models.enums import ArticleImageSlotStatus, MaterialStatus, Platform
+from app.models.enums import ArticleImageSlotStatus, MaterialStatus, Platform, WorkspaceRole
 from app.models.publishing import (
     PlatformPublishJobOperationType,
     PlatformPublishJobStatus,
@@ -1391,4 +1394,173 @@ async def test_lineaged_readiness_block_emits_safe_step_failed_before_job_or_wri
     assert len(failed) == 1
     assert failed[0].payload["step"] == "readiness"
     assert failed[0].payload["error_code"] == "WECHAT_ARTICLE_NOT_READY"
+    assert await session.scalar(select(PlatformPublishJob.id)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_fields",
+    [
+        {"status": "failed", "retryable": True, "error_code": "http_503"},
+        {"status": "corrupt", "retryable": "yes", "error_code": None},
+    ],
+)
+async def test_failure_result_committed_before_status_crash_requires_reconciliation(
+    session, admin, tmp_path, result_fields, monkeypatch
+) -> None:
+    from app.services import publishing
+
+    account, article, version = await _article_with_selected_cover(session, admin, tmp_path)
+    job = await prepare_wechat_draft_sync_job(
+        session,
+        admin,
+        article_id=article.id,
+        request=SyncWechatDraftRequest(
+            article_version_id=version.id,
+            idempotency_key=f"wechat-sync-failure-result-{result_fields['status']}",
+            conflict_strategy="fail",
+        ),
+    )
+    job.status = PlatformPublishJobStatus.WECHAT_RUNNING
+    job.retry_count = 1
+    job_id = job.id
+    admin_id = admin.id
+    event_payloads = [
+        (
+            "intent",
+            {
+                "operation": "cover_upload",
+                "status": "committed",
+                "job_id": job.id,
+                "attempt": 1,
+            },
+        ),
+    ]
+    if result_fields["status"] != "failed":
+        event_payloads.append(
+            (
+                "result",
+                {
+                    "operation": "cover_upload",
+                    "job_id": job.id,
+                    "attempt": 1,
+                    **result_fields,
+                },
+            )
+        )
+    for phase, payload in event_payloads:
+        session.add(
+            Event(
+                type=f"wechat.draft_sync.{phase}",
+                org_id=admin.org_id,
+                account_id=account.id,
+                content_item_id=article.id,
+                idempotency_key=__import__("hashlib")
+                .sha256(f"failure-result-{result_fields['status']}:{phase}".encode())
+                .hexdigest(),
+                payload=payload,
+            )
+        )
+    await session.commit()
+    provider = _DraftClient()
+    await provider.add_permanent_cover()
+    assert provider.cover_calls == 1
+    if result_fields["status"] == "failed":
+        real_commit = session.commit
+        commit_count = 0
+
+        async def crash_after_failure_result_commit() -> None:
+            nonlocal commit_count
+            commit_count += 1
+            if commit_count == 2:
+                raise RuntimeError("simulated crash before job status commit")
+            await real_commit()
+
+        monkeypatch.setattr(session, "commit", crash_after_failure_result_commit)
+        error = WechatDraftIntegrationError(
+            "provider unavailable",
+            code="http_503",
+            retryable=True,
+            rid="safe-rid",
+            endpoint="/cgi-bin/material/add_material",
+        )
+        with pytest.raises(RuntimeError, match="before job status commit"):
+            await publishing._commit_external_failure(
+                session,
+                job,
+                operation="cover_upload",
+                error=error,
+            )
+        assert commit_count == 2
+        monkeypatch.setattr(session, "commit", real_commit)
+        await session.rollback()
+        await session.refresh(job)
+        assert job.status is PlatformPublishJobStatus.WECHAT_RUNNING
+        admin = await session.get(type(admin), admin_id)
+
+    async def capability_probe(_session, account_id: int):
+        return _capabilities(account_id)
+
+    with pytest.raises(PublishingServiceError) as recovered:
+        await execute_wechat_draft_sync_job(
+            session,
+            admin,
+            job_id=job_id,
+            capability_probe=capability_probe,
+            token_provider=_TokenProvider(),
+            draft_client=provider,
+        )
+    assert recovered.value.code == "WECHAT_DRAFT_RECONCILIATION_REQUIRED"
+    recovered_job = await session.get(PlatformPublishJob, job_id)
+    assert recovered_job.status is PlatformPublishJobStatus.WECHAT_RECONCILIATION_REQUIRED
+    assert provider.cover_calls == 1
+    assert provider.add_calls == provider.body_calls == 0
+
+    with pytest.raises(PublishingServiceError):
+        await execute_wechat_draft_sync_job(
+            session,
+            admin,
+            job_id=job_id,
+            capability_probe=capability_probe,
+            token_provider=_TokenProvider(),
+            draft_client=provider,
+        )
+    assert provider.cover_calls == 1
+    assert provider.add_calls == provider.body_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_post_sync_visible_reviewer_is_fail_closed_404(
+    client, session, admin, member, tmp_path
+) -> None:
+    account, article, version = await _article_with_selected_cover(session, admin, tmp_path)
+    workspace = Client(org_id=admin.org_id, name="Visible read-only workspace")
+    session.add(workspace)
+    await session.flush()
+    session.add_all(
+        [
+            AccountClient(account_id=account.id, client_id=workspace.id),
+            ClientMembership(
+                client_id=workspace.id,
+                user_id=member.id,
+                role=WorkspaceRole.REVIEWER,
+            ),
+        ]
+    )
+    await session.commit()
+    login = await client.post(
+        "/auth/login",
+        json={"email": "user@test.com", "password": "user-pw-123"},
+    )
+    response = await client.post(
+        f"/wechat-articles/{article.id}/draft-syncs",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        json={
+            "article_version_id": version.id,
+            "idempotency_key": "wechat-sync-reviewer-denied",
+            "expected_remote_hash": None,
+            "conflict_strategy": "fail",
+        },
+    )
+    assert response.status_code == 404
     assert await session.scalar(select(PlatformPublishJob.id)) is None

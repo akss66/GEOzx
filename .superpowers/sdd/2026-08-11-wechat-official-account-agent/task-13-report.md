@@ -137,3 +137,33 @@ are not serialized.
 
 Commit: this report is part of the atomic Task 13 feature commit; the final SHA is reported
 to the controller after commit creation.
+
+## Review fix round 1
+
+Addressed both findings from `task-13-review.md` with focused RED/GREEN coverage:
+
+1. A job left `wechat_running` after its current-attempt failure result was committed no
+   longer wedges as `WECHAT_DRAFT_SYNC_ALREADY_RUNNING`. Recovery verifies scoped job,
+   attempt, operation/intent matching, and allowlisted result shape, then moves a failed or
+   malformed result to `wechat_reconciliation_required`. The regression simulates one
+   provider call and proves both recovery and replay make zero additional external calls.
+   A normal second worker with no result remains `WECHAT_DRAFT_SYNC_ALREADY_RUNNING`.
+2. The POST approval boundary now narrowly maps a visible REVIEWER role mismatch from 403 to
+   fail-closed 404. GET behavior and the shared workspace helper are unchanged. The regression
+   proves no publish job is created.
+
+Round 1 verification after the fixes:
+
+```text
+pytest tests/test_wechat_draft_sync.py -q
+31 passed
+
+pytest tests/test_wechat_draft_sync.py tests/test_content_publishing_skill.py tests/test_wechat_draft_client.py -q
+76 passed
+
+pytest tests/test_publishing_service.py tests/test_publishing_api.py tests/test_wechat_renderer.py tests/test_wechat_article_images.py -q
+73 passed
+
+ruff / format / mypy / migration py_compile / diff check
+passed
+```

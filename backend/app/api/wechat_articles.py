@@ -134,6 +134,13 @@ async def sync_wechat_article_draft(
         return WechatDraftSyncOut.model_validate(wechat_draft_sync_out(job))
     except PublishingServiceError as exc:
         return _draft_sync_error(exc)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="微信公众号文章不存在",
+            ) from None
+        raise
 
 
 @sync_router.get(

@@ -1153,6 +1153,11 @@ async def _guard_unresolved_sync_intent(
         for event in events
         if isinstance(event.payload, dict) and event.payload.get("job_id") == job.id
     ]
+    intent_keys = {
+        (payload.get("attempt"), payload.get("operation"))
+        for event, payload in relevant
+        if event.type == "wechat.draft_sync.intent"
+    }
     result_keys = {
         (payload.get("attempt"), payload.get("operation"))
         for event, payload in relevant
@@ -1171,6 +1176,35 @@ async def _guard_unresolved_sync_intent(
         raise PublishingServiceError(
             "WECHAT_DRAFT_RECONCILIATION_REQUIRED",
             "上一次微信写入结果不明确，请先人工对账。",
+            status_code=409,
+        )
+    current_results = [
+        payload
+        for event, payload in relevant
+        if event.type == "wechat.draft_sync.result" and payload.get("attempt") == job.retry_count
+    ]
+    failed_or_malformed_result = any(
+        payload.get("status") == "failed"
+        or payload.get("status") not in {"succeeded", "failed"}
+        or not isinstance(payload.get("operation"), str)
+        or (payload.get("attempt"), payload.get("operation")) not in intent_keys
+        or (
+            payload.get("status") == "failed"
+            and (
+                not isinstance(payload.get("retryable"), bool)
+                or not isinstance(payload.get("error_code"), str)
+            )
+        )
+        for payload in current_results
+    )
+    if failed_or_malformed_result:
+        job.status = PlatformPublishJobStatus.WECHAT_RECONCILIATION_REQUIRED
+        job.last_error_code = "WECHAT_DRAFT_RECONCILIATION_REQUIRED"
+        job.last_error_message = "微信外部写入失败结果已记录，任务状态需要人工对账"
+        await session.commit()
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_RECONCILIATION_REQUIRED",
+            "上一轮微信写入已记录失败结果，但任务收口中断，请先人工对账。",
             status_code=409,
         )
     raise PublishingServiceError(
