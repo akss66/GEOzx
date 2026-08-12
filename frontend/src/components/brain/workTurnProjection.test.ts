@@ -51,29 +51,43 @@ const wechatExecutionSummary: Extract<TurnProjection, { type: "execution_summary
   tools: [],
 };
 
+const wechatWorkspaceProjection = (
+  overrides: Partial<Extract<TurnProjection, { type: "wechat_article_workspace" }>> = {},
+): Extract<TurnProjection, { type: "wechat_article_workspace" }> => ({
+  type: "wechat_article_workspace",
+  turn_id: 101,
+  skill_run_id: 10,
+  account_id: 11,
+  article_id: 42,
+  article_version_id: 4101,
+  status: "waiting_user",
+  current_action: "produce",
+  available_actions: ["generate_images", "sync_draft"],
+  ...overrides,
+});
+
 describe("projectWorkTurn", () => {
-  it("maps downstream WeChat stages only when durable step codes exist and still falls back safely", () => {
+  it("uses workspace current_action for downstream WeChat activity and keeps unknown runtime steps generic", () => {
     const model = projectWorkTurn(turn({
       status: "running",
-      projections: [wechatExecutionSummary],
+      projections: [
+        wechatExecutionSummary,
+        wechatWorkspaceProjection({ current_action: "generate_images" }),
+      ],
       runtime_overlay: {
         lastEventId: 11,
         lastSequence: 11,
         steps: {
-          generate_images: { state: "active", attempt: 1 },
-          sync_draft: { state: "waiting", attempt: 1 },
-          draft_sync_completed: { state: "done", attempt: 1 },
+          brief_resolution: { state: "done", attempt: 1 },
           unknown_internal_key: { state: "waiting", attempt: 7 },
         },
         deliverableIds: [],
       },
-    }));
+    }), { threadAccountId: 11 });
 
     expect(model.currentActivity).toBe("正在生成所选图片");
     expect(model.steps).toEqual(expect.arrayContaining([
-      { code: "generate_images", label: "正在生成所选图片", state: "active" },
-      { code: "sync_draft", label: "正在同步微信公众号草稿", state: "waiting" },
-      { code: "draft_sync_completed", label: "微信草稿已同步", state: "done" },
+      { code: "brief_resolution", label: "正在确认文章目标", state: "done" },
       { code: "unknown_internal_key", label: "执行任务", state: "waiting" },
     ]));
   });
@@ -102,7 +116,7 @@ describe("projectWorkTurn", () => {
         created_at: "2026-08-04T00:00:00Z",
         updated_at: "2026-08-04T00:00:00Z",
       },
-    }));
+    }), { threadAccountId: 11 });
 
     expect(model).toMatchObject({
       status: expected,
@@ -110,30 +124,14 @@ describe("projectWorkTurn", () => {
     });
   });
 
-  it("keeps a WeChat article action interrupt in the same waiting WorkTurn and projects a workspace link only for a valid same-turn article result", () => {
+  it("keeps a WeChat handoff in the same waiting WorkTurn and projects a workspace link only for a trusted account projection", () => {
     const model = projectWorkTurn(turn({
       status: "waiting_permission",
       turn_phase: "waiting_approval",
       assistant_response: "raw runtime response should not be the main handoff",
       projections: [
         wechatExecutionSummary,
-        {
-          type: "artifact",
-          artifact_id: 4101,
-          artifact_type: "wechat_article",
-          skill_run_id: 10,
-          account_id: 11,
-          turn_id: 101,
-          report: {
-            article_id: 42,
-            current_immutable_version: 3,
-            readiness: { status: "waiting_user" },
-            explicit_user_decisions: [
-              { action: "generate_images", status: "not_requested" },
-              { action: "sync_draft", status: "not_requested" },
-            ],
-          },
-        },
+        wechatWorkspaceProjection(),
       ],
       pending_interrupt: {
         id: 72,
@@ -141,11 +139,76 @@ describe("projectWorkTurn", () => {
         thread_id: 81,
         turn_id: 101,
         run_id: 9,
-        kind: "article_action" as never,
+        kind: "clarification",
         status: "pending",
         public_message: "Choose the next article action.",
         action_label: "Open article workspace",
-        response_schema: {},
+        response_schema: {
+          type: "object",
+          required: ["action"],
+          properties: {
+            action: {
+              type: "string",
+              enum: ["generate_images", "sync_draft"],
+            },
+          },
+        },
+        version: 1,
+        resolved_at: null,
+        created_at: "2026-08-04T00:00:00Z",
+        updated_at: "2026-08-04T00:00:00Z",
+      },
+    }));
+
+    expect(model.status).toBe("waiting_user");
+    expect(model.assistantText).toBe("文章初稿已生成");
+    expect(model.articleWorkspaceAction).toEqual({
+      articleId: 42,
+      href: "/wechat-articles/42",
+      label: "打开文章工作台",
+      title: "文章初稿已生成",
+    });
+  });
+
+  it("projects the WeChat workspace handoff from a dedicated workspace projection plus clarification schema only", () => {
+    const model = projectWorkTurn(turn({
+      status: "waiting_permission",
+      turn_phase: "waiting_approval",
+      assistant_response: "Article draft is ready.",
+      projections: [
+        wechatExecutionSummary,
+        {
+          type: "wechat_article_workspace",
+          turn_id: 101,
+          skill_run_id: 10,
+          account_id: 11,
+          article_id: 42,
+          article_version_id: 4101,
+          status: "waiting_user",
+          current_action: "produce",
+          available_actions: ["generate_images", "sync_draft"],
+        } as unknown as TurnProjection,
+      ],
+      pending_interrupt: {
+        id: 72,
+        account_id: 11,
+        thread_id: 81,
+        turn_id: 101,
+        run_id: 9,
+        kind: "clarification",
+        status: "pending",
+        public_message: "Choose the next article action.",
+        action_label: "Open article workspace",
+        response_schema: {
+          type: "object",
+          required: ["action"],
+          properties: {
+            action: {
+              type: "string",
+              enum: ["generate_images", "sync_draft"],
+            },
+          },
+        },
         version: 1,
         resolved_at: null,
         created_at: "2026-08-04T00:00:00Z",
@@ -167,39 +230,13 @@ describe("projectWorkTurn", () => {
     const crossTurn = projectWorkTurn(turn({
       projections: [
         wechatExecutionSummary,
-        {
-          type: "artifact",
-          artifact_id: 4102,
-          artifact_type: "wechat_article",
-          skill_run_id: 10,
-          account_id: 11,
-          turn_id: 999,
-          report: {
-            article_id: 77,
-            current_immutable_version: 2,
-            readiness: { status: "waiting_user" },
-            explicit_user_decisions: [],
-          },
-        },
+        wechatWorkspaceProjection({ turn_id: 999, article_id: 77 }),
       ],
     }));
     const invalidId = projectWorkTurn(turn({
       projections: [
         wechatExecutionSummary,
-        {
-          type: "artifact",
-          artifact_id: 4103,
-          artifact_type: "wechat_article",
-          skill_run_id: 10,
-          account_id: 11,
-          turn_id: 101,
-          report: {
-            article_id: 0,
-            current_immutable_version: 2,
-            readiness: { status: "waiting_user" },
-            explicit_user_decisions: [],
-          },
-        },
+        wechatWorkspaceProjection({ article_id: 0 }),
       ],
     }));
 
@@ -217,20 +254,7 @@ describe("projectWorkTurn", () => {
           ...wechatExecutionSummary,
           status: "blocked",
         },
-        {
-          type: "artifact",
-          artifact_id: 4104,
-          artifact_type: "wechat_article",
-          skill_run_id: 10,
-          account_id: 11,
-          turn_id: 101,
-          report: {
-            article_id: 42,
-            current_immutable_version: 3,
-            readiness: { status: "waiting_user" },
-            explicit_user_decisions: [{ action: "generate_images", status: "not_requested" }],
-          },
-        },
+        wechatWorkspaceProjection({ current_action: "generate_images" }),
         {
           type: "execution_blocked",
           turn_id: 101,
@@ -255,29 +279,8 @@ describe("projectWorkTurn", () => {
           ...wechatExecutionSummary,
           status: "running",
         },
-        {
-          type: "artifact",
-          artifact_id: 4105,
-          artifact_type: "wechat_article",
-          skill_run_id: 10,
-          account_id: 11,
-          turn_id: 101,
-          report: {
-            article_id: 42,
-            current_immutable_version: 4,
-            readiness: { status: "waiting_user" },
-            explicit_user_decisions: [{ action: "sync_draft", status: "requested" }],
-          },
-        },
+        wechatWorkspaceProjection({ current_action: "sync_draft" }),
       ],
-      runtime_overlay: {
-        lastEventId: 12,
-        lastSequence: 12,
-        steps: {
-          sync_draft: { state: "active", attempt: 1 },
-        },
-        deliverableIds: [],
-      },
     }));
 
     expect(model.articleWorkspaceAction?.articleId).toBe(42);
@@ -295,20 +298,7 @@ describe("projectWorkTurn", () => {
           ...wechatExecutionSummary,
           status: "blocked",
         },
-        {
-          type: "artifact",
-          artifact_id: 4106,
-          artifact_type: "wechat_article",
-          skill_run_id: 10,
-          account_id: 11,
-          turn_id: 101,
-          report: {
-            article_id: 42,
-            current_immutable_version: 5,
-            readiness: { status: "waiting_user" },
-            explicit_user_decisions: [{ action: "sync_draft", status: "requested" }],
-          },
-        },
+        wechatWorkspaceProjection({ current_action: "sync_draft" }),
         {
           type: "execution_blocked",
           turn_id: 101,

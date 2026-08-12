@@ -16,6 +16,7 @@ from app.models import (
     AgentInvocation,
     AgentRun,
     AgentToolCall,
+    ContentItem,
     ConversationThread,
     ConversationTurn,
     Deliverable,
@@ -23,6 +24,7 @@ from app.models import (
     ToolExecutionAttempt,
     TurnInterrupt,
 )
+from app.models.enums import DeliverableType
 from app.schemas.conversation import (
     ConversationAgentRunOut,
     ConversationApprovalOut,
@@ -265,6 +267,23 @@ async def _turn_projections_by_turn(
             .order_by(Deliverable.turn_id, Deliverable.id)
         )
     )
+    thread_rows = list(
+        await session.scalars(
+            select(ConversationThread).where(
+                ConversationThread.id.in_(tuple({turn.thread_id for turn in turns}))
+            )
+        )
+    )
+    content_item_ids = tuple({deliverable.content_item_id for deliverable in deliverables})
+    content_items = (
+        list(
+            await session.scalars(
+                select(ContentItem).where(ContentItem.id.in_(content_item_ids))
+            )
+        )
+        if content_item_ids
+        else []
+    )
     attempt_counts: dict[int, int] = {}
     if tool_calls:
         attempt_counts = {
@@ -290,6 +309,8 @@ async def _turn_projections_by_turn(
     invocations_by_turn = _group_by_turn(invocations, lambda row: row.turn_id or 0)
     tool_calls_by_turn = _group_by_turn(tool_calls, lambda row: row.turn_id or 0)
     deliverables_by_turn = _group_by_turn(deliverables, lambda row: row.turn_id or 0)
+    thread_account_by_id = {thread.id: thread.account_id for thread in thread_rows}
+    content_by_id = {item.id: item for item in content_items}
     projections_by_turn: dict[int, list[dict]] = {}
     result_payload_types = {
         "progress",
@@ -312,6 +333,20 @@ async def _turn_projections_by_turn(
             if isinstance(projection, dict) and projection.get("type") in result_payload_types
             if (safe := sanitize_conversation_projection(projection)) is not None
         ]
+        existing_artifact_ids = {
+            projection["artifact_id"]
+            for projection in projections
+            if projection.get("type") == "artifact" and isinstance(projection.get("artifact_id"), int)
+        }
+        for deliverable in deliverables_by_turn.get(turn.id, []):
+            artifact_projection = _deliverable_artifact_projection(
+                deliverable,
+                content_by_id=content_by_id,
+            )
+            if artifact_projection is None or artifact_projection["artifact_id"] in existing_artifact_ids:
+                continue
+            projections.append(artifact_projection)
+            existing_artifact_ids.add(artifact_projection["artifact_id"])
         turn_tool_calls = tool_calls_by_turn.get(turn.id, [])
         projections.extend(
             {
@@ -335,6 +370,15 @@ async def _turn_projections_by_turn(
         )
         if execution_summary is not None:
             projections.append(execution_summary)
+        wechat_workspace = _wechat_article_workspace_projection(
+            turn,
+            skill_run=latest_skill_run_by_turn.get(turn.id),
+            deliverables=deliverables_by_turn.get(turn.id, []),
+            content_by_id=content_by_id,
+            thread_account_by_id=thread_account_by_id,
+        )
+        if wechat_workspace is not None:
+            projections.append(wechat_workspace)
         projections_by_turn[turn.id] = projections
     return projections_by_turn
 
@@ -357,6 +401,132 @@ def _group_by_turn(
     for row in rows:
         grouped.setdefault(turn_id(row), []).append(row)
     return grouped
+
+
+def _wechat_article_workspace_projection(
+    turn: ConversationTurn,
+    *,
+    skill_run: SkillRun | None,
+    deliverables: list[Deliverable],
+    content_by_id: dict[int, ContentItem],
+    thread_account_by_id: dict[int, int],
+) -> dict | None:
+    if skill_run is None or skill_run.skill_code != "wechat_article_production":
+        return None
+    output = dict(skill_run.output_snapshot or {})
+    status = output.get("status")
+    if status not in {"waiting_user", "completed", "blocked", "failed"}:
+        return None
+    deliverable = next(
+        (
+            item
+            for item in deliverables
+            if item.type == DeliverableType.WECHAT_ARTICLE
+            and item.turn_id == turn.id
+            and item.thread_id == turn.thread_id
+            and item.skill_run_id == skill_run.id
+        ),
+        None,
+    )
+    if deliverable is None:
+        return None
+    content = content_by_id.get(deliverable.content_item_id)
+    thread_account_id = thread_account_by_id.get(turn.thread_id)
+    if (
+        content is None
+        or content.account_id is None
+        or thread_account_id is None
+        or content.account_id != thread_account_id
+    ):
+        return None
+    report = output.get("report")
+    if not isinstance(report, dict):
+        return None
+    article_id = report.get("article_id")
+    if article_id != deliverable.content_item_id:
+        return None
+    interrupt = output.get("interrupt")
+    if isinstance(interrupt, dict):
+        interrupt_version_id = interrupt.get("article_version_id")
+        if isinstance(interrupt_version_id, int) and interrupt_version_id != deliverable.id:
+            return None
+    current_action = _wechat_current_action(skill_run)
+    available_actions = _wechat_available_actions(output, report)
+    return {
+        "type": "wechat_article_workspace",
+        "turn_id": turn.id,
+        "skill_run_id": skill_run.id,
+        "account_id": content.account_id,
+        "article_id": deliverable.content_item_id,
+        "article_version_id": deliverable.id,
+        "status": status,
+        "current_action": current_action,
+        "available_actions": available_actions,
+    }
+
+
+def _wechat_current_action(skill_run: SkillRun) -> str:
+    requested_action = dict(skill_run.input_snapshot or {}).get("requested_action")
+    if requested_action in {"produce", "generate_images", "sync_draft"}:
+        return requested_action
+    report = dict(skill_run.output_snapshot or {}).get("report")
+    if isinstance(report, dict):
+        for item in report.get("explicit_user_decisions", []):
+            if (
+                isinstance(item, dict)
+                and item.get("status") == "executed"
+                and item.get("action") in {"generate_images", "sync_draft"}
+            ):
+                return str(item["action"])
+    return "produce"
+
+
+def _wechat_available_actions(output: dict, report: dict) -> list[str]:
+    ordered: list[str] = []
+
+    def collect(values: object) -> None:
+        if not isinstance(values, list):
+            return
+        for value in values:
+            if value in {"generate_images", "sync_draft"} and value not in ordered:
+                ordered.append(value)
+
+    interrupt = output.get("interrupt")
+    if isinstance(interrupt, dict):
+        collect(interrupt.get("available_actions"))
+    explicit = report.get("explicit_user_decisions")
+    if isinstance(explicit, list):
+        collect(
+            [
+                item.get("action")
+                for item in explicit
+                if isinstance(item, dict)
+                and item.get("action") in {"generate_images", "sync_draft"}
+            ]
+        )
+    return ordered
+
+
+def _deliverable_artifact_projection(
+    deliverable: Deliverable,
+    *,
+    content_by_id: dict[int, ContentItem],
+) -> dict | None:
+    content = content_by_id.get(deliverable.content_item_id)
+    if content is None or content.account_id is None:
+        return None
+    payload = deliverable.payload if isinstance(deliverable.payload, dict) else {}
+    artifact_type = payload.get("artifact_type")
+    if not isinstance(artifact_type, str) or not artifact_type.strip():
+        artifact_type = deliverable.type.value
+    return {
+        "type": "artifact",
+        "turn_id": deliverable.turn_id,
+        "artifact_id": deliverable.id,
+        "artifact_type": artifact_type,
+        "skill_run_id": deliverable.skill_run_id,
+        "account_id": content.account_id,
+    }
 
 
 def _execution_summary_from_loaded(

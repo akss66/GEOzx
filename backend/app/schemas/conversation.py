@@ -168,6 +168,20 @@ class ConversationArtifactProjectionOut(ConversationProjectionModel):
     account_id: int = Field(gt=0)
 
 
+class ConversationWechatArticleWorkspaceProjectionOut(ConversationProjectionModel):
+    type: Literal["wechat_article_workspace"] = "wechat_article_workspace"
+    skill_run_id: int = Field(gt=0)
+    account_id: int = Field(gt=0)
+    article_id: int = Field(gt=0)
+    article_version_id: int = Field(gt=0)
+    status: Literal["waiting_user", "completed", "blocked", "failed"]
+    current_action: Literal["produce", "generate_images", "sync_draft"]
+    available_actions: list[Literal["generate_images", "sync_draft"]] = Field(
+        default_factory=list,
+        max_length=2,
+    )
+
+
 class ConversationAccountDataProjectionOut(ConversationProjectionModel):
     type: Literal["account_data"] = "account_data"
     account_id: int = Field(gt=0)
@@ -230,6 +244,7 @@ ConversationProjectionOut: TypeAlias = Annotated[
     | ConversationExecutionSummaryOut
     | ConversationApprovalProjectionOut
     | ConversationArtifactProjectionOut
+    | ConversationWechatArticleWorkspaceProjectionOut
     | ConversationAccountDataProjectionOut
     | ConversationExecutionBlockedProjectionOut,
     Field(discriminator="type"),

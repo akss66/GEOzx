@@ -46,7 +46,10 @@ export function TurnStream({
   sourceArtifactOverrides?: Record<number, Artifact>;
   onRestartTurn?: (turn: ConversationTurn) => void;
 }) {
-  const projectedTurns = thread.turns.map((turn) => ({ turn, view: projectWorkTurn(turn) }));
+  const projectedTurns = thread.turns.map((turn) => ({
+    turn,
+    view: projectWorkTurn(turn, { threadAccountId: thread.account_id }),
+  }));
   const orbOwnerKey = lastActiveWorkTurnKey(projectedTurns);
 
   return (
@@ -420,6 +423,7 @@ function isKnownProjection(projection: TurnProjection) {
     "execution_summary",
     "approval",
     "artifact",
+    "wechat_article_workspace",
     "account_data",
     "execution_blocked",
   ].includes(projection.type);

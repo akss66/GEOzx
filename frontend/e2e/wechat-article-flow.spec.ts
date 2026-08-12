@@ -14,7 +14,7 @@ const primaryAccount = {
   client_id: null,
   client_ids: [],
   nickname: "公众号主账号",
-  platform: "wechat",
+  platform: "wechat_official_account",
   group_id: null,
   project_id: null,
   project_ids: [],
@@ -45,8 +45,13 @@ test("wechat article handoff stays in one WorkTurn and survives refresh plus acc
   const scenario = await mockWechatArticleApi(page);
   await loginAsAdmin(page);
 
-  await page.locator(".tz-account-trigger").click();
-  await page.locator(".tz-account-panel button", { hasText: primaryAccount.nickname }).click();
+  await page.goto("/accounts");
+  const primaryAccountCard = page.locator(".account-object-card", { hasText: primaryAccount.nickname });
+  await expect(primaryAccountCard).toHaveCount(1);
+  await primaryAccountCard.getByRole("button", { name: "设为当前" }).click();
+
+  await page.goto("/");
+  await expect(page.locator(".tz-account-trigger")).toContainText(primaryAccount.nickname);
 
   const composer = page.getByLabel("运营大脑消息");
   await composer.fill("写一篇关于夏季门店陈列的公众号文章");
@@ -74,7 +79,7 @@ test("wechat article handoff stays in one WorkTurn and survives refresh plus acc
   await page.getByRole("button", { name: "获取提示词" }).click();
   await expect(page.getByText("适合门店橱窗海报的夏季陈列主视觉提示词")).toBeVisible();
 
-  const titleInput = page.getByLabel("标题");
+  const titleInput = page.getByRole("textbox", { name: "标题" });
   await titleInput.fill("夏季门店陈列新标题");
   await page.waitForTimeout(2200);
   await expect(page.getByRole("button", { name: "查看差异" })).toBeVisible();
@@ -107,10 +112,22 @@ async function loginAsAdmin(page: Page) {
 
 async function installBrowserState(page: Page) {
   await page.addInitScript(() => {
+    if (sessionStorage.getItem("__wechat_flow_bootstrapped") === "1") {
+      return;
+    }
     sessionStorage.clear();
     localStorage.removeItem("tongzhouxing_current_workspace");
     localStorage.removeItem("tongzhouxing_brain_active_conversation_threads");
     localStorage.removeItem("tongzhouxing_brain_active_tasks");
+    localStorage.setItem("tongzhouxing_account_matrix_preferences", JSON.stringify({
+      version: 1,
+      view: "cards",
+      projectId: null,
+      dimension: "all",
+      platform: "all",
+      groupId: null,
+    }));
+    sessionStorage.setItem("__wechat_flow_bootstrapped", "1");
   });
 }
 
@@ -137,6 +154,19 @@ async function mockWechatArticleApi(page: Page) {
     if (method === "GET" && path === "/projects") return json(route, []);
     if (method === "GET" && path === "/account-groups") return json(route, []);
     if (method === "GET" && path === "/clients") return json(route, []);
+    if (method === "GET" && path === "/account-matrix") {
+      return json(route, {
+        platforms: [{
+          platform: "wechat_official_account",
+          total: 2,
+          active: 2,
+          integration_status: "connected",
+          auth_status: "authorized",
+          data_sync_status: "healthy",
+        }],
+      });
+    }
+    if (method === "GET" && path === "/platform-integrations") return json(route, []);
     if (method === "GET" && path === "/notifications") return json(route, []);
     if (method === "GET" && path === "/notifications/unread-count") return json(route, { count: 0 });
     if (method === "GET" && path === "/skills") return json(route, { data: [] });
@@ -207,7 +237,7 @@ async function mockWechatArticleApi(page: Page) {
         projections: turn.projections,
       });
     }
-    if (method === "GET" && /^\/conversation-threads\/\d+\/events$/.test(path)) {
+    if (method === "GET" && /^\/conversation-threads\/\d+\/(?:events|event-stream)$/.test(path)) {
       return json(route, { data: [] });
     }
     if (method === "GET" && path === "/artifacts") {
@@ -345,21 +375,15 @@ function wechatArticleTurn(message: string, clientMessageId: string) {
         tools: [],
       },
       {
-        type: "artifact",
-        artifact_id: 9001,
-        artifact_type: "wechat_article",
+        type: "wechat_article_workspace",
+        turn_id: turnId,
         skill_run_id: 6101,
         account_id: primaryAccount.id,
-        turn_id: turnId,
-        report: {
-          article_id: articleId,
-          current_immutable_version: 3,
-          readiness: { status: "waiting_user" },
-          explicit_user_decisions: [
-            { action: "generate_images", status: "not_requested" },
-            { action: "sync_draft", status: "not_requested" },
-          ],
-        },
+        article_id: articleId,
+        article_version_id: 9001,
+        status: "waiting_user",
+        current_action: "produce",
+        available_actions: ["generate_images", "sync_draft"],
       },
     ],
     pending_interrupt: {
@@ -368,11 +392,20 @@ function wechatArticleTurn(message: string, clientMessageId: string) {
       thread_id: threadId,
       turn_id: turnId,
       run_id: 5101,
-      kind: "article_action",
+      kind: "clarification",
       status: "pending",
       public_message: "Choose the next article action.",
       action_label: "Open article workspace",
-      response_schema: {},
+      response_schema: {
+        type: "object",
+        required: ["action"],
+        properties: {
+          action: {
+            type: "string",
+            enum: ["generate_images", "sync_draft"],
+          },
+        },
+      },
       version: 1,
       resolved_at: null,
       created_at: createdAt,

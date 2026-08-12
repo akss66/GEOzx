@@ -799,6 +799,17 @@ export type TurnProjection =
       turn_id?: number;
     }
   | {
+      type: "wechat_article_workspace";
+      turn_id: number;
+      skill_run_id: number;
+      account_id: number;
+      article_id: number;
+      article_version_id: number;
+      status: "waiting_user" | "completed" | "blocked" | "failed";
+      current_action: "produce" | "generate_images" | "sync_draft";
+      available_actions: Array<"generate_images" | "sync_draft">;
+    }
+  | {
       type: "account_data";
       account_id: number;
       skill_code: string;
@@ -1007,7 +1018,7 @@ export interface ConversationTurnEvent {
   created_at: string;
 }
 
-export type TurnInterruptKind = "clarification" | "approval" | "manual_pause" | "article_action";
+export type TurnInterruptKind = "clarification" | "approval" | "manual_pause";
 export type TurnInterruptStatus =
   | "pending"
   | "resolved"
