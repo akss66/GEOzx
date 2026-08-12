@@ -656,6 +656,83 @@ async def test_resolve_stale_pending_version_is_conflict(session, admin) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resolution", [{}, {"optional_note": "still missing"}])
+async def test_resolve_rejects_missing_json_schema_required_fields(
+    session,
+    admin,
+    resolution,
+) -> None:
+    """A malformed answer must not consume a durable clarification."""
+
+    _account, _thread, _turn, run, *_ = await _runtime_context(
+        session, admin, key=f"resolve-required-{len(resolution)}"
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="clarification",
+        semantic_key=f"resolve-required-{len(resolution)}",
+        public_message="Need the primary call to action.",
+        response_schema={
+            "type": "object",
+            "required": ["primary_cta"],
+            "properties": {"primary_cta": {"type": "object"}},
+            "additionalProperties": False,
+        },
+    )
+    interrupt_id = requested.interrupt.id
+    await session.commit()
+
+    with pytest.raises(Exception) as exc_info:
+        await resolve_interrupt(
+            session,
+            user=admin,
+            interrupt_id=interrupt_id,
+            expected_version=1,
+            idempotency_key=f"required-resolution-{len(resolution)}",
+            resolution=resolution,
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    await session.refresh(requested.interrupt)
+    await session.refresh(run)
+    assert requested.interrupt.status == "pending"
+    assert requested.interrupt.version == 1
+    assert run.status == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_resolve_keeps_schema_less_legacy_interrupt_compatible(session, admin) -> None:
+    """Legacy object interrupts without declared required fields still accept {}."""
+
+    _account, _thread, _turn, run, *_ = await _runtime_context(
+        session, admin, key="resolve-legacy-empty"
+    )
+    requested = await request_interrupt(
+        session,
+        user=admin,
+        run_id=run.id,
+        kind="manual_pause",
+        semantic_key="resolve-legacy-empty",
+        public_message="Paused for optional operator context.",
+        response_schema={"type": "object"},
+    )
+    await session.commit()
+
+    result = await resolve_interrupt(
+        session,
+        user=admin,
+        interrupt_id=requested.interrupt.id,
+        expected_version=1,
+        idempotency_key="legacy-empty-resolution",
+        resolution={},
+    )
+
+    assert result.interrupt.status == "resolved"
+
+
+@pytest.mark.asyncio
 async def test_resolve_cross_user_account_is_404(client, session, admin, member) -> None:
     _account, _thread, _turn, run, *_ = await _runtime_context(
         session, admin, key="resolve-hidden"

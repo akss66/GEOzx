@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,7 @@ from app.models import (
     User,
 )
 from app.models.enums import BrainTaskStatus
+from app.orchestrator.skills.wechat_article_production import resolve_missing_primary_cta
 from app.services.composite_skill_runs import lock_composite_finish_approval
 from app.services.runtime_locking import (
     RuntimeRootLock,
@@ -97,6 +99,13 @@ def _conflict(code: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={"code": code, "message": message},
+    )
+
+
+def _invalid_resolution(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={"code": "INTERRUPT_RESOLUTION_INVALID", "message": message},
     )
 
 
@@ -366,6 +375,35 @@ async def resolve_interrupt(
             "The interrupt changed before this response was submitted.",
         )
 
+    _validate_clarification_resolution(interrupt, canonical_resolution)
+
+    resumed_structured_input: dict | None = None
+    resumed_skill: SkillRun | None = None
+    if interrupt.kind == "clarification" and interrupt.skill_run_id is not None:
+        resumed_skill = await session.get(SkillRun, interrupt.skill_run_id)
+        if (
+            resumed_skill is not None
+            and resumed_skill.skill_code == "wechat_article_production"
+            and resumed_skill.run_id == discovered.run.id
+            and resumed_skill.turn_id == discovered.turn.id
+            and resumed_skill.thread_id == discovered.thread.id
+            and resumed_skill.org_id == discovered.run.org_id
+        ):
+            try:
+                resolved_input = resolve_missing_primary_cta(
+                    dict(resumed_skill.input_snapshot or {}),
+                    canonical_resolution,
+                )
+            except ValidationError as exc:
+                raise _invalid_resolution(
+                    "Interrupt response does not complete the required article brief."
+                ) from exc
+            if resolved_input is not None:
+                resumed_structured_input = resolved_input.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+
     now = datetime.now(UTC)
     claimed = await session.execute(
         update(TurnInterrupt)
@@ -484,6 +522,11 @@ async def resolve_interrupt(
                 "resolution_hash": resolution_hash,
             },
             **(
+                {"trusted_structured_input": resumed_structured_input}
+                if resumed_structured_input is not None
+                else {}
+            ),
+            **(
                 {
                     "operation": "resume_permission",
                     "tool_call_id": interrupt.source_id,
@@ -493,6 +536,9 @@ async def resolve_interrupt(
                 else {}
             ),
         }
+        if resumed_structured_input is not None and resumed_skill is not None:
+            resumed_skill.status = "running"
+            resumed_skill.error_code = None
         turn.status = "queued"
         if task is not None:
             task.status = BrainTaskStatus.RUNNING
@@ -819,6 +865,73 @@ def _canonical_resolution(value: dict) -> tuple[dict, str]:
     )
     normalized = json.loads(encoded)
     return normalized, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _validate_clarification_resolution(
+    interrupt: TurnInterrupt,
+    resolution: dict,
+) -> None:
+    """Validate new object schemas while preserving schema-less legacy pauses."""
+
+    if interrupt.kind != "clarification":
+        return
+    schema = dict(interrupt.response_schema or {})
+    required = schema.get("required")
+    properties = schema.get("properties")
+    if (
+        schema.get("type") != "object"
+        or not isinstance(required, list)
+        or not required
+        or not all(isinstance(field, str) and field for field in required)
+        or len(required) != len(set(required))
+        or not isinstance(properties, dict)
+        or any(field not in properties for field in required)
+    ):
+        return
+    missing = [field for field in required if field not in resolution]
+    if missing:
+        raise _invalid_resolution(
+            "Interrupt response is missing required fields: " + ", ".join(missing)
+        )
+    if schema.get("additionalProperties") is False:
+        unexpected = sorted(set(resolution) - set(properties))
+        if unexpected:
+            raise _invalid_resolution(
+                "Interrupt response contains unexpected fields: " + ", ".join(unexpected)
+            )
+    for field, value in resolution.items():
+        property_schema = properties.get(field)
+        if isinstance(property_schema, dict) and not _matches_property_schema(
+            value,
+            property_schema,
+        ):
+            raise _invalid_resolution(
+                f"Interrupt response field does not match its schema: {field}"
+            )
+
+
+def _matches_property_schema(value: object, schema: dict) -> bool:
+    if "const" in schema and value != schema["const"]:
+        return False
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return False
+    expected_type = schema.get("type")
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "boolean":
+        return type(value) is bool
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return expected_type is None
 
 
 def _interrupt_matches_runtime(

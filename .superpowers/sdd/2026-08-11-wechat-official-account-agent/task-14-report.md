@@ -55,3 +55,37 @@ All production behavior was introduced after a focused failing test:
 ## Commit
 
 Atomic commit: `feat: orchestrate WeChat article production` (SHA reported with the handoff because a commit cannot contain its own hash).
+
+## Fix round 1/5 — durable clarification resume
+
+Independent review found two gaps in the shipped clarification path. Both fixes followed RED/GREEN TDD against the real persistence boundaries:
+
+- Resolution validation RED: strict clarification schemas using JSON Schema `required` accepted `{}` and missing required fields. The focused run reported 2 failures while a schema-less legacy interrupt remained compatible. `resolve_interrupt` now validates only clarification object schemas that declare a well-formed non-empty `required` list backed by `properties`; missing, unexpected, type/enum/const-mismatched values fail with `INTERRUPT_RESOLUTION_INVALID` before any status mutation. Legacy schemas without this contract remain unchanged.
+- Worker recovery RED: `resolve_interrupt -> queued AgentRun -> _execute_v2_conversation_run -> execute_conversation_turn -> SkillRuntime` returned the original waiting result because the answer existed only under `resume_interrupt`. The resolver now recognizes only the same-run/same-thread/same-turn `wechat_article_production` SkillRun, merges only `primary_cta` into its frozen pending brief, revalidates the complete `ArticleBrief`, persists JSON-mode server-owned `trusted_structured_input`, and advances that SkillRun for recovery. The runtime accepts only the exact frozen-to-resolved transition tied to that persisted clarification; all other changed structured input still raises `SKILL_RECOVERY_INPUT_CONFLICT`.
+- JSON boundary RED: the server-owned trusted input was converted back to Python-mode `AnyHttpUrl` before constructing the JSON-valued `CapabilityRequest`. `_capability_request_payload` now emits the validated model in JSON mode. The real worker test proves URL-bearing CTA input crosses this boundary.
+- Domain validation RED: a present but empty `primary_cta` leaked a Pydantic error. It now returns HTTP 422 without resolving or versioning the interrupt.
+
+Fix-round scope approved by the controller:
+
+- `backend/app/services/turn_interrupts.py` — transactional resolution validation and scoped trusted-input projection.
+- `backend/app/services/turn_execution.py` — one-line JSON serialization correction at the trusted-input boundary.
+- `backend/tests/test_turn_interrupts_api.py` — required-field and legacy compatibility regression tests.
+- Task 14-owned Runtime, WeChat Skill contract/helper, and test files.
+
+Fix-round verification:
+
+- Focused strict/legacy interrupt slice: 3 passed.
+- Focused real worker recovery and invalid CTA slice: 2 passed.
+- Capability request, conversation submission, turn execution, and full interrupt API regression: 129 passed.
+- Required Task 14 gate: 34 passed in 18.10s.
+- Ruff check passed for every changed production and test file; Task 14-owned new/modified files pass Ruff format checks.
+- Full-file Ruff format checks still report unrelated pre-existing formatting deltas in the legacy portions of `skill_runtime.py`, `turn_execution.py`, `turn_interrupts.py`, and the old interrupt test file; no bulk formatting was applied.
+- Targeted mypy reports 35 baseline errors in the pre-existing large Runtime/service files (34 in `skill_runtime.py`, one existing SQLAlchemy `rowcount` typing error in `turn_interrupts.py`); no error points to a newly added fix-round line.
+- `git diff --check` is clean, and no credential/private-key pattern is present in the fix diff.
+
+Fix-round self-review:
+
+- The resolution cannot replace account, org, run, thread, skill code, requested action, or other frozen input. The pure WeChat helper accepts exactly `{primary_cta}` and reconstructs the complete input from server-frozen state.
+- Invalid resolution is rejected before the interrupt update statement, so the interrupt remains pending and the original waiting runtime state is preserved.
+- A successful resume retains one ConversationTurn, one AgentRun, one SkillRun, and exactly the three declared expert invocations. Replaying the worker result performs no duplicate expert or artifact work.
+- No new runtime, queue, dependency, image-generation side effect, draft-sync side effect, or external publish path was added.

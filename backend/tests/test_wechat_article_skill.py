@@ -41,6 +41,8 @@ from app.orchestrator.skills.registry import skill_registry
 from app.schemas.capability_request import CapabilityRequest
 from app.schemas.conversation import TurnExecutionMode
 from app.services.image_generation import ImageGenerationResult
+from app.services.turn_interrupts import resolve_interrupt
+from app.worker import _execute_v2_conversation_run
 
 
 def _brief(*, include_primary_cta: bool = True) -> dict:
@@ -391,7 +393,157 @@ async def test_skill_waits_for_missing_primary_cta_without_creating_duplicate_tu
         await session.scalars(select(TurnInterrupt).where(TurnInterrupt.run_id == run.id))
     )
     assert len(interrupts) == 1
-    assert interrupts[0].response_schema["required_fields"] == ["primary_cta"]
+    assert interrupts[0].response_schema["required"] == ["primary_cta"]
+
+
+@pytest.mark.asyncio
+async def test_worker_resumes_missing_cta_on_same_turn_without_duplicate_experts(
+    session,
+    admin,
+    monkeypatch,
+) -> None:
+    """Exercise resolve -> queued run -> worker -> recovered SkillRuntime end to end."""
+
+    account, thread, turn, run = await _wechat_scope(
+        session,
+        admin,
+        key="wechat-resume-primary-cta",
+    )
+    original_request = _request(
+        admin=admin,
+        account=account,
+        thread=thread,
+        turn=turn,
+        run=run,
+        brief=_brief(include_primary_cta=False),
+    )
+    run.request_payload = {
+        **dict(run.request_payload or {}),
+        "client_message_id": run.client_message_id,
+        "execution_preference": "FORMAL_TASK",
+        "requested_skill_code": "wechat_article_production",
+        "trusted_structured_input": original_request.structured_input,
+    }
+    harness = _ArticleHarness()
+    runtime = SkillRuntime(harness=harness)
+    monkeypatch.setattr("app.services.turn_execution.skill_runtime", runtime)
+    waiting = await runtime.execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="wechat_article_production",
+        capability_request=original_request,
+    )
+    assert waiting.status == "waiting_user"
+    interrupt = await session.scalar(select(TurnInterrupt).where(TurnInterrupt.run_id == run.id))
+    assert interrupt is not None
+
+    resolved = await resolve_interrupt(
+        session,
+        user=admin,
+        interrupt_id=interrupt.id,
+        expected_version=interrupt.version,
+        idempotency_key="wechat-resume-primary-cta",
+        resolution={"primary_cta": _brief()["primary_cta"]},
+    )
+    assert resolved.run.id == run.id
+    assert resolved.run.status == "queued"
+    assert set(resolved.run.request_payload["trusted_structured_input"]) == {
+        "brief",
+        "requested_action",
+        "sync_confirmed",
+    }
+
+    result = await _execute_v2_conversation_run(
+        session,
+        run=resolved.run,
+        worker_id="wechat-resume-primary-cta-worker",
+    )
+
+    assert result.status == "waiting_user"
+    assert result.projections[0]["artifact_type"] == "wechat_article"
+    replay = await _execute_v2_conversation_run(
+        session,
+        run=resolved.run,
+        worker_id="wechat-resume-primary-cta-worker",
+    )
+    assert replay == result
+    assert resolved.run.id == run.id
+    assert resolved.run.turn_id == turn.id
+    assert (
+        await session.scalar(
+            select(func.count(ConversationTurn.id)).where(ConversationTurn.thread_id == thread.id)
+        )
+        == 1
+    )
+    assert harness.calls == [
+        AgentCode.CONTENT_DIRECTOR,
+        AgentCode.EDITOR,
+        AgentCode.ART_DIRECTOR,
+    ]
+    assert (
+        await session.scalar(select(func.count(AgentRun.id)).where(AgentRun.turn_id == turn.id))
+        == 1
+    )
+    assert (
+        await session.scalar(select(func.count(SkillRun.id)).where(SkillRun.run_id == run.id)) == 1
+    )
+    assert (
+        await session.scalar(
+            select(func.count(AgentInvocation.id)).where(AgentInvocation.run_id == run.id)
+        )
+        == 3
+    )
+
+
+@pytest.mark.asyncio
+async def test_wechat_cta_interrupt_rejects_invalid_cta_without_resolving(
+    session,
+    admin,
+) -> None:
+    """A present but invalid CTA cannot consume the domain clarification."""
+
+    account, thread, turn, run = await _wechat_scope(
+        session,
+        admin,
+        key="wechat-invalid-primary-cta",
+    )
+    waiting = await SkillRuntime().execute(
+        session,
+        user=admin,
+        thread=thread,
+        turn=turn,
+        run=run,
+        skill_code="wechat_article_production",
+        capability_request=_request(
+            admin=admin,
+            account=account,
+            thread=thread,
+            turn=turn,
+            run=run,
+            brief=_brief(include_primary_cta=False),
+        ),
+    )
+    assert waiting.status == "waiting_user"
+    interrupt = await session.scalar(select(TurnInterrupt).where(TurnInterrupt.run_id == run.id))
+    assert interrupt is not None
+
+    with pytest.raises(Exception) as exc_info:
+        await resolve_interrupt(
+            session,
+            user=admin,
+            interrupt_id=interrupt.id,
+            expected_version=interrupt.version,
+            idempotency_key="wechat-invalid-primary-cta",
+            resolution={"primary_cta": {}},
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    await session.refresh(interrupt)
+    assert interrupt.status == "pending"
+    assert interrupt.version == 1
 
 
 @pytest.mark.asyncio

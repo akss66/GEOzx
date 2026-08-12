@@ -897,7 +897,7 @@ def _capability_request_payload(
         raise PermissionError("trusted structured input Skill is unavailable") from exc
     validated = definition.input_model.model_validate(trusted)
     payload["structured_input"] = validated.model_dump(
-        mode="python",
+        mode="json",
         exclude_none=True,
     )
     return payload

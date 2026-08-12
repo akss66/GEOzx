@@ -40,6 +40,36 @@ class WechatArticleProductionInput(BaseModel):
         return value
 
 
+def resolve_missing_primary_cta(
+    frozen_input: dict[str, Any],
+    resolution: dict[str, Any],
+) -> WechatArticleProductionInput | None:
+    """Resolve only the server-frozen missing CTA clarification transition."""
+
+    input_payload = {
+        key: value
+        for key, value in frozen_input.items()
+        if key in WechatArticleProductionInput.model_fields
+    }
+    parsed = WechatArticleProductionInput.model_validate(input_payload)
+    if (
+        parsed.requested_action != "produce"
+        or parsed.brief is not None
+        or parsed.pending_brief is None
+        or set(resolution) != {"primary_cta"}
+    ):
+        return None
+    brief = ArticleBrief.model_validate(
+        {**parsed.pending_brief, "primary_cta": resolution["primary_cta"]}
+    )
+    return WechatArticleProductionInput.model_validate(
+        {
+            **parsed.model_dump(mode="json", exclude={"pending_brief", "brief"}),
+            "brief": brief.model_dump(mode="json"),
+        }
+    )
+
+
 class WechatArticleProductionOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -89,4 +119,5 @@ __all__ = [
     "WechatArticleProductionInput",
     "WechatArticleProductionOutput",
     "WechatArticleImageSlotPlan",
+    "resolve_missing_primary_cta",
 ]

@@ -110,6 +110,7 @@ from app.orchestrator.skills.visual_brief_generation import (
 from app.orchestrator.skills.wechat_article_production import (
     WechatArticleImageSlotPlan,
     WechatArticleProductionInput,
+    resolve_missing_primary_cta,
 )
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
@@ -601,7 +602,36 @@ class SkillRuntime:
                     **_server_skill_context_snapshot(server_context),
                 }
                 if requested_snapshot != frozen_snapshot:
-                    raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
+                    resolved_input = None
+                    resume_interrupt = dict(run.request_payload or {}).get("resume_interrupt")
+                    if (
+                        definition.code == "wechat_article_production"
+                        and isinstance(resume_interrupt, dict)
+                        and resume_interrupt.get("kind") == "clarification"
+                        and isinstance(resume_interrupt.get("resolution"), dict)
+                    ):
+                        resolved_input = resolve_missing_primary_cta(
+                            frozen_snapshot,
+                            resume_interrupt["resolution"],
+                        )
+                    resolved_snapshot = (
+                        {
+                            **{
+                                key: value
+                                for key, value in frozen_snapshot.items()
+                                if key not in definition.input_model.model_fields
+                            },
+                            **resolved_input.model_dump(mode="json"),
+                        }
+                        if resolved_input is not None
+                        else None
+                    )
+                    if resolved_snapshot != requested_snapshot:
+                        raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
+                    recovery_candidate.input_snapshot = requested_snapshot
+                    recovery_candidate.input_hash = skill_input_hash(requested_snapshot)
+                    frozen_snapshot = requested_snapshot
+                    frozen_input = requested_input
         else:
             frozen_input = _validated_skill_input(
                 definition=definition,
@@ -1783,7 +1813,7 @@ class SkillRuntime:
             action_label=f"补充《{article_name}》操作信息",
             response_schema={
                 "type": "object",
-                "required_fields": required_fields,
+                "required": required_fields,
                 "properties": {
                     field: (
                         {"type": "boolean"}
