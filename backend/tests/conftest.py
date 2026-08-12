@@ -9,6 +9,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -30,6 +31,27 @@ def _sqlite_article_document_is_valid(document: str | None) -> int:
     except (TypeError, ValueError, ValidationError):
         return 0
     return 1
+
+
+def _bind_sqlite_article_document_check(dbapi_connection) -> None:
+    module_name = type(dbapi_connection).__module__.lower()
+    if "sqlite" not in module_name:
+        return
+    if hasattr(dbapi_connection, "run_async"):
+        dbapi_connection.run_async(
+            lambda raw_connection: raw_connection.create_function(
+                "wechat_article_document_is_valid", 1, _sqlite_article_document_is_valid
+            )
+        )
+        return
+    create_function = getattr(dbapi_connection, "create_function", None)
+    if callable(create_function):
+        create_function("wechat_article_document_is_valid", 1, _sqlite_article_document_is_valid)
+
+
+@event.listens_for(Engine, "connect")
+def _register_sqlite_article_document_check(dbapi_connection, _connection_record) -> None:
+    _bind_sqlite_article_document_check(dbapi_connection)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -57,14 +79,6 @@ async def session():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _register_article_document_check(dbapi_connection, _connection_record) -> None:
-        dbapi_connection.run_async(
-            lambda raw_connection: raw_connection.create_function(
-                "wechat_article_document_is_valid", 1, _sqlite_article_document_is_valid
-            )
-        )
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -37,6 +37,18 @@ const secondaryAccount = {
 const threadId = 4001;
 const turnId = 4101;
 const articleId = 42;
+const realSmokeOrgName = process.env.WECHAT_SMOKE_TEST_ORG_NAME?.trim() ?? "";
+const realSmokeAccountName = process.env.WECHAT_SMOKE_TEST_ACCOUNT_NAME?.trim() ?? "";
+
+test("real WeChat smoke requires explicit operator-approved org and account names", async () => {
+  test.skip(
+    !realSmokeOrgName || !realSmokeAccountName,
+    "Real WeChat smoke is disabled until one test organization and one test公众号 are explicitly named.",
+  );
+
+  expect(realSmokeOrgName).not.toBe("");
+  expect(realSmokeAccountName).not.toBe("");
+});
 
 test("wechat article handoff stays in one WorkTurn and survives refresh plus account switching", async ({
   page,

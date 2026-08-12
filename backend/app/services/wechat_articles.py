@@ -17,6 +17,7 @@ from app.models import (
     ArticleWorkingCopy,
     ContentItem,
     Deliverable,
+    Event,
     KnowledgeCitation,
     User,
 )
@@ -75,6 +76,26 @@ def _validated_article_document(document: ArticleDocument | dict) -> ArticleDocu
 
 def _declared_citation_ids(document: ArticleDocument) -> set[int]:
     return {citation_id for claim in document.claims for citation_id in claim.citation_ids}
+
+
+def _record_article_event(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    org_id: int,
+    account_id: int,
+    article_id: int,
+    payload: dict[str, int | str | float],
+) -> None:
+    session.add(
+        Event(
+            type=event_type,
+            org_id=org_id,
+            account_id=account_id,
+            content_item_id=article_id,
+            payload=payload,
+        )
+    )
 
 
 async def _map_article_version_citations(
@@ -193,6 +214,31 @@ async def create_article(
         )
         session.add_all([content_item, working_copy, first_version])
         await session.flush()
+        _record_article_event(
+            session,
+            event_type="wechat.article.created",
+            org_id=account.org_id,
+            account_id=account.id,
+            article_id=content_item.id,
+            payload={
+                "account_id": account.id,
+                "article_id": content_item.id,
+            },
+        )
+        _record_article_event(
+            session,
+            event_type="wechat.article.initial_draft_ready",
+            org_id=account.org_id,
+            account_id=account.id,
+            article_id=content_item.id,
+            payload={
+                "account_id": account.id,
+                "article_id": content_item.id,
+                "article_version_id": first_version.id,
+                "version": 1,
+                "trigger": "first_ai_draft",
+            },
+        )
         await _map_article_version_citations(
             session,
             deliverable=first_version,
@@ -262,6 +308,17 @@ async def freeze_article_version(
             Deliverable.type == DeliverableType.WECHAT_ARTICLE,
         )
     )
+    previous_version = None
+    if current_version is not None:
+        previous_version_result = await session.execute(
+            select(Deliverable).where(
+                Deliverable.content_item_id == content_item.id,
+                Deliverable.agent_code == ARTICLE_VERSION_AGENT_CODE,
+                Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+                Deliverable.version == current_version,
+            )
+        )
+        previous_version = previous_version_result.scalar_one_or_none()
     next_version = (current_version or 0) + 1
     deliverable = Deliverable(
         content_item_id=content_item.id,
@@ -291,6 +348,26 @@ async def freeze_article_version(
         )
         raise ArticleFreezeConflict(current_version or 0) from exc
     working_copy.based_on_deliverable_id = deliverable.id
+    text_semantic_change_ratio = 0.0
+    if previous_version is not None:
+        previous_document = _validated_article_document(previous_version.payload["document"])
+        diff = diff_versions(previous_document, validated_document)
+        text_semantic_change_ratio = float(diff["textSemanticChangeRatio"])
+    _record_article_event(
+        session,
+        event_type="wechat.article.version_saved",
+        org_id=account.org_id,
+        account_id=account.id,
+        article_id=content_item.id,
+        payload={
+            "account_id": account.id,
+            "article_id": content_item.id,
+            "article_version_id": deliverable.id,
+            "version": next_version,
+            "trigger": trigger,
+            "text_semantic_change_ratio": text_semantic_change_ratio,
+        },
+    )
     await session.commit()
     await session.refresh(deliverable)
     await session.refresh(working_copy)
@@ -430,8 +507,10 @@ async def validate_article_for_sync(
         invalid = not claim.citation_ids
         for citation_id in claim.citation_ids:
             citation = citations.get(citation_id)
-            invalid = invalid or citation is None or not _citation_supports_external_claim(
-                citation, account=account, now=now
+            invalid = (
+                invalid
+                or citation is None
+                or not _citation_supports_external_claim(citation, account=account, now=now)
             )
         if invalid:
             unresolved_claims.add(claim.claim_id)

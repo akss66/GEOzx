@@ -606,7 +606,7 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
 
 
 def test_migration_head_is_wechat_article_evidence() -> None:
-    assert get_head_revision() == "20260811_0330"
+    assert get_head_revision() == "20260811_0400"
 
 
 def test_turn_interrupts_sqlite_upgrade_and_downgrade(monkeypatch) -> None:

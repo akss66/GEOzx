@@ -162,6 +162,7 @@ async def independent_wechat_database(
         f"sqlite+aiosqlite:///{database_path}",
         connect_args={"timeout": 30},
     )
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)

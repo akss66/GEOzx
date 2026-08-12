@@ -1480,12 +1480,43 @@ async def get_wechat_account_capabilities(
             detail="account_not_authorized",
         )
     try:
-        return await probe_wechat_capabilities(session, account.id)
+        snapshot = await probe_wechat_capabilities(session, account.id)
     except WechatCapabilityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=exc.code,
         ) from exc
+    session.add(
+        Event(
+            type="wechat.capabilities.checked",
+            org_id=user.org_id,
+            account_id=account.id,
+            payload={
+                "account_id": account.id,
+                "draft_add": "ready" if snapshot.draft_add.can_use else snapshot.draft_add.reason,
+                "draft_get": "ready" if snapshot.draft_get.can_use else snapshot.draft_get.reason,
+                "draft_update": (
+                    "ready" if snapshot.draft_update.can_use else snapshot.draft_update.reason
+                ),
+                "upload_article_image": (
+                    "ready"
+                    if snapshot.upload_article_image.can_use
+                    else snapshot.upload_article_image.reason
+                ),
+                "add_permanent_material": (
+                    "ready"
+                    if snapshot.add_permanent_material.can_use
+                    else snapshot.add_permanent_material.reason
+                ),
+                "analytics": "ready" if snapshot.analytics.can_use else snapshot.analytics.reason,
+                "freepublish": (
+                    "ready" if snapshot.freepublish.can_use else snapshot.freepublish.reason
+                ),
+            },
+        )
+    )
+    await session.commit()
+    return snapshot
 
 
 @router.post(

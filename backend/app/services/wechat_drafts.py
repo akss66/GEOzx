@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import time
 from html import escape
 from html.parser import HTMLParser
 from typing import Any
@@ -15,6 +17,8 @@ from pydantic import ValidationError
 
 from app.schemas.wechat_article import WechatDraftArticle, WechatRemoteDraft
 from app.services.wechat_component import WechatIntegrationError
+
+logger = logging.getLogger(__name__)
 
 WECHAT_API_BASE_URL = "https://api.weixin.qq.com"
 DRAFT_ADD_ENDPOINT = "/cgi-bin/draft/add"
@@ -193,12 +197,11 @@ class WechatDraftClient:
         access_token: str,
         article: WechatDraftArticle,
     ) -> str:
-        response = await self._post(
+        payload = await self._call_json_endpoint(
             DRAFT_ADD_ENDPOINT,
             access_token=access_token,
-            json={"articles": [article.model_dump(mode="json", exclude_none=True)]},
+            json_body={"articles": [article.model_dump(mode="json", exclude_none=True)]},
         )
-        payload = _decode_response(response, endpoint=DRAFT_ADD_ENDPOINT)
         media_id = payload.get("media_id") if isinstance(payload, dict) else None
         if not isinstance(media_id, str) or not media_id.strip():
             raise _integration_error(
@@ -217,12 +220,11 @@ class WechatDraftClient:
         content: bytes,
         media_type: str,
     ) -> str:
-        response = await self._request(
+        payload = await self._call_json_endpoint(
             UPLOAD_ARTICLE_IMAGE_ENDPOINT,
             access_token=access_token,
             files={"media": (filename, content, media_type)},
         )
-        payload = _decode_response(response, endpoint=UPLOAD_ARTICLE_IMAGE_ENDPOINT)
         url = payload.get("url")
         if not isinstance(url, str) or not _is_wechat_image_url(url):
             raise _integration_error(
@@ -241,13 +243,12 @@ class WechatDraftClient:
         content: bytes,
         media_type: str,
     ) -> str:
-        response = await self._request(
+        payload = await self._call_json_endpoint(
             ADD_PERMANENT_MATERIAL_ENDPOINT,
             access_token=access_token,
             params={"type": "image"},
             files={"media": (filename, content, media_type)},
         )
-        payload = _decode_response(response, endpoint=ADD_PERMANENT_MATERIAL_ENDPOINT)
         media_id = payload.get("media_id")
         if not isinstance(media_id, str) or not media_id.strip():
             raise _integration_error(
@@ -264,12 +265,11 @@ class WechatDraftClient:
         access_token: str,
         media_id: str,
     ) -> WechatRemoteDraft:
-        response = await self._post(
+        payload = await self._call_json_endpoint(
             DRAFT_GET_ENDPOINT,
             access_token=access_token,
-            json={"media_id": media_id},
+            json_body={"media_id": media_id},
         )
-        payload = _decode_response(response, endpoint=DRAFT_GET_ENDPOINT)
         try:
             return WechatRemoteDraft.model_validate(payload)
         except ValidationError:
@@ -288,16 +288,15 @@ class WechatDraftClient:
         index: int,
         article: WechatDraftArticle,
     ) -> None:
-        response = await self._post(
+        payload = await self._call_json_endpoint(
             DRAFT_UPDATE_ENDPOINT,
             access_token=access_token,
-            json={
+            json_body={
                 "media_id": media_id,
                 "index": index,
                 "articles": article.model_dump(mode="json", exclude_none=True),
             },
         )
-        payload = _decode_response(response, endpoint=DRAFT_UPDATE_ENDPOINT)
         if payload.get("errcode") != 0:
             raise _integration_error(
                 "WeChat draft update did not confirm success",
@@ -318,6 +317,40 @@ class WechatDraftClient:
             access_token=access_token,
             json=json,
         )
+
+    async def _call_json_endpoint(
+        self,
+        endpoint: str,
+        *,
+        access_token: str,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        try:
+            response = await self._request(
+                endpoint,
+                access_token=access_token,
+                params=params,
+                json=json_body,
+                files=files,
+            )
+            payload = _decode_response(response, endpoint=endpoint)
+        except WechatDraftIntegrationError as error:
+            _log_wechat_api_request(
+                endpoint=endpoint,
+                outcome="error",
+                duration_ms=round(max(0.0, time.monotonic() - started) * 1000),
+                error=error,
+            )
+            raise
+        _log_wechat_api_request(
+            endpoint=endpoint,
+            outcome="success",
+            duration_ms=round(max(0.0, time.monotonic() - started) * 1000),
+        )
+        return payload
 
     async def _request(
         self,
@@ -351,6 +384,27 @@ class WechatDraftClient:
                 retryable=True,
                 endpoint=endpoint,
             ) from None
+
+
+def _log_wechat_api_request(
+    *,
+    endpoint: str,
+    outcome: str,
+    duration_ms: int,
+    error: WechatDraftIntegrationError | None = None,
+) -> None:
+    extra: dict[str, Any] = {
+        "event_name": "wechat_api_request",
+        "endpoint": endpoint,
+        "outcome": outcome,
+        "duration_ms": max(0, duration_ms),
+    }
+    if error is not None:
+        extra["error_code"] = error.error_code
+        extra["retryable"] = bool(error.retryable)
+        if error.rid is not None:
+            extra["rid"] = error.rid
+    logger.info("wechat_api_request", extra=extra)
 
 
 def _is_wechat_image_url(value: str) -> bool:

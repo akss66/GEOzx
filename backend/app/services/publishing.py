@@ -72,8 +72,13 @@ from app.schemas.publishing import (
     PublishJobOut,
     SyncWechatDraftRequest,
 )
-from app.schemas.wechat_article import ArticleDocument, ReadinessIssue, WechatDraftArticle
-from app.schemas.wechat_article import ArticleDraftSyncContextOut, ArticleSyncReadinessOut
+from app.schemas.wechat_article import (
+    ArticleDocument,
+    ArticleDraftSyncContextOut,
+    ArticleSyncReadinessOut,
+    ReadinessIssue,
+    WechatDraftArticle,
+)
 from app.services.deliverable_streams import deliverable_stream_clause
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.wechat_articles import ARTICLE_VERSION_AGENT_CODE, validate_article_for_sync
@@ -350,6 +355,18 @@ async def prepare_wechat_draft_sync_job(
         async with session.begin_nested():
             session.add(job)
             await session.flush()
+            _record_wechat_sync_product_event(
+                session,
+                job,
+                event_type="wechat.draft.sync_requested",
+                payload={
+                    "account_id": account.id,
+                    "article_id": article_id,
+                    "article_version_id": deliverable.id,
+                    "sync_id": job.id,
+                    "conflict_strategy": request.conflict_strategy,
+                },
+            )
     except IntegrityError:
         winner = await session.scalar(
             select(PlatformPublishJob).where(
@@ -701,6 +718,18 @@ async def execute_wechat_draft_sync_job(
             job.last_error_code = "WECHAT_DRAFT_CONFLICT"
             job.last_error_message = "微信草稿已发生变化"
             await session.commit()
+            _record_wechat_sync_product_event(
+                session,
+                job,
+                event_type="wechat.draft.sync_conflicted",
+                payload={
+                    "account_id": job.account_id,
+                    "article_id": int(package["article_id"]),
+                    "article_version_id": int(job.article_version_id or 0),
+                    "sync_id": job.id,
+                    "error_code": "WECHAT_DRAFT_CONFLICT",
+                },
+            )
             await _append_wechat_sync_step(
                 session,
                 job,
@@ -883,6 +912,19 @@ async def execute_wechat_draft_sync_job(
     job.publish_package = package
     flag_modified(job, "publish_package")
     await _commit_external_result(session, job, operation=operation)
+    _record_wechat_sync_product_event(
+        session,
+        job,
+        event_type="wechat.draft.sync_completed",
+        payload={
+            "account_id": job.account_id,
+            "article_id": int(package["article_id"]),
+            "article_version_id": int(job.article_version_id or 0),
+            "sync_id": job.id,
+            "external_media_id": media_id,
+            "retry_count": job.retry_count,
+        },
+    )
     await _append_wechat_sync_step(session, job, "sync", "completed")
     await session.commit()
     await session.refresh(job)
@@ -1123,6 +1165,25 @@ def _safe_capability_snapshot(snapshot: WechatCapabilitySnapshot) -> dict[str, A
     return snapshot.model_dump(mode="json")
 
 
+def _record_wechat_sync_product_event(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    *,
+    event_type: str,
+    payload: dict[str, int | str],
+) -> None:
+    package = job.publish_package if isinstance(job.publish_package, dict) else {}
+    session.add(
+        Event(
+            type=event_type,
+            org_id=job.org_id,
+            account_id=job.account_id,
+            content_item_id=int(package["article_id"]),
+            payload=payload,
+        )
+    )
+
+
 async def _load_frozen_asset(
     session: AsyncSession,
     job: PlatformPublishJob,
@@ -1256,6 +1317,19 @@ async def _commit_external_failure(
     job.last_error_code = str(error.error_code or "WECHAT_DRAFT_EXTERNAL_FAILURE")[:120]
     job.last_error_message = "微信公众号外部写入失败"
     await session.commit()
+    _record_wechat_sync_product_event(
+        session,
+        job,
+        event_type="wechat.draft.sync_failed",
+        payload={
+            "account_id": job.account_id,
+            "article_id": int((job.publish_package or {})["article_id"]),
+            "article_version_id": int(job.article_version_id or 0),
+            "sync_id": job.id,
+            "error_code": str(error.error_code or "integration_error")[:80],
+            "retryable": "true" if retryable else "false",
+        },
+    )
 
 
 def _sync_event_key(job: PlatformPublishJob, operation: str, phase: str) -> str:
