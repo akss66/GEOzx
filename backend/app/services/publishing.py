@@ -15,13 +15,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
-from sqlalchemy import CursorResult, or_, select, update
+from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
-from app.core.workspace_access import require_account_access
+from app.core.workspace_access import accessible_account_clause, require_account_access
 from app.integrations.douyin import (
     DouyinIntegrationError,
     build_douyin_h5_publish_schema,
@@ -73,6 +73,7 @@ from app.schemas.publishing import (
     SyncWechatDraftRequest,
 )
 from app.schemas.wechat_article import ArticleDocument, WechatDraftArticle
+from app.schemas.wechat_article import ArticleDraftSyncContextOut, ArticleSyncReadinessOut
 from app.services.deliverable_streams import deliverable_stream_clause
 from app.services.turn_events import TurnEventScope, append_turn_event
 from app.services.wechat_articles import ARTICLE_VERSION_AGENT_CODE, validate_article_for_sync
@@ -349,6 +350,88 @@ async def prepare_wechat_draft_sync_job(
     await session.commit()
     await session.refresh(job)
     return job
+
+
+async def get_wechat_draft_sync_context(
+    session: AsyncSession,
+    user: User,
+    *,
+    article_id: int,
+    article_version_id: int,
+) -> ArticleDraftSyncContextOut:
+    """Return a read-only preflight projection without creating any sync side effects."""
+    source = await session.execute(
+        select(Deliverable, ContentItem, Account)
+        .join(ContentItem, Deliverable.content_item_id == ContentItem.id)
+        .join(Account, ContentItem.account_id == Account.id)
+        .where(
+            Deliverable.id == article_version_id,
+            Deliverable.content_item_id == article_id,
+            Deliverable.agent_code == ARTICLE_VERSION_AGENT_CODE,
+            Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+            ContentItem.account_id == Account.id,
+            Account.org_id == user.org_id,
+            await accessible_account_clause(session, user),
+        )
+    )
+    lineage = source.one_or_none()
+    if lineage is None:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_VERSION_NOT_FOUND",
+            "????????????????????",
+            status_code=404,
+        )
+    deliverable, _content_item, account = lineage
+    document = ArticleDocument.model_validate(deliverable.payload["document"])
+    readiness = await validate_article_for_sync(session, version_id=deliverable.id)
+    image_count = await session.scalar(
+        select(func.count(ArticleImageSlot.id)).where(
+            ArticleImageSlot.content_item_id == article_id,
+            ArticleImageSlot.account_id == account.id,
+            ArticleImageSlot.selected_material_id.is_not(None),
+        )
+    )
+    mapping = await session.scalar(
+        select(WechatDraftMapping).where(
+            WechatDraftMapping.org_id == user.org_id,
+            WechatDraftMapping.account_id == account.id,
+            WechatDraftMapping.content_item_id == article_id,
+        )
+    )
+    latest_job = await session.scalar(
+        select(PlatformPublishJob)
+        .join(Deliverable, PlatformPublishJob.article_version_id == Deliverable.id)
+        .where(
+            PlatformPublishJob.org_id == user.org_id,
+            PlatformPublishJob.account_id == account.id,
+            PlatformPublishJob.operation_type == PlatformPublishJobOperationType.WECHAT_DRAFT_SYNC,
+            Deliverable.content_item_id == article_id,
+        )
+        .order_by(PlatformPublishJob.updated_at.desc(), PlatformPublishJob.id.desc())
+        .limit(1)
+    )
+    remote = None
+    if latest_job is not None:
+        remote_hash = latest_job.observed_remote_hash
+        if remote_hash is None and mapping is not None:
+            remote_hash = mapping.remote_hash
+        remote = {
+            "status": latest_job.status.value,
+            "remoteHash": remote_hash,
+            "updatedAt": latest_job.updated_at,
+            "errorCode": latest_job.last_error_code,
+            "operationType": latest_job.operation_type.value,
+        }
+    return ArticleDraftSyncContextOut.model_validate(
+        {
+            "targetAccount": {"id": account.id, "name": account.nickname},
+            "articleTitle": document.title,
+            "articleVersionId": deliverable.id,
+            "imageCount": image_count or 0,
+            "readiness": _article_sync_readiness_out(readiness),
+            "remote": remote,
+        }
+    )
 
 
 def _frozen_image_fact(material: MaterialAsset) -> dict[str, Any]:
@@ -841,6 +924,31 @@ def wechat_draft_sync_out(job: PlatformPublishJob) -> dict[str, Any]:
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+def _article_sync_readiness_out(readiness) -> ArticleSyncReadinessOut:
+    return ArticleSyncReadinessOut.model_validate(
+        {
+            "canSync": readiness.can_sync,
+            "blockers": [
+                {
+                    "code": issue.code,
+                    "message": issue.message,
+                    "claimId": issue.claim_id,
+                }
+                for issue in readiness.blockers
+            ],
+            "warnings": [
+                {
+                    "code": issue.code,
+                    "message": issue.message,
+                    "claimId": issue.claim_id,
+                }
+                for issue in readiness.warnings
+            ],
+            "unresolvedClaimCount": readiness.unresolved_claim_count,
+        }
+    )
 
 
 def _validate_wechat_sync_approval(job: PlatformPublishJob) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from html.parser import HTMLParser
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -216,6 +217,41 @@ class ArticleSyncReadiness(_StrictModel):
     warnings: list[ReadinessIssue]
     citation_count: int = Field(ge=0)
     unresolved_claim_count: int = Field(ge=0)
+
+
+class ArticleSyncReadinessIssueOut(_StrictModel):
+    code: Annotated[str, Field(min_length=1, max_length=120)]
+    message: Annotated[str, Field(min_length=1, max_length=500)]
+    claimId: str | None = None
+
+
+class ArticleSyncReadinessOut(_StrictModel):
+    canSync: bool
+    blockers: list[ArticleSyncReadinessIssueOut]
+    warnings: list[ArticleSyncReadinessIssueOut]
+    unresolvedClaimCount: int = Field(ge=0)
+
+
+class ArticleSyncTargetAccountOut(_StrictModel):
+    id: int = Field(gt=0)
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class ArticleSyncRemoteStateOut(_StrictModel):
+    status: Annotated[str, Field(min_length=1, max_length=120)]
+    remoteHash: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    updatedAt: datetime
+    errorCode: Annotated[str, Field(min_length=1, max_length=120)] | None = None
+    operationType: Annotated[str, Field(min_length=1, max_length=120)]
+
+
+class ArticleDraftSyncContextOut(_StrictModel):
+    targetAccount: ArticleSyncTargetAccountOut
+    articleTitle: Annotated[str, Field(min_length=1, max_length=64)]
+    articleVersionId: int = Field(gt=0)
+    imageCount: int = Field(ge=0)
+    readiness: ArticleSyncReadinessOut
+    remote: ArticleSyncRemoteStateOut | None = None
 
 
 class ArticleImageSlotOut(_StrictModel):

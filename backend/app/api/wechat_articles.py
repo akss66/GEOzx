@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.db import get_session
-from app.models import ArticleImageSlot, Deliverable, Event
+from app.models import Account, ArticleImageSlot, Deliverable, Event
 from app.models.enums import DeliverableType
 from app.schemas.publishing import SyncWechatDraftRequest, WechatDraftSyncOut
 from app.schemas.wechat_article import (
+    ArticleDraftSyncContextOut,
     ArticleDocument,
     ArticleImageGenerationRequest,
     ArticleImagePromptOut,
@@ -33,6 +34,7 @@ from app.services.image_generation import (
 from app.services.publishing import (
     PublishingServiceError,
     execute_wechat_draft_sync_job,
+    get_wechat_draft_sync_context,
     get_wechat_draft_sync_job,
     prepare_wechat_draft_sync_job,
     wechat_draft_sync_out,
@@ -223,7 +225,7 @@ def _slot_response(slot: ArticleImageSlot) -> dict:
     ).model_dump(mode="json")
 
 
-async def _working_copy_response(session: AsyncSession, working_copy) -> dict:
+async def _working_copy_response(session: AsyncSession, working_copy, account: Account) -> dict:
     slots = list(
         await session.scalars(
             select(ArticleImageSlot)
@@ -236,6 +238,8 @@ async def _working_copy_response(session: AsyncSession, working_copy) -> dict:
         "document": working_copy.document,
         "lockVersion": working_copy.lock_version,
         "basedOnDeliverableId": working_copy.based_on_deliverable_id,
+        "accountId": account.id,
+        "accountName": account.nickname,
         "imageSlots": [_slot_response(slot) for slot in slots],
     }
 
@@ -258,8 +262,12 @@ async def create_wechat_article(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="article_not_found")
     content_item, working_copy, first_version = result
+    article = await _load_article_for_user(session, user, content_item.id)
+    if article is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="article_not_found")
+    _working_copy, _content_item, account = article
     return {
-        **(await _working_copy_response(session, working_copy)),
+        **(await _working_copy_response(session, working_copy, account)),
         "articleId": content_item.id,
         "firstVersion": _deliverable_response(first_version),
     }
@@ -292,7 +300,11 @@ async def autosave_working_copy(
         )
     if working_copy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="article_not_found")
-    return await _working_copy_response(session, working_copy)
+    article = await _load_article_for_user(session, user, article_id)
+    if article is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="article_not_found")
+    _working_copy, _content_item, account = article
+    return await _working_copy_response(session, working_copy, account)
 
 
 @router.get("/{article_id}/working-copy")
@@ -300,7 +312,28 @@ async def get_working_copy(article_id: int, user: CurrentUser, session: SessionD
     article = await _load_article_for_user(session, user, article_id)
     if article is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="article_not_found")
-    return await _working_copy_response(session, article[0])
+    return await _working_copy_response(session, article[0], article[2])
+
+
+@router.get(
+    "/{article_id}/draft-sync-context",
+    response_model=ArticleDraftSyncContextOut,
+)
+async def get_article_draft_sync_context(
+    article_id: int,
+    article_version_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> ArticleDraftSyncContextOut | JSONResponse:
+    try:
+        return await get_wechat_draft_sync_context(
+            session,
+            user,
+            article_id=article_id,
+            article_version_id=article_version_id,
+        )
+    except PublishingServiceError as exc:
+        return _draft_sync_error(exc)
 
 
 @router.get(

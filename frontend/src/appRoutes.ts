@@ -9,6 +9,7 @@ export type AppPage =
   | "accounts"
   | "account-data"
   | "knowledge"
+  | "wechat-article-workspace"
   | "config"
   | "models"
   | "users";
@@ -32,6 +33,7 @@ export const APP_ROUTES: readonly AppRouteItem[] = [
   { path: "accounts", page: "accounts" },
   { path: "accounts/:accountId/data", page: "account-data" },
   { path: "knowledge", page: "knowledge" },
+  { path: "wechat-articles/:articleId", page: "wechat-article-workspace" },
   { path: "config", page: "config", adminOnly: true },
   { path: "models", page: "models", adminOnly: true },
   { path: "users", page: "users", adminOnly: true },

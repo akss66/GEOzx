@@ -11,8 +11,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
 
-from app.models import Account, ArticleWorkingCopy, ContentItem, Deliverable
+from app.models import (
+    Account,
+    ArticleWorkingCopy,
+    ContentItem,
+    Deliverable,
+    PlatformPublishJob,
+    WechatDraftMapping,
+)
 from app.models.enums import DeliverableType, Platform
+from app.models.publishing import (
+    PlatformPublishJobOperationType,
+    PlatformPublishJobStatus,
+)
 from app.schemas.wechat_article import ArticleDocument
 from app.services import wechat_articles
 from app.services.wechat_articles import (
@@ -100,6 +111,8 @@ async def test_create_article_freezes_first_draft_and_autosave_preserves_that_ve
     assert created.status_code == 201
     article_id = created.json()["articleId"]
     assert created.json()["lockVersion"] == 1
+    assert created.json()["accountId"] == account.id
+    assert created.json()["accountName"] == "Article account"
     versions = await session.execute(
         Deliverable.__table__.select().where(Deliverable.content_item_id == article_id)
     )
@@ -116,6 +129,12 @@ async def test_create_article_freezes_first_draft_and_autosave_preserves_that_ve
 
     assert autosaved.status_code == 200
     assert autosaved.json()["lockVersion"] == 2
+    assert autosaved.json()["accountId"] == account.id
+    assert autosaved.json()["accountName"] == "Article account"
+    fetched = await client.get(f"/wechat-articles/{article_id}/working-copy", headers=headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["accountId"] == account.id
+    assert fetched.json()["accountName"] == "Article account"
     stored_version = (
         (
             await session.execute(
@@ -257,6 +276,180 @@ async def test_inaccessible_article_and_preview_contract_fail_closed(
     assert preview.status_code == 200
     assert preview.json()["renderedHtml"] is None
     assert preview.json()["document"] == _document()
+
+
+@pytest.mark.asyncio
+async def test_draft_sync_context_hides_cross_scope_and_version_mismatch(
+    client, admin, member, session
+):
+    primary_account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Primary article account",
+    )
+    secondary_account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Secondary article account",
+    )
+    session.add_all([primary_account, secondary_account])
+    await session.commit()
+    admin_headers = await _headers(client)
+    primary_created = await client.post(
+        "/wechat-articles",
+        headers=admin_headers,
+        json={"account_id": primary_account.id, "document": _document()},
+    )
+    secondary_created = await client.post(
+        "/wechat-articles",
+        headers=admin_headers,
+        json={"account_id": secondary_account.id, "document": _document(paragraph="Other article.")},
+    )
+    primary_article_id = primary_created.json()["articleId"]
+    secondary_version_id = secondary_created.json()["firstVersion"]["id"]
+
+    mismatch = await client.get(
+        f"/wechat-articles/{primary_article_id}/draft-sync-context",
+        headers=admin_headers,
+        params={"article_version_id": secondary_version_id},
+    )
+
+    assert mismatch.status_code == 404
+
+    member_login = await client.post(
+        "/auth/login", json={"email": "user@test.com", "password": "user-pw-123"}
+    )
+    member_headers = {"Authorization": f"Bearer {member_login.json()['access_token']}"}
+    hidden = await client.get(
+        f"/wechat-articles/{primary_article_id}/draft-sync-context",
+        headers=member_headers,
+        params={"article_version_id": primary_created.json()["firstVersion"]["id"]},
+    )
+
+    assert hidden.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_draft_sync_context_returns_safe_allowlisted_projection_without_remote_history(
+    client, admin, session
+):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="WeChat sync account",
+    )
+    session.add(account)
+    await session.commit()
+    headers = await _headers(client)
+    created = await client.post(
+        "/wechat-articles",
+        headers=headers,
+        json={"account_id": account.id, "document": _document()},
+    )
+
+    response = await client.get(
+        f"/wechat-articles/{created.json()['articleId']}/draft-sync-context",
+        headers=headers,
+        params={"article_version_id": created.json()["firstVersion"]["id"]},
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {
+        "targetAccount",
+        "articleTitle",
+        "articleVersionId",
+        "imageCount",
+        "readiness",
+        "remote",
+    }
+    assert response.json()["targetAccount"] == {
+        "id": account.id,
+        "name": "WeChat sync account",
+    }
+    assert response.json()["articleTitle"] == _document()["title"]
+    assert response.json()["articleVersionId"] == created.json()["firstVersion"]["id"]
+    assert response.json()["imageCount"] == 0
+    assert set(response.json()["readiness"]) == {
+        "canSync",
+        "blockers",
+        "warnings",
+        "unresolvedClaimCount",
+    }
+    assert response.json()["remote"] is None
+    serialized = str(response.json())
+    assert "publish_package" not in serialized
+    assert "approval_snapshot" not in serialized
+    assert "last_error_message" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_draft_sync_context_returns_latest_safe_remote_projection(
+    client, admin, session
+):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="WeChat sync account",
+    )
+    session.add(account)
+    await session.commit()
+    headers = await _headers(client)
+    created = await client.post(
+        "/wechat-articles",
+        headers=headers,
+        json={"account_id": account.id, "document": _document()},
+    )
+    article_id = created.json()["articleId"]
+    version_id = created.json()["firstVersion"]["id"]
+    session.add(
+        WechatDraftMapping(
+            org_id=admin.org_id,
+            account_id=account.id,
+            content_item_id=article_id,
+            media_id="remote-media-7",
+            remote_hash="known-remote-hash",
+            last_synced_deliverable_id=version_id,
+        )
+    )
+    session.add(
+        PlatformPublishJob(
+            org_id=admin.org_id,
+            account_id=account.id,
+            created_by_id=admin.id,
+            platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+            operation_type=PlatformPublishJobOperationType.WECHAT_DRAFT_SYNC,
+            status=PlatformPublishJobStatus.WECHAT_SYNCED,
+            idempotency_key="draft-sync-context-history",
+            article_version_id=version_id,
+            observed_remote_hash="known-remote-hash",
+            last_error_code="SHOULD_NOT_LEAK_DETAIL",
+            publish_package={
+                "article_id": article_id,
+                "article_version_id": version_id,
+                "conflict_strategy": "overwrite_confirmed",
+            },
+            capabilities_snapshot={"token": "must-not-leak"},
+            approval_snapshot={"raw": "must-not-leak"},
+        )
+    )
+    await session.commit()
+
+    response = await client.get(
+        f"/wechat-articles/{article_id}/draft-sync-context",
+        headers=headers,
+        params={"article_version_id": version_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["remote"] == {
+        "status": "wechat_synced",
+        "remoteHash": "known-remote-hash",
+        "updatedAt": response.json()["remote"]["updatedAt"],
+        "errorCode": "SHOULD_NOT_LEAK_DETAIL",
+        "operationType": "draft_sync",
+    }
+    assert "token" not in str(response.json())
+    assert "raw" not in str(response.json())
 
 
 @pytest.mark.asyncio
