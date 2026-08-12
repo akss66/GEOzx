@@ -11,6 +11,7 @@ import WechatSyncConfirmation from "../components/wechat-article/WechatSyncConfi
 import { OperationalState, PageHeader } from "../components/ui";
 import {
   WechatArticleVersionConflictError,
+  canConfirmWechatDraftSync,
   createWechatArticleVersion,
   createWechatDraftSync,
   generateAllWechatArticleImages,
@@ -563,13 +564,14 @@ async function confirmSync(
   setErrorMessage: (value: string | null) => void,
   setSyncOpen: (value: boolean) => void,
 ) {
-  if (!context) return;
+  if (!context || !canConfirmWechatDraftSync(context)) return;
+  const syncContext = context;
   try {
     setSyncSubmitting(true);
     await createWechatDraftSync(articleId, {
-      articleVersionId: context.articleVersionId,
+      articleVersionId: syncContext.articleVersionId,
       idempotencyKey: buildIdempotencyKey("wechat-sync"),
-      expectedRemoteHash: context.remote?.remoteHash ?? null,
+      expectedRemoteHash: syncContext.remote?.remoteHash ?? null,
       conflictStrategy: "fail",
     });
     setAnnouncement("已提交公众号草稿同步");

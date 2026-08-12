@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { api } from "../api/client";
 import {
+  canConfirmWechatDraftSync,
   WechatArticleVersionConflictError,
   createWechatDraftSync,
   generateAllWechatArticleImages,
   getWechatArticleDraftSyncContext,
   getWechatArticleWorkingCopy,
+  requiresWechatDraftSyncManualReview,
   saveWechatArticleWorkingCopy,
   selectWechatArticleImageMaterial,
   uploadWechatArticleImage,
@@ -185,6 +187,31 @@ describe("wechatArticle service", () => {
     });
     expect(JSON.stringify(result)).not.toContain("publish_package");
     expect(JSON.stringify(result)).not.toContain("citationCount");
+  });
+
+  it("fails closed for remote conflict states even when readiness is malformed", () => {
+    const context = {
+      targetAccount: { id: 31, name: "Brand account" },
+      articleTitle: "Summer window insulation guide",
+      articleVersionId: 12,
+      imageCount: 3,
+      readiness: {
+        canSync: true,
+        blockers: [],
+        warnings: [],
+        unresolvedClaimCount: 0,
+      },
+      remote: {
+        status: "wechat_conflict",
+        remoteHash: "known-hash",
+        updatedAt: "2026-08-12T09:00:00Z",
+        errorCode: "REMOTE_HASH_CONFLICT",
+        operationType: "draft_sync",
+      },
+    };
+
+    expect(requiresWechatDraftSyncManualReview(context)).toBe(true);
+    expect(canConfirmWechatDraftSync(context)).toBe(false);
   });
 
   it("sends fresh idempotency keys for generate-all and keeps selection lock version explicit", async () => {

@@ -143,6 +143,21 @@ export interface WechatArticleDraftSyncContext {
   } | null;
 }
 
+const REMOTE_DRAFT_SYNC_MANUAL_REVIEW_STATUSES = new Set([
+  "wechat_conflict",
+  "wechat_reconciliation_required",
+]);
+
+export function requiresWechatDraftSyncManualReview(
+  context: Pick<WechatArticleDraftSyncContext, "remote"> | null | undefined,
+): boolean {
+  return context?.remote ? REMOTE_DRAFT_SYNC_MANUAL_REVIEW_STATUSES.has(context.remote.status) : false;
+}
+
+export function canConfirmWechatDraftSync(context: WechatArticleDraftSyncContext | null): boolean {
+  return Boolean(context && context.readiness.canSync && !requiresWechatDraftSyncManualReview(context));
+}
+
 export interface CreateWechatDraftSyncInput {
   articleVersionId: number;
   idempotencyKey: string;

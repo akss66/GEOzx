@@ -1,7 +1,11 @@
 import { Button, Modal } from "antd";
 import { useRef, type RefObject } from "react";
 
-import type { WechatArticleDraftSyncContext } from "../../services/wechatArticle";
+import {
+  canConfirmWechatDraftSync,
+  requiresWechatDraftSyncManualReview,
+  type WechatArticleDraftSyncContext,
+} from "../../services/wechatArticle";
 
 interface WechatSyncConfirmationProps {
   context: WechatArticleDraftSyncContext | null;
@@ -21,6 +25,8 @@ export default function WechatSyncConfirmation({
   onConfirm,
 }: WechatSyncConfirmationProps) {
   const cancelButtonRef = useRef<HTMLElement | null>(null);
+  const canConfirm = canConfirmWechatDraftSync(context);
+  const needsManualReview = requiresWechatDraftSyncManualReview(context);
 
   return (
     <Modal
@@ -89,8 +95,13 @@ export default function WechatSyncConfirmation({
                 远端冲突：{context.remote.errorCode}。请先核对最新草稿，再重新创建同步。
               </p>
             ) : null}
-            {!context.readiness.canSync ? (
-              <p className="wechat-sync-dialog__blocking-note">当前状态不允许盲确认，请先处理阻断项后再同步。</p>
+            {needsManualReview ? (
+              <p className="wechat-sync-dialog__blocking-note">
+                请先查看冲突或人工对账，确认远端草稿状态后再继续同步。
+              </p>
+            ) : null}
+            {!canConfirm ? (
+              <p className="wechat-sync-dialog__blocking-note">当前状态不允许直接确认，请先处理阻断项后再同步。</p>
             ) : null}
           </section>
 
@@ -111,7 +122,7 @@ export default function WechatSyncConfirmation({
               type="primary"
               loading={submitting}
               onClick={onConfirm}
-              disabled={!context.readiness.canSync}
+              disabled={!canConfirm}
             >
               {`确认同步到公众号「${context.targetAccount.name}」草稿箱`}
             </Button>

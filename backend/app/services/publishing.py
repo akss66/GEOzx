@@ -72,7 +72,7 @@ from app.schemas.publishing import (
     PublishJobOut,
     SyncWechatDraftRequest,
 )
-from app.schemas.wechat_article import ArticleDocument, WechatDraftArticle
+from app.schemas.wechat_article import ArticleDocument, ReadinessIssue, WechatDraftArticle
 from app.schemas.wechat_article import ArticleDraftSyncContextOut, ArticleSyncReadinessOut
 from app.services.deliverable_streams import deliverable_stream_clause
 from app.services.turn_events import TurnEventScope, append_turn_event
@@ -100,6 +100,20 @@ class PublishingServiceError(RuntimeError):
         self.retryable = retryable
         self.status_code = status_code
         self.details = details or {}
+
+
+_REMOTE_SYNC_BLOCKING_ISSUES: dict[PlatformPublishJobStatus, ReadinessIssue] = {
+    PlatformPublishJobStatus.WECHAT_CONFLICT: ReadinessIssue(
+        code="REMOTE_DRAFT_CONFLICT",
+        message="远端草稿存在冲突，请先查看冲突后再继续同步。",
+        claim_id=None,
+    ),
+    PlatformPublishJobStatus.WECHAT_RECONCILIATION_REQUIRED: ReadinessIssue(
+        code="REMOTE_DRAFT_RECONCILIATION_REQUIRED",
+        message="上一次同步结果待人工对账，请先完成对账后再继续同步。",
+        claim_id=None,
+    ),
+}
 
 
 _CONNECTION_ERROR_CODES = frozenset(
@@ -410,6 +424,7 @@ async def get_wechat_draft_sync_context(
         .order_by(PlatformPublishJob.updated_at.desc(), PlatformPublishJob.id.desc())
         .limit(1)
     )
+    readiness = _apply_remote_sync_blockers(readiness, latest_job)
     remote = None
     if latest_job is not None:
         remote_hash = latest_job.observed_remote_hash
@@ -949,6 +964,18 @@ def _article_sync_readiness_out(readiness) -> ArticleSyncReadinessOut:
             "unresolvedClaimCount": readiness.unresolved_claim_count,
         }
     )
+
+
+def _apply_remote_sync_blockers(readiness, latest_job: PlatformPublishJob | None):
+    if latest_job is None:
+        return readiness
+    remote_issue = _REMOTE_SYNC_BLOCKING_ISSUES.get(latest_job.status)
+    if remote_issue is None:
+        return readiness
+    blockers = list(readiness.blockers)
+    if all(issue.code != remote_issue.code for issue in blockers):
+        blockers.append(remote_issue)
+    return readiness.model_copy(update={"can_sync": False, "blockers": blockers})
 
 
 def _validate_wechat_sync_approval(job: PlatformPublishJob) -> None:

@@ -88,6 +88,21 @@ vi.mock("../services/wechatArticle", () => ({
   getWechatArticleDraftSyncContext: vi.fn(),
   createWechatDraftSync: vi.fn(),
   getWechatDraftSync: vi.fn(),
+  requiresWechatDraftSyncManualReview: (context: { remote: { status: string } | null } | null) =>
+    context?.remote
+      ? ["wechat_conflict", "wechat_reconciliation_required"].includes(context.remote.status)
+      : false,
+  canConfirmWechatDraftSync: (context: {
+    readiness: { canSync: boolean };
+    remote: { status: string } | null;
+  } | null) => Boolean(
+    context
+    && context.readiness.canSync
+    && !(
+      context.remote
+      && ["wechat_conflict", "wechat_reconciliation_required"].includes(context.remote.status)
+    ),
+  ),
 }));
 
 const getWorkingCopyMock = vi.mocked(getWechatArticleWorkingCopy);
@@ -467,6 +482,41 @@ describe("WechatArticleWorkspace", () => {
 
     await waitFor(() => expect(view.container.querySelector(".ant-modal")).toBeNull());
     expect(syncTrigger).toHaveFocus();
+  });
+
+  it("fails closed when remote draft state requires manual conflict review even if canSync is malformed", async () => {
+    getSyncContextMock.mockResolvedValueOnce({
+      targetAccount: { id: 31, name: "鍝佺墝鍏紬鍙?" },
+      articleTitle: "Summer window insulation guide",
+      articleVersionId: 12,
+      imageCount: 1,
+      readiness: {
+        canSync: true,
+        blockers: [],
+        warnings: [],
+        unresolvedClaimCount: 0,
+      },
+      remote: {
+        status: "wechat_conflict",
+        remoteHash: "hash-conflict",
+        updatedAt: "2026-08-12T09:00:00Z",
+        errorCode: "REMOTE_HASH_CONFLICT",
+        operationType: "draft_sync",
+      },
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: COPY.syncTrigger }));
+
+    const dialog = await screen.findByRole("dialog", { name: COPY.syncDialog });
+    const confirmButton = within(dialog).getAllByRole("button")[1];
+
+    expect(dialog.querySelector(".wechat-sync-dialog__blocking-note")).toHaveTextContent("冲突");
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(confirmButton);
+
+    expect(createSyncMock).not.toHaveBeenCalled();
   });
 
   it("shows a concrete recovery error when sync confirmation context is unavailable", async () => {

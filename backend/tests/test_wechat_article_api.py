@@ -453,6 +453,67 @@ async def test_draft_sync_context_returns_latest_safe_remote_projection(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_status", "expected_code"),
+    [
+        (PlatformPublishJobStatus.WECHAT_CONFLICT, "REMOTE_DRAFT_CONFLICT"),
+        (
+            PlatformPublishJobStatus.WECHAT_RECONCILIATION_REQUIRED,
+            "REMOTE_DRAFT_RECONCILIATION_REQUIRED",
+        ),
+    ],
+)
+async def test_draft_sync_context_fails_closed_for_remote_conflict_states(
+    client, admin, session, job_status, expected_code
+):
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="WeChat sync account",
+    )
+    session.add(account)
+    await session.commit()
+    headers = await _headers(client)
+    created = await client.post(
+        "/wechat-articles",
+        headers=headers,
+        json={"account_id": account.id, "document": _document()},
+    )
+    article_id = created.json()["articleId"]
+    version_id = created.json()["firstVersion"]["id"]
+    session.add(
+        PlatformPublishJob(
+            org_id=admin.org_id,
+            account_id=account.id,
+            created_by_id=admin.id,
+            platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+            operation_type=PlatformPublishJobOperationType.WECHAT_DRAFT_SYNC,
+            status=job_status,
+            idempotency_key=f"draft-sync-context-{job_status.value}",
+            article_version_id=version_id,
+            observed_remote_hash="known-remote-hash",
+            last_error_code="REMOTE_STATE",
+            publish_package={
+                "article_id": article_id,
+                "article_version_id": version_id,
+                "conflict_strategy": "fail",
+            },
+        )
+    )
+    await session.commit()
+
+    response = await client.get(
+        f"/wechat-articles/{article_id}/draft-sync-context",
+        headers=headers,
+        params={"article_version_id": version_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["readiness"]["canSync"] is False
+    assert expected_code in {item["code"] for item in response.json()["readiness"]["blockers"]}
+
+
+@pytest.mark.asyncio
 async def test_article_version_service_entries_freeze_rewrite_presync_and_successful_sync(
     client, admin, session
 ):
