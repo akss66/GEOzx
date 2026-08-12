@@ -110,3 +110,7 @@ Task 17: fix round 1/5 implemented (original Critical/Important/Minor addressed 
 Task 17: fix round 1/5 (Critical 1, Important 1, Minor 1 addressed; commits 87cdcbb, 6063074; independent scoped re-review clean)
 Task 17: complete (commits baa8751..6063074; backend 55, frontend focused 135, full frontend suite, lint/build/bundle, E2E 1/1 passed)
 Task 18: dispatched from base 46fa022 (real account write requires separate explicit approval naming test organization and official account)
+Task 18: automated implementation completed (commits 53e250d, 17f2b04; observability, exact product events, alert evaluators, rollout/rollback runbook, and guarded E2E)
+Task 18: branch integration gate repaired (shared SQLite article-document UDF fixture, migration head 0400 assertion, semantic-ratio query isolation); backend full suite 2010 passed, 21 skipped, 0 failed
+Task 18: fix round 1/5 (2 Important findings addressed: exact authorization/image/key-interaction event contract and no-lineage draft-sync event durability; independent re-review clean with 0 Critical/Important)
+Task 18: automated phase complete; real WeChat smoke remains pending separate explicit approval naming the test organization and official account, and must keep freepublish disabled
