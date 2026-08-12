@@ -32,6 +32,7 @@ class ContentItem(Base, TimestampMixin):
     """一条内容贯穿全链路的实例（含当前阶段、状态）。"""
 
     __tablename__ = "content_items"
+    __table_args__ = (UniqueConstraint("id", "account_id", name="uq_content_items_id_account"),)
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     project_id: Mapped[int | None] = mapped_column(

@@ -81,6 +81,7 @@ from app.models.publishing import PlatformPublishJob
 from app.models.run_revision import RunRevision, SkillStageCheckpoint
 from app.models.skill_runtime import SkillRun
 from app.models.turn_interrupt import TurnInterrupt
+from app.models.wechat_article import ArticleImageSlot, ArticleWorkingCopy, WechatDraftMapping
 from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
@@ -161,5 +162,8 @@ __all__ = [
     "PlatformIntegration",
     "PlatformAccountAuth",
     "WechatComponentCredential",
+    "ArticleWorkingCopy",
+    "ArticleImageSlot",
+    "WechatDraftMapping",
     "PlatformPublishJob",
 ]
