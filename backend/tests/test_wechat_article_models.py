@@ -178,9 +178,14 @@ def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invar
     fk_session.add(content)
     fk_session.commit()
 
-    working_copy = ArticleWorkingCopy(content_item_id=content.id, document=_valid_document())
+    working_copy = ArticleWorkingCopy(
+        content_item_id=content.id,
+        account_id=account.id,
+        document=_valid_document(),
+    )
     slot = ArticleImageSlot(
         content_item_id=content.id,
+        account_id=account.id,
         stable_key="window-detail",
         purpose="Explain the installation detail.",
         aspect_ratio="3:2",
@@ -196,6 +201,7 @@ def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invar
         fk_session.execute(
             ArticleWorkingCopy.__table__.insert().values(
                 content_item_id=content.id,
+                account_id=account.id,
                 document=_valid_document(),
                 lock_version=0,
             )
@@ -207,6 +213,7 @@ def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invar
         fk_session.execute(
             ArticleImageSlot.__table__.insert().values(
                 content_item_id=content.id,
+                account_id=account.id,
                 stable_key="invalid-lock-version",
                 purpose="Invalid lock version",
                 aspect_ratio="3:2",
@@ -217,7 +224,13 @@ def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invar
         fk_session.commit()
     fk_session.rollback()
 
-    fk_session.add(ArticleWorkingCopy(content_item_id=content.id, document=_valid_document()))
+    fk_session.add(
+        ArticleWorkingCopy(
+            content_item_id=content.id,
+            account_id=account.id,
+            document=_valid_document(),
+        )
+    )
     with pytest.raises(IntegrityError):
         fk_session.commit()
     fk_session.rollback()
@@ -225,6 +238,7 @@ def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invar
     fk_session.add(
         ArticleImageSlot(
             content_item_id=content.id,
+            account_id=account.id,
             stable_key="window-detail",
             purpose="Duplicate key",
             aspect_ratio="3:2",
@@ -285,11 +299,78 @@ def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invar
         fk_session.execute(
             ArticleWorkingCopy.__table__.insert().values(
                 content_item_id=999999,
+                account_id=account.id,
                 document=_valid_document(),
                 lock_version=1,
             )
         )
         fk_session.commit()
+
+
+def test_working_copy_rejects_documents_that_fail_the_article_document_contract(
+    fk_session: Session,
+):
+    org = Org(name="Document validation organization")
+    account = Account(
+        org=org,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Document validation account",
+    )
+    fk_session.add_all([org, account])
+    fk_session.flush()
+    content = ContentItem(account_id=account.id, title="Validated article")
+    fk_session.add(content)
+    fk_session.commit()
+
+    invalid_document = _valid_document()
+    invalid_document["blocks"] = [
+        {"type": "rawHtml", "block_id": "unsafe", "html": "<script>alert(1)</script>"}
+    ]
+    with pytest.raises(ValidationError):
+        ArticleWorkingCopy(
+            content_item_id=content.id,
+            account_id=account.id,
+            document=invalid_document,
+        )
+
+    assert fk_session.query(ArticleWorkingCopy).count() == 0
+
+
+def test_working_copy_and_slots_require_an_account_scoped_content_item(fk_session: Session):
+    org = Org(name="Account lineage organization")
+    account = Account(
+        org=org,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Account lineage account",
+    )
+    unscoped_content = ContentItem(title="Unscoped article")
+    fk_session.add_all([org, account, unscoped_content])
+    fk_session.commit()
+
+    with pytest.raises(IntegrityError):
+        fk_session.add(
+            ArticleWorkingCopy(
+                content_item_id=unscoped_content.id,
+                account_id=account.id,
+                document=_valid_document(),
+            )
+        )
+        fk_session.commit()
+    fk_session.rollback()
+
+    with pytest.raises(IntegrityError):
+        fk_session.add(
+            ArticleImageSlot(
+                content_item_id=unscoped_content.id,
+                account_id=account.id,
+                stable_key="unscoped-slot",
+                purpose="Must not attach to unscoped content.",
+                aspect_ratio="3:2",
+                visual_brief="No image plan may escape account lineage.",
+            )
+        )
+        fk_session.commit()
+    fk_session.rollback()
 
 
 def test_wechat_article_deliverable_types_are_the_three_explicit_article_outputs():

@@ -28,9 +28,7 @@ class DeliverableActionDefinition:
     requires_thread: bool = False
 
 
-ACTIONABLE_STATUSES: frozenset[ArtifactStatus] = frozenset(
-    {"ready_for_review", "accepted"}
-)
+ACTIONABLE_STATUSES: frozenset[ArtifactStatus] = frozenset({"ready_for_review", "accepted"})
 REVISION_DELIVERABLE_TYPES = frozenset(
     item for item in DeliverableType if get_schema(item) is not None
 )
@@ -54,6 +52,9 @@ REVISION_ARTIFACT_TYPES = frozenset(
         "ad_plan",
         "cs_record",
         "operation_execution_plan",
+        "wechat_article",
+        "wechat_image_plan",
+        "wechat_rendered_article",
     }
 )
 
@@ -65,9 +66,7 @@ SERVER_ACTIONS: dict[str, DeliverableActionDefinition] = {
         artifact_types=frozenset({"video_script"}),
         deliverable_types=frozenset({DeliverableType.VIDEO_SCRIPT}),
         statuses=ACTIONABLE_STATUSES,
-        roles=frozenset(
-            {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
-        ),
+        roles=frozenset({WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}),
         request_model=CreateShootTaskActionRequest,
     ),
     "add_to_schedule": DeliverableActionDefinition(
@@ -87,9 +86,7 @@ SERVER_ACTIONS: dict[str, DeliverableActionDefinition] = {
         artifact_types=REVISION_ARTIFACT_TYPES,
         deliverable_types=REVISION_DELIVERABLE_TYPES,
         statuses=ACTIONABLE_STATUSES,
-        roles=frozenset(
-            {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
-        ),
+        roles=frozenset({WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}),
         request_model=RequestRevisionActionRequest,
     ),
     "generate_next_iteration": DeliverableActionDefinition(
@@ -101,9 +98,7 @@ SERVER_ACTIONS: dict[str, DeliverableActionDefinition] = {
         ),
         deliverable_types=frozenset({DeliverableType.REVIEW_REPORT}),
         statuses=frozenset({"accepted"}),
-        roles=frozenset(
-            {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
-        ),
+        roles=frozenset({WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}),
         request_model=GenerateNextIterationActionRequest,
         requires_thread=True,
     ),
@@ -121,8 +116,7 @@ def server_action_for(
     if (
         definition is None
         or (
-            definition.artifact_types is not None
-            and artifact_type not in definition.artifact_types
+            definition.artifact_types is not None and artifact_type not in definition.artifact_types
         )
         or deliverable_type not in definition.deliverable_types
         or artifact_status not in definition.statuses

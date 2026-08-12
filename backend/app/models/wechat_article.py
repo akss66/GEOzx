@@ -13,11 +13,12 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db import Base
 from app.models.base import BigIntPK, JSONVariant, TimestampMixin, pg_enum
 from app.models.enums import ArticleImageSlotStatus
+from app.schemas.wechat_article import ArticleDocument
 
 if TYPE_CHECKING:
     from app.models.content import ContentItem, Deliverable
@@ -33,12 +34,19 @@ class ArticleWorkingCopy(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("content_item_id", name="uq_article_working_copy_content_item"),
         CheckConstraint("lock_version > 0", name="ck_article_working_copy_lock_version_positive"),
+        ForeignKeyConstraint(
+            ["content_item_id", "account_id"],
+            ["content_items.id", "content_items.account_id"],
+            name="fk_article_working_copy_content_account",
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     content_item_id: Mapped[int] = mapped_column(
         ForeignKey("content_items.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    account_id: Mapped[int] = mapped_column(BigIntPK, nullable=False)
     based_on_deliverable_id: Mapped[int | None] = mapped_column(
         ForeignKey("deliverables.id", ondelete="SET NULL"), index=True, nullable=True
     )
@@ -48,9 +56,13 @@ class ArticleWorkingCopy(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
-    content_item: Mapped[ContentItem] = relationship()  # noqa: F821
+    content_item: Mapped[ContentItem] = relationship(foreign_keys=[content_item_id])  # noqa: F821
     based_on_deliverable: Mapped[Deliverable | None] = relationship()  # noqa: F821
     updated_by: Mapped[User | None] = relationship()  # noqa: F821
+
+    @validates("document")
+    def _validate_document(self, _key: str, value: dict) -> dict:
+        return ArticleDocument.model_validate(value).model_dump(mode="json")
 
 
 class ArticleImageSlot(Base, TimestampMixin):
@@ -60,12 +72,19 @@ class ArticleImageSlot(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("content_item_id", "stable_key", name="uq_article_image_slot_stable_key"),
         CheckConstraint("lock_version > 0", name="ck_article_image_slot_lock_version_positive"),
+        ForeignKeyConstraint(
+            ["content_item_id", "account_id"],
+            ["content_items.id", "content_items.account_id"],
+            name="fk_article_image_slot_content_account",
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     content_item_id: Mapped[int] = mapped_column(
         ForeignKey("content_items.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    account_id: Mapped[int] = mapped_column(BigIntPK, nullable=False)
     stable_key: Mapped[str] = mapped_column(String(128), nullable=False)
     purpose: Mapped[str] = mapped_column(String(300), nullable=False)
     placement_after_block_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -82,7 +101,7 @@ class ArticleImageSlot(Base, TimestampMixin):
     )
     lock_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
-    content_item: Mapped[ContentItem] = relationship()  # noqa: F821
+    content_item: Mapped[ContentItem] = relationship(foreign_keys=[content_item_id])  # noqa: F821
     selected_material: Mapped[MaterialAsset | None] = relationship()  # noqa: F821
 
 

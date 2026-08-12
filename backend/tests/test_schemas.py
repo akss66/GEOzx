@@ -8,9 +8,14 @@ from app.schemas.deliverable import (
     AdPlanPayload,
     PositioningStrategyPayload,
     PublishPackagePayload,
+    WechatArticlePayload,
+    WechatImagePlanPayload,
+    WechatRenderedArticlePayload,
     get_schema,
     validate_payload,
 )
+from app.services.artifacts import _normalize_artifact_type, validate_complete_artifact_payload
+from app.services.deliverable_action_registry import REVISION_DELIVERABLE_TYPES
 
 _INVALID_BUSINESS_PAYLOADS = [
     (
@@ -162,9 +167,64 @@ def test_publish_package_registered_and_serializes() -> None:
     )
 
     assert isinstance(payload, PublishPackagePayload)
-    assert payload.model_dump(mode="json")["package"]["scripts"][0]["script_id"] == (
-        "script-01"
+    assert payload.model_dump(mode="json")["package"]["scripts"][0]["script_id"] == ("script-01")
+
+
+def test_wechat_article_deliverables_use_the_shared_validation_and_revision_pipeline() -> None:
+    article_payload = {
+        "document": {
+            "title": "Summer insulation guide",
+            "digest": "Practical advice for a cooler home.",
+            "blocks": [
+                {
+                    "type": "paragraph",
+                    "block_id": "intro",
+                    "text": "Start with the windows.",
+                }
+            ],
+        }
+    }
+
+    payload = validate_complete_artifact_payload(DeliverableType.WECHAT_ARTICLE, article_payload)
+
+    validated_article = validate_payload(DeliverableType.WECHAT_ARTICLE, article_payload)
+    assert isinstance(validated_article, WechatArticlePayload)
+    assert payload["document"]["title"] == "Summer insulation guide"
+
+    image_plan = validate_complete_artifact_payload(
+        DeliverableType.WECHAT_IMAGE_PLAN,
+        {
+            "slots": [
+                {
+                    "stable_key": "hero-window",
+                    "purpose": "Explain the first visual.",
+                    "aspect_ratio": "3:2",
+                    "visual_brief": "A bright, practical close-up.",
+                }
+            ]
+        },
     )
+    rendered = validate_complete_artifact_payload(
+        DeliverableType.WECHAT_RENDERED_ARTICLE,
+        {"article_deliverable_id": 1, "rendered_html": "<p>Rendered locally.</p>"},
+    )
+    assert isinstance(
+        validate_payload(DeliverableType.WECHAT_IMAGE_PLAN, image_plan), WechatImagePlanPayload
+    )
+    assert isinstance(
+        validate_payload(DeliverableType.WECHAT_RENDERED_ARTICLE, rendered),
+        WechatRenderedArticlePayload,
+    )
+    assert {
+        _normalize_artifact_type(DeliverableType.WECHAT_ARTICLE),
+        _normalize_artifact_type(DeliverableType.WECHAT_IMAGE_PLAN),
+        _normalize_artifact_type(DeliverableType.WECHAT_RENDERED_ARTICLE),
+    } == {"wechat_article", "wechat_image_plan", "wechat_rendered_article"}
+    assert {
+        DeliverableType.WECHAT_ARTICLE,
+        DeliverableType.WECHAT_IMAGE_PLAN,
+        DeliverableType.WECHAT_RENDERED_ARTICLE,
+    } <= REVISION_DELIVERABLE_TYPES
 
 
 @pytest.mark.parametrize(("deliverable_type", "payload"), _INVALID_BUSINESS_PAYLOADS)
