@@ -126,6 +126,14 @@ PUBLIC_SKILL_POLICIES: dict[str, PublicSkillPolicy] = {
         surfaces=frozenset({"composer"}),
         aliases=("数据复盘", "运营复盘", "表现复盘"),
     ),
+    "wechat_article_production": PublicSkillPolicy(
+        code="wechat_article_production",
+        category="quick_operations",
+        icon="file-text",
+        requires_account=True,
+        surfaces=frozenset({"composer", "artifact_center"}),
+        aliases=("微信公众号文章", "公众号文章", "公众号推文", "微信长文"),
+    ),
 }
 
 

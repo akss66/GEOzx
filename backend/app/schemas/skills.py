@@ -27,7 +27,12 @@ class SkillDefinition:
     expert_codes: tuple[str, ...]
     tool_codes: tuple[str, ...]
     risk_level: Literal["low", "medium", "high"]
-    approval_policy: Literal["none", "before_tools", "before_finish"]
+    approval_policy: Literal[
+        "none",
+        "before_tools",
+        "before_finish",
+        "explicit_before_external_write",
+    ]
     artifact_type: str | None
     expert_stages: tuple[tuple[str, ...], ...] = ()
     critic_policy: Literal["none", "required"] = "none"
@@ -72,7 +77,12 @@ class SkillCatalogItem(BaseModel):
     tool_codes: list[str]
     critic_policy: Literal["none", "required"]
     risk_level: Literal["low", "medium", "high"]
-    approval_policy: Literal["none", "before_tools", "before_finish"]
+    approval_policy: Literal[
+        "none",
+        "before_tools",
+        "before_finish",
+        "explicit_before_external_write",
+    ]
     artifact_type: str | None
 
     @classmethod

@@ -73,6 +73,9 @@ from app.orchestrator.skills.operation_iteration import (  # noqa: E402
 from app.orchestrator.skills.visual_brief_generation import (  # noqa: E402
     VISUAL_BRIEF_GENERATION_SKILL,
 )
+from app.orchestrator.skills.wechat_article_production import (  # noqa: E402
+    WECHAT_ARTICLE_PRODUCTION_SKILL,
+)
 
 skill_registry = SkillRegistry(
     [
@@ -88,6 +91,7 @@ skill_registry = SkillRegistry(
         SCRIPT_GENERATION_SKILL,
         PUBLISHING_PREPARATION_SKILL,
         PERFORMANCE_REVIEW_SKILL,
+        WECHAT_ARTICLE_PRODUCTION_SKILL,
     ]
 )
 
