@@ -177,7 +177,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=primary.id,
         title="Verified brand fact",
         entry_kind="product_fact",
@@ -187,7 +187,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=shared.id,
         title="Verified shared policy",
     )
@@ -202,7 +202,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=other_client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=other_brand.id,
         title="Other brand fact",
         entry_kind="product_fact",
@@ -212,7 +212,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=archived.id,
         title="Archived base fact",
     )
@@ -220,7 +220,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=primary.id,
         title="Draft fact",
         entry_kind="product_fact",
@@ -231,7 +231,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=primary.id,
         title="Rejected fact",
         entry_kind="product_fact",
@@ -242,7 +242,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=primary.id,
         title="Expired fact",
         entry_kind="product_fact",
@@ -253,7 +253,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=primary.id,
         title="Disallowed price claim",
         entry_kind="product_fact",
@@ -262,7 +262,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=primary.id,
         title="Unpermitted numeric price",
         payload={"kind": "price", "amount": 99},
@@ -271,7 +271,7 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         session,
         org_id=admin.org_id,
         client_id=client.id,
-        project_id=project.id,
+        project_id=None,
         knowledge_base_id=inactive_binding_base.id,
         title="Retired binding fact",
     )
@@ -297,6 +297,162 @@ async def test_agent_reads_current_account_scope_in_precedence_order_and_exclude
         unpermitted_numeric_claim.id,
         inactive_binding_fact.id,
     }.isdisjoint({row.id for row in rows})
+
+
+@pytest.mark.asyncio
+async def test_disallowed_local_claims_cannot_starve_later_authorized_base_evidence(session, admin):
+    """A pre-filter LIMIT must not hide permitted brand or shared evidence."""
+
+    client = Client(org_id=admin.org_id, name="Starvation client")
+    session.add(client)
+    await session.flush()
+    project = Project(org_id=admin.org_id, client_id=client.id, name="Starvation project")
+    account = Account(
+        org_id=admin.org_id,
+        client_id=client.id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Starvation account",
+    )
+    primary = KnowledgeBase(
+        org_id=admin.org_id,
+        client_id=client.id,
+        kind="brand",
+        name="Starvation brand",
+        status="active",
+    )
+    shared = KnowledgeBase(
+        org_id=admin.org_id,
+        client_id=None,
+        kind="organization_shared",
+        name="Starvation shared",
+        status="active",
+    )
+    session.add_all([project, account, primary, shared])
+    await session.flush()
+    session.add_all(
+        [
+            AccountKnowledgeBinding(
+                org_id=admin.org_id,
+                account_id=account.id,
+                knowledge_base_id=primary.id,
+                knowledge_base_kind="brand",
+                client_id=client.id,
+                binding_type="primary_brand",
+                status="active",
+            ),
+            AccountKnowledgeBinding(
+                org_id=admin.org_id,
+                account_id=account.id,
+                knowledge_base_id=shared.id,
+                knowledge_base_kind="organization_shared",
+                client_id=None,
+                binding_type="shared",
+                status="active",
+            ),
+        ]
+    )
+    await session.flush()
+    for number in range(73):
+        await _entry(
+            session,
+            org_id=admin.org_id,
+            client_id=client.id,
+            project_id=project.id,
+            title=f"Disallowed local price {number}",
+            payload={"kind": "price", "amount": number + 1},
+        )
+    brand = await _entry(
+        session,
+        org_id=admin.org_id,
+        client_id=client.id,
+        project_id=None,
+        knowledge_base_id=primary.id,
+        title="Permitted brand evidence",
+    )
+    shared_entry = await _entry(
+        session,
+        org_id=admin.org_id,
+        client_id=client.id,
+        project_id=None,
+        knowledge_base_id=shared.id,
+        title="Permitted shared evidence",
+    )
+    await session.commit()
+
+    rows = await knowledge_workspace.list_agent_knowledge_for_account(
+        session,
+        org_id=admin.org_id,
+        account_id=account.id,
+        project_id=project.id,
+        limit=24,
+    )
+
+    assert [row.id for row in rows] == [brand.id, shared_entry.id]
+
+
+@pytest.mark.asyncio
+async def test_account_knowledge_filters_through_the_streaming_query_path(
+    session, admin, monkeypatch
+):
+    """Replacing the stream with eager materialization would remove the retrieval memory bound."""
+
+    client = Client(org_id=admin.org_id, name="Streaming client")
+    session.add(client)
+    await session.flush()
+    project = Project(org_id=admin.org_id, client_id=client.id, name="Streaming project")
+    account = Account(
+        org_id=admin.org_id,
+        client_id=client.id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Streaming account",
+    )
+    session.add_all([project, account])
+    await session.flush()
+    entry = await _entry(
+        session,
+        org_id=admin.org_id,
+        client_id=client.id,
+        project_id=project.id,
+        title="Streaming local rule",
+    )
+    await session.commit()
+
+    original_stream_scalars = session.stream_scalars
+    stream_closed = False
+
+    async def stream_scalars(statement, **kwargs):
+        result = await original_stream_scalars(statement, **kwargs)
+
+        class CloseTrackedResult:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return await result.__anext__()
+
+            async def close(self):
+                nonlocal stream_closed
+                stream_closed = True
+                await result.close()
+
+        return CloseTrackedResult()
+
+    async def eager_scalars(*_args, **_kwargs):
+        raise AssertionError("account retrieval must not eagerly materialize candidate rows")
+
+    monkeypatch.setattr(session, "stream_scalars", stream_scalars)
+    monkeypatch.setattr(session, "scalars", eager_scalars)
+
+    rows = await knowledge_workspace.list_agent_knowledge_for_account(
+        session,
+        org_id=admin.org_id,
+        account_id=account.id,
+        project_id=project.id,
+        limit=1,
+    )
+
+    assert [row.id for row in rows] == [entry.id]
+    assert stream_closed is True
 
 
 @pytest.mark.asyncio

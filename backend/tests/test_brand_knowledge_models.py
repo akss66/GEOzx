@@ -1,5 +1,8 @@
 """Database invariants for account-scoped brand knowledge."""
 
+import importlib
+import inspect
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -229,6 +232,79 @@ def test_knowledge_entries_accept_legacy_rows_without_a_knowledge_base():
     assert "effective_at" in entry_columns
     assert "expires_at" in entry_columns
     assert "allowed_for_external_claim" in entry_columns
+
+
+@pytest.mark.asyncio
+async def test_knowledge_entry_scope_constraints_allow_shared_rows_and_reject_raw_scope_bypasses(
+    session,
+):
+    """Removing the derived base kind lets raw rows cross local, brand, and shared boundaries."""
+
+    await _seed_binding_scope(session)
+    entry_table = Base.metadata.tables["knowledge_entries"]
+    assert entry_table.c.client_id.nullable is True
+    assert "knowledge_base_kind" in entry_table.c
+
+    common = {
+        "org_id": 1,
+        "project_id": None,
+        "category": "prompt_library",
+        "content": "Verified source",
+        "payload": {},
+        "source_type": "manual",
+        "source_label": "Source",
+        "version": 1,
+        "status": "active",
+        "entry_kind": "policy",
+        "verification_status": "verified",
+        "allowed_for_external_claim": False,
+    }
+    await session.execute(
+        entry_table.insert(),
+        {
+            **common,
+            "title": "Permitted shared",
+            "client_id": None,
+            "knowledge_base_id": 1002,
+            "knowledge_base_kind": "organization_shared",
+        },
+    )
+    await session.commit()
+
+    for title, client_id, base_id, base_kind, org_id in (
+        ("Null local", None, None, None, 1),
+        ("Null brand", None, 1000, "brand", 1),
+        ("Client shared", 10, 1002, "organization_shared", 1),
+        ("Mismatched brand client", 11, 1000, "brand", 1),
+        ("Mismatched base kind", 10, 1000, "organization_shared", 1),
+        ("Mismatched base org", 10, 1000, "brand", 2),
+    ):
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                entry_table.insert(),
+                {
+                    **common,
+                    "title": title,
+                    "org_id": org_id,
+                    "client_id": client_id,
+                    "knowledge_base_id": base_id,
+                    "knowledge_base_kind": base_kind,
+                },
+            )
+            await session.commit()
+        await session.rollback()
+
+
+def test_shared_entry_migration_refuses_a_destructive_downgrade() -> None:
+    """A pre-0260 schema cannot represent a shared row, so downgrade must refuse it."""
+
+    migration = importlib.import_module(
+        "migrations.versions.20260811_0260_shared_knowledge_entries"
+    )
+    assert migration.down_revision == "20260811_0250"
+    source = inspect.getsource(migration.downgrade)
+    assert "cannot downgrade while organization_shared knowledge entries exist" in source
+    assert source.index("cannot downgrade") < source.index("drop_column")
 
 
 @pytest.mark.asyncio

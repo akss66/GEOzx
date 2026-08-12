@@ -48,14 +48,33 @@ class KnowledgeEntry(Base, TimestampMixin):
             "effective_at IS NULL OR expires_at IS NULL OR effective_at <= expires_at",
             name="ck_knowledge_entries_validity_range",
         ),
+        CheckConstraint(
+            "(knowledge_base_id IS NULL AND knowledge_base_kind IS NULL "
+            "AND client_id IS NOT NULL) OR "
+            "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'brand' "
+            "AND client_id IS NOT NULL) OR "
+            "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'organization_shared' "
+            "AND client_id IS NULL)",
+            name="ck_knowledge_entries_scope_kind_client",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "org_id", "knowledge_base_kind"],
+            ["knowledge_bases.id", "knowledge_bases.org_id", "knowledge_bases.kind"],
+            name="fk_knowledge_entries_base_org_kind",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "client_id"],
+            ["knowledge_bases.id", "knowledge_bases.client_id"],
+            name="fk_knowledge_entries_base_client",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    client_id: Mapped[int] = mapped_column(
-        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=False
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=True
     )
     project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
@@ -78,6 +97,7 @@ class KnowledgeEntry(Base, TimestampMixin):
     knowledge_base_id: Mapped[int | None] = mapped_column(
         ForeignKey("knowledge_bases.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    knowledge_base_kind: Mapped[str | None] = mapped_column(String(40), nullable=True)
     entry_kind: Mapped[str] = mapped_column(
         String(40), default="document", index=True, nullable=False
     )
@@ -98,7 +118,7 @@ class KnowledgeEntry(Base, TimestampMixin):
     )
 
     org: Mapped[Org] = relationship()  # noqa: F821
-    client: Mapped[Client] = relationship()  # noqa: F821
+    client: Mapped[Client | None] = relationship()  # noqa: F821
     project: Mapped[Project | None] = relationship()  # noqa: F821
     citations: Mapped[list[KnowledgeCitation]] = relationship(
         back_populates="entry", cascade="all, delete-orphan"

@@ -231,7 +231,12 @@ async def get_scoped_entry(
     writable: bool,
 ) -> KnowledgeEntry:
     entry = await session.get(KnowledgeEntry, entry_id)
-    if entry is None or entry.org_id != user.org_id:
+    if (
+        entry is None
+        or entry.org_id != user.org_id
+        or entry.client_id is None
+        or entry.knowledge_base_id is not None
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识条目不存在")
     await require_knowledge_scope(
         session,
@@ -343,6 +348,13 @@ async def list_agent_knowledge_for_account(
         )
     )
     local_match = KnowledgeEntry.knowledge_base_id.is_(None)
+    local_scope = (
+        local_match
+        & (KnowledgeEntry.client_id == Account.client_id)
+        & (KnowledgeEntry.project_id == project_id)
+    )
+    primary_scope = primary_match & KnowledgeEntry.project_id.is_(None)
+    shared_scope = shared_match & KnowledgeEntry.project_id.is_(None)
     source_tier = case(
         (local_match, 0),
         (primary_match, 1),
@@ -362,8 +374,6 @@ async def list_agent_knowledge_for_account(
             Project.org_id == org_id,
             Project.client_id == Account.client_id,
             KnowledgeEntry.org_id == org_id,
-            KnowledgeEntry.client_id == Account.client_id,
-            KnowledgeEntry.project_id == project_id,
             KnowledgeEntry.status == "active",
             KnowledgeEntry.verification_status == "verified",
             or_(KnowledgeEntry.effective_at.is_(None), KnowledgeEntry.effective_at <= now),
@@ -372,13 +382,21 @@ async def list_agent_knowledge_for_account(
                 ~KnowledgeEntry.entry_kind.in_(("product_fact", "case")),
                 KnowledgeEntry.allowed_for_external_claim.is_(True),
             ),
-            or_(local_match, primary_match, shared_match),
+            or_(local_scope, primary_scope, shared_scope),
         )
         .order_by(source_tier.asc(), KnowledgeEntry.id.asc())
-        .limit(bounded_limit * 3)
     )
-    rows = list(await session.scalars(query))
-    return [row for row in rows if _claim_is_permitted(row)][:bounded_limit]
+    rows: list[KnowledgeEntry] = []
+    candidates = await session.stream_scalars(query)
+    try:
+        async for row in candidates:
+            if _claim_is_permitted(row):
+                rows.append(row)
+                if len(rows) == bounded_limit:
+                    break
+    finally:
+        await candidates.close()
+    return rows
 
 
 def _claim_is_permitted(row: KnowledgeEntry) -> bool:

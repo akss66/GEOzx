@@ -15,9 +15,11 @@ from app.models import (
     KnowledgeCitation,
     KnowledgeEntry,
     Org,
+    Project,
     User,
 )
 from app.models.enums import KnowledgeCategory, Platform, UserRole, WorkspaceRole
+from app.services.knowledge_workspace import list_agent_knowledge_for_account
 
 
 async def _token(client, email: str, password: str) -> dict[str, str]:
@@ -25,7 +27,9 @@ async def _token(client, email: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-async def _member(session, admin, *, email: str, role: WorkspaceRole) -> tuple[User, Client, Account]:
+async def _member(
+    session, admin, *, email: str, role: WorkspaceRole
+) -> tuple[User, Client, Account]:
     user = User(
         org_id=admin.org_id,
         email=email,
@@ -47,7 +51,9 @@ async def _member(session, admin, *, email: str, role: WorkspaceRole) -> tuple[U
     return user, workspace, account
 
 
-async def _brand_base(session, *, org_id: int, client_id: int, name: str, creator_id: int) -> KnowledgeBase:
+async def _brand_base(
+    session, *, org_id: int, client_id: int, name: str, creator_id: int
+) -> KnowledgeBase:
     base = KnowledgeBase(
         org_id=org_id,
         client_id=client_id,
@@ -141,7 +147,89 @@ async def test_knowledge_base_crud_and_entry_lists_are_paginated(client, session
 
 
 @pytest.mark.asyncio
-async def test_product_fact_payload_rejects_malformed_values_at_the_boundary(client, session, admin):
+async def test_admin_creates_shared_entry_with_null_client_and_agents_retrieve_it(
+    client, session, admin
+):
+    """Shared knowledge must use its real null-client base shape without bypassing bindings."""
+
+    lead, workspace, account = await _member(
+        session, admin, email="shared-entry-lead@test.com", role=WorkspaceRole.LEAD
+    )
+    project = Project(org_id=admin.org_id, client_id=workspace.id, name="Shared entry project")
+    shared = KnowledgeBase(
+        org_id=admin.org_id,
+        client_id=None,
+        kind="organization_shared",
+        name="Shared entry base",
+        status="active",
+        version=1,
+        created_by_id=admin.id,
+    )
+    session.add_all([project, shared])
+    await session.flush()
+    session.add(
+        AccountKnowledgeBinding(
+            org_id=admin.org_id,
+            account_id=account.id,
+            knowledge_base_id=shared.id,
+            knowledge_base_kind="organization_shared",
+            client_id=None,
+            binding_type="shared",
+            status="active",
+            bound_by_id=admin.id,
+        )
+    )
+    await session.commit()
+    headers = await _token(client, admin.email, "admin-pw-123")
+
+    created = await client.post(
+        f"/knowledge-bases/{shared.id}/entries",
+        headers=headers,
+        json={
+            "title": "Shared verified policy",
+            "content": "Use the organization disclosure language.",
+            "category": "prompt_library",
+            "source_label": "Organization policy",
+            "entry_kind": "policy",
+            "payload": {"schema_version": 1, "kind": "policy"},
+        },
+    )
+
+    assert created.status_code == 201
+    entry_id = created.json()["id"]
+    entry = await session.get(KnowledgeEntry, entry_id)
+    assert entry is not None
+    assert entry.client_id is None
+    assert entry.project_id is None
+    assert entry.knowledge_base_kind == "organization_shared"
+    assert (
+        await client.patch(
+            f"/knowledge/{entry_id}",
+            headers=headers,
+            json={"title": "Wrong local route"},
+        )
+    ).status_code == 404
+    verified = await client.patch(
+        f"/knowledge-bases/{shared.id}/entries/{entry_id}",
+        headers=headers,
+        json={"verification_status": "verified"},
+    )
+    assert verified.status_code == 200
+
+    rows = await list_agent_knowledge_for_account(
+        session,
+        org_id=admin.org_id,
+        account_id=account.id,
+        project_id=project.id,
+        limit=24,
+    )
+    assert [row.id for row in rows] == [entry_id]
+
+
+@pytest.mark.asyncio
+async def test_product_fact_payload_rejects_malformed_values_at_the_boundary(
+    client, session, admin
+):
     """Untyped facts could otherwise turn malformed claims into publishable knowledge."""
 
     lead, workspace, _account = await _member(
@@ -181,13 +269,9 @@ async def test_legacy_entry_update_cannot_bypass_product_fact_validation(client,
     lead, workspace, _account = await _member(
         session, admin, email="legacy-facts-lead@test.com", role=WorkspaceRole.LEAD
     )
-    base = await _brand_base(
-        session, org_id=admin.org_id, client_id=workspace.id, name="Legacy facts", creator_id=lead.id
-    )
     entry = KnowledgeEntry(
         org_id=admin.org_id,
         client_id=workspace.id,
-        knowledge_base_id=base.id,
         category=KnowledgeCategory.PROMPT_LIBRARY,
         title="Warranty",
         content="Ten year warranty.",
@@ -406,7 +490,9 @@ async def test_binding_returns_conflict_after_a_partial_unique_failure(
     headers = await _token(client, lead.email, "member-pw-123")
 
     async def raise_partial_unique(*_args, **_kwargs):
-        raise IntegrityError("insert", {}, Exception("uq_account_knowledge_bindings_active_primary_brand"))
+        raise IntegrityError(
+            "insert", {}, Exception("uq_account_knowledge_bindings_active_primary_brand")
+        )
 
     monkeypatch.setattr(knowledge_api, "bind_account_primary_knowledge_base", raise_partial_unique)
     response = await client.put(
@@ -539,7 +625,8 @@ async def test_binding_fails_closed_then_rebinds_and_unbinds_without_removing_ci
     deleted = await client.delete(f"/accounts/{account.id}/knowledge-binding", headers=headers)
     assert deleted.status_code == 204
     assert await session.scalar(select(func.count()).select_from(KnowledgeCitation)) == 1
-    assert (await client.get(f"/accounts/{account.id}/knowledge-binding", headers=headers)).status_code == 404
+    binding = await client.get(f"/accounts/{account.id}/knowledge-binding", headers=headers)
+    assert binding.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -550,7 +637,11 @@ async def test_binding_requires_lead_or_admin_and_account_access(client, session
         session, admin, email="binding-operator@test.com", role=WorkspaceRole.OPERATOR
     )
     base = await _brand_base(
-        session, org_id=admin.org_id, client_id=workspace.id, name="Operator base", creator_id=operator.id
+        session,
+        org_id=admin.org_id,
+        client_id=workspace.id,
+        name="Operator base",
+        creator_id=operator.id,
     )
     response = await client.put(
         f"/accounts/{account.id}/knowledge-binding",

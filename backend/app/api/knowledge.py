@@ -314,6 +314,7 @@ async def create_knowledge_base_entry(
         client_id=base.client_id,
         project_id=None,
         knowledge_base_id=base.id,
+        knowledge_base_kind=base.kind,
         category=body.category,
         title=body.title,
         content=body.content,
