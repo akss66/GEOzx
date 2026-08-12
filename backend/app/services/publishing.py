@@ -10,12 +10,15 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import CursorResult, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
 from app.core.workspace_access import require_account_access
@@ -31,6 +34,7 @@ from app.models import (
     Account,
     AccountClient,
     AgentToolCall,
+    ArticleImageSlot,
     ContentItem,
     Deliverable,
     Event,
@@ -41,25 +45,40 @@ from app.models import (
     Project,
     ProjectAccount,
     User,
+    WechatDraftMapping,
 )
 from app.models.enums import (
     AccountStatus,
+    ArticleImageSlotStatus,
     ContentIdentityConfidence,
     DataSourceKind,
     DeliverableStatus,
+    DeliverableType,
     MaterialStatus,
     Platform,
     WorkspaceRole,
 )
-from app.models.publishing import PlatformPublishJob, PlatformPublishJobStatus
+from app.models.publishing import (
+    PlatformPublishJob,
+    PlatformPublishJobOperationType,
+    PlatformPublishJobStatus,
+)
 from app.schemas.orchestrator import PublishPackageOut
+from app.schemas.platform import WechatCapabilitySnapshot
 from app.schemas.publishing import (
     CreatePublishJobRequest,
     DouyinCreateVideoCallback,
     PublishHandoffOut,
     PublishJobOut,
+    SyncWechatDraftRequest,
 )
+from app.schemas.wechat_article import ArticleDocument, WechatDraftArticle
 from app.services.deliverable_streams import deliverable_stream_clause
+from app.services.turn_events import TurnEventScope, append_turn_event
+from app.services.wechat_articles import ARTICLE_VERSION_AGENT_CODE, validate_article_for_sync
+from app.services.wechat_component import WechatIntegrationError
+from app.services.wechat_drafts import WechatDraftIntegrationError, compute_remote_hash
+from app.services.wechat_renderer import render_wechat_article
 
 
 class PublishingServiceError(RuntimeError):
@@ -90,6 +109,1079 @@ _CONNECTION_ERROR_CODES = frozenset(
         "DOUYIN_PUBLISH_SCOPE_MISSING",
     }
 )
+
+_MAX_SYNC_IMAGE_BYTES = 20 * 1024 * 1024
+_SYNC_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
+async def prepare_wechat_draft_sync_job(
+    session: AsyncSession,
+    user: User,
+    *,
+    article_id: int,
+    request: SyncWechatDraftRequest,
+) -> PlatformPublishJob:
+    """Freeze one exact account-scoped package before any external interaction."""
+    source = await session.execute(
+        select(Deliverable, ContentItem, Account)
+        .join(ContentItem, Deliverable.content_item_id == ContentItem.id)
+        .join(Account, ContentItem.account_id == Account.id)
+        .where(
+            Deliverable.id == request.article_version_id,
+            Deliverable.content_item_id == article_id,
+            Deliverable.agent_code == ARTICLE_VERSION_AGENT_CODE,
+            Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+            ContentItem.account_id == Account.id,
+            Account.org_id == user.org_id,
+        )
+    )
+    lineage = source.one_or_none()
+    if lineage is None:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_VERSION_NOT_FOUND",
+            "找不到当前账号对应的公众号文章版本。",
+            status_code=404,
+        )
+    deliverable, _content_item, account = lineage
+    await require_account_access(
+        session,
+        user,
+        account.id,
+        roles={WorkspaceRole.LEAD, WorkspaceRole.OPERATOR},
+    )
+    if account.platform is not Platform.WECHAT_OFFICIAL_ACCOUNT:
+        raise PublishingServiceError(
+            "WECHAT_ACCOUNT_REQUIRED",
+            "当前文章不属于微信公众号账号。",
+            status_code=422,
+        )
+    if account.status is not AccountStatus.ACTIVE:
+        raise PublishingServiceError(
+            "WECHAT_ACCOUNT_INACTIVE",
+            "当前微信公众号账号不可用于草稿同步。",
+            status_code=422,
+        )
+    await _append_deliverable_sync_step(
+        session,
+        deliverable,
+        org_id=user.org_id,
+        account_id=account.id,
+        idempotency_key=request.idempotency_key,
+        step="readiness",
+        phase="started",
+    )
+    readiness = await validate_article_for_sync(session, version_id=deliverable.id)
+    if not readiness.can_sync:
+        await _append_deliverable_sync_step(
+            session,
+            deliverable,
+            org_id=user.org_id,
+            account_id=account.id,
+            idempotency_key=request.idempotency_key,
+            step="readiness",
+            phase="failed",
+            error_code="WECHAT_ARTICLE_NOT_READY",
+        )
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_NOT_READY",
+            "文章尚未满足同步条件。",
+            status_code=422,
+            details={"blockerCodes": [item.code for item in readiness.blockers]},
+        )
+    await _append_deliverable_sync_step(
+        session,
+        deliverable,
+        org_id=user.org_id,
+        account_id=account.id,
+        idempotency_key=request.idempotency_key,
+        step="readiness",
+        phase="completed",
+    )
+
+    document = ArticleDocument.model_validate(deliverable.payload["document"])
+    body_slot_keys = sorted(
+        {
+            slot_key
+            for block in document.blocks
+            if isinstance((slot_key := getattr(block, "slot_key", None)), str)
+        }
+    )
+    required_keys = ["cover", *body_slot_keys]
+    slots = list(
+        await session.scalars(
+            select(ArticleImageSlot).where(
+                ArticleImageSlot.content_item_id == article_id,
+                ArticleImageSlot.account_id == account.id,
+                ArticleImageSlot.stable_key.in_(required_keys),
+            )
+        )
+    )
+    slots_by_key = {slot.stable_key: slot for slot in slots}
+    if set(slots_by_key) != set(required_keys):
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSETS_NOT_READY",
+            "封面或正文配图尚未选择。",
+            status_code=422,
+        )
+
+    frozen_assets: dict[str, dict[str, Any]] = {}
+    for stable_key in required_keys:
+        slot = slots_by_key[stable_key]
+        if slot.status is not ArticleImageSlotStatus.SELECTED or slot.selected_material_id is None:
+            raise PublishingServiceError(
+                "WECHAT_ARTICLE_ASSETS_NOT_READY",
+                "封面或正文配图尚未选择。",
+                status_code=422,
+            )
+        material = await session.scalar(
+            select(MaterialAsset).where(
+                MaterialAsset.id == slot.selected_material_id,
+                MaterialAsset.org_id == user.org_id,
+                MaterialAsset.content_item_id == article_id,
+                MaterialAsset.kind == "image",
+                MaterialAsset.status == MaterialStatus.READY,
+            )
+        )
+        if material is None or not material.local_path:
+            raise PublishingServiceError(
+                "WECHAT_ARTICLE_ASSETS_NOT_READY",
+                "封面或正文配图不可用。",
+                status_code=422,
+            )
+        frozen_assets[stable_key] = _frozen_image_fact(material)
+
+    mapping = await session.scalar(
+        select(WechatDraftMapping).where(
+            WechatDraftMapping.org_id == user.org_id,
+            WechatDraftMapping.account_id == account.id,
+            WechatDraftMapping.content_item_id == article_id,
+        )
+    )
+    _validate_remote_strategy(mapping, request)
+    package = {
+        "article_id": article_id,
+        "article_version_id": deliverable.id,
+        "conflict_strategy": request.conflict_strategy,
+        "document_hash": hashlib.sha256(
+            _canonical(document.model_dump(mode="json")).encode("utf-8")
+        ).hexdigest(),
+        "body_assets": [{"stable_key": key, **frozen_assets[key]} for key in body_slot_keys],
+        "cover_asset": frozen_assets["cover"],
+        "initial_mapping": (
+            {
+                "media_id": mapping.media_id,
+                "remote_hash": mapping.remote_hash,
+                "last_synced_deliverable_id": mapping.last_synced_deliverable_id,
+            }
+            if mapping is not None
+            else None
+        ),
+        "progress": {"body_urls": {}, "cover_media_id": None, "draft_completed": False},
+    }
+    digest = hashlib.sha256(
+        _canonical(
+            {
+                "org_id": user.org_id,
+                "account_id": account.id,
+                "article_id": article_id,
+                "article_version_id": deliverable.id,
+                "conflict_strategy": request.conflict_strategy,
+                "expected_remote_hash": request.expected_remote_hash,
+                "package": {key: value for key, value in package.items() if key != "progress"},
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+
+    existing = await session.scalar(
+        select(PlatformPublishJob).where(
+            PlatformPublishJob.org_id == user.org_id,
+            PlatformPublishJob.idempotency_key == request.idempotency_key,
+        )
+    )
+    if existing is not None:
+        _assert_wechat_sync_digest(existing, digest)
+        return existing
+
+    job = PlatformPublishJob(
+        org_id=user.org_id,
+        account_id=account.id,
+        created_by_id=user.id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        operation_type=PlatformPublishJobOperationType.WECHAT_DRAFT_SYNC,
+        status=PlatformPublishJobStatus.WECHAT_QUEUED,
+        idempotency_key=request.idempotency_key,
+        article_version_id=deliverable.id,
+        expected_remote_hash=request.expected_remote_hash,
+        request_digest=digest,
+        publish_package=package,
+        capabilities_snapshot={},
+        approval_snapshot={
+            "actor_id": user.id,
+            "account_id": account.id,
+            "article_id": article_id,
+            "article_version_id": deliverable.id,
+            "conflict_strategy": request.conflict_strategy,
+            "expected_remote_hash": request.expected_remote_hash,
+            "request_digest": digest,
+            "approved_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    try:
+        async with session.begin_nested():
+            session.add(job)
+            await session.flush()
+    except IntegrityError:
+        winner = await session.scalar(
+            select(PlatformPublishJob).where(
+                PlatformPublishJob.org_id == user.org_id,
+                PlatformPublishJob.idempotency_key == request.idempotency_key,
+            )
+        )
+        if winner is None:
+            raise
+        _assert_wechat_sync_digest(winner, digest)
+        return winner
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+def _frozen_image_fact(material: MaterialAsset) -> dict[str, Any]:
+    root = Path(settings.storage_local_dir).resolve()
+    candidate = (root / (material.local_path or "")).resolve()
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSET_UNAVAILABLE",
+            "文章图片文件不可用。",
+            status_code=422,
+        )
+    size = candidate.stat().st_size
+    if size <= 0 or size > _MAX_SYNC_IMAGE_BYTES:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSET_UNAVAILABLE",
+            "文章图片文件大小不符合要求。",
+            status_code=422,
+        )
+    media_type = _SYNC_IMAGE_MEDIA_TYPES.get(candidate.suffix.lower())
+    if media_type is None:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSET_UNAVAILABLE",
+            "文章图片格式不受支持。",
+            status_code=422,
+        )
+    content = candidate.read_bytes()
+    if len(content) != size:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSET_UNAVAILABLE",
+            "文章图片读取失败。",
+            status_code=422,
+        )
+    return {
+        "material_id": material.id,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": size,
+        "media_type": media_type,
+    }
+
+
+def _validate_remote_strategy(
+    mapping: WechatDraftMapping | None,
+    request: SyncWechatDraftRequest,
+) -> None:
+    if mapping is None:
+        if request.conflict_strategy == "overwrite_confirmed":
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_OVERWRITE_REQUIRES_MAPPING",
+                "当前文章尚无可覆盖的微信草稿。",
+                status_code=422,
+            )
+        if request.expected_remote_hash is not None:
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_UNEXPECTED_REMOTE_HASH",
+                "新建微信草稿时不应提交远端版本确认值。",
+                status_code=422,
+            )
+        return
+    if (
+        request.conflict_strategy in {"fail", "overwrite_confirmed"}
+        and not (request.expected_remote_hash or "").strip()
+    ):
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_EXPECTED_HASH_REQUIRED",
+            "更新微信草稿前必须确认当前远端版本。",
+            status_code=422,
+        )
+
+
+def _assert_wechat_sync_digest(job: PlatformPublishJob, digest: str) -> None:
+    if (
+        job.operation_type is not PlatformPublishJobOperationType.WECHAT_DRAFT_SYNC
+        or job.request_digest != digest
+    ):
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_IDEMPOTENCY_CONFLICT",
+            "该幂等键已用于不同的微信草稿同步请求。",
+            status_code=409,
+        )
+
+
+async def execute_wechat_draft_sync_job(
+    session: AsyncSession,
+    user: User,
+    *,
+    job_id: int,
+    capability_probe: Any,
+    token_provider: Any,
+    draft_client: Any,
+) -> PlatformPublishJob:
+    """Execute a frozen new-draft package without holding DB work over provider I/O."""
+    job = await _get_wechat_sync_job(session, user, job_id)
+    if job.status is PlatformPublishJobStatus.WECHAT_SYNCED:
+        return job
+    _validate_wechat_sync_approval(job)
+    await _append_wechat_sync_step(session, job, "capabilities", "started")
+    await _guard_unresolved_sync_intent(session, job)
+    if job.status not in {
+        PlatformPublishJobStatus.WECHAT_QUEUED,
+        PlatformPublishJobStatus.WECHAT_RUNNING,
+    }:
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_SYNC_NOT_RUNNABLE",
+            "当前微信草稿同步任务不可执行。",
+            status_code=409,
+        )
+    if job.status is PlatformPublishJobStatus.WECHAT_QUEUED:
+        expected_attempt = job.retry_count
+        claimed = await session.execute(
+            update(PlatformPublishJob)
+            .where(
+                PlatformPublishJob.id == job.id,
+                PlatformPublishJob.status == PlatformPublishJobStatus.WECHAT_QUEUED,
+                PlatformPublishJob.retry_count == expected_attempt,
+            )
+            .values(
+                status=PlatformPublishJobStatus.WECHAT_RUNNING,
+                retry_count=expected_attempt + 1,
+            )
+        )
+        if not isinstance(claimed, CursorResult) or claimed.rowcount != 1:
+            await session.rollback()
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_SYNC_ALREADY_RUNNING",
+                "微信草稿同步任务已由其他执行器接管。",
+                status_code=409,
+            )
+        await session.commit()
+        job = await _get_wechat_sync_job(session, user, job.id)
+
+    try:
+        capabilities = WechatCapabilitySnapshot.model_validate(
+            await capability_probe(session, job.account_id)
+        )
+    except (WechatIntegrationError, ValueError) as exc:
+        await _commit_boundary_failure_without_intent(
+            session,
+            job,
+            error=exc,
+            fallback_code="WECHAT_DRAFT_CAPABILITY_PROBE_FAILED",
+        )
+        await _append_wechat_sync_step(
+            session,
+            job,
+            "capabilities",
+            "failed",
+            error_code="WECHAT_DRAFT_CAPABILITY_PROBE_FAILED",
+        )
+        raise _safe_external_service_error(exc) from None
+    package = dict(job.publish_package or {})
+    initial_mapping = package.get("initial_mapping")
+    strategy = str(package["conflict_strategy"])
+    required_capabilities = [capabilities.add_permanent_material]
+    required_capabilities.append(
+        capabilities.draft_update
+        if initial_mapping is not None and strategy != "create_new"
+        else capabilities.draft_add
+    )
+    if initial_mapping is not None and strategy != "create_new":
+        required_capabilities.append(capabilities.draft_get)
+    if package.get("body_assets"):
+        required_capabilities.append(capabilities.upload_article_image)
+    if not all(item.can_use for item in required_capabilities):
+        job.capabilities_snapshot = _safe_capability_snapshot(capabilities)
+        job.status = PlatformPublishJobStatus.WECHAT_BLOCKED
+        job.last_error_code = "WECHAT_DRAFT_CAPABILITY_MISSING"
+        job.last_error_message = "微信公众号缺少草稿同步所需能力"
+        await session.commit()
+        await _append_wechat_sync_step(
+            session,
+            job,
+            "capabilities",
+            "failed",
+            error_code="WECHAT_DRAFT_CAPABILITY_MISSING",
+        )
+        return job
+    job.capabilities_snapshot = _safe_capability_snapshot(capabilities)
+    await session.commit()
+
+    try:
+        access_token = await token_provider.get_authorizer_access_token(session, job.account_id)
+    except WechatIntegrationError as exc:
+        await _commit_boundary_failure_without_intent(
+            session,
+            job,
+            error=exc,
+            fallback_code="WECHAT_DRAFT_AUTHORIZATION_REVOKED",
+        )
+        await _append_wechat_sync_step(
+            session,
+            job,
+            "capabilities",
+            "failed",
+            error_code="WECHAT_DRAFT_AUTHORIZATION_REVOKED",
+        )
+        retryable = _is_retryable_external_error(exc)
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_EXTERNAL_RETRYABLE"
+            if retryable
+            else "WECHAT_DRAFT_AUTHORIZATION_REVOKED",
+            "微信公众号授权服务暂时不可用，请稍后重试。"
+            if retryable
+            else "微信公众号授权已失效，请重新授权后再同步。",
+            retryable=retryable,
+            status_code=503 if retryable else 422,
+        ) from None
+    await session.commit()
+    await _append_wechat_sync_step(session, job, "capabilities", "completed")
+    await _append_wechat_sync_step(session, job, "assets", "started")
+    await _append_wechat_sync_step(session, job, "assets", "completed")
+    await _append_wechat_sync_step(session, job, "conflict", "started")
+    progress = dict(package.get("progress") or {})
+
+    update_media_id: str | None = None
+    if initial_mapping is not None and strategy != "create_new":
+        update_media_id = str(initial_mapping["media_id"])
+        await _commit_external_intent(session, job, operation="draft_get")
+        try:
+            remote = await draft_client.get_draft(
+                access_token=access_token,
+                media_id=update_media_id,
+            )
+        except WechatDraftIntegrationError as exc:
+            await _commit_external_failure(session, job, operation="draft_get", error=exc)
+            await _append_wechat_sync_step(
+                session,
+                job,
+                "conflict",
+                "failed",
+                error_code="WECHAT_DRAFT_EXTERNAL_FAILURE",
+            )
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_EXTERNAL_RETRYABLE"
+                if exc.retryable
+                else "WECHAT_DRAFT_EXTERNAL_FAILURE",
+                "微信公众号暂时无法读取草稿。" if exc.retryable else "微信公众号返回了无效草稿。",
+                retryable=exc.retryable,
+                status_code=503 if exc.retryable else 422,
+            ) from None
+        observed_hash = compute_remote_hash(remote.news_item[0])
+        job.observed_remote_hash = observed_hash
+        await _commit_external_result(session, job, operation="draft_get")
+        expected = job.expected_remote_hash
+        stored_hash = initial_mapping.get("remote_hash")
+        accepted = (
+            observed_hash == expected == stored_hash
+            if strategy == "fail"
+            else observed_hash == expected
+        )
+        if not accepted:
+            job.status = PlatformPublishJobStatus.WECHAT_CONFLICT
+            job.last_error_code = "WECHAT_DRAFT_CONFLICT"
+            job.last_error_message = "微信草稿已发生变化"
+            await session.commit()
+            await _append_wechat_sync_step(
+                session,
+                job,
+                "conflict",
+                "failed",
+                error_code="WECHAT_DRAFT_CONFLICT",
+            )
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_CONFLICT",
+                "微信草稿已被修改，请确认最新版本后再同步。",
+                status_code=409,
+                details={
+                    "syncId": job.id,
+                    "observedRemoteHash": observed_hash,
+                },
+            )
+    await _append_wechat_sync_step(session, job, "conflict", "completed")
+    await _append_wechat_sync_step(session, job, "sync", "started")
+    body_urls = dict(progress.get("body_urls") or {})
+    for body_fact_value in package.get("body_assets") or []:
+        body_fact = dict(body_fact_value)
+        stable_key = str(body_fact.pop("stable_key"))
+        if stable_key in body_urls:
+            continue
+        body_bytes, body_media_type = await _load_frozen_asset(
+            session,
+            job,
+            body_fact,
+        )
+        operation = f"body_upload:{stable_key}"
+        await _commit_external_intent(session, job, operation=operation)
+        try:
+            body_url = await draft_client.upload_article_image(
+                access_token=access_token,
+                filename=(f"body-{body_fact['material_id']}{_media_suffix(body_media_type)}"),
+                content=body_bytes,
+                media_type=body_media_type,
+            )
+        except WechatDraftIntegrationError as exc:
+            await _commit_external_failure(session, job, operation=operation, error=exc)
+            await _append_wechat_sync_step(
+                session,
+                job,
+                "sync",
+                "failed",
+                error_code="WECHAT_DRAFT_EXTERNAL_FAILURE",
+            )
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_EXTERNAL_RETRYABLE"
+                if exc.retryable
+                else "WECHAT_DRAFT_EXTERNAL_FAILURE",
+                "微信公众号暂时无法处理图片。"
+                if exc.retryable
+                else "微信公众号拒绝了图片处理请求。",
+                retryable=exc.retryable,
+                status_code=503 if exc.retryable else 422,
+            ) from None
+        body_urls[stable_key] = body_url
+        progress["body_urls"] = body_urls
+        package["progress"] = progress
+        job.publish_package = package
+        flag_modified(job, "publish_package")
+        await _commit_external_result(session, job, operation=operation)
+    cover_fact = dict(package["cover_asset"])
+    if progress.get("cover_media_id") is None:
+        cover_bytes, cover_media_type = await _load_frozen_asset(
+            session,
+            job,
+            cover_fact,
+        )
+        await _commit_external_intent(session, job, operation="cover_upload")
+        try:
+            cover_media_id = await draft_client.add_permanent_cover(
+                access_token=access_token,
+                filename=(f"cover-{cover_fact['material_id']}{_media_suffix(cover_media_type)}"),
+                content=cover_bytes,
+                media_type=cover_media_type,
+            )
+        except WechatDraftIntegrationError as exc:
+            await _commit_external_failure(session, job, operation="cover_upload", error=exc)
+            await _append_wechat_sync_step(
+                session,
+                job,
+                "sync",
+                "failed",
+                error_code="WECHAT_DRAFT_EXTERNAL_FAILURE",
+            )
+            raise _safe_external_service_error(exc) from None
+        progress["cover_media_id"] = cover_media_id
+        package["progress"] = progress
+        job.publish_package = package
+        flag_modified(job, "publish_package")
+        await _commit_external_result(session, job, operation="cover_upload")
+
+    version = await session.scalar(
+        select(Deliverable).where(
+            Deliverable.id == job.article_version_id,
+            Deliverable.content_item_id == package["article_id"],
+            Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+            Deliverable.agent_code == ARTICLE_VERSION_AGENT_CODE,
+        )
+    )
+    if version is None:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_VERSION_NOT_FOUND",
+            "找不到已批准的公众号文章版本。",
+            status_code=404,
+        )
+    document = ArticleDocument.model_validate(version.payload["document"])
+    document_hash = hashlib.sha256(
+        _canonical(document.model_dump(mode="json")).encode("utf-8")
+    ).hexdigest()
+    if document_hash != package["document_hash"]:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_VERSION_CHANGED",
+            "已批准的公众号文章版本发生异常变化。",
+            status_code=409,
+        )
+    rendered = render_wechat_article(document, asset_map=body_urls)
+    outbound = WechatDraftArticle(
+        title=document.title,
+        author=document.author,
+        digest=document.digest,
+        content=rendered.normalized_html,
+        thumb_media_id=progress["cover_media_id"],
+        need_open_comment=1,
+        only_fans_can_comment=0,
+        content_source_url=None,
+    )
+    operation = "draft_update" if update_media_id is not None else "draft_add"
+    await _commit_external_intent(session, job, operation=operation)
+    try:
+        if update_media_id is None:
+            media_id = await draft_client.add_draft(
+                access_token=access_token,
+                article=outbound,
+            )
+        else:
+            await draft_client.update_draft(
+                access_token=access_token,
+                media_id=update_media_id,
+                index=0,
+                article=outbound,
+            )
+            media_id = update_media_id
+    except WechatDraftIntegrationError as exc:
+        await _commit_external_failure(session, job, operation=operation, error=exc)
+        await _append_wechat_sync_step(
+            session,
+            job,
+            "sync",
+            "failed",
+            error_code="WECHAT_DRAFT_EXTERNAL_FAILURE",
+        )
+        raise _safe_external_service_error(exc) from None
+    remote_hash = compute_remote_hash(outbound)
+    mapping = await session.scalar(
+        select(WechatDraftMapping).where(
+            WechatDraftMapping.org_id == job.org_id,
+            WechatDraftMapping.account_id == job.account_id,
+            WechatDraftMapping.content_item_id == int(package["article_id"]),
+        )
+    )
+    if mapping is None:
+        mapping = WechatDraftMapping(
+            org_id=job.org_id,
+            account_id=job.account_id,
+            content_item_id=int(package["article_id"]),
+            media_id=media_id,
+        )
+        session.add(mapping)
+    mapping.media_id = media_id
+    mapping.remote_hash = remote_hash
+    mapping.last_synced_deliverable_id = job.article_version_id
+    job.external_media_id = media_id
+    job.observed_remote_hash = remote_hash
+    job.status = PlatformPublishJobStatus.WECHAT_SYNCED
+    progress["draft_completed"] = True
+    package["progress"] = progress
+    job.publish_package = package
+    flag_modified(job, "publish_package")
+    await _commit_external_result(session, job, operation=operation)
+    await _append_wechat_sync_step(session, job, "sync", "completed")
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+async def _get_wechat_sync_job(
+    session: AsyncSession,
+    user: User,
+    job_id: int,
+) -> PlatformPublishJob:
+    job = await session.scalar(
+        select(PlatformPublishJob).where(
+            PlatformPublishJob.id == job_id,
+            PlatformPublishJob.org_id == user.org_id,
+            PlatformPublishJob.operation_type == PlatformPublishJobOperationType.WECHAT_DRAFT_SYNC,
+        )
+    )
+    if job is None:
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_SYNC_NOT_FOUND",
+            "找不到微信草稿同步任务。",
+            status_code=404,
+        )
+    await require_account_access(session, user, job.account_id)
+    return job
+
+
+async def get_wechat_draft_sync_job(
+    session: AsyncSession,
+    user: User,
+    job_id: int,
+) -> PlatformPublishJob:
+    """Public account-scoped read boundary for one draft-sync ledger row."""
+    return await _get_wechat_sync_job(session, user, job_id)
+
+
+def wechat_draft_sync_out(job: PlatformPublishJob) -> dict[str, Any]:
+    package = job.publish_package if isinstance(job.publish_package, dict) else {}
+    approval = job.approval_snapshot if isinstance(job.approval_snapshot, dict) else {}
+    strategy = approval.get("conflict_strategy") or package.get("conflict_strategy")
+    return {
+        "id": job.id,
+        "account_id": job.account_id,
+        "article_id": int(package["article_id"]),
+        "article_version_id": job.article_version_id,
+        "status": job.status,
+        "conflict_strategy": strategy,
+        "external_media_id": job.external_media_id,
+        "expected_remote_hash": job.expected_remote_hash,
+        "observed_remote_hash": job.observed_remote_hash,
+        "retryable": job.status is PlatformPublishJobStatus.WECHAT_QUEUED and job.retry_count > 0,
+        "error_code": job.last_error_code,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _validate_wechat_sync_approval(job: PlatformPublishJob) -> None:
+    package = job.publish_package if isinstance(job.publish_package, dict) else {}
+    approval = job.approval_snapshot if isinstance(job.approval_snapshot, dict) else {}
+    expected = {
+        "actor_id": job.created_by_id,
+        "account_id": job.account_id,
+        "article_id": package.get("article_id"),
+        "article_version_id": job.article_version_id,
+        "conflict_strategy": package.get("conflict_strategy"),
+        "expected_remote_hash": job.expected_remote_hash,
+        "request_digest": job.request_digest,
+    }
+    if any(approval.get(key) != value for key, value in expected.items()) or not isinstance(
+        approval.get("approved_at"), str
+    ):
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_APPROVAL_INVALID",
+            "同步批准信息无效，请重新确认后再同步。",
+            status_code=422,
+        )
+
+
+async def _append_wechat_sync_step(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    step: str,
+    phase: str,
+    *,
+    error_code: str | None = None,
+) -> None:
+    version = await session.get(Deliverable, job.article_version_id)
+    if version is None or version.thread_id is None or version.turn_id is None:
+        return
+    labels = {
+        "readiness": "检查文章版本",
+        "capabilities": "检查公众号能力",
+        "assets": "检查文章素材",
+        "conflict": "检查远端草稿冲突",
+        "sync": "同步微信公众号草稿",
+    }
+    payload: dict[str, object] = {
+        "step": step,
+        "title": labels[step],
+        "status": phase,
+        "metadata": {"category": "wechat_draft_sync"},
+    }
+    if error_code is not None:
+        payload["error_code"] = error_code
+    await append_turn_event(
+        session,
+        TurnEventScope(
+            org_id=job.org_id,
+            account_id=job.account_id,
+            thread_id=version.thread_id,
+            turn_id=version.turn_id,
+            run_id=version.run_id,
+            skill_run_id=version.skill_run_id,
+        ),
+        f"step.{phase}",
+        payload,
+        f"wechat-draft-sync:{job.id}:{step}:{phase}",
+    )
+    await session.commit()
+
+
+async def _append_deliverable_sync_step(
+    session: AsyncSession,
+    version: Deliverable,
+    *,
+    org_id: int,
+    account_id: int,
+    idempotency_key: str,
+    step: str,
+    phase: str,
+    error_code: str | None = None,
+) -> None:
+    if version.thread_id is None or version.turn_id is None:
+        return
+    payload: dict[str, object] = {
+        "step": step,
+        "title": "检查文章版本",
+        "status": phase,
+        "metadata": {"category": "wechat_draft_sync"},
+    }
+    if error_code is not None:
+        payload["error_code"] = error_code
+    await append_turn_event(
+        session,
+        TurnEventScope(
+            org_id=org_id,
+            account_id=account_id,
+            thread_id=version.thread_id,
+            turn_id=version.turn_id,
+            run_id=version.run_id,
+            skill_run_id=version.skill_run_id,
+        ),
+        f"step.{phase}",
+        payload,
+        f"wechat-draft-sync:{idempotency_key}:{step}:{phase}",
+    )
+    await session.commit()
+
+
+def _is_retryable_external_error(error: BaseException) -> bool:
+    if not bool(getattr(error, "retryable", False)):
+        return False
+    code = str(getattr(error, "error_code", "") or "").lower()
+    is_rate_limit = code in {"429", "45009", "http_429"} or "rate" in code
+    return not is_rate_limit or bool(getattr(error, "retry_after_seconds", None))
+
+
+def _safe_external_service_error(error: BaseException) -> PublishingServiceError:
+    retryable = _is_retryable_external_error(error)
+    return PublishingServiceError(
+        "WECHAT_DRAFT_EXTERNAL_RETRYABLE" if retryable else "WECHAT_DRAFT_EXTERNAL_FAILURE",
+        "微信公众号服务暂时不可用，请稍后重试。"
+        if retryable
+        else "微信公众号拒绝了本次同步，请检查授权或内容后重试。",
+        retryable=retryable,
+        status_code=503 if retryable else 422,
+    )
+
+
+async def _commit_boundary_failure_without_intent(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    *,
+    error: BaseException,
+    fallback_code: str,
+) -> None:
+    retryable = _is_retryable_external_error(error)
+    job.status = (
+        PlatformPublishJobStatus.WECHAT_QUEUED
+        if retryable
+        else PlatformPublishJobStatus.WECHAT_BLOCKED
+    )
+    job.last_error_code = str(getattr(error, "error_code", None) or fallback_code)[:120]
+    job.last_error_message = "微信公众号连接或授权校验失败"
+    await session.commit()
+
+
+def _safe_capability_snapshot(snapshot: WechatCapabilitySnapshot) -> dict[str, Any]:
+    return snapshot.model_dump(mode="json")
+
+
+async def _load_frozen_asset(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    fact: dict[str, Any],
+) -> tuple[bytes, str]:
+    material = await session.scalar(
+        select(MaterialAsset).where(
+            MaterialAsset.id == fact.get("material_id"),
+            MaterialAsset.org_id == job.org_id,
+            MaterialAsset.content_item_id == (job.publish_package or {}).get("article_id"),
+            MaterialAsset.kind == "image",
+            MaterialAsset.status == MaterialStatus.READY,
+        )
+    )
+    if material is None or not material.local_path:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSET_UNAVAILABLE",
+            "文章图片文件不可用。",
+            status_code=422,
+        )
+    current = _frozen_image_fact(material)
+    if current != fact:
+        raise PublishingServiceError(
+            "WECHAT_ARTICLE_ASSET_CHANGED",
+            "已批准的文章图片发生变化。",
+            status_code=409,
+        )
+    path = Path(settings.storage_local_dir).resolve() / material.local_path  # noqa: ASYNC240
+    with path.open("rb") as source:
+        return source.read(), str(fact["media_type"])
+
+
+async def _commit_external_intent(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    *,
+    operation: str,
+) -> None:
+    intent_key = _sync_event_key(job, operation, "intent")
+    result_key = _sync_event_key(job, operation, "result")
+    prior_intent = await session.scalar(select(Event).where(Event.idempotency_key == intent_key))
+    if prior_intent is not None:
+        prior_result = await session.scalar(
+            select(Event).where(Event.idempotency_key == result_key)
+        )
+        if prior_result is None:
+            job.status = PlatformPublishJobStatus.WECHAT_RECONCILIATION_REQUIRED
+            job.last_error_code = "WECHAT_DRAFT_RECONCILIATION_REQUIRED"
+            job.last_error_message = "微信外部写入结果需要人工对账"
+            await session.commit()
+            raise PublishingServiceError(
+                "WECHAT_DRAFT_RECONCILIATION_REQUIRED",
+                "上一次微信写入结果不明确，请先人工对账。",
+                status_code=409,
+            )
+        return
+    session.add(
+        Event(
+            type="wechat.draft_sync.intent",
+            org_id=job.org_id,
+            account_id=job.account_id,
+            content_item_id=int((job.publish_package or {})["article_id"]),
+            idempotency_key=intent_key,
+            payload={
+                "operation": operation,
+                "status": "committed",
+                "job_id": job.id,
+                "attempt": job.retry_count,
+            },
+        )
+    )
+    await session.commit()
+
+
+async def _commit_external_result(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    *,
+    operation: str,
+) -> None:
+    session.add(
+        Event(
+            type="wechat.draft_sync.result",
+            org_id=job.org_id,
+            account_id=job.account_id,
+            content_item_id=int((job.publish_package or {})["article_id"]),
+            idempotency_key=_sync_event_key(job, operation, "result"),
+            payload={
+                "operation": operation,
+                "status": "succeeded",
+                "job_id": job.id,
+                "attempt": job.retry_count,
+            },
+        )
+    )
+    await session.commit()
+
+
+async def _commit_external_failure(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    *,
+    operation: str,
+    error: WechatDraftIntegrationError,
+) -> None:
+    retryable = _is_retryable_external_error(error)
+    result_key = _sync_event_key(job, operation, "result")
+    session.add(
+        Event(
+            type="wechat.draft_sync.result",
+            org_id=job.org_id,
+            account_id=job.account_id,
+            content_item_id=int((job.publish_package or {})["article_id"]),
+            idempotency_key=result_key,
+            payload={
+                "operation": operation,
+                "status": "failed",
+                "retryable": retryable,
+                "error_code": str(error.error_code or "integration_error")[:80],
+                "job_id": job.id,
+                "attempt": job.retry_count,
+            },
+        )
+    )
+    await session.commit()
+    job.status = (
+        PlatformPublishJobStatus.WECHAT_QUEUED
+        if retryable
+        else PlatformPublishJobStatus.WECHAT_BLOCKED
+    )
+    job.last_error_code = str(error.error_code or "WECHAT_DRAFT_EXTERNAL_FAILURE")[:120]
+    job.last_error_message = "微信公众号外部写入失败"
+    await session.commit()
+
+
+def _sync_event_key(job: PlatformPublishJob, operation: str, phase: str) -> str:
+    return hashlib.sha256(
+        (
+            f"wechat-draft-sync:{job.id}:{job.request_digest}:"
+            f"attempt:{job.retry_count}:{operation}:{phase}"
+        ).encode()
+    ).hexdigest()
+
+
+async def _guard_unresolved_sync_intent(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+) -> None:
+    if job.status is not PlatformPublishJobStatus.WECHAT_RUNNING:
+        return
+    events = list(
+        await session.scalars(
+            select(Event).where(
+                Event.org_id == job.org_id,
+                Event.account_id == job.account_id,
+                Event.content_item_id == int((job.publish_package or {})["article_id"]),
+                Event.type.in_({"wechat.draft_sync.intent", "wechat.draft_sync.result"}),
+            )
+        )
+    )
+    relevant = [
+        (event, event.payload)
+        for event in events
+        if isinstance(event.payload, dict) and event.payload.get("job_id") == job.id
+    ]
+    result_keys = {
+        (payload.get("attempt"), payload.get("operation"))
+        for event, payload in relevant
+        if event.type == "wechat.draft_sync.result"
+    }
+    unresolved = any(
+        event.type == "wechat.draft_sync.intent"
+        and (payload.get("attempt"), payload.get("operation")) not in result_keys
+        for event, payload in relevant
+    )
+    if unresolved:
+        job.status = PlatformPublishJobStatus.WECHAT_RECONCILIATION_REQUIRED
+        job.last_error_code = "WECHAT_DRAFT_RECONCILIATION_REQUIRED"
+        job.last_error_message = "微信外部写入结果需要人工对账"
+        await session.commit()
+        raise PublishingServiceError(
+            "WECHAT_DRAFT_RECONCILIATION_REQUIRED",
+            "上一次微信写入结果不明确，请先人工对账。",
+            status_code=409,
+        )
+    raise PublishingServiceError(
+        "WECHAT_DRAFT_SYNC_ALREADY_RUNNING",
+        "微信草稿同步任务已由其他执行器接管。",
+        status_code=409,
+    )
+
+
+def _media_suffix(media_type: str) -> str:
+    return {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[media_type]
 
 
 async def publish_approved_artifact(
@@ -235,9 +1327,7 @@ def _publish_artifact_receipt(
     artifact: Deliverable,
 ) -> dict[str, Any]:
     status_value = (
-        job.status.value
-        if isinstance(job.status, PlatformPublishJobStatus)
-        else str(job.status)
+        job.status.value if isinstance(job.status, PlatformPublishJobStatus) else str(job.status)
     )
     if status_value in {"bound", "observing", "completed"}:
         status = "published"
@@ -411,8 +1501,7 @@ async def sync_publish_jobs_after_approval(
             select(PlatformPublishJob).where(
                 PlatformPublishJob.org_id == org_id,
                 PlatformPublishJob.tool_call_id == tool_call.id,
-                PlatformPublishJob.status
-                == PlatformPublishJobStatus.PENDING_APPROVAL,
+                PlatformPublishJob.status == PlatformPublishJobStatus.PENDING_APPROVAL,
             )
         )
     )
@@ -429,11 +1518,7 @@ async def sync_publish_jobs_after_approval(
             job,
             from_status=previous_status,
             to_status=job.status,
-            reason=(
-                "publish_approval_granted"
-                if approved
-                else "publish_approval_rejected"
-            ),
+            reason=("publish_approval_granted" if approved else "publish_approval_rejected"),
         )
 
 
@@ -833,9 +1918,7 @@ async def _approved_tool_call(
     job: PlatformPublishJob,
 ) -> AgentToolCall:
     tool_call = (
-        await session.get(AgentToolCall, job.tool_call_id)
-        if job.tool_call_id is not None
-        else None
+        await session.get(AgentToolCall, job.tool_call_id) if job.tool_call_id is not None else None
     )
     if tool_call is None or tool_call.org_id != job.org_id:
         raise PublishingServiceError(
@@ -864,11 +1947,7 @@ async def _load_ready_douyin_configuration(
             PlatformAccountAuth.platform == Platform.DOUYIN.value,
         )
     )
-    if (
-        integration is None
-        or not integration.client_key
-        or not integration.client_secret_ref
-    ):
+    if integration is None or not integration.client_key or not integration.client_secret_ref:
         raise PublishingServiceError(
             "DOUYIN_APP_NOT_CONFIGURED",
             "抖音开放平台应用尚未配置完整。",

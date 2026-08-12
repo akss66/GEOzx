@@ -14,6 +14,7 @@ from app.core.auth import CurrentUser
 from app.db import get_session
 from app.models import ArticleImageSlot, Deliverable, Event
 from app.models.enums import DeliverableType
+from app.schemas.publishing import SyncWechatDraftRequest, WechatDraftSyncOut
 from app.schemas.wechat_article import (
     ArticleDocument,
     ArticleImageGenerationRequest,
@@ -29,6 +30,13 @@ from app.services.image_generation import (
     ImageUploadError,
     WechatArticleImageService,
 )
+from app.services.publishing import (
+    PublishingServiceError,
+    execute_wechat_draft_sync_job,
+    get_wechat_draft_sync_job,
+    prepare_wechat_draft_sync_job,
+    wechat_draft_sync_out,
+)
 from app.services.wechat_articles import (
     ARTICLE_VERSION_AGENT_CODE,
     ArticleFreezeConflict,
@@ -41,6 +49,7 @@ from app.services.wechat_articles import (
 )
 
 router = APIRouter(prefix="/wechat-articles", tags=["wechat-articles"])
+sync_router = APIRouter(tags=["wechat-articles"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
@@ -56,6 +65,94 @@ class ArticleCreateRequest(BaseModel):
 
     account_id: int = Field(gt=0)
     document: ArticleDocument
+
+
+def get_wechat_capability_probe():
+    return None
+
+
+def get_wechat_token_provider():
+    return None
+
+
+def get_wechat_draft_client():
+    return None
+
+
+def _draft_sync_error(error: PublishingServiceError) -> JSONResponse:
+    return JSONResponse(
+        status_code=error.status_code,
+        content={
+            "error": {
+                "code": error.code,
+                "message": error.message,
+                "retryable": error.retryable,
+                "details": error.details,
+            }
+        },
+    )
+
+
+@router.post(
+    "/{article_id}/draft-syncs",
+    response_model=WechatDraftSyncOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def sync_wechat_article_draft(
+    article_id: int,
+    body: SyncWechatDraftRequest,
+    user: CurrentUser,
+    session: SessionDep,
+):
+    try:
+        job = await prepare_wechat_draft_sync_job(
+            session,
+            user,
+            article_id=article_id,
+            request=body,
+        )
+        capability_probe = get_wechat_capability_probe()
+        token_provider = get_wechat_token_provider()
+        draft_client = get_wechat_draft_client()
+        if capability_probe is None or token_provider is None or draft_client is None:
+            return _draft_sync_error(
+                PublishingServiceError(
+                    "WECHAT_DRAFT_SYNC_UNAVAILABLE",
+                    "微信草稿同步服务尚未配置。",
+                    retryable=True,
+                    status_code=503,
+                )
+            )
+        job = await execute_wechat_draft_sync_job(
+            session,
+            user,
+            job_id=job.id,
+            capability_probe=capability_probe,
+            token_provider=token_provider,
+            draft_client=draft_client,
+        )
+        return WechatDraftSyncOut.model_validate(wechat_draft_sync_out(job))
+    except PublishingServiceError as exc:
+        return _draft_sync_error(exc)
+
+
+@sync_router.get(
+    "/wechat-draft-syncs/{sync_id}",
+    response_model=WechatDraftSyncOut,
+)
+async def get_wechat_draft_sync(
+    sync_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+):
+    try:
+        job = await get_wechat_draft_sync_job(session, user, sync_id)
+        return WechatDraftSyncOut.model_validate(wechat_draft_sync_out(job))
+    except PublishingServiceError as exc:
+        return _draft_sync_error(exc)
+
+
+router.routes.extend(sync_router.routes)
 
 
 def get_image_generation_provider() -> ImageGenerationProvider | None:

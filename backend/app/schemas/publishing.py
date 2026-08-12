@@ -79,3 +79,34 @@ class DouyinCreateVideoCallback(BaseModel):
     log_id: str | None = Field(default=None, max_length=200)
     content: DouyinCreateVideoContent
     event_time: datetime | None = None
+
+
+class SyncWechatDraftRequest(BaseModel):
+    """Explicit approval to synchronize one immutable article version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    article_version_id: int = Field(gt=0)
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    expected_remote_hash: str | None = Field(default=None, max_length=128)
+    conflict_strategy: Literal["fail", "create_new", "overwrite_confirmed"] = "fail"
+
+
+class WechatDraftSyncOut(BaseModel):
+    """User-safe projection of the durable draft-sync ledger row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    account_id: int
+    article_id: int
+    article_version_id: int
+    status: PlatformPublishJobStatus
+    conflict_strategy: Literal["fail", "create_new", "overwrite_confirmed"]
+    external_media_id: str | None
+    expected_remote_hash: str | None
+    observed_remote_hash: str | None
+    retryable: bool
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime

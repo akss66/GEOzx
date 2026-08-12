@@ -24,6 +24,19 @@ class PlatformPublishJobStatus(StrEnum):
     FAILED = "failed"
     EXPIRED = "expired"
     CANCELLED = "cancelled"
+    WECHAT_QUEUED = "wechat_queued"
+    WECHAT_RUNNING = "wechat_running"
+    WECHAT_SYNCED = "wechat_synced"
+    WECHAT_CONFLICT = "wechat_conflict"
+    WECHAT_BLOCKED = "wechat_blocked"
+    WECHAT_RECONCILIATION_REQUIRED = "wechat_reconciliation_required"
+
+
+class PlatformPublishJobOperationType(StrEnum):
+    """Stable operation discriminator for the shared external-write ledger."""
+
+    LEGACY_DOUYIN_PUBLISH = "legacy_douyin_publish"
+    WECHAT_DRAFT_SYNC = "draft_sync"
 
 
 class PlatformPublishJob(Base, TimestampMixin):
@@ -90,17 +103,28 @@ class PlatformPublishJob(Base, TimestampMixin):
         index=True,
         nullable=False,
     )
+    operation_type: Mapped[PlatformPublishJobOperationType] = mapped_column(
+        pg_enum(PlatformPublishJobOperationType, "platform_publish_job_operation_type"),
+        default=PlatformPublishJobOperationType.LEGACY_DOUYIN_PUBLISH,
+        index=True,
+        nullable=False,
+    )
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     publish_package: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
-    capabilities_snapshot: Mapped[dict] = mapped_column(
-        JSONVariant, default=dict, nullable=False
-    )
+    capabilities_snapshot: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     approval_snapshot: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
 
     share_id: Mapped[str | None] = mapped_column(String(160), index=True, nullable=True)
     posting_task_id: Mapped[str | None] = mapped_column(String(160), index=True, nullable=True)
     external_video_id: Mapped[str | None] = mapped_column(String(160), index=True, nullable=True)
     external_item_id: Mapped[str | None] = mapped_column(String(160), index=True, nullable=True)
+    external_media_id: Mapped[str | None] = mapped_column(String(256), index=True, nullable=True)
+    article_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("deliverables.id", ondelete="RESTRICT"), index=True, nullable=True
+    )
+    expected_remote_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    observed_remote_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    request_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     handoff_started_at: Mapped[datetime | None] = mapped_column(
@@ -108,9 +132,7 @@ class PlatformPublishJob(Base, TimestampMixin):
     )
     bound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_retry_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_platform_log_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
