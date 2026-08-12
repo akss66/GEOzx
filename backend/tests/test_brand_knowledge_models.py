@@ -342,6 +342,8 @@ async def test_knowledge_citations_allow_unknown_legacy_snapshots_and_index_exac
         "source_url",
         "verification_status",
         "allowed_for_external_claim",
+        "effective_at",
+        "expires_at",
     }
     assert expected_columns <= set(citation_table.c.keys())
     assert all(citation_table.c[name].nullable for name in expected_columns)
@@ -369,4 +371,6 @@ async def test_knowledge_citations_allow_unknown_legacy_snapshots_and_index_exac
         "source_url": None,
         "verification_status": None,
         "allowed_for_external_claim": None,
+        "effective_at": None,
+        "expires_at": None,
     }

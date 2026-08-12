@@ -636,3 +636,5 @@ async def test_citations_snapshot_the_exact_evidence_version_after_the_entry_cha
     assert citation.source_url == "https://example.test/original"
     assert citation.verification_status == "verified"
     assert citation.allowed_for_external_claim is True
+    assert citation.effective_at == entry.effective_at
+    assert citation.expires_at == entry.expires_at

@@ -467,6 +467,8 @@ async def record_knowledge_citations(
             source_url=row.source_url,
             verification_status=row.verification_status,
             allowed_for_external_claim=row.allowed_for_external_claim,
+            effective_at=row.effective_at,
+            expires_at=row.expires_at,
             task_id=task_id,
             invocation_id=invocation_id,
             agent_code=agent_code,

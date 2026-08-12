@@ -605,8 +605,8 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_publish_package_deliverable_type() -> None:
-    assert get_head_revision() == "20260805_0300"
+def test_migration_head_is_wechat_article_evidence() -> None:
+    assert get_head_revision() == "20260811_0330"
 
 
 def test_turn_interrupts_sqlite_upgrade_and_downgrade(monkeypatch) -> None:
@@ -4023,3 +4023,227 @@ def test_account_data_projection_guards_migration_smoke(monkeypatch) -> None:
         assert "canonical_import_row_number" in content_columns
         assert "uq_metric_snapshots_import_projection" in metric_uniques
         assert "uq_platform_content_records_import_row_identity" in content_uniques
+
+
+def test_wechat_article_evidence_migration_is_linear_strict_and_fail_closed() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260811_0330_wechat_article_evidence"
+    )
+
+    assert migration.down_revision == "20260811_0320"
+    upgrade_source = inspect.getsource(migration.upgrade)
+    downgrade_source = inspect.getsource(migration.downgrade)
+    assert '"effective_at"' in upgrade_source
+    assert '"expires_at"' in upgrade_source
+    assert '"article_version_citations"' in upgrade_source
+    assert "CREATE OR REPLACE FUNCTION wechat_article_document_is_valid" in (
+        migration._VALIDATOR_WITH_CLAIMS
+    )
+    assert "claims" in migration._VALIDATOR_WITH_CLAIMS
+    assert "cannot downgrade while article version citations exist" in downgrade_source
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"),
+    reason="TEST_POSTGRES_URL is required for the PostgreSQL WeChat evidence gate",
+)
+def test_wechat_article_evidence_postgres_upgrade_downgrade_reupgrade_gate(monkeypatch) -> None:
+    raw_url = os.environ["TEST_POSTGRES_URL"]
+    async_url = raw_url.replace("postgresql+psycopg://", "postgresql+asyncpg://").replace(
+        "postgresql://", "postgresql+asyncpg://"
+    )
+    sync_url = raw_url.replace("postgresql+asyncpg://", "postgresql+psycopg://").replace(
+        "postgresql://", "postgresql+psycopg://"
+    )
+    monkeypatch.setattr(settings, "database_url", async_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260811_0320")
+    engine = sa.create_engine(sync_url)
+    old_document = {
+        "title": "Old article",
+        "digest": "Old digest",
+        "author": "Editor",
+        "blocks": [{"type": "paragraph", "block_id": "body", "text": "Old body"}],
+    }
+    claimed_document = {
+        **old_document,
+        "claims": [
+            {
+                "claim_id": "claim-1",
+                "block_id": "body",
+                "kind": "product_fact",
+                "text": "Verified fact",
+                "citation_ids": [1],
+            }
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            org_id = connection.scalar(
+                sa.text("INSERT INTO orgs (name) VALUES ('task10-pg') RETURNING id")
+            )
+            client_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO clients (org_id, name, status) "
+                    "VALUES (:org, 'task10-client', 'active') RETURNING id"
+                ),
+                {"org": org_id},
+            )
+            account_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO accounts (org_id, client_id, platform, nickname, status) "
+                    "VALUES (:org, :client, 'wechat_official_account', 'task10', 'active') "
+                    "RETURNING id"
+                ),
+                {"org": org_id, "client": client_id},
+            )
+            content_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO content_items (account_id, title, current_stage, status) "
+                    "VALUES (:account, 'task10', 'positioning', 'draft') RETURNING id"
+                ),
+                {"account": account_id},
+            )
+            working_copy_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO article_working_copies "
+                    "(content_item_id, account_id, document, lock_version) "
+                    "VALUES (:content, :account, CAST(:document AS jsonb), 1) RETURNING id"
+                ),
+                {
+                    "content": content_id,
+                    "account": account_id,
+                    "document": json.dumps(old_document),
+                },
+            )
+
+        command.upgrade(config, "20260811_0330")
+        with engine.begin() as connection:
+            assert connection.scalar(
+                sa.text("SELECT document->>'title' FROM article_working_copies WHERE id=:id"),
+                {"id": working_copy_id},
+            ) == "Old article"
+            connection.execute(
+                sa.text(
+                    "UPDATE article_working_copies SET document=CAST(:document AS jsonb) "
+                    "WHERE id=:id"
+                ),
+                {"document": json.dumps(claimed_document), "id": working_copy_id},
+            )
+            for invalid in (
+                {
+                    **old_document,
+                    "blocks": [
+                        {"type": "rawHtml", "block_id": "x", "html": "<script>x</script>"}
+                    ],
+                },
+                {
+                    **claimed_document,
+                    "claims": [
+                        {**claimed_document["claims"][0], "block_id": "missing"}
+                    ],
+                },
+            ):
+                with pytest.raises(sa.exc.IntegrityError):
+                    with connection.begin_nested():
+                        connection.execute(
+                            sa.text(
+                                "UPDATE article_working_copies "
+                                "SET document=CAST(:document AS jsonb) WHERE id=:id"
+                            ),
+                            {"document": json.dumps(invalid), "id": working_copy_id},
+                        )
+            entry_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO knowledge_entries "
+                    "(org_id, client_id, category, title, content, payload, source_type, "
+                    "source_label, version, status, entry_kind, verification_status, "
+                    "allowed_for_external_claim) VALUES "
+                    "(:org, :client, 'script_library', 'fact', 'fact', '{}'::jsonb, "
+                    "'official_document', 'manual', 1, 'active', 'product_fact', "
+                    "'verified', true) RETURNING id"
+                ),
+                {"org": org_id, "client": client_id},
+            )
+            citation_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO knowledge_citations "
+                    "(org_id, client_id, entry_id, entry_version, source_type, source_label, "
+                    "verification_status, allowed_for_external_claim, effective_at, expires_at, "
+                    "agent_code, context) VALUES "
+                    "(:org, :client, :entry, 1, 'official_document', 'manual', 'verified', true, "
+                    "now() - interval '1 day', now() + interval '1 day', "
+                    "'02-content-director', 'task10') RETURNING id"
+                ),
+                {"org": org_id, "client": client_id, "entry": entry_id},
+            )
+            deliverable_id = connection.scalar(
+                sa.text(
+                    "INSERT INTO deliverables "
+                    "(content_item_id, agent_code, type, version, status, payload) VALUES "
+                    "(:content, '02-content-director', 'wechat_article', 1, 'draft', "
+                    "CAST(:payload AS jsonb)) RETURNING id"
+                ),
+                {"content": content_id, "payload": json.dumps({"document": claimed_document})},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO article_version_citations "
+                    "(deliverable_id, knowledge_citation_id) VALUES (:deliverable, :citation)"
+                ),
+                {"deliverable": deliverable_id, "citation": citation_id},
+            )
+            with pytest.raises(sa.exc.IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        sa.text(
+                            "INSERT INTO article_version_citations "
+                            "(deliverable_id, knowledge_citation_id) "
+                            "VALUES (:deliverable, :citation)"
+                        ),
+                        {"deliverable": deliverable_id, "citation": citation_id},
+                    )
+            with pytest.raises(sa.exc.IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        sa.text("DELETE FROM knowledge_citations WHERE id=:id"),
+                        {"id": citation_id},
+                    )
+
+        with pytest.raises(
+            Exception, match="cannot downgrade while article version citations exist"
+        ):
+            command.downgrade(config, "20260811_0320")
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260811_0330"
+            )
+
+        with engine.begin() as connection:
+            connection.execute(sa.text("DELETE FROM article_version_citations"))
+            connection.execute(
+                sa.text(
+                    "UPDATE article_working_copies SET document=CAST(:document AS jsonb) "
+                    "WHERE id=:id"
+                ),
+                {"document": json.dumps(old_document), "id": working_copy_id},
+            )
+        command.downgrade(config, "20260811_0320")
+        with engine.begin() as connection:
+            with pytest.raises(sa.exc.IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        sa.text(
+                            "UPDATE article_working_copies "
+                            "SET document=CAST(:document AS jsonb) WHERE id=:id"
+                        ),
+                        {"document": json.dumps(claimed_document), "id": working_copy_id},
+                    )
+        command.upgrade(config, "20260811_0330")
+        with engine.connect() as connection:
+            assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+                "20260811_0330"
+            )
+            assert "article_version_citations" in sa.inspect(connection).get_table_names()
+    finally:
+        engine.dispose()

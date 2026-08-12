@@ -4,11 +4,21 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 StrictText = Annotated[str, Field(min_length=1, max_length=20_000)]
 BlockId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
 SlotKey = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,127}$")]
+PositiveCitationId = Annotated[int, Field(gt=0)]
 
 
 class _StrictModel(BaseModel):
@@ -129,11 +139,33 @@ ArticleBlock = Annotated[
 ]
 
 
+class ArticleClaim(_StrictModel):
+    claim_id: BlockId
+    block_id: BlockId
+    kind: Literal["product_fact", "case", "promise", "price", "numeric", "public_info"]
+    text: StrictText
+    citation_ids: list[PositiveCitationId] = Field(default_factory=list, max_length=20)
+
+    @field_validator("text", mode="after")
+    @classmethod
+    def _reject_html_text(cls, value: str) -> str:
+        if "<" in value or ">" in value:
+            raise ValueError("HTML is not permitted in article claims")
+        return value
+
+    @model_validator(mode="after")
+    def _require_unique_citations(self) -> ArticleClaim:
+        if len(self.citation_ids) != len(set(self.citation_ids)):
+            raise ValueError("article claim citation_ids must be unique")
+        return self
+
+
 class ArticleDocument(_StrictModel):
     title: Annotated[str, Field(min_length=1, max_length=64)]
     digest: Annotated[str, Field(min_length=1, max_length=120)]
     author: Annotated[str, Field(min_length=1, max_length=120)] | None = None
     blocks: list[ArticleBlock] = Field(min_length=1, max_length=500)
+    claims: list[ArticleClaim] = Field(default_factory=list, max_length=200)
 
     @field_validator("title", "digest", "author", mode="after")
     @classmethod
@@ -147,11 +179,38 @@ class ArticleDocument(_StrictModel):
         block_ids = [block.block_id for block in self.blocks]
         if len(block_ids) != len(set(block_ids)):
             raise ValueError("article block_id values must be unique")
+        claim_ids = [claim.claim_id for claim in self.claims]
+        if len(claim_ids) != len(set(claim_ids)):
+            raise ValueError("article claim_id values must be unique")
+        unknown_block_ids = {claim.block_id for claim in self.claims} - set(block_ids)
+        if unknown_block_ids:
+            raise ValueError("article claims must reference an existing block_id")
         for block in self.blocks:
             for value in _block_text_values(block):
                 if "<" in value or ">" in value:
                     raise ValueError("HTML is not permitted in article documents")
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_legacy_claims(self, handler: SerializerFunctionWrapHandler) -> dict:
+        serialized = handler(self)
+        if not self.claims:
+            serialized.pop("claims", None)
+        return serialized
+
+
+class ReadinessIssue(_StrictModel):
+    code: Annotated[str, Field(min_length=1, max_length=120)]
+    message: Annotated[str, Field(min_length=1, max_length=500)]
+    claim_id: str | None = None
+
+
+class ArticleSyncReadiness(_StrictModel):
+    can_sync: bool
+    blockers: list[ReadinessIssue]
+    warnings: list[ReadinessIssue]
+    citation_count: int = Field(ge=0)
+    unresolved_claim_count: int = Field(ge=0)
 
 
 def _block_text_values(block: ArticleBlock) -> tuple[str, ...]:

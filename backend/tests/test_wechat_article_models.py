@@ -7,7 +7,7 @@ from collections.abc import Generator
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import UniqueConstraint, create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -16,6 +16,7 @@ from app.db import Base
 from app.models import (
     Account,
     ArticleImageSlot,
+    ArticleVersionCitation,
     ArticleWorkingCopy,
     ContentItem,
     Org,
@@ -144,6 +145,37 @@ def test_article_document_requires_unique_nonempty_stable_block_ids_and_slot_key
     image_url["blocks"][5]["slot_key"] = "https://cdn.example.com/image.jpg"
     with pytest.raises(ValidationError):
         ArticleDocument.model_validate(image_url)
+
+
+def test_article_document_claims_are_structured_unique_and_reference_existing_blocks():
+    document = _valid_document()
+    document["claims"] = [
+        {
+            "claim_id": "claim-product",
+            "block_id": "paragraph-intro",
+            "kind": "product_fact",
+            "text": "The product reduces heat transfer.",
+            "citation_ids": [7, 9],
+        }
+    ]
+    parsed = ArticleDocument.model_validate(document)
+    assert parsed.claims[0].citation_ids == [7, 9]
+    assert ArticleDocument.model_validate(_valid_document()).claims == []
+
+    for mutation in (
+        {"block_id": "missing", "citation_ids": [7]},
+        {"block_id": "paragraph-intro", "citation_ids": [7, 7]},
+        {"block_id": "paragraph-intro", "citation_ids": [0]},
+    ):
+        invalid = _valid_document()
+        invalid["claims"] = [{**document["claims"][0], **mutation}]
+        with pytest.raises(ValidationError):
+            ArticleDocument.model_validate(invalid)
+
+    duplicate = _valid_document()
+    duplicate["claims"] = [document["claims"][0], document["claims"][0]]
+    with pytest.raises(ValidationError):
+        ArticleDocument.model_validate(duplicate)
 
 
 @pytest.fixture
@@ -426,3 +458,15 @@ def test_wechat_article_deliverable_types_are_the_three_explicit_article_outputs
         DeliverableType.WECHAT_IMAGE_PLAN.value,
         DeliverableType.WECHAT_RENDERED_ARTICLE.value,
     } == {"wechat_article", "wechat_image_plan", "wechat_rendered_article"}
+
+
+def test_article_version_citations_are_unique_and_restrict_evidence_deletion(fk_session: Session):
+    table = ArticleVersionCitation.__table__
+    unique_columns = {
+        tuple(constraint.columns.keys())
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert ("deliverable_id", "knowledge_citation_id") in unique_columns
+    foreign_keys = {fk.parent.name: fk.ondelete for fk in table.foreign_keys}
+    assert foreign_keys == {"deliverable_id": "RESTRICT", "knowledge_citation_id": "RESTRICT"}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, cast
 
 from sqlalchemy import func, select, update
@@ -10,10 +11,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workspace_access import accessible_account_clause
-from app.models import Account, ArticleWorkingCopy, ContentItem, Deliverable, User
+from app.models import (
+    Account,
+    ArticleVersionCitation,
+    ArticleWorkingCopy,
+    ContentItem,
+    Deliverable,
+    KnowledgeCitation,
+    User,
+)
 from app.models.enums import DeliverableType, Platform
 from app.schemas.deliverable import validate_payload
-from app.schemas.wechat_article import ArticleDocument
+from app.schemas.wechat_article import (
+    ArticleDocument,
+    ArticleSyncReadiness,
+    ReadinessIssue,
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +41,14 @@ class ArticleFreezeConflict(Exception):
     """The immutable version sequence changed during a freeze attempt."""
 
     current_version: int
+
+
+class ArticleCitationScopeError(ValueError):
+    """A document declared missing or cross-scope evidence."""
+
+
+class ArticleVersionNotFound(LookupError):
+    """The requested immutable article version does not exist."""
 
 
 ARTICLE_VERSION_AGENT_CODE = "02-content-director"
@@ -50,6 +71,46 @@ def _validated_article_payload(document: dict) -> dict:
 def _validated_article_document(document: ArticleDocument | dict) -> ArticleDocument:
     """Reconstruct a strict document before using any source fields."""
     return ArticleDocument.model_validate(document)
+
+
+def _declared_citation_ids(document: ArticleDocument) -> set[int]:
+    return {citation_id for claim in document.claims for citation_id in claim.citation_ids}
+
+
+async def _map_article_version_citations(
+    session: AsyncSession,
+    *,
+    deliverable: Deliverable,
+    document: ArticleDocument,
+    account: Account,
+) -> None:
+    citation_ids = _declared_citation_ids(document)
+    if not citation_ids:
+        return
+    if account.client_id is None:
+        raise ArticleCitationScopeError("article account has no client evidence scope")
+    citations = list(
+        await session.scalars(
+            select(KnowledgeCitation).where(KnowledgeCitation.id.in_(citation_ids))
+        )
+    )
+    if {citation.id for citation in citations} != citation_ids:
+        raise ArticleCitationScopeError("article citation does not exist")
+    if any(
+        citation.org_id != account.org_id or citation.client_id != account.client_id
+        for citation in citations
+    ):
+        raise ArticleCitationScopeError("article citation is outside the account scope")
+    session.add_all(
+        [
+            ArticleVersionCitation(
+                deliverable_id=deliverable.id,
+                knowledge_citation_id=citation_id,
+            )
+            for citation_id in sorted(citation_ids)
+        ]
+    )
+    await session.flush()
 
 
 async def _load_article_for_user(
@@ -131,6 +192,12 @@ async def create_article(
     )
     session.add_all([content_item, working_copy, first_version])
     await session.flush()
+    await _map_article_version_citations(
+        session,
+        deliverable=first_version,
+        document=validated_document,
+        account=account,
+    )
     working_copy.based_on_deliverable_id = first_version.id
     await session.commit()
     await session.refresh(content_item)
@@ -185,7 +252,8 @@ async def freeze_article_version(
     article = await _lock_article_for_user(session, user, content_item_id)
     if article is None:
         return None
-    content_item, _account, working_copy = article
+    content_item, account, working_copy = article
+    validated_document = _validated_article_document(working_copy.document)
     current_version = await session.scalar(
         select(func.max(Deliverable.version)).where(
             Deliverable.content_item_id == content_item.id,
@@ -199,13 +267,19 @@ async def freeze_article_version(
         agent_code=ARTICLE_VERSION_AGENT_CODE,
         type=DeliverableType.WECHAT_ARTICLE,
         version=next_version,
-        payload=_validated_article_payload(working_copy.document),
+        payload=_validated_article_payload(validated_document.model_dump(mode="json")),
         note=f"article_version:{trigger}",
     )
     try:
         async with session.begin_nested():
             session.add(deliverable)
             await session.flush()
+            await _map_article_version_citations(
+                session,
+                deliverable=deliverable,
+                document=validated_document,
+                account=account,
+            )
     except IntegrityError as exc:
         current_version = await session.scalar(
             select(func.max(Deliverable.version)).where(
@@ -294,6 +368,126 @@ def diff_versions(base_document: ArticleDocument, target_document: ArticleDocume
         "changed": changed,
         "textSemanticChangeRatio": len(semantic_changes) / len(text_ids) if text_ids else 0.0,
     }
+
+
+_EXTERNAL_CLAIM_CODES = {
+    "product_fact": "UNRESOLVED_PRODUCT_CLAIM",
+    "case": "UNRESOLVED_CASE_CLAIM",
+    "promise": "UNRESOLVED_PROMISE_CLAIM",
+    "price": "UNRESOLVED_PRICE_CLAIM",
+    "numeric": "UNRESOLVED_NUMERIC_CLAIM",
+}
+
+
+async def validate_article_for_sync(
+    session: AsyncSession,
+    *,
+    version_id: int,
+    quality_review_available: bool = True,
+) -> ArticleSyncReadiness:
+    """Read only the immutable version and its exact historical evidence snapshots."""
+    row = await session.execute(
+        select(Deliverable, ContentItem, Account)
+        .join(ContentItem, Deliverable.content_item_id == ContentItem.id)
+        .join(Account, ContentItem.account_id == Account.id)
+        .where(
+            Deliverable.id == version_id,
+            Deliverable.agent_code == ARTICLE_VERSION_AGENT_CODE,
+            Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+            ContentItem.account_id == Account.id,
+        )
+    )
+    lineage = cast(tuple[Deliverable, ContentItem, Account] | None, row.one_or_none())
+    if lineage is None:
+        raise ArticleVersionNotFound("WeChat article version not found")
+    deliverable, _content_item, account = lineage
+    document = _validated_article_document(deliverable.payload["document"])
+    evidence_rows = await session.execute(
+        select(ArticleVersionCitation, KnowledgeCitation)
+        .join(
+            KnowledgeCitation,
+            ArticleVersionCitation.knowledge_citation_id == KnowledgeCitation.id,
+        )
+        .where(ArticleVersionCitation.deliverable_id == deliverable.id)
+    )
+    citations = {citation.id: citation for _mapping, citation in evidence_rows.all()}
+    blockers: list[ReadinessIssue] = []
+    warnings: list[ReadinessIssue] = []
+    unresolved_claims: set[str] = set()
+    now = datetime.now(UTC)
+    for claim in document.claims:
+        if claim.kind == "public_info":
+            if not claim.citation_ids or any(cid not in citations for cid in claim.citation_ids):
+                warnings.append(
+                    ReadinessIssue(
+                        code="UNVERIFIED_PUBLIC_INFO",
+                        message="Public information has no traceable version evidence.",
+                        claim_id=claim.claim_id,
+                    )
+                )
+            continue
+        invalid = not claim.citation_ids
+        for citation_id in claim.citation_ids:
+            citation = citations.get(citation_id)
+            invalid = invalid or citation is None or not _citation_supports_external_claim(
+                citation, account=account, now=now
+            )
+        if invalid:
+            unresolved_claims.add(claim.claim_id)
+            blockers.append(
+                ReadinessIssue(
+                    code=_EXTERNAL_CLAIM_CODES[claim.kind],
+                    message="External claim lacks valid immutable evidence.",
+                    claim_id=claim.claim_id,
+                )
+            )
+    if not quality_review_available:
+        warnings.append(
+            ReadinessIssue(
+                code="QUALITY_REVIEW_UNAVAILABLE",
+                message="Quality review was unavailable; no score was synthesized.",
+            )
+        )
+    return ArticleSyncReadiness(
+        can_sync=not blockers,
+        blockers=blockers,
+        warnings=warnings,
+        citation_count=len(citations),
+        unresolved_claim_count=len(unresolved_claims),
+    )
+
+
+def _citation_supports_external_claim(
+    citation: KnowledgeCitation, *, account: Account, now: datetime
+) -> bool:
+    if citation.org_id != account.org_id or account.client_id is None:
+        return False
+    if citation.client_id != account.client_id:
+        return False
+    required_snapshots = (
+        citation.entry_version,
+        citation.source_type,
+        citation.source_label,
+        citation.verification_status,
+        citation.allowed_for_external_claim,
+        citation.effective_at,
+        citation.expires_at,
+    )
+    if any(value is None for value in required_snapshots):
+        return False
+    assert citation.effective_at is not None
+    assert citation.expires_at is not None
+    effective_at = _as_utc(citation.effective_at)
+    expires_at = _as_utc(citation.expires_at)
+    return bool(
+        citation.verification_status == "verified"
+        and citation.allowed_for_external_claim is True
+        and effective_at <= now < expires_at
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _block_has_text(block: dict) -> bool:

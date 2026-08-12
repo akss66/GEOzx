@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
+    DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -67,6 +70,30 @@ class ArticleWorkingCopy(Base, TimestampMixin):
     @validates("document")
     def _validate_document(self, _key: str, value: dict) -> dict:
         return ArticleDocument.model_validate(value).model_dump(mode="json")
+
+
+class ArticleVersionCitation(Base):
+    """Immutable exact evidence selected for one immutable article version."""
+
+    __tablename__ = "article_version_citations"
+    __table_args__ = (
+        UniqueConstraint(
+            "deliverable_id",
+            "knowledge_citation_id",
+            name="uq_article_version_citation_evidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    deliverable_id: Mapped[int] = mapped_column(
+        ForeignKey("deliverables.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    knowledge_citation_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_citations.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class ArticleImageSlot(Base, TimestampMixin):

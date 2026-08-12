@@ -299,6 +299,8 @@ class KnowledgeCitation(Base):
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     verification_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
     allowed_for_external_claim: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     task_id: Mapped[int | None] = mapped_column(
         ForeignKey("brain_tasks.id", ondelete="SET NULL"), index=True, nullable=True
     )
