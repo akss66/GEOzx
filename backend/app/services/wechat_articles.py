@@ -171,34 +171,35 @@ async def create_article(
         return None
     validated_document = _validated_article_document(document)
     payload = _validated_article_payload(validated_document.model_dump(mode="json"))
-    content_item = ContentItem(
-        account_id=account.id,
-        created_by_id=user.id,
-        title=validated_document.title,
-    )
-    working_copy = ArticleWorkingCopy(
-        content_item=content_item,
-        account_id=account.id,
-        document=validated_document.model_dump(mode="json"),
-        updated_by_id=user.id,
-    )
-    first_version = Deliverable(
-        content_item=content_item,
-        agent_code=ARTICLE_VERSION_AGENT_CODE,
-        type=DeliverableType.WECHAT_ARTICLE,
-        version=1,
-        payload=payload,
-        note="article_version:first_ai_draft",
-    )
-    session.add_all([content_item, working_copy, first_version])
-    await session.flush()
-    await _map_article_version_citations(
-        session,
-        deliverable=first_version,
-        document=validated_document,
-        account=account,
-    )
-    working_copy.based_on_deliverable_id = first_version.id
+    async with session.begin_nested():
+        content_item = ContentItem(
+            account_id=account.id,
+            created_by_id=user.id,
+            title=validated_document.title,
+        )
+        working_copy = ArticleWorkingCopy(
+            content_item=content_item,
+            account_id=account.id,
+            document=validated_document.model_dump(mode="json"),
+            updated_by_id=user.id,
+        )
+        first_version = Deliverable(
+            content_item=content_item,
+            agent_code=ARTICLE_VERSION_AGENT_CODE,
+            type=DeliverableType.WECHAT_ARTICLE,
+            version=1,
+            payload=payload,
+            note="article_version:first_ai_draft",
+        )
+        session.add_all([content_item, working_copy, first_version])
+        await session.flush()
+        await _map_article_version_citations(
+            session,
+            deliverable=first_version,
+            document=validated_document,
+            account=account,
+        )
+        working_copy.based_on_deliverable_id = first_version.id
     await session.commit()
     await session.refresh(content_item)
     await session.refresh(working_copy)

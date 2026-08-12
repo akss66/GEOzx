@@ -6,11 +6,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import (
     Account,
     ArticleVersionCitation,
+    ArticleWorkingCopy,
     Client,
+    ContentItem,
+    Deliverable,
     KnowledgeCitation,
     KnowledgeEntry,
 )
@@ -87,6 +91,41 @@ def test_renderer_refuses_non_https_cta_urls():
     document["blocks"][-1]["url"] = "http://example.com/read"
     with pytest.raises(WechatRenderError):
         render_wechat_article(ArticleDocument.model_validate(document), asset_map={"hero": "https://mmbiz.qpic.cn/a"})
+
+
+@pytest.mark.parametrize(
+    "credential_url",
+    [
+        "https://user@example.com/read",
+        "https://:pass@example.com/read",
+        "https://user:pass@example.com/read",
+    ],
+)
+def test_renderer_refuses_credential_bearing_cta_urls(credential_url):
+    document = _document()
+    document["blocks"][-1]["url"] = credential_url
+
+    with pytest.raises(WechatRenderError):
+        render_wechat_article(
+            ArticleDocument.model_validate(document),
+            asset_map={"hero": "https://mmbiz.qpic.cn/a"},
+        )
+
+
+@pytest.mark.parametrize(
+    "credential_url",
+    [
+        "https://user@mmbiz.qpic.cn/trusted.jpg",
+        "https://:pass@mmbiz.qpic.cn/trusted.jpg",
+        "https://user:pass@mmbiz.qpic.cn/trusted.jpg",
+    ],
+)
+def test_renderer_refuses_credential_bearing_wechat_image_urls(credential_url):
+    with pytest.raises(WechatRenderError):
+        render_wechat_article(
+            ArticleDocument.model_validate(_document()),
+            asset_map={"hero": credential_url},
+        )
 
 
 @pytest.mark.parametrize(
@@ -356,6 +395,46 @@ async def test_article_version_creation_rejects_missing_and_cross_client_citatio
             account_id=account.id,
             document=_claimed_document([999_999]),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["missing", "cross_client"])
+async def test_failed_article_creation_cannot_commit_partial_rows(
+    session, admin, failure_kind
+):
+    account_client = Client(org_id=admin.org_id, name="Atomic account client")
+    account = Account(
+        org_id=admin.org_id,
+        client=account_client,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Atomic account",
+    )
+    session.add_all([account_client, account])
+    await session.flush()
+    citation_id = 999_999
+    if failure_kind == "cross_client":
+        foreign_client = Client(org_id=admin.org_id, name="Foreign client")
+        session.add(foreign_client)
+        await session.flush()
+        _entry, citation = await _citation(session, admin, foreign_client)
+        citation_id = citation.id
+    await session.commit()
+
+    with pytest.raises(ArticleCitationScopeError):
+        await create_article(
+            session,
+            admin,
+            account_id=account.id,
+            document=_claimed_document([citation_id]),
+        )
+    await session.commit()
+
+    session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with session_factory() as verifier:
+        assert await verifier.scalar(select(func.count(ContentItem.id))) == 0
+        assert await verifier.scalar(select(func.count(ArticleWorkingCopy.id))) == 0
+        assert await verifier.scalar(select(func.count(Deliverable.id))) == 0
+        assert await verifier.scalar(select(func.count(ArticleVersionCitation.id))) == 0
 
 
 @pytest.mark.asyncio

@@ -187,7 +187,12 @@ def _element(
 
 def _require_https_url(value: str) -> None:
     parsed = urlsplit(value)
-    if parsed.scheme not in ALLOWED_URL_SCHEMES or not parsed.hostname or parsed.username:
+    if (
+        parsed.scheme not in ALLOWED_URL_SCHEMES
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise WechatRenderError("only absolute HTTPS URLs are permitted")
 
 
