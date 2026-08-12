@@ -109,3 +109,4 @@ Task 17: fix round 1/5 in progress (Critical real backend projection contract mi
 Task 17: fix round 1/5 implemented (original Critical/Important/Minor addressed locally; commit 87cdcbb; independent scoped re-review pending)
 Task 17: fix round 1/5 (Critical 1, Important 1, Minor 1 addressed; commits 87cdcbb, 6063074; independent scoped re-review clean)
 Task 17: complete (commits baa8751..6063074; backend 55, frontend focused 135, full frontend suite, lint/build/bundle, E2E 1/1 passed)
+Task 18: dispatched from base 46fa022 (real account write requires separate explicit approval naming test organization and official account)
