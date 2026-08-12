@@ -229,3 +229,45 @@ def test_knowledge_entries_accept_legacy_rows_without_a_knowledge_base():
     assert "effective_at" in entry_columns
     assert "expires_at" in entry_columns
     assert "allowed_for_external_claim" in entry_columns
+
+
+@pytest.mark.asyncio
+async def test_knowledge_citations_allow_unknown_legacy_snapshots_and_index_exact_versions(session):
+    """Removing snapshots would make later fact gates read mutable source state."""
+
+    citation_table = Base.metadata.tables["knowledge_citations"]
+    expected_columns = {
+        "entry_version",
+        "source_type",
+        "source_label",
+        "source_url",
+        "verification_status",
+        "allowed_for_external_claim",
+    }
+    assert expected_columns <= set(citation_table.c.keys())
+    assert all(citation_table.c[name].nullable for name in expected_columns)
+    assert any(
+        tuple(column.name for column in index.columns) == ("entry_id", "entry_version")
+        and not index.unique
+        for index in citation_table.indexes
+    )
+    await session.execute(
+        citation_table.insert(),
+        {
+            "org_id": 1,
+            "client_id": 1,
+            "entry_id": 1,
+            "agent_code": "legacy-agent",
+            "context": "legacy citation without snapshots",
+        },
+    )
+    await session.commit()
+    legacy = (await session.execute(citation_table.select())).mappings().one()
+    assert {name: legacy[name] for name in expected_columns} == {
+        "entry_version": None,
+        "source_type": None,
+        "source_label": None,
+        "source_url": None,
+        "verification_status": None,
+        "allowed_for_external_claim": None,
+    }

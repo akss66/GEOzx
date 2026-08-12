@@ -3,8 +3,9 @@
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.workspace_access import (
     accessible_client_ids,
@@ -30,6 +31,8 @@ from app.models.enums import KnowledgeCategory, UserRole, WorkspaceRole
 OPERATING_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
 FACT_REVIEW_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.REVIEWER}
 BINDING_ROLES = {WorkspaceRole.LEAD}
+_MAX_AGENT_KNOWLEDGE_LIMIT = 24
+_EXTERNAL_CLAIM_KINDS = {"product_fact", "case", "promise", "price", "numeric_claim"}
 
 
 async def require_knowledge_scope(
@@ -288,20 +291,138 @@ async def list_agent_knowledge(
     )
 
 
-def knowledge_context(rows: list[KnowledgeEntry]) -> dict[str, list[dict]]:
-    grouped: dict[str, list[dict]] = {}
-    for row in rows:
-        grouped.setdefault(row.category.value, []).append(
-            {
-                "id": row.id,
-                "title": row.title,
-                "content": row.content,
-                "tags": row.tags or [],
-                "source": row.source_label,
-                "version": row.version,
-            }
+async def list_agent_knowledge_for_account(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    project_id: int,
+    limit: int = _MAX_AGENT_KNOWLEDGE_LIMIT,
+) -> list[KnowledgeEntry]:
+    """Resolve current, account-bound evidence in one consistent database read.
+
+    ``KnowledgeEntry`` has no account foreign key.  Its local layer is therefore
+    intentionally limited to unbound entries in the account's client and exact
+    project; it must not be represented as account-exclusive data.
+    """
+
+    bounded_limit = min(max(limit, 0), _MAX_AGENT_KNOWLEDGE_LIMIT)
+    if bounded_limit == 0:
+        return []
+
+    primary_binding = aliased(AccountKnowledgeBinding)
+    primary_base = aliased(KnowledgeBase)
+    shared_binding = aliased(AccountKnowledgeBinding)
+    shared_base = aliased(KnowledgeBase)
+    now = datetime.now(UTC)
+
+    primary_match = exists(
+        select(primary_binding.id)
+        .join(primary_base, primary_base.id == primary_binding.knowledge_base_id)
+        .where(
+            primary_binding.org_id == org_id,
+            primary_binding.account_id == account_id,
+            primary_binding.binding_type == "primary_brand",
+            primary_binding.status == "active",
+            primary_base.kind == "brand",
+            primary_base.status == "active",
+            KnowledgeEntry.knowledge_base_id == primary_binding.knowledge_base_id,
         )
-    return grouped
+    )
+    shared_match = exists(
+        select(shared_binding.id)
+        .join(shared_base, shared_base.id == shared_binding.knowledge_base_id)
+        .where(
+            shared_binding.org_id == org_id,
+            shared_binding.account_id == account_id,
+            shared_binding.binding_type == "shared",
+            shared_binding.status == "active",
+            shared_base.kind == "organization_shared",
+            shared_base.status == "active",
+            KnowledgeEntry.knowledge_base_id == shared_binding.knowledge_base_id,
+        )
+    )
+    local_match = KnowledgeEntry.knowledge_base_id.is_(None)
+    source_tier = case(
+        (local_match, 0),
+        (primary_match, 1),
+        (shared_match, 2),
+        else_=3,
+    )
+
+    query = (
+        select(KnowledgeEntry)
+        .join(Account, Account.id == account_id)
+        .join(
+            Project,
+            Project.id == project_id,
+        )
+        .where(
+            Account.org_id == org_id,
+            Project.org_id == org_id,
+            Project.client_id == Account.client_id,
+            KnowledgeEntry.org_id == org_id,
+            KnowledgeEntry.client_id == Account.client_id,
+            KnowledgeEntry.project_id == project_id,
+            KnowledgeEntry.status == "active",
+            KnowledgeEntry.verification_status == "verified",
+            or_(KnowledgeEntry.effective_at.is_(None), KnowledgeEntry.effective_at <= now),
+            or_(KnowledgeEntry.expires_at.is_(None), KnowledgeEntry.expires_at > now),
+            or_(
+                ~KnowledgeEntry.entry_kind.in_(("product_fact", "case")),
+                KnowledgeEntry.allowed_for_external_claim.is_(True),
+            ),
+            or_(local_match, primary_match, shared_match),
+        )
+        .order_by(source_tier.asc(), KnowledgeEntry.id.asc())
+        .limit(bounded_limit * 3)
+    )
+    rows = list(await session.scalars(query))
+    return [row for row in rows if _claim_is_permitted(row)][:bounded_limit]
+
+
+def _claim_is_permitted(row: KnowledgeEntry) -> bool:
+    """Require explicit permission before a claim-like record reaches an Agent."""
+
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    payload_kind = str(payload.get("kind", ""))
+    is_numeric_claim = any(
+        isinstance(payload.get(key), (int, float)) and not isinstance(payload.get(key), bool)
+        for key in ("amount", "price", "value", "quantity")
+    )
+    needs_permission = (
+        row.entry_kind in _EXTERNAL_CLAIM_KINDS
+        or payload_kind in _EXTERNAL_CLAIM_KINDS
+        or is_numeric_claim
+    )
+    return not needs_permission or row.allowed_for_external_claim
+
+
+def knowledge_context(rows: list[KnowledgeEntry]) -> dict[str, list[dict]]:
+    """Build the canonical user-context envelope for untrusted knowledge evidence."""
+
+    evidence = [
+        {
+            "category": row.category.value,
+            "content": row.content,
+            "citation": {
+                "entry_id": row.id,
+                "entry_version": row.version,
+                "source_label": row.source_label,
+                "source_url": row.source_url,
+                "source_type": row.source_type,
+                "verification_status": row.verification_status,
+                "allowed_for_external_claim": row.allowed_for_external_claim,
+            },
+            "tags": row.tags or [],
+            "title": row.title,
+        }
+        for row in rows
+    ]
+    context: dict[str, list[dict]] = {"untrusted_evidence": evidence}
+    for item in evidence:
+        context.setdefault(str(item["category"]), []).append(item)
+    return context
 
 
 async def record_knowledge_citations(
@@ -322,6 +443,12 @@ async def record_knowledge_citations(
             client_id=client_id,
             project_id=project_id,
             entry_id=row.id,
+            entry_version=row.version,
+            source_type=row.source_type,
+            source_label=row.source_label,
+            source_url=row.source_url,
+            verification_status=row.verification_status,
+            allowed_for_external_claim=row.allowed_for_external_claim,
             task_id=task_id,
             invocation_id=invocation_id,
             agent_code=agent_code,

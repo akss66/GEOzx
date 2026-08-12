@@ -256,6 +256,9 @@ class KnowledgeCitation(Base):
     """An immutable record of an agent/task using a knowledge entry."""
 
     __tablename__ = "knowledge_citations"
+    __table_args__ = (
+        Index("ix_knowledge_citations_entry_id_version", "entry_id", "entry_version"),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -270,6 +273,12 @@ class KnowledgeCitation(Base):
     entry_id: Mapped[int] = mapped_column(
         ForeignKey("knowledge_entries.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    entry_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_label: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    verification_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    allowed_for_external_claim: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     task_id: Mapped[int | None] = mapped_column(
         ForeignKey("brain_tasks.id", ondelete="SET NULL"), index=True, nullable=True
     )

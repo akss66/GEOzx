@@ -44,7 +44,7 @@ from app.orchestrator.agent_harness import AgentHarnessResult, agent_harness
 from app.services.agent_management import get_business_config, require_agent_enabled
 from app.services.knowledge_workspace import (
     knowledge_context,
-    list_agent_knowledge,
+    list_agent_knowledge_for_account,
     record_knowledge_citations,
 )
 
@@ -182,14 +182,13 @@ async def _create_direct_agent_run_legacy(
     runner = spec.runner()
     runner.code = code.value
     knowledge_rows = (
-        await list_agent_knowledge(
+        await list_agent_knowledge_for_account(
             session,
             org_id=user.org_id,
-            client_id=project.client_id,
+            account_id=account.id,
             project_id=project.id,
         )
-        if project.client_id is not None
-        else []
+        if project.client_id is not None else []
     )
     try:
         payload = await runner.run(
