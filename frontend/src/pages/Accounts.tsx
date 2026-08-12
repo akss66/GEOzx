@@ -67,6 +67,11 @@ import {
   updateProject,
 } from "../api/workspace";
 import { presentApiError } from "../api/errors";
+import {
+  createWechatAuthorizationSession,
+  getWechatAccountCapabilities,
+  isOfficialWechatAuthorizationUrl,
+} from "../services/wechatIntegration";
 import { OperationalState, PageHeader, Panel } from "../components/ui";
 import {
   AccountCardsView,
@@ -103,11 +108,16 @@ import type {
   Project,
   UpdatePlatformIntegrationInput,
 } from "../types";
+import type {
+  WechatCapabilityKey,
+  WechatCapabilityState,
+} from "../types/wechatArticle";
 
 const PLATFORM_OPTIONS: { label: string; value: Platform }[] = [
   { label: "抖音", value: "douyin" },
   { label: "小红书", value: "xiaohongshu" },
   { label: "视频号", value: "shipinhao" },
+  { label: "微信公众号", value: "wechat_official_account" },
 ];
 
 const DIMENSION_LABEL: Record<GroupDimension, string> = {
@@ -188,6 +198,14 @@ const PLATFORM_DEFAULT_STATUS: Record<Platform, PlatformMatrixSummary> = {
     integration_status: "manual",
     auth_status: "manual",
     data_sync_status: "manual",
+  },
+  wechat_official_account: {
+    platform: "wechat_official_account",
+    total: 0,
+    active: 0,
+    integration_status: "oauth_ready",
+    auth_status: "unauthorized",
+    data_sync_status: "not_configured",
   },
 };
 
@@ -317,6 +335,12 @@ export default function Accounts() {
     queryKey: ["douyin-account-capabilities", capabilityAccount?.id],
     queryFn: () => getDouyinAccountCapabilities(capabilityAccount!.id),
     enabled: isAdmin && capabilityAccount?.platform === "douyin",
+    retry: false,
+  });
+  const wechatCapabilitiesQuery = useQuery({
+    queryKey: ["wechat-account-capabilities", capabilityAccount?.id],
+    queryFn: () => getWechatAccountCapabilities(capabilityAccount!.id),
+    enabled: isAdmin && capabilityAccount?.platform === "wechat_official_account",
     retry: false,
   });
 
@@ -610,6 +634,26 @@ export default function Accounts() {
     onError: () => message.error("授权链接生成失败，请先检查平台接入配置"),
   });
 
+  const wechatAuthorizeMutation = useMutation({
+    mutationFn: () => createWechatAuthorizationSession({}),
+    onSuccess: (result) => {
+      if (!isOfficialWechatAuthorizationUrl(result.authorizationUrl)) {
+        message.error("微信授权地址校验失败，请联系管理员检查开放平台组件配置");
+        return;
+      }
+      window.open(result.authorizationUrl, "_blank", "noopener,noreferrer");
+      message.success("已打开微信公众号官方授权页");
+    },
+    onError: (error) => {
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      message.error(
+        status === 503
+          ? "微信开放平台组件尚未配置，请联系管理员配置 Component AppID、AppSecret 与授权事件接收地址"
+          : "微信公众号授权暂时不可用，请稍后重试",
+      );
+    },
+  });
+
   const douyinIncrementalAuthorizeMutation = useMutation({
     mutationFn: ({
       accountId,
@@ -821,8 +865,10 @@ export default function Accounts() {
           syncLoading={douyinSyncMutation.isPending}
           onOpenDataCenter={() => openAccountDataCenter(account)}
           onOfficialAuthorize={() => douyinAuthorizeMutation.mutate(account.id)}
+          onWechatAuthorize={() => wechatAuthorizeMutation.mutate()}
           onSyncMetrics={() => douyinSyncMutation.mutate(account.id)}
           onInspectCapabilities={() => setCapabilityAccount(account)}
+          wechatAuthorizeLoading={wechatAuthorizeMutation.isPending}
           onDelete={() => setDeleteTarget(account)}
         />
       ),
@@ -1485,14 +1531,41 @@ export default function Accounts() {
       </Modal>
 
       <Modal
-        title={capabilityAccount ? `抖音能力 · ${capabilityAccount.nickname}` : "抖音能力"}
+        title={capabilityAccount?.platform === "wechat_official_account"
+          ? `微信能力 · ${capabilityAccount.nickname}`
+          : capabilityAccount ? `抖音能力 · ${capabilityAccount.nickname}` : "平台能力"}
         open={capabilityAccount != null}
         onCancel={() => setCapabilityAccount(null)}
         footer={null}
         width={680}
         destroyOnHidden
       >
-        {douyinCapabilitiesQuery.isLoading ? (
+        {capabilityAccount?.platform === "wechat_official_account" ? (
+          wechatCapabilitiesQuery.isLoading ? (
+            <div role="status" style={{ padding: "32px 0", textAlign: "center", color: "var(--dy-muted)" }}>
+              正在核对微信公众号授权与能力...
+            </div>
+          ) : wechatCapabilitiesQuery.isError ? (
+            <OperationalState
+              kind="error"
+              title="微信能力状态暂时不可用"
+              description="请确认公众号已完成官方授权；若组件未配置，请联系管理员配置微信开放平台组件。"
+              actionLabel="重新检查"
+              onAction={() => void wechatCapabilitiesQuery.refetch()}
+            />
+          ) : (
+            <div style={{ display: "grid", gap: 10 }} aria-live="polite">
+              {WECHAT_CAPABILITY_ROWS.map((row) => (
+                <WechatCapabilityRow
+                  key={row.key}
+                  label={row.label}
+                  state={wechatCapabilitiesQuery.data?.[row.key]}
+                  freepublish={row.key === "freepublish"}
+                />
+              ))}
+            </div>
+          )
+        ) : douyinCapabilitiesQuery.isLoading ? (
           <div style={{ padding: "32px 0", textAlign: "center", color: "var(--dy-muted)" }}>
             正在核对开放平台与账号授权状态...
           </div>
@@ -1822,9 +1895,11 @@ function AccountActions({
   syncLoading,
   onOpenDataCenter,
   onOfficialAuthorize,
+  onWechatAuthorize,
   onSyncMetrics,
   onInspectCapabilities,
   onDelete,
+  wechatAuthorizeLoading,
 }: {
   account: Account;
   canManage: boolean;
@@ -1832,12 +1907,26 @@ function AccountActions({
   syncLoading: boolean;
   onOpenDataCenter: () => void;
   onOfficialAuthorize: () => void;
+  onWechatAuthorize: () => void;
   onSyncMetrics: () => void;
   onInspectCapabilities: () => void;
   onDelete: () => void;
+  wechatAuthorizeLoading: boolean;
 }) {
   const mode = getAccountActionMode(account);
-  const primaryAction = canManage
+  const primaryAction = canManage && account.platform === "wechat_official_account"
+    ? account.auth_status === "authorized" ? null : (
+      <Button
+        size="small"
+        type="primary"
+        loading={wechatAuthorizeLoading}
+        aria-label={`授权微信公众号 ${account.nickname}`}
+        onClick={onWechatAuthorize}
+      >
+        授权微信公众号
+      </Button>
+    )
+    : canManage
     ? mode === "official_authorize" ? (
       <Button
         size="small"
@@ -1885,6 +1974,17 @@ function AccountActions({
           />
         </Tooltip>
       ) : null}
+      {canManage && account.platform === "wechat_official_account" && account.auth_status === "authorized" ? (
+        <Tooltip title="查看微信公众号能力状态">
+          <Button
+            size="small"
+            type="text"
+            icon={<SafetyCertificateOutlined />}
+            aria-label={`查看微信能力 ${account.nickname}`}
+            onClick={onInspectCapabilities}
+          />
+        </Tooltip>
+      ) : null}
       {canManage ? (
         <Tooltip title="删除账号">
           <Button
@@ -1898,6 +1998,46 @@ function AccountActions({
         </Tooltip>
       ) : null}
     </Space>
+  );
+}
+
+const WECHAT_CAPABILITY_ROWS: Array<{ key: WechatCapabilityKey; label: string }> = [
+  { key: "uploadArticleImage", label: "上传图文图片" },
+  { key: "addPermanentMaterial", label: "新增永久素材" },
+  { key: "draftAdd", label: "新建草稿" },
+  { key: "draftGet", label: "读取草稿" },
+  { key: "draftUpdate", label: "更新草稿" },
+  { key: "analytics", label: "内容数据分析" },
+  { key: "freepublish", label: "发布文章" },
+];
+
+function WechatCapabilityRow({
+  label,
+  state,
+  freepublish,
+}: {
+  label: string;
+  state?: WechatCapabilityState;
+  freepublish: boolean;
+}) {
+  const status = freepublish
+    ? "首版未开启"
+    : state?.canUse
+      ? "可用"
+      : ({
+          component_permission_missing: "开放平台组件缺少权限",
+          account_permission_missing: "公众号尚未授权所需权限",
+          unsupported_account_type: "公众号类型暂不支持",
+          account_not_verified: "公众号未认证",
+          account_qualification_unknown: "公众号资质未知",
+          account_not_authorized: "需要重新授权公众号",
+          live_probe_failed: "实时探测失败，请稍后重试",
+        } as Record<string, string>)[state?.reason ?? ""] ?? "能力状态未知";
+  return (
+    <section style={{ borderBottom: "1px solid var(--dy-border)", padding: "10px 0", display: "flex", justifyContent: "space-between", gap: 12 }}>
+      <strong>{label}</strong>
+      <Tag color={!freepublish && state?.canUse ? "success" : "default"}>{status}</Tag>
+    </section>
   );
 }
 

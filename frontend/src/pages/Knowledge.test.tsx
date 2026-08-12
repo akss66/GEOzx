@@ -14,7 +14,20 @@ import {
   listKnowledgeSuggestions,
 } from "../api/knowledge";
 import { getWorkspaceContext } from "../api/shell";
+import {
+  bindWechatKnowledgeBase,
+  getWechatKnowledgeBinding,
+  listWechatKnowledgeBases,
+  unbindWechatKnowledgeBase,
+} from "../services/wechatIntegration";
 import Knowledge from "./Knowledge";
+
+const currentWorkspace = vi.hoisted(() => ({
+  clientId: 1,
+  projectId: 2,
+  platform: "wechat_official_account",
+  accountId: 31,
+}));
 
 beforeAll(() => {
   Object.defineProperty(window, "matchMedia", {
@@ -90,17 +103,35 @@ vi.mock("../api/shell", () => ({
   })),
 }));
 
+vi.mock("../services/wechatIntegration", () => ({
+  bindWechatKnowledgeBase: vi.fn(),
+  getWechatKnowledgeBinding: vi.fn(async () => null),
+  listWechatKnowledgeBases: vi.fn(async () => ({
+    data: [],
+    pagination: { limit: 100, offset: 0, total: 0 },
+  })),
+  unbindWechatKnowledgeBase: vi.fn(),
+}));
+
 vi.mock("../stores/currentWorkspace", () => ({
-  useCurrentWorkspace: vi.fn(() => ({ clientId: 1, projectId: 2, platform: "douyin", accountId: null })),
+  useCurrentWorkspace: vi.fn(() => currentWorkspace),
 }));
 
 describe("Knowledge", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    currentWorkspace.accountId = 31;
+    vi.mocked(getWechatKnowledgeBinding).mockResolvedValue(null);
+    vi.mocked(listWechatKnowledgeBases).mockResolvedValue({
+      data: [],
+      pagination: { limit: 100, offset: 0, total: 0 },
+    });
+  });
   afterEach(cleanup);
 
   function renderPage() {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    render(<QueryClientProvider client={client}><AntApp><Knowledge /></AntApp></QueryClientProvider>);
+    return render(<QueryClientProvider client={client}><AntApp><Knowledge /></AntApp></QueryClientProvider>);
   }
 
   it("renders a scoped document with provenance, version, and citations", async () => {
@@ -158,5 +189,86 @@ describe("Knowledge", () => {
     expect(screen.queryByText("尚未被 Agent 引用")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
     expect(await screen.findByText("校准账号定位")).toBeInTheDocument();
+  });
+
+  it("binds the first accessible brand knowledge base and excludes shared bases", async () => {
+    vi.mocked(listWechatKnowledgeBases).mockResolvedValueOnce({
+      data: [
+        { id: 41, clientId: 1, kind: "brand", name: "品牌事实库", description: null, status: "active", version: 1 },
+        { id: 42, clientId: null, kind: "organization_shared", name: "组织共享库", description: null, status: "active", version: 1 },
+      ],
+      pagination: { limit: 100, offset: 0, total: 2 },
+    });
+    vi.mocked(bindWechatKnowledgeBase).mockResolvedValueOnce({
+      id: 9, accountId: 31, knowledgeBaseId: 41, knowledgeBaseKind: "brand",
+      clientId: 1, bindingType: "primary_brand", status: "active", boundAt: "2026-08-12T00:00:00Z",
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("公众号主品牌知识库")).toBeInTheDocument();
+    expect(screen.queryByText("组织共享库")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "绑定主品牌 品牌事实库" }));
+    await waitFor(() => expect(bindWechatKnowledgeBase).toHaveBeenCalledWith(31, 41));
+  });
+
+  it("requires named confirmation before replacing a primary brand and cancel does not mutate", async () => {
+    vi.mocked(listWechatKnowledgeBases).mockResolvedValueOnce({
+      data: [
+        { id: 41, clientId: 1, kind: "brand", name: "现有品牌库", description: null, status: "active", version: 1 },
+        { id: 43, clientId: 1, kind: "brand", name: "目标品牌库", description: null, status: "active", version: 1 },
+      ],
+      pagination: { limit: 100, offset: 0, total: 2 },
+    });
+    vi.mocked(getWechatKnowledgeBinding).mockResolvedValueOnce({
+      id: 9, accountId: 31, knowledgeBaseId: 41, knowledgeBaseKind: "brand",
+      clientId: 1, bindingType: "primary_brand", status: "active", boundAt: "2026-08-12T00:00:00Z",
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "替换为主品牌 目标品牌库" }));
+    expect(screen.getByText("将“现有品牌库”替换为“目标品牌库”？")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消替换" }));
+    expect(bindWechatKnowledgeBase).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "替换为主品牌 目标品牌库" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认替换" }));
+    await waitFor(() => expect(bindWechatKnowledgeBase).toHaveBeenCalledWith(31, 43));
+    expect(unbindWechatKnowledgeBase).not.toHaveBeenCalled();
+  });
+
+  it("isolates primary-brand binding by current account key", async () => {
+    vi.mocked(listWechatKnowledgeBases).mockResolvedValue({
+      data: [
+        { id: 41, clientId: 1, kind: "brand", name: "甲品牌库", description: null, status: "active", version: 1 },
+        { id: 43, clientId: 1, kind: "brand", name: "乙品牌库", description: null, status: "active", version: 1 },
+      ],
+      pagination: { limit: 100, offset: 0, total: 2 },
+    });
+    vi.mocked(getWechatKnowledgeBinding).mockImplementation(async (accountId) => ({
+      id: accountId, accountId, knowledgeBaseId: accountId === 31 ? 41 : 43,
+      knowledgeBaseKind: "brand", clientId: 1, bindingType: "primary_brand",
+      status: "active", boundAt: "2026-08-12T00:00:00Z",
+    }));
+
+    const view = renderPage();
+    expect(await screen.findByText("当前：甲品牌库")).toBeInTheDocument();
+    currentWorkspace.accountId = 32;
+    view.rerender(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AntApp><Knowledge /></AntApp></QueryClientProvider>);
+
+    expect(await screen.findByText("当前：乙品牌库")).toBeInTheDocument();
+    expect(screen.queryByText("当前：甲品牌库")).not.toBeInTheDocument();
+    expect(getWechatKnowledgeBinding).toHaveBeenCalledWith(31);
+    expect(getWechatKnowledgeBinding).toHaveBeenCalledWith(32);
+  });
+
+  it("announces an empty primary-brand choice and offers retry on load failure", async () => {
+    renderPage();
+    expect(await screen.findByText("当前客户没有可绑定的品牌知识库")).toHaveAttribute("role", "status");
+    cleanup();
+    vi.mocked(listWechatKnowledgeBases).mockRejectedValueOnce(new Error("secret backend detail"));
+    renderPage();
+    expect(await screen.findByRole("button", { name: "主品牌绑定加载失败，重新加载" })).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("secret backend detail");
   });
 });

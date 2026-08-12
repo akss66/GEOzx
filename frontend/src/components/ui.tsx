@@ -18,6 +18,7 @@ const PLATFORM_LABEL: Record<Platform, string> = {
   douyin: "抖音",
   xiaohongshu: "小红书",
   shipinhao: "视频号",
+  wechat_official_account: "微信公众号",
 };
 
 const STATUS_META: Record<
@@ -48,6 +49,7 @@ const PLATFORM_COLOR: Record<Platform, string> = {
   douyin: "default",
   xiaohongshu: "error",
   shipinhao: "success",
+  wechat_official_account: "success",
 };
 
 export function PlatformTag({ platform }: { platform: Platform }) {

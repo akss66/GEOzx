@@ -1365,7 +1365,7 @@ export interface RiskQueueItem {
 
 // —— 工作区域：项目 / 账号矩阵 ——
 
-export type Platform = "douyin" | "xiaohongshu" | "shipinhao";
+export type Platform = "douyin" | "xiaohongshu" | "shipinhao" | "wechat_official_account";
 export type ProjectStatus = "active" | "paused" | "archived";
 export type AccountStatus = "active" | "inactive" | "banned";
 export type GroupDimension = "track" | "persona" | "platform";

@@ -113,7 +113,7 @@ function PublishPreparationForm({
   const mutation = useMutation({
     mutationFn: (values: PublishForm) =>
       checkPublishReadiness(workspace.content_item.id, {
-        platform: account.platform,
+        platform: account.platform as Exclude<typeof account.platform, "wechat_official_account">,
         title: values.title.trim(),
         body: values.body.trim(),
         topics: lines(values.topics),

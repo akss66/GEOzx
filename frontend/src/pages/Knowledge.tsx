@@ -26,7 +26,14 @@ import {
 import { presentApiError } from "../api/errors";
 import { getWorkspaceContext } from "../api/shell";
 import { OperationalState } from "../components/ui";
+import {
+  bindWechatKnowledgeBase,
+  getWechatKnowledgeBinding,
+  listWechatKnowledgeBases,
+  unbindWechatKnowledgeBase,
+} from "../services/wechatIntegration";
 import { useCurrentWorkspace } from "../stores/currentWorkspace";
+import type { WechatKnowledgeBase, WechatKnowledgeBinding } from "../types/wechatArticle";
 import type {
   KnowledgeCategory,
   KnowledgeEntry,
@@ -87,6 +94,47 @@ export default function Knowledge() {
     queryFn: () => listKnowledgeSuggestions(client!.id, project?.id),
     enabled: Boolean(client),
   });
+  const wechatAccountId = workspace.platform === "wechat_official_account"
+    ? workspace.accountId
+    : null;
+  const knowledgeBasesQuery = useQuery({
+    queryKey: ["wechat-knowledge-bases", client?.id],
+    queryFn: () => listWechatKnowledgeBases(),
+    enabled: Boolean(wechatAccountId && client),
+    retry: false,
+  });
+  const knowledgeBindingQuery = useQuery({
+    queryKey: ["wechat-knowledge-binding", wechatAccountId],
+    queryFn: () => getWechatKnowledgeBinding(wechatAccountId!),
+    enabled: Boolean(wechatAccountId),
+    retry: false,
+  });
+  const brandBases = useMemo(
+    () => (knowledgeBasesQuery.data?.data ?? []).filter(
+      (base) => base.kind === "brand" && base.status === "active" && base.clientId === client?.id,
+    ),
+    [client?.id, knowledgeBasesQuery.data?.data],
+  );
+  const bindKnowledgeMutation = useMutation({
+    mutationFn: (knowledgeBaseId: number) =>
+      bindWechatKnowledgeBase(wechatAccountId!, knowledgeBaseId),
+    onSuccess: (binding) => {
+      qcBinding(binding);
+      message.success("公众号主品牌知识库已更新");
+    },
+    onError: () => message.error("主品牌知识库绑定失败，请核对账号与品牌归属"),
+  });
+  const unbindKnowledgeMutation = useMutation({
+    mutationFn: () => unbindWechatKnowledgeBase(wechatAccountId!),
+    onSuccess: () => {
+      qcBinding(null);
+      message.success("已解除公众号主品牌知识库绑定");
+    },
+    onError: () => message.error("解除主品牌知识库绑定失败，请稍后重试"),
+  });
+  function qcBinding(binding: WechatKnowledgeBinding | null) {
+    queryClient.setQueryData(["wechat-knowledge-binding", wechatAccountId], binding);
+  }
 
   const entries = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase();
@@ -258,6 +306,20 @@ export default function Knowledge() {
         suggestionCount={suggestions.length}
         onMode={setMode}
         onCategory={(next) => { setMode("library"); setCategory(next); }}
+        wechatBinding={wechatAccountId ? {
+          accountId: wechatAccountId,
+          bases: brandBases,
+          binding: knowledgeBindingQuery.data ?? null,
+          loading: knowledgeBasesQuery.isLoading || knowledgeBindingQuery.isLoading,
+          error: knowledgeBasesQuery.isError || knowledgeBindingQuery.isError,
+          mutating: bindKnowledgeMutation.isPending || unbindKnowledgeMutation.isPending,
+          onBind: (baseId) => bindKnowledgeMutation.mutate(baseId),
+          onUnbind: () => unbindKnowledgeMutation.mutate(),
+          onRetry: () => void Promise.all([
+            knowledgeBasesQuery.refetch(),
+            knowledgeBindingQuery.refetch(),
+          ]),
+        } : null}
       />
 
       <section className="knowledge-index">
@@ -357,9 +419,20 @@ export default function Knowledge() {
   );
 }
 
-function KnowledgeNavigation({ clientName, projectName, mode, category, suggestionCount, onMode, onCategory }: {
+function KnowledgeNavigation({ clientName, projectName, mode, category, suggestionCount, onMode, onCategory, wechatBinding }: {
   clientName?: string; projectName?: string; mode: LibraryMode; category: KnowledgeCategory;
   suggestionCount: number; onMode: (mode: LibraryMode) => void; onCategory: (category: KnowledgeCategory) => void;
+  wechatBinding: {
+    accountId: number;
+    bases: WechatKnowledgeBase[];
+    binding: WechatKnowledgeBinding | null;
+    loading: boolean;
+    error: boolean;
+    mutating: boolean;
+    onBind: (baseId: number) => void;
+    onUnbind: () => void;
+    onRetry: () => void;
+  } | null;
 }) {
   return (
     <aside className="knowledge-navigation">
@@ -371,7 +444,75 @@ function KnowledgeNavigation({ clientName, projectName, mode, category, suggesti
       <div className="knowledge-navigation__collections"><span>集合</span>{CATEGORIES.map((item) => (
         <button type="button" key={item.key} className={mode === "library" && category === item.key ? "is-active" : ""} onClick={() => onCategory(item.key)}><strong>{item.label}</strong><small>{item.short}</small></button>
       ))}</div>
+      {wechatBinding ? <WechatBrandBinding {...wechatBinding} /> : null}
     </aside>
+  );
+}
+
+function WechatBrandBinding({
+  bases,
+  binding,
+  loading,
+  error,
+  mutating,
+  onBind,
+  onUnbind,
+  onRetry,
+}: {
+  accountId: number;
+  bases: WechatKnowledgeBase[];
+  binding: WechatKnowledgeBinding | null;
+  loading: boolean;
+  error: boolean;
+  mutating: boolean;
+  onBind: (baseId: number) => void;
+  onUnbind: () => void;
+  onRetry: () => void;
+}) {
+  const current = bases.find((base) => base.id === binding?.knowledgeBaseId) ?? null;
+  return (
+    <section aria-labelledby="wechat-brand-binding-title" style={{ borderTop: "1px solid var(--dy-border)", paddingTop: 16, display: "grid", gap: 8 }}>
+      <strong id="wechat-brand-binding-title">公众号主品牌知识库</strong>
+      {loading ? <span role="status">正在读取主品牌绑定...</span> : error ? (
+        <Button size="small" onClick={onRetry}>主品牌绑定加载失败，重新加载</Button>
+      ) : bases.length === 0 ? (
+        <span role="status">当前客户没有可绑定的品牌知识库</span>
+      ) : (
+        <>
+          <span aria-live="polite">当前：{current?.name ?? "未绑定"}</span>
+          {bases.filter((base) => base.id !== binding?.knowledgeBaseId).map((base) =>
+            binding && current ? (
+              <Popconfirm
+                key={base.id}
+                title={`将“${current.name}”替换为“${base.name}”？`}
+                description="替换后，公众号仅使用新的主品牌知识库。"
+                okText="确认替换"
+                cancelText="取消替换"
+                onConfirm={() => onBind(base.id)}
+              >
+                <Button size="small" loading={mutating} aria-label={`替换为主品牌 ${base.name}`}>
+                  替换为 {base.name}
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Button key={base.id} size="small" loading={mutating} aria-label={`绑定主品牌 ${base.name}`} onClick={() => onBind(base.id)}>
+                绑定 {base.name}
+              </Button>
+            ),
+          )}
+          {binding && current ? (
+            <Popconfirm
+              title={`解除“${current.name}”的主品牌绑定？`}
+              okText="确认解除"
+              cancelText="保留绑定"
+              onConfirm={onUnbind}
+            >
+              <Button size="small" danger loading={mutating} aria-label={`解除主品牌 ${current.name}`}>解除绑定</Button>
+            </Popconfirm>
+          ) : null}
+        </>
+      )}
+    </section>
   );
 }
 
