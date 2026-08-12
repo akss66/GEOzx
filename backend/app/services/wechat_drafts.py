@@ -23,6 +23,46 @@ DRAFT_UPDATE_ENDPOINT = "/cgi-bin/draft/update"
 UPLOAD_ARTICLE_IMAGE_ENDPOINT = "/cgi-bin/media/uploadimg"
 ADD_PERMANENT_MATERIAL_ENDPOINT = "/cgi-bin/material/add_material"
 _RETRYABLE_WECHAT_CODES = frozenset({-1, 45009})
+_BLOCK_HTML_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+    }
+)
 _SECRET_KEY = r"(?:access_token|authorizer_access_token|refresh_token|secret|token)"
 _QUOTED_SECRET_ASSIGNMENT = re.compile(
     rf"(?i)(?P<prefix>\b{_SECRET_KEY}\b[\"']?\s*[:=]\s*)"
@@ -335,50 +375,109 @@ class _CanonicalHtmlParser(HTMLParser):
         super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
         self.stack: list[str] = []
+        self.last_child: list[str | None] = []
+        self.pending_whitespace: tuple[str, str, str | None] | None = None
 
     def handle_starttag(
         self,
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
+        self._flush_whitespace(next_tag=tag)
         self.parts.append(self._start(tag, attrs, closed=False))
+        if self.last_child:
+            self.last_child[-1] = tag
         if tag not in {"img", "hr", "br"}:
             self.stack.append(tag)
+            self.last_child.append(None)
 
     def handle_startendtag(
         self,
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
+        self._flush_whitespace(next_tag=tag)
         self.parts.append(self._start(tag, attrs, closed=True))
+        if self.last_child:
+            self.last_child[-1] = tag
 
     def handle_endtag(self, tag: str) -> None:
+        self._flush_whitespace(next_end_tag=tag)
         self.parts.append(f"</{tag}>")
         if tag in self.stack:
             index = len(self.stack) - 1 - self.stack[::-1].index(tag)
             del self.stack[index:]
+            del self.last_child[index:]
 
     def handle_data(self, data: str) -> None:
-        is_formatting_whitespace = not data.strip() and any(
-            character in data for character in "\r\n\t"
-        )
-        if data.strip() or (self.stack and not is_formatting_whitespace):
-            self.parts.append(data)
+        if not data.strip():
+            if not self.stack:
+                return
+            if self.pending_whitespace is None:
+                self.pending_whitespace = (data, self.stack[-1], self.last_child[-1])
+            else:
+                pending, parent, previous = self.pending_whitespace
+                self.pending_whitespace = (pending + data, parent, previous)
+            return
+        self._flush_whitespace(next_text=True)
+        self.parts.append(data)
+        if self.last_child:
+            self.last_child[-1] = "#text"
 
     def handle_entityref(self, name: str) -> None:
+        self._flush_whitespace(next_text=True)
         self.parts.append(f"&{name};")
+        if self.last_child:
+            self.last_child[-1] = "#text"
 
     def handle_charref(self, name: str) -> None:
+        self._flush_whitespace(next_text=True)
         self.parts.append(f"&#{name};")
+        if self.last_child:
+            self.last_child[-1] = "#text"
 
     def handle_comment(self, data: str) -> None:
+        self._flush_whitespace(next_text=True)
         self.parts.append(f"<!--{data}-->")
+        if self.last_child:
+            self.last_child[-1] = "#text"
 
     def handle_decl(self, decl: str) -> None:
+        self._flush_whitespace(next_text=True)
         self.parts.append(f"<!{decl}>")
+        if self.last_child:
+            self.last_child[-1] = "#text"
 
     def handle_pi(self, data: str) -> None:
+        self._flush_whitespace(next_text=True)
         self.parts.append(f"<?{data}>")
+        if self.last_child:
+            self.last_child[-1] = "#text"
+
+    def close(self) -> None:
+        super().close()
+        self._flush_whitespace()
+
+    def _flush_whitespace(
+        self,
+        *,
+        next_tag: str | None = None,
+        next_end_tag: str | None = None,
+        next_text: bool = False,
+    ) -> None:
+        pending = self.pending_whitespace
+        if pending is None:
+            return
+        self.pending_whitespace = None
+        data, parent, previous = pending
+        next_is_block_boundary = next_tag in _BLOCK_HTML_TAGS or next_end_tag == parent
+        previous_is_block_boundary = previous is None or previous in _BLOCK_HTML_TAGS
+        if not (
+            parent in _BLOCK_HTML_TAGS
+            and (previous_is_block_boundary or next_is_block_boundary)
+            and not next_text
+        ):
+            self.parts.append(data)
 
     @staticmethod
     def _start(

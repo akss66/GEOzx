@@ -596,6 +596,39 @@ def test_remote_hash_preserves_visible_space_inside_inline_wrapper() -> None:
     assert compute_remote_hash(spaced) != compute_remote_hash(joined)
 
 
+def test_remote_hash_ignores_plain_space_intertag_whitespace_for_block_children() -> None:
+    compact = _article(content="<div><p>a</p></div>")
+    spaced = _article(content="<div>   <p>a</p></div>")
+
+    assert compute_remote_hash(compact) == compute_remote_hash(spaced)
+
+
+@pytest.mark.parametrize(
+    ("compact", "formatted"),
+    [
+        (
+            "<div><p>a</p><p>b</p></div>",
+            "<div>\n  <p>a</p>\n  <p>b</p>\n</div>",
+        ),
+        (
+            "<section><div><p>a</p></div></section>",
+            "  <section>\n    <div>\n      <p>a</p>\n    </div>\n  </section>  ",
+        ),
+        (
+            "<ul><li>a</li><li>b</li></ul>",
+            "<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>",
+        ),
+    ],
+)
+def test_remote_hash_ignores_block_container_formatting_whitespace(
+    compact: str,
+    formatted: str,
+) -> None:
+    assert compute_remote_hash(_article(content=compact)) == compute_remote_hash(
+        _article(content=formatted)
+    )
+
+
 @pytest.mark.parametrize(
     "change",
     [

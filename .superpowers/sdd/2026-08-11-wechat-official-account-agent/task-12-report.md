@@ -152,3 +152,47 @@ uv run pytest tests/test_wechat_renderer.py tests/test_wechat_article_api.py tes
 ruff / format / mypy / git diff --check
 PASS
 ```
+
+## Review fix round 2
+
+Follow-up review found that the round-1 line-break heuristic still treated a plain-space-only
+node before a block child as semantic: `<div><p>a</p></div>` and
+`<div>   <p>a</p></div>` produced different hashes. The parser now defers whitespace emission
+until it sees the following parse event and classifies that whitespace using its parent,
+previous child, and next boundary. Inside a block container it discards whitespace only when
+at least one side is a block boundary or the container edge; whitespace between two inline
+siblings and whitespace inside an inline wrapper remain semantic.
+
+Round-2 RED evidence: the new plain-space/block-child regression failed against `05216a5`
+while the existing inline-space controls passed. The first minimal boundary implementation
+then exposed an existing `p`-to-`img` formatting regression; broadening the block-boundary
+test from “both sides” to “either side” restored that invariant without weakening the inline
+controls.
+
+The final matrix covers block siblings with newline indentation, leading/trailing block
+container indentation, list-item formatting, inline sibling spaces, generic inline sibling
+spaces, and an inline wrapper containing only a visible space.
+
+```text
+uv run pytest tests/test_wechat_draft_client.py -q
+42 passed
+
+uv run pytest tests/test_wechat_renderer.py tests/test_wechat_article_api.py tests/test_wechat_article_images.py -q
+59 passed
+
+uv run ruff check app/services/wechat_drafts.py app/schemas/wechat_article.py tests/test_wechat_draft_client.py
+All checks passed
+
+uv run ruff format --check app/services/wechat_drafts.py app/schemas/wechat_article.py tests/test_wechat_draft_client.py
+3 files already formatted
+
+uv run mypy app/services/wechat_drafts.py app/schemas/wechat_article.py
+Success: no issues found in 2 source files
+
+git diff --check
+PASS
+```
+
+Task 18 must still validate canonicalization against representative HTML returned by a live
+WeChat draft account, especially less-common container and embedded-media shapes that cannot
+be confirmed while official documentation and a live account are unavailable here.
