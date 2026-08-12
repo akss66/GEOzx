@@ -272,6 +272,13 @@ class WechatRemoteDraftItem(WechatDraftArticle):
 
     model_config = ConfigDict(extra="ignore")
 
+    @field_validator("author", "content_source_url", mode="before")
+    @classmethod
+    def _empty_optional_fields_are_unset(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
 
 class WechatRemoteDraft(_StrictModel):
     news_item: list[WechatRemoteDraftItem] = Field(min_length=1)

@@ -83,6 +83,94 @@ async def test_platform_error_is_typed_retryable_and_secret_free() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("errmsg", "expected"),
+    [
+        (
+            'platform said {"access_token":"leak-json-123","status":"busy"}',
+            'platform said {"access_token":"[redacted]","status":"busy"}',
+        ),
+        (
+            "authorizer_access_token: leak-colon-456, retry later",
+            "authorizer_access_token: [redacted], retry later",
+        ),
+        (
+            "refresh_token = 'leak-equals-789' while token_count: 3",
+            "refresh_token = '[redacted]' while token_count: 3",
+        ),
+    ],
+)
+async def test_platform_error_redacts_common_secret_assignment_styles(
+    errmsg: str,
+    expected: str,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errcode": 40001, "errmsg": errmsg})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(WechatIntegrationError) as captured:
+            await WechatDraftClient(client=http_client).add_draft(
+                access_token="authorizer-secret",
+                article=_article(),
+            )
+
+    assert captured.value.errmsg == expected
+    assert "leak-" not in captured.value.errmsg
+    assert "token_count: 3" in expected or "token_count" not in errmsg
+
+
+@pytest.mark.asyncio
+async def test_platform_error_redacts_quoted_secret_before_bounding_message() -> None:
+    long_secret = "s" * 80
+    errmsg = f'{"x" * 270} {{"access_token":"{long_secret}"}}'
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errcode": 40001, "errmsg": errmsg})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(WechatIntegrationError) as captured:
+            await WechatDraftClient(client=http_client).add_draft(
+                access_token="authorizer-secret",
+                article=_article(),
+            )
+
+    assert long_secret not in captured.value.errmsg
+    assert "ssss" not in captured.value.errmsg
+    assert '"access_token":"[redacted]"' in captured.value.errmsg
+    assert len(captured.value.errmsg) <= 300
+
+
+@pytest.mark.asyncio
+async def test_platform_error_redacts_url_query_and_json_token_in_errmsg_and_rid() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "errcode": 40001,
+                "errmsg": "failed https://api.example.test/?access_token=query-leak&mode=1",
+                "rid": "trace {'token':'json-leak','token_count':3}",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(WechatIntegrationError) as captured:
+            await WechatDraftClient(client=http_client).add_draft(
+                access_token="authorizer-secret",
+                article=_article(),
+            )
+
+    error = captured.value
+    assert error.errmsg == ("failed https://api.example.test/?access_token=[redacted]&mode=1")
+    assert error.rid == "trace {'token':'[redacted]','token_count':3}"
+    for leaked in ("query-leak", "json-leak", "authorizer-secret"):
+        assert leaked not in error.errmsg
+        assert leaked not in error.rid
+        assert leaked not in str(error)
+        assert leaked not in repr(error)
+    assert error.__cause__ is None
+
+
+@pytest.mark.asyncio
 async def test_platform_rid_is_sanitized() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -384,6 +472,42 @@ async def test_get_draft_requires_typed_news_item_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_draft_normalizes_empty_optional_remote_fields() -> None:
+    remote_item = _article().model_dump(mode="json", exclude_none=True)
+    remote_item.update({"author": "", "content_source_url": ""})
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"news_item": [remote_item]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await WechatDraftClient(client=http_client).get_draft(
+            access_token="authorizer-secret",
+            media_id="draft-media-id",
+        )
+
+    assert result.news_item[0].author is None
+    assert result.news_item[0].content_source_url is None
+
+
+@pytest.mark.asyncio
+async def test_get_draft_rejects_nonempty_invalid_remote_source_url() -> None:
+    remote_item = _article().model_dump(mode="json", exclude_none=True)
+    remote_item["content_source_url"] = "not-a-url"
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"news_item": [remote_item]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(WechatIntegrationError) as captured:
+            await WechatDraftClient(client=http_client).get_draft(
+                access_token="authorizer-secret",
+                media_id="draft-media-id",
+            )
+
+    assert captured.value.code == "invalid_news_item"
+
+
+@pytest.mark.asyncio
 async def test_update_draft_requires_explicit_zero_errcode() -> None:
     observed: list[dict[str, object]] = []
     responses = iter([{"errcode": 0}, {}, {"errcode": 1, "errmsg": "invalid"}])
@@ -454,6 +578,20 @@ def test_remote_hash_preserves_significant_whitespace_between_inline_nodes() -> 
             '<p><a href="https://example.com/a">甲</a><a href="https://example.com/b">乙</a></p>'
         )
     )
+
+    assert compute_remote_hash(spaced) != compute_remote_hash(joined)
+
+
+def test_remote_hash_preserves_inline_whitespace_under_generic_containers() -> None:
+    spaced = _article(content="<div><span>a</span> <span>b</span></div>")
+    joined = _article(content="<div><span>a</span><span>b</span></div>")
+
+    assert compute_remote_hash(spaced) != compute_remote_hash(joined)
+
+
+def test_remote_hash_preserves_visible_space_inside_inline_wrapper() -> None:
+    spaced = _article(content=('<p><span> </span><a href="https://example.com/b">b</a></p>'))
+    joined = _article(content=('<p><span></span><a href="https://example.com/b">b</a></p>'))
 
     assert compute_remote_hash(spaced) != compute_remote_hash(joined)
 

@@ -114,3 +114,41 @@ tokens only; production code contains parameter names but no secret values or lo
 - Live WeChat may return additional error codes whose retryability must be derived from current
   official guidance rather than guessed here.
 - This client does not provide idempotency or remote-conflict persistence; Task 13 owns both.
+
+## Review fix round 1
+
+Independent review reproduced and this round fixed three boundary defects with test-first
+regressions:
+
+1. Platform `errmsg`/`rid` sanitization now recognizes secret assignments written as
+   `key=value`, JSON `"key":"value"`, URL query, or `key: value`, including the recognized
+   `access_token`, `authorizer_access_token`, `refresh_token`, `secret`, and `token` families,
+   preserving delimiters and quoting while
+   redacting only the value. Redaction occurs before the 300-character bound so truncation
+   cannot expose the leading portion of a long secret. Nearby non-secret keys such as
+   `token_count` remain unchanged.
+2. Canonical HTML now preserves whitespace-only text under generic/inline containers such as
+   `<div><span>a</span> <span>b</span></div>` and `<span> </span><a>`. It ignores formatting-only
+   whitespace containing line breaks/tabs and edge whitespace, while preserving plain spaces
+   within an element regardless of its tag name.
+3. The inbound-only `WechatRemoteDraftItem` accepts WeChat's empty-string representation for
+   unset `author` and `content_source_url`, normalizing both to `None`. The outbound
+   `WechatDraftArticle` remains strict, and non-empty invalid remote URLs still fail closed.
+
+Review RED evidence: three sanitization cases and the generic-container whitespace case failed
+against `a1f87a0`; the long-secret truncation regression also failed before redaction ordering
+was corrected. Empty optional remote fields failed as `invalid_news_item`, while the invalid
+non-empty URL control already failed closed. All became GREEN after the minimal changes.
+
+Review-round verification supersedes the earlier counts:
+
+```text
+uv run pytest tests/test_wechat_draft_client.py -q
+38 passed
+
+uv run pytest tests/test_wechat_renderer.py tests/test_wechat_article_api.py tests/test_wechat_article_images.py -q
+59 passed
+
+ruff / format / mypy / git diff --check
+PASS
+```

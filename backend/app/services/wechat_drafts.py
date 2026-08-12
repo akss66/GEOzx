@@ -23,8 +23,14 @@ DRAFT_UPDATE_ENDPOINT = "/cgi-bin/draft/update"
 UPLOAD_ARTICLE_IMAGE_ENDPOINT = "/cgi-bin/media/uploadimg"
 ADD_PERMANENT_MATERIAL_ENDPOINT = "/cgi-bin/material/add_material"
 _RETRYABLE_WECHAT_CODES = frozenset({-1, 45009})
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(access_token|authorizer_access_token|refresh_token|secret)\s*=\s*[^\s&]+"
+_SECRET_KEY = r"(?:access_token|authorizer_access_token|refresh_token|secret|token)"
+_QUOTED_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)(?P<prefix>\b{_SECRET_KEY}\b[\"']?\s*[:=]\s*)"
+    rf"(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
+)
+_UNQUOTED_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)(?P<prefix>\b{_SECRET_KEY}\b[\"']?\s*[:=]\s*)"
+    r"(?P<value>(?![\"'])[^\s,;&}\]]+)"
 )
 
 
@@ -37,8 +43,18 @@ class WechatDraftIntegrationError(WechatIntegrationError):
 def _sanitized_text(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    one_line = " ".join(value.split())[:300]
-    return _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[redacted]", one_line)
+    one_line = " ".join(value.split())
+    quoted_redacted = _QUOTED_SECRET_ASSIGNMENT.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}[redacted]{match.group('quote')}"
+        ),
+        one_line,
+    )
+    redacted = _UNQUOTED_SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group('prefix')}[redacted]",
+        quoted_redacted,
+    )
+    return redacted[:300]
 
 
 def _integration_error(
@@ -343,10 +359,10 @@ class _CanonicalHtmlParser(HTMLParser):
             del self.stack[index:]
 
     def handle_data(self, data: str) -> None:
-        if data.strip() or (
-            self.stack
-            and self.stack[-1] in {"p", "h2", "h3", "h4", "blockquote", "cite", "li", "aside", "a"}
-        ):
+        is_formatting_whitespace = not data.strip() and any(
+            character in data for character in "\r\n\t"
+        )
+        if data.strip() or (self.stack and not is_formatting_whitespace):
             self.parts.append(data)
 
     def handle_entityref(self, name: str) -> None:
