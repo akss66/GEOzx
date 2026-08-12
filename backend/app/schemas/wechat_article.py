@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import (
     AnyHttpUrl,
@@ -21,6 +23,7 @@ StrictText = Annotated[str, Field(min_length=1, max_length=20_000)]
 BlockId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
 SlotKey = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,127}$")]
 PositiveCitationId = Annotated[int, Field(gt=0)]
+WechatCommentFlag = Literal[0, 1]
 
 
 class _StrictModel(BaseModel):
@@ -241,6 +244,66 @@ class ArticleImageGenerationRequest(_StrictModel):
 class ArticleImageSelectionRequest(_StrictModel):
     material_id: PositiveCitationId
     expected_lock_version: int = Field(ge=1)
+
+
+class WechatDraftArticle(_StrictModel):
+    """Only the plan-approved fields accepted by WeChat draft add/update."""
+
+    title: Annotated[str, Field(min_length=1, max_length=32)]
+    author: Annotated[str, Field(min_length=1, max_length=16)] | None = None
+    digest: Annotated[str, Field(min_length=1, max_length=120)]
+    content: Annotated[str, Field(min_length=1, max_length=20_000)]
+    thumb_media_id: Annotated[str, Field(min_length=1, max_length=256)]
+    need_open_comment: WechatCommentFlag
+    only_fans_can_comment: WechatCommentFlag
+    content_source_url: AnyHttpUrl | None = None
+
+    @field_validator("content", mode="after")
+    @classmethod
+    def _require_wechat_image_sources(cls, value: str) -> str:
+        parser = _DraftImageSourceValidator()
+        parser.feed(value)
+        parser.close()
+        return value
+
+
+class WechatRemoteDraftItem(WechatDraftArticle):
+    """Validated conflict fields from draft/get; remote-only fields are not propagated."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class WechatRemoteDraft(_StrictModel):
+    news_item: list[WechatRemoteDraftItem] = Field(min_length=1)
+
+
+class _DraftImageSourceValidator(HTMLParser):
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag != "img":
+            return
+        sources = [value for name, value in attrs if name == "src"]
+        if len(sources) != 1 or sources[0] is None:
+            raise ValueError("article image must contain exactly one source URL")
+        source = sources[0]
+        try:
+            parsed = urlsplit(source)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("article image URL is invalid") from exc
+        if not (
+            parsed.scheme.lower() == "https"
+            and (parsed.hostname or "").lower() == "mmbiz.qpic.cn"
+            and parsed.username is None
+            and parsed.password is None
+            and port in (None, 443)
+        ):
+            raise ValueError("article images must use WeChat-hosted HTTPS URLs")
+
+    handle_startendtag = handle_starttag
 
 
 def _block_text_values(block: ArticleBlock) -> tuple[str, ...]:
