@@ -241,6 +241,14 @@ async def test_create_authorization_session_returns_official_url_and_hashes_stat
     assert created.payload["knowledge_base_id"] == 12
     assert raw_state not in str(created.payload)
     assert created.idempotency_key == hashlib.sha256(raw_state.encode()).hexdigest()
+    started = await session.scalar(
+        select(Event).where(Event.type == "wechat.authorization.started")
+    )
+    assert started is not None
+    assert started.payload == {
+        "component_appid": _COMPONENT_APPID,
+        "state_id": result["state_id"],
+    }
 
 
 @pytest.mark.asyncio
@@ -304,6 +312,63 @@ async def test_authorization_state_is_consumed_once_and_credentials_are_encrypte
     assert auth.refresh_token_encrypted != "authorizer-refresh-token"
     assert decrypt_credential(auth.access_token_encrypted or "") == "authorizer-access-token"
     assert decrypt_credential(auth.refresh_token_encrypted or "") == "authorizer-refresh-token"
+    completed = await session.scalar(
+        select(Event)
+        .where(Event.type == "wechat.authorization.completed")
+        .order_by(Event.id.desc())
+    )
+    assert completed is not None
+    assert completed.account_id == account.id
+    assert completed.payload == {
+        "authorizer_appid": "wx_authorizer_123456",
+        "component_appid": _COMPONENT_APPID,
+        "scopes": ["1", "15"],
+        "source_time": completed.payload["source_time"],
+        "state_id": result["state_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_authorization_exchange_failure_records_failed_product_event(
+    client, session, admin, monkeypatch
+):
+    _configure_callback_secrets(monkeypatch)
+    result = await _create_authorization_session(client, session, admin, monkeypatch)
+    raw_state = _state_from_authorization_url(result["authorization_url"])
+
+    async def fail_exchange(*_args, **_kwargs):
+        raise platform_api.WechatIntegrationError(
+            "access_token=secret exchange failed",
+            code=-1,
+            retryable=True,
+            rid="wx-rid",
+            endpoint="/cgi-bin/component/api_query_auth",
+        )
+
+    monkeypatch.setattr(
+        WechatOpenPlatformClient,
+        "exchange_authorization_code",
+        fail_exchange,
+    )
+
+    response = await client.get(
+        "/platform-integrations/wechat/oauth/callback",
+        params={"state": raw_state, "auth_code": "broken-code"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "WeChat authorization exchange failed"
+    failed = await session.scalar(
+        select(Event).where(Event.type == "wechat.authorization.failed").order_by(Event.id.desc())
+    )
+    assert failed is not None
+    assert failed.payload == {
+        "component_appid": _COMPONENT_APPID,
+        "state_id": result["state_id"],
+        "error_code": "-1",
+        "retryable": "true",
+    }
+    assert "secret" not in str(failed.payload)
 
 
 @pytest.mark.asyncio
@@ -434,6 +499,12 @@ async def test_revocation_committed_during_code_exchange_wins_across_sessions(
         assert (
             await verification_session.scalar(
                 select(func.count(Event.id)).where(Event.type == "wechat.unauthorized")
+            )
+            == 1
+        )
+        assert (
+            await verification_session.scalar(
+                select(func.count(Event.id)).where(Event.type == "wechat.authorization.revoked")
             )
             == 1
         )

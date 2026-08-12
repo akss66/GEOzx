@@ -22,11 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models import ArticleImageSlot, Event, MaterialAsset, User
 from app.models.enums import ArticleImageSlotStatus, MaterialStatus
-from app.services.wechat_articles import _load_article_for_user
+from app.services.wechat_articles import _load_article_for_user, _record_article_key_interaction
 
 _REQUEST_EVENT = "wechat.article_image_generation.requested"
 _COMPLETED_EVENT = "wechat.article_image_generation.completed"
 _FAILED_EVENT = "wechat.article_image_generation.failed"
+_PRODUCT_GENERATE_ALL_REQUESTED_EVENT = "wechat.images.generate_all_requested"
+_PRODUCT_IMAGE_SELECTED_EVENT = "wechat.images.image_selected"
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8_192
 MAX_IMAGE_PIXELS = 40_000_000
@@ -178,6 +180,27 @@ class WechatArticleImageService:
                 },
                 idempotency_key=request_key,
             )
+        )
+        self._session.add(
+            Event(
+                type=_PRODUCT_GENERATE_ALL_REQUESTED_EVENT,
+                org_id=self._user.org_id,
+                account_id=account.id,
+                content_item_id=article_id,
+                payload={
+                    "account_id": account.id,
+                    "article_id": article_id,
+                    "requested_slot_count": len(claimed_slot_ids),
+                    "reference_material_count": len(reference_ids),
+                },
+            )
+        )
+        _record_article_key_interaction(
+            self._session,
+            org_id=self._user.org_id,
+            account_id=account.id,
+            article_id=article_id,
+            interaction_type="images_generate_all_requested",
         )
         try:
             await self._session.commit()
@@ -393,6 +416,28 @@ class WechatArticleImageService:
         if getattr(selected, "rowcount", 0) != 1:
             await self._session.rollback()
             raise ImageGenerationIdempotencyConflict("image slot version conflict")
+        self._session.add(
+            Event(
+                type=_PRODUCT_IMAGE_SELECTED_EVENT,
+                org_id=self._user.org_id,
+                account_id=account.id,
+                content_item_id=article_id,
+                payload={
+                    "account_id": account.id,
+                    "article_id": article_id,
+                    "slot_id": slot_id,
+                    "material_id": material.id,
+                    "selection_source": "existing_material",
+                },
+            )
+        )
+        _record_article_key_interaction(
+            self._session,
+            org_id=self._user.org_id,
+            account_id=account.id,
+            article_id=article_id,
+            interaction_type="image_selected",
+        )
         await self._session.commit()
         return await self._session.scalar(
             select(ArticleImageSlot).where(ArticleImageSlot.id == slot_id)
@@ -499,6 +544,28 @@ class WechatArticleImageService:
             )
             if getattr(selected, "rowcount", 0) != 1:
                 raise ImageGenerationIdempotencyConflict("image slot version conflict")
+            self._session.add(
+                Event(
+                    type=_PRODUCT_IMAGE_SELECTED_EVENT,
+                    org_id=self._user.org_id,
+                    account_id=account.id,
+                    content_item_id=article_id,
+                    payload={
+                        "account_id": account.id,
+                        "article_id": article_id,
+                        "slot_id": slot_id,
+                        "material_id": asset.id,
+                        "selection_source": "upload",
+                    },
+                )
+            )
+            _record_article_key_interaction(
+                self._session,
+                org_id=self._user.org_id,
+                account_id=account.id,
+                article_id=article_id,
+                interaction_type="image_selected",
+            )
             await self._session.commit()
             return asset
         except Exception:

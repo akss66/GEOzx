@@ -242,9 +242,7 @@ async def test_batch_request_is_committed_before_provider_and_replay_returns_per
         )
     )
     generation_events = [
-        event
-        for event in events
-        if event.type != "wechat.article_image_generation.idempotency_bound"
+        event for event in events if event.type.startswith("wechat.article_image_generation.")
     ]
     assert [event.type for event in generation_events] == [
         "wechat.article_image_generation.requested",
@@ -254,6 +252,30 @@ async def test_batch_request_is_committed_before_provider_and_replay_returns_per
         "status": "completed",
         "material_id": first.material_ids[0],
         "cost": None,
+    }
+    generate_all_requested = await session.scalar(
+        select(Event)
+        .where(Event.type == "wechat.images.generate_all_requested")
+        .order_by(Event.id.desc())
+    )
+    assert generate_all_requested is not None
+    assert generate_all_requested.payload == {
+        "account_id": slot.account_id,
+        "article_id": article.id,
+        "requested_slot_count": 1,
+        "reference_material_count": 0,
+    }
+    interaction = await session.scalar(
+        select(Event)
+        .where(Event.type == "wechat.article.key_interaction_recorded")
+        .order_by(Event.id.desc())
+    )
+    assert interaction is not None
+    assert interaction.payload == {
+        "account_id": slot.account_id,
+        "article_id": article.id,
+        "interaction_type": "images_generate_all_requested",
+        "count": 1,
     }
 
 
@@ -443,6 +465,29 @@ async def test_selecting_replacement_keeps_old_asset_and_rejects_cross_article_a
     assert selected.selected_material_id == replacement.id
     assert selected.lock_version == original_lock_version + 2
     assert await session.get(MaterialAsset, old_asset.id) is old_asset
+    image_selected = await session.scalar(
+        select(Event).where(Event.type == "wechat.images.image_selected").order_by(Event.id.desc())
+    )
+    assert image_selected is not None
+    assert image_selected.payload == {
+        "account_id": slot.account_id,
+        "article_id": article.id,
+        "slot_id": slot.id,
+        "material_id": replacement.id,
+        "selection_source": "existing_material",
+    }
+    interaction = await session.scalar(
+        select(Event)
+        .where(Event.type == "wechat.article.key_interaction_recorded")
+        .order_by(Event.id.desc())
+    )
+    assert interaction is not None
+    assert interaction.payload == {
+        "account_id": slot.account_id,
+        "article_id": article.id,
+        "interaction_type": "image_selected",
+        "count": 1,
+    }
 
     with pytest.raises(ImageGenerationScopeError):
         await service.select_material(
@@ -632,6 +677,17 @@ async def test_upload_reencodes_without_exif_and_selects_ready_user_asset(
     assert slot.status == ArticleImageSlotStatus.SELECTED
     assert slot.selected_material_id == asset.id
     assert slot.lock_version == original_lock_version + 2
+    image_selected = await session.scalar(
+        select(Event).where(Event.type == "wechat.images.image_selected").order_by(Event.id.desc())
+    )
+    assert image_selected is not None
+    assert image_selected.payload == {
+        "account_id": slot.account_id,
+        "article_id": article.id,
+        "slot_id": slot.id,
+        "material_id": asset.id,
+        "selection_source": "upload",
+    }
 
 
 @pytest.mark.asyncio

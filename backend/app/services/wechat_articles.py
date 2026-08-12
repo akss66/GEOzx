@@ -60,6 +60,12 @@ ArticleVersionTrigger = Literal[
     "pre_sync_freeze",
     "successful_sync_snapshot",
 ]
+ArticleKeyInteraction = Literal[
+    "version_saved",
+    "images_generate_all_requested",
+    "image_selected",
+    "draft_sync_requested",
+]
 
 
 def _validated_article_payload(document: dict) -> dict:
@@ -95,6 +101,29 @@ def _record_article_event(
             content_item_id=article_id,
             payload=payload,
         )
+    )
+
+
+def _record_article_key_interaction(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    article_id: int,
+    interaction_type: ArticleKeyInteraction,
+) -> None:
+    _record_article_event(
+        session,
+        event_type="wechat.article.key_interaction_recorded",
+        org_id=org_id,
+        account_id=account_id,
+        article_id=article_id,
+        payload={
+            "account_id": account_id,
+            "article_id": article_id,
+            "interaction_type": interaction_type,
+            "count": 1,
+        },
     )
 
 
@@ -368,6 +397,14 @@ async def freeze_article_version(
             "text_semantic_change_ratio": text_semantic_change_ratio,
         },
     )
+    if trigger == "explicit_save_version":
+        _record_article_key_interaction(
+            session,
+            org_id=account.org_id,
+            account_id=account.id,
+            article_id=content_item.id,
+            interaction_type="version_saved",
+        )
     await session.commit()
     await session.refresh(deliverable)
     await session.refresh(working_copy)

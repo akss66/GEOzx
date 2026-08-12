@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException
 from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
@@ -81,7 +81,11 @@ from app.schemas.wechat_article import (
 )
 from app.services.deliverable_streams import deliverable_stream_clause
 from app.services.turn_events import TurnEventScope, append_turn_event
-from app.services.wechat_articles import ARTICLE_VERSION_AGENT_CODE, validate_article_for_sync
+from app.services.wechat_articles import (
+    ARTICLE_VERSION_AGENT_CODE,
+    _record_article_key_interaction,
+    validate_article_for_sync,
+)
 from app.services.wechat_component import WechatIntegrationError
 from app.services.wechat_drafts import WechatDraftIntegrationError, compute_remote_hash
 from app.services.wechat_renderer import render_wechat_article
@@ -366,6 +370,13 @@ async def prepare_wechat_draft_sync_job(
                     "sync_id": job.id,
                     "conflict_strategy": request.conflict_strategy,
                 },
+            )
+            _record_article_key_interaction(
+                session,
+                org_id=user.org_id,
+                account_id=account.id,
+                article_id=article_id,
+                interaction_type="draft_sync_requested",
             )
     except IntegrityError:
         winner = await session.scalar(
@@ -718,7 +729,7 @@ async def execute_wechat_draft_sync_job(
             job.last_error_code = "WECHAT_DRAFT_CONFLICT"
             job.last_error_message = "微信草稿已发生变化"
             await session.commit()
-            _record_wechat_sync_product_event(
+            await _commit_wechat_sync_product_event(
                 session,
                 job,
                 event_type="wechat.draft.sync_conflicted",
@@ -912,7 +923,8 @@ async def execute_wechat_draft_sync_job(
     job.publish_package = package
     flag_modified(job, "publish_package")
     await _commit_external_result(session, job, operation=operation)
-    _record_wechat_sync_product_event(
+    await session.commit()
+    await _commit_wechat_sync_product_event(
         session,
         job,
         event_type="wechat.draft.sync_completed",
@@ -926,7 +938,6 @@ async def execute_wechat_draft_sync_job(
         },
     )
     await _append_wechat_sync_step(session, job, "sync", "completed")
-    await session.commit()
     await session.refresh(job)
     return job
 
@@ -1184,6 +1195,27 @@ def _record_wechat_sync_product_event(
     )
 
 
+async def _commit_wechat_sync_product_event(
+    session: AsyncSession,
+    job: PlatformPublishJob,
+    *,
+    event_type: str,
+    payload: dict[str, int | str],
+) -> None:
+    bind = session.bind
+    if bind is None:
+        raise RuntimeError("publishing session is not bound")
+    isolated_sessions = async_sessionmaker(bind, expire_on_commit=False)
+    async with isolated_sessions() as isolated_session:
+        _record_wechat_sync_product_event(
+            isolated_session,
+            job,
+            event_type=event_type,
+            payload=payload,
+        )
+        await isolated_session.commit()
+
+
 async def _load_frozen_asset(
     session: AsyncSession,
     job: PlatformPublishJob,
@@ -1317,7 +1349,7 @@ async def _commit_external_failure(
     job.last_error_code = str(error.error_code or "WECHAT_DRAFT_EXTERNAL_FAILURE")[:120]
     job.last_error_message = "微信公众号外部写入失败"
     await session.commit()
-    _record_wechat_sync_product_event(
+    await _commit_wechat_sync_product_event(
         session,
         job,
         event_type="wechat.draft.sync_failed",

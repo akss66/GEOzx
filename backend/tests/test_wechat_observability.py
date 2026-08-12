@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.api.platform_integrations as platform_api
 from app.models import Account, Event, PlatformAccountAuth
@@ -17,6 +18,7 @@ from app.schemas.publishing import SyncWechatDraftRequest
 from app.schemas.wechat_article import ArticleDocument, WechatDraftArticle
 from app.services.publishing import (
     PublishingServiceError,
+    _commit_wechat_sync_product_event,
     execute_wechat_draft_sync_job,
     prepare_wechat_draft_sync_job,
 )
@@ -182,7 +184,9 @@ async def test_freeze_article_version_records_semantic_change_ratio(session, adm
             .order_by(Event.id)
         )
     )
-    version_saved = events[-1]
+    version_saved = next(
+        event for event in reversed(events) if event.type == "wechat.article.version_saved"
+    )
     assert version_saved.type == "wechat.article.version_saved"
     assert version_saved.payload == {
         "account_id": account.id,
@@ -191,6 +195,18 @@ async def test_freeze_article_version_records_semantic_change_ratio(session, adm
         "version": 2,
         "trigger": "explicit_save_version",
         "text_semantic_change_ratio": 1.0,
+    }
+    interaction = next(
+        event
+        for event in reversed(events)
+        if event.type == "wechat.article.key_interaction_recorded"
+    )
+    assert interaction.type == "wechat.article.key_interaction_recorded"
+    assert interaction.payload == {
+        "account_id": account.id,
+        "article_id": article.id,
+        "interaction_type": "version_saved",
+        "count": 1,
     }
 
 
@@ -317,6 +333,22 @@ async def test_draft_sync_records_requested_and_completed_events(session, admin,
         "sync_id": job.id,
         "conflict_strategy": "fail",
     }
+    interaction = await session.scalar(
+        select(Event)
+        .where(
+            Event.org_id == admin.org_id,
+            Event.content_item_id == article.id,
+            Event.type == "wechat.article.key_interaction_recorded",
+        )
+        .order_by(Event.id.desc())
+    )
+    assert interaction is not None
+    assert interaction.payload == {
+        "account_id": job.account_id,
+        "article_id": article.id,
+        "interaction_type": "draft_sync_requested",
+        "count": 1,
+    }
 
     async def capability_probe(_session, account_id: int):
         return _capabilities(account_id)
@@ -349,6 +381,19 @@ async def test_draft_sync_records_requested_and_completed_events(session, admin,
         "external_media_id": "draft-media-1",
         "retry_count": 1,
     }
+    verifier_sessions = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with verifier_sessions() as verifier:
+        persisted = await verifier.scalar(
+            select(Event)
+            .where(
+                Event.org_id == admin.org_id,
+                Event.content_item_id == article.id,
+                Event.type == "wechat.draft.sync_completed",
+            )
+            .order_by(Event.id.desc())
+        )
+    assert persisted is not None
+    assert persisted.payload == succeeded.payload
     serialized = "".join(str(event.payload) for event in [requested, succeeded])
     assert "test-authorizer-token" not in serialized
     assert "<p>" not in serialized
@@ -396,6 +441,8 @@ async def test_draft_sync_records_conflicted_event(session, admin, tmp_path) -> 
     async def capability_probe(_session, account_id: int):
         return _capabilities(account_id)
 
+    org_id = admin.org_id
+    article_id = article.id
     with pytest.raises(PublishingServiceError) as caught:
         await execute_wechat_draft_sync_job(
             session,
@@ -406,16 +453,19 @@ async def test_draft_sync_records_conflicted_event(session, admin, tmp_path) -> 
             draft_client=_RemoteDraftClient(remote_article),
         )
     assert caught.value.code == "WECHAT_DRAFT_CONFLICT"
+    await session.rollback()
 
-    conflicted = await session.scalar(
-        select(Event)
-        .where(
-            Event.org_id == admin.org_id,
-            Event.content_item_id == article.id,
-            Event.type == "wechat.draft.sync_conflicted",
+    verifier_sessions = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with verifier_sessions() as verifier:
+        conflicted = await verifier.scalar(
+            select(Event)
+            .where(
+                Event.org_id == org_id,
+                Event.content_item_id == article_id,
+                Event.type == "wechat.draft.sync_conflicted",
+            )
+            .order_by(Event.id.desc())
         )
-        .order_by(Event.id.desc())
-    )
     assert conflicted is not None
     assert conflicted.payload == {
         "account_id": account.id,
@@ -448,6 +498,8 @@ async def test_draft_sync_records_failed_event(session, admin, tmp_path) -> None
     async def capability_probe(_session, account_id: int):
         return _capabilities(account_id)
 
+    org_id = admin.org_id
+    article_id = article.id
     with pytest.raises(PublishingServiceError) as caught:
         await execute_wechat_draft_sync_job(
             session,
@@ -458,16 +510,19 @@ async def test_draft_sync_records_failed_event(session, admin, tmp_path) -> None
             draft_client=_FailSecondBodyOnceClient(),
         )
     assert caught.value.code == "WECHAT_DRAFT_EXTERNAL_RETRYABLE"
+    await session.rollback()
 
-    failed = await session.scalar(
-        select(Event)
-        .where(
-            Event.org_id == admin.org_id,
-            Event.content_item_id == article.id,
-            Event.type == "wechat.draft.sync_failed",
+    verifier_sessions = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with verifier_sessions() as verifier:
+        failed = await verifier.scalar(
+            select(Event)
+            .where(
+                Event.org_id == org_id,
+                Event.content_item_id == article_id,
+                Event.type == "wechat.draft.sync_failed",
+            )
+            .order_by(Event.id.desc())
         )
-        .order_by(Event.id.desc())
-    )
     assert failed is not None
     assert failed.payload == {
         "account_id": job.account_id,
@@ -477,6 +532,62 @@ async def test_draft_sync_records_failed_event(session, admin, tmp_path) -> None
         "error_code": "http_503",
         "retryable": "true",
     }
+
+
+@pytest.mark.asyncio
+async def test_sync_product_event_helper_uses_independent_commit_boundary(
+    session, admin, tmp_path
+) -> None:
+    account, article, version = await _article_with_selected_cover(session, admin, tmp_path)
+    job = await prepare_wechat_draft_sync_job(
+        session,
+        admin,
+        article_id=article.id,
+        request=SyncWechatDraftRequest(
+            article_version_id=version.id,
+            idempotency_key="wechat-sync-helper-boundary",
+            conflict_strategy="fail",
+        ),
+    )
+    unrelated = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Unrelated account",
+    )
+    session.add(unrelated)
+    await session.commit()
+    unrelated_id = unrelated.id
+    unrelated.nickname = "Dirty nickname that must not persist"
+
+    await _commit_wechat_sync_product_event(
+        session,
+        job,
+        event_type="wechat.draft.sync_completed",
+        payload={
+            "account_id": account.id,
+            "article_id": article.id,
+            "article_version_id": version.id,
+            "sync_id": job.id,
+            "external_media_id": "draft-media-1",
+            "retry_count": 1,
+        },
+    )
+
+    verifier_sessions = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with verifier_sessions() as verifier:
+        persisted = await verifier.scalar(
+            select(Event)
+            .where(
+                Event.org_id == admin.org_id,
+                Event.content_item_id == article.id,
+                Event.type == "wechat.draft.sync_completed",
+            )
+            .order_by(Event.id.desc())
+        )
+        unrelated_account = await verifier.get(Account, unrelated_id)
+    assert persisted is not None
+    assert unrelated_account is not None
+    assert unrelated_account.nickname == "Unrelated account"
 
 
 def test_rollout_alerts_fire_only_on_bounded_thresholds() -> None:

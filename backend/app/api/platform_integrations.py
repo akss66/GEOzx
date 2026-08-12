@@ -120,6 +120,26 @@ _WECHAT_EVENT_TYPES = frozenset(
 )
 
 
+def _record_wechat_authorization_product_event(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    org_id: int | None,
+    account_id: int | None = None,
+    payload: dict[str, object],
+    idempotency_key: str | None = None,
+) -> None:
+    session.add(
+        Event(
+            type=event_type,
+            org_id=org_id,
+            account_id=account_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
+    )
+
+
 def _default_capabilities(platform: Platform) -> dict[str, str]:
     if platform == Platform.DOUYIN:
         return dict(DOUYIN_DEFAULT_CAPABILITIES)
@@ -552,6 +572,15 @@ async def create_wechat_authorization_session(
             },
         )
     )
+    _record_wechat_authorization_product_event(
+        session,
+        event_type="wechat.authorization.started",
+        org_id=admin.org_id,
+        payload={
+            "component_appid": integration.client_key,
+            "state_id": state_id,
+        },
+    )
     await session.commit()
 
     callback_url = _append_query_value(integration.redirect_uri, "state", state)
@@ -773,19 +802,18 @@ async def _upsert_wechat_authorization(
     }
     integration.status = "connected"
     integration.auth_status = "authorized"
-    session.add(
-        Event(
-            type="wechat.authorization.completed",
-            org_id=org_id,
-            account_id=account.id,
-            payload={
-                "authorizer_appid": grant.authorizer_appid,
-                "component_appid": integration.client_key,
-                "scopes": scopes,
-                "source_time": authorization_source_time,
-                "state_id": state_payload["state_id"],
-            },
-        )
+    _record_wechat_authorization_product_event(
+        session,
+        event_type="wechat.authorization.completed",
+        org_id=org_id,
+        account_id=account.id,
+        payload={
+            "authorizer_appid": grant.authorizer_appid,
+            "component_appid": integration.client_key,
+            "scopes": scopes,
+            "source_time": authorization_source_time,
+            "state_id": state_payload["state_id"],
+        },
     )
     await session.commit()
 
@@ -819,6 +847,18 @@ async def handle_wechat_oauth_callback(
             session, integration.id, code
         )
     except WechatIntegrationError as exc:
+        _record_wechat_authorization_product_event(
+            session,
+            event_type="wechat.authorization.failed",
+            org_id=int(state_payload["org_id"]),
+            payload={
+                "component_appid": integration.client_key,
+                "state_id": state_payload["state_id"],
+                "error_code": str(exc.error_code),
+                "retryable": "true" if exc.retryable else "false",
+            },
+        )
+        await session.commit()
         raise HTTPException(
             status_code=(
                 status.HTTP_503_SERVICE_UNAVAILABLE
@@ -1165,6 +1205,18 @@ async def _apply_wechat_callback_event(
             payload=normalized_payload,
         )
     )
+    if info_type == "unauthorized":
+        _record_wechat_authorization_product_event(
+            session,
+            event_type="wechat.authorization.revoked",
+            org_id=event_org_id,
+            payload={
+                "component_appid": component_appid,
+                "authorizer_appid": authorizer_appid or "",
+                "source_time": create_time,
+            },
+            idempotency_key=_wechat_hash(f"{fingerprint}:revoked"),
+        )
     try:
         await session.commit()
     except IntegrityError as exc:
