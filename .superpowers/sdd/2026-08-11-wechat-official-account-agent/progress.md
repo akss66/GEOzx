@@ -107,3 +107,5 @@ Task 17: dispatched from base 2c063f0c2b4bfa239fe8862e6e206b7b633fc747
 Task 17: fix round 1/5 in progress (Critical real backend projection contract mismatch; Important E2E never reaches business assertion; Minor account defense; base baa8751)
 
 Task 17: fix round 1/5 implemented (original Critical/Important/Minor addressed locally; commit 87cdcbb; independent scoped re-review pending)
+Task 17: fix round 1/5 (Critical 1, Important 1, Minor 1 addressed; commits 87cdcbb, 6063074; independent scoped re-review clean)
+Task 17: complete (commits baa8751..6063074; backend 55, frontend focused 135, full frontend suite, lint/build/bundle, E2E 1/1 passed)
