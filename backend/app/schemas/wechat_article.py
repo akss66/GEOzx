@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.models.enums import ArticleImageSlotStatus
+
 StrictText = Annotated[str, Field(min_length=1, max_length=20_000)]
 BlockId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
 SlotKey = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,127}$")]
@@ -211,6 +213,34 @@ class ArticleSyncReadiness(_StrictModel):
     warnings: list[ReadinessIssue]
     citation_count: int = Field(ge=0)
     unresolved_claim_count: int = Field(ge=0)
+
+
+class ArticleImageSlotOut(_StrictModel):
+    """Public slot projection; internal prompts are deliberately absent."""
+
+    id: int = Field(gt=0)
+    stableKey: SlotKey
+    purpose: Annotated[str, Field(min_length=1, max_length=300)]
+    aspectRatio: Annotated[str, Field(min_length=1, max_length=32)]
+    visualBrief: StrictText
+    status: ArticleImageSlotStatus
+    selectedMaterialId: int | None
+    lockVersion: int = Field(ge=1)
+    hasPrompt: bool
+
+
+class ArticleImagePromptOut(_StrictModel):
+    prompt: StrictText
+
+
+class ArticleImageGenerationRequest(_StrictModel):
+    idempotency_key: Annotated[str, Field(min_length=8, max_length=160)]
+    reference_material_ids: list[PositiveCitationId] = Field(default_factory=list, max_length=20)
+
+
+class ArticleImageSelectionRequest(_StrictModel):
+    material_id: PositiveCitationId
+    expected_lock_version: int = Field(ge=1)
 
 
 def _block_text_values(block: ArticleBlock) -> tuple[str, ...]:
