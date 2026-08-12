@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
-from sqlalchemy import event
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.models import Account, ArticleWorkingCopy, ContentItem, Deliverable
 from app.models.enums import DeliverableType, Platform
 from app.schemas.wechat_article import ArticleDocument
 from app.services import wechat_articles
 from app.services.wechat_articles import (
+    create_article,
+    freeze_article_version,
     freeze_before_sync,
     snapshot_completed_whole_article_rewrite,
     snapshot_successful_sync,
@@ -162,7 +170,7 @@ async def test_explicit_version_diff_reports_stable_block_changes(client, admin,
 
 @pytest.mark.asyncio
 async def test_freeze_returns_structured_conflict_when_unique_version_fallback_trips(
-    client, admin, session
+    client, admin, monkeypatch, session
 ):
     """A database unique race must become a safe version conflict, never an overwrite."""
     account = Account(
@@ -179,38 +187,42 @@ async def test_freeze_returns_structured_conflict_when_unique_version_fallback_t
         json={"account_id": account.id, "document": _document()},
     )
     article_id = created.json()["articleId"]
-    triggered = False
-
-    def insert_competing_version(sync_session, _flush_context, _instances):
-        nonlocal triggered
-        if triggered:
-            return
-        pending = [item for item in sync_session.new if isinstance(item, Deliverable)]
-        if not pending or pending[0].version != 2:
-            return
-        triggered = True
-        sync_session.connection().execute(
-            Deliverable.__table__.insert().values(
+    winner_session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with winner_session_factory() as winner_session:
+        winner_session.add(
+            Deliverable(
                 content_item_id=article_id,
                 agent_code="02-content-director",
                 type=DeliverableType.WECHAT_ARTICLE,
                 version=2,
                 payload={"document": _document()},
-                note="competing-test-version",
+                note="winning-test-version",
             )
         )
+        await winner_session.commit()
+    original_scalar = session.scalar
+    scalar_calls = 0
 
-    event.listen(session.sync_session, "before_flush", insert_competing_version)
-    try:
-        response = await client.post(f"/wechat-articles/{article_id}/versions", headers=headers)
-    finally:
-        event.remove(session.sync_session, "before_flush", insert_competing_version)
+    async def stale_first_version_read(statement, *args, **kwargs):
+        nonlocal scalar_calls
+        scalar_calls += 1
+        if scalar_calls == 1:
+            return 1
+        return await original_scalar(statement, *args, **kwargs)
 
-    assert triggered is True
+    monkeypatch.setattr(session, "scalar", stale_first_version_read)
+
+    async def raise_unique_conflict() -> None:
+        raise IntegrityError("INSERT", {}, Exception("simulated concurrent unique conflict"))
+
+    monkeypatch.setattr(session, "flush", raise_unique_conflict)
+    response = await client.post(f"/wechat-articles/{article_id}/versions", headers=headers)
+
+    assert scalar_calls == 2
     assert response.status_code == 409
     assert response.json()["error"] == {
         "code": "ARTICLE_VERSION_CONFLICT",
-        "details": {"currentVersion": 1},
+        "details": {"currentVersion": 2},
     }
 
 
@@ -283,3 +295,73 @@ async def test_article_version_service_entries_freeze_rewrite_presync_and_succes
         "article_version:pre_sync_freeze",
         "article_version:successful_sync_snapshot",
     ]
+
+
+@pytest.mark.asyncio
+async def test_freeze_revalidates_malformed_working_copy_before_persisting_version(
+    client, admin, session
+):
+    """An invalid source document must not become an immutable Deliverable payload."""
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Article account",
+    )
+    session.add(account)
+    await session.commit()
+    headers = await _headers(client)
+    created = await client.post(
+        "/wechat-articles",
+        headers=headers,
+        json={"account_id": account.id, "document": _document()},
+    )
+    article_id = created.json()["articleId"]
+    working_copy = await session.scalar(
+        select(ArticleWorkingCopy).where(ArticleWorkingCopy.content_item_id == article_id)
+    )
+    assert working_copy is not None
+    set_committed_value(
+        working_copy,
+        "document",
+        {
+            **_document(),
+            "blocks": [{"type": "rawHtml", "block_id": "unsafe", "html": "<script>bad()</script>"}],
+        },
+    )
+
+    with pytest.raises(ValidationError):
+        await freeze_article_version(
+            session,
+            admin,
+            content_item_id=article_id,
+            trigger="explicit_save_version",
+        )
+
+    version_count = await session.scalar(
+        select(func.count(Deliverable.id)).where(Deliverable.content_item_id == article_id)
+    )
+    assert version_count == 1
+
+
+@pytest.mark.asyncio
+async def test_create_revalidates_malformed_source_before_persisting_first_version(admin, session):
+    """A bypassed source object cannot create an invalid immutable first draft."""
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Article account",
+    )
+    session.add(account)
+    await session.commit()
+    malformed_document = cast(
+        ArticleDocument,
+        {
+            **_document(),
+            "blocks": [{"type": "rawHtml", "block_id": "unsafe", "html": "<script>bad()</script>"}],
+        },
+    )
+
+    with pytest.raises(ValidationError):
+        await create_article(session, admin, account_id=account.id, document=malformed_document)
+
+    assert await session.scalar(select(func.count(ContentItem.id))) == 0

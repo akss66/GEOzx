@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.workspace_access import accessible_account_clause
 from app.models import Account, ArticleWorkingCopy, ContentItem, Deliverable, User
 from app.models.enums import DeliverableType, Platform
+from app.schemas.deliverable import validate_payload
 from app.schemas.wechat_article import ArticleDocument
 
 
@@ -37,6 +38,18 @@ ArticleVersionTrigger = Literal[
     "pre_sync_freeze",
     "successful_sync_snapshot",
 ]
+
+
+def _validated_article_payload(document: dict) -> dict:
+    """Validate immutable snapshots through the shared deliverable registry."""
+    return validate_payload(DeliverableType.WECHAT_ARTICLE, {"document": document}).model_dump(
+        mode="json"
+    )
+
+
+def _validated_article_document(document: ArticleDocument | dict) -> ArticleDocument:
+    """Reconstruct a strict document before using any source fields."""
+    return ArticleDocument.model_validate(document)
 
 
 async def _load_article_for_user(
@@ -95,11 +108,17 @@ async def create_article(
     )
     if account is None:
         return None
-    content_item = ContentItem(account_id=account.id, created_by_id=user.id, title=document.title)
+    validated_document = _validated_article_document(document)
+    payload = _validated_article_payload(validated_document.model_dump(mode="json"))
+    content_item = ContentItem(
+        account_id=account.id,
+        created_by_id=user.id,
+        title=validated_document.title,
+    )
     working_copy = ArticleWorkingCopy(
         content_item=content_item,
         account_id=account.id,
-        document=document.model_dump(mode="json"),
+        document=validated_document.model_dump(mode="json"),
         updated_by_id=user.id,
     )
     first_version = Deliverable(
@@ -107,7 +126,7 @@ async def create_article(
         agent_code=ARTICLE_VERSION_AGENT_CODE,
         type=DeliverableType.WECHAT_ARTICLE,
         version=1,
-        payload={"document": document.model_dump(mode="json")},
+        payload=payload,
         note="article_version:first_ai_draft",
     )
     session.add_all([content_item, working_copy, first_version])
@@ -180,7 +199,7 @@ async def freeze_article_version(
         agent_code=ARTICLE_VERSION_AGENT_CODE,
         type=DeliverableType.WECHAT_ARTICLE,
         version=next_version,
-        payload={"document": working_copy.document},
+        payload=_validated_article_payload(working_copy.document),
         note=f"article_version:{trigger}",
     )
     try:
@@ -188,6 +207,13 @@ async def freeze_article_version(
             session.add(deliverable)
             await session.flush()
     except IntegrityError as exc:
+        current_version = await session.scalar(
+            select(func.max(Deliverable.version)).where(
+                Deliverable.content_item_id == content_item.id,
+                Deliverable.agent_code == ARTICLE_VERSION_AGENT_CODE,
+                Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+            )
+        )
         raise ArticleFreezeConflict(current_version or 0) from exc
     working_copy.based_on_deliverable_id = deliverable.id
     await session.commit()
