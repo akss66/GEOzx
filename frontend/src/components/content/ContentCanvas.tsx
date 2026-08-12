@@ -85,6 +85,9 @@ export function ContentCanvas({
   const currentStageIndex = CONTENT_STAGES.findIndex(
     (item) => item.key === workspace.content_item.current_stage,
   );
+  const inspectorOptions = workspace.account?.platform === "wechat_official_account"
+    ? INSPECTOR_OPTIONS.filter((option) => option.value !== "publish")
+    : INSPECTOR_OPTIONS;
 
   return (
     <main className="content-canvas">
@@ -114,7 +117,7 @@ export function ContentCanvas({
       <div className="content-canvas__tools">
         <Segmented
           value={inspectorMode ?? undefined}
-          options={INSPECTOR_OPTIONS}
+          options={inspectorOptions}
           onChange={(value) => onOpenInspector(value as ContentInspectorMode)}
         />
       </div>

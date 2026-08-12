@@ -191,11 +191,11 @@ describe("Knowledge", () => {
     expect(await screen.findByText("校准账号定位")).toBeInTheDocument();
   });
 
-  it("binds the first accessible brand knowledge base and excludes shared bases", async () => {
+  it("selects an eligible brand from a later page and excludes shared bases", async () => {
     vi.mocked(listWechatKnowledgeBases).mockResolvedValueOnce({
       data: [
-        { id: 41, clientId: 1, kind: "brand", name: "品牌事实库", description: null, status: "active", version: 1 },
         { id: 42, clientId: null, kind: "organization_shared", name: "组织共享库", description: null, status: "active", version: 1 },
+        { id: 41, clientId: 1, kind: "brand", name: "第二页品牌事实库", description: null, status: "active", version: 1 },
       ],
       pagination: { limit: 100, offset: 0, total: 2 },
     });
@@ -208,7 +208,7 @@ describe("Knowledge", () => {
 
     expect(await screen.findByText("公众号主品牌知识库")).toBeInTheDocument();
     expect(screen.queryByText("组织共享库")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "绑定主品牌 品牌事实库" }));
+    fireEvent.click(screen.getByRole("button", { name: "绑定主品牌 第二页品牌事实库" }));
     await waitFor(() => expect(bindWechatKnowledgeBase).toHaveBeenCalledWith(31, 41));
   });
 

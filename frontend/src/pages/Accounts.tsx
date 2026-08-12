@@ -647,7 +647,9 @@ export default function Accounts() {
     onError: (error) => {
       const status = (error as { response?: { status?: number } })?.response?.status;
       message.error(
-        status === 503
+        status === 422
+          ? "请联系管理员配置微信公众号第三方平台 AppID 和授权回调地址"
+          : status === 503
           ? "微信开放平台组件尚未配置，请联系管理员配置 Component AppID、AppSecret 与授权事件接收地址"
           : "微信公众号授权暂时不可用，请稍后重试",
       );

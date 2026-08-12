@@ -243,6 +243,36 @@ describe("Accounts", () => {
     open.mockRestore();
   });
 
+  it("explains how to recover when WeChat authorization configuration is missing", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([{
+      id: 18,
+      nickname: "品牌公众号",
+      platform: "wechat_official_account",
+      group_id: null,
+      project_id: null,
+      status: "active",
+      external_account_id: null,
+      integration_status: "oauth_ready",
+      auth_status: "unauthorized",
+      data_sync_status: "not_configured",
+      created_at: "2026-08-12T00:00:00Z",
+    }]);
+    vi.mocked(createWechatAuthorizationSession).mockRejectedValueOnce({
+      response: {
+        status: 422,
+        data: { detail: "missing client_key and redirect_uri; raw-secret" },
+      },
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "授权微信公众号 品牌公众号" }));
+
+    expect(await screen.findByText(
+      "请联系管理员配置微信公众号第三方平台 AppID 和授权回调地址",
+    )).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("raw-secret");
+  });
+
   it("renders actionable WeChat capability states and keeps freepublish disabled", async () => {
     vi.mocked(listAccounts).mockResolvedValueOnce([
       {

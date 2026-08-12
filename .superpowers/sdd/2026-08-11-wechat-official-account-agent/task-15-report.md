@@ -48,3 +48,20 @@ DONE_WITH_CONCERNS
 ## Commit
 
 Atomic commit: `feat: authorize and bind WeChat accounts`. The final handoff SHA is authoritative because a commit cannot embed its own final hash without changing that hash.
+
+## Review fix round 1
+
+### Findings resolved
+
+- Knowledge-base discovery now follows backend pagination until `total`. Empty/non-advancing pages fail explicitly, and a 100-page ceiling prevents unbounded requests. Tests prove a brand on page 2 is returned and selectable while `organization_shared` remains excluded.
+- The WeChat authorization-session endpoint's real `422` setup failure now gives the concrete recovery action: configure the WeChat third-party platform AppID and authorization callback URL. Raw backend detail is never rendered.
+- WeChat workspaces no longer expose the legacy “发布准备” entry. `PublishPreparation` also has a runtime guard that renders an unsupported state without mounting queries or calling legacy publish APIs. The previous platform cast was removed.
+
+### TDD and verification
+
+- RED: pagination made only one request; the 422 path rendered generic copy; WeChat mounted the legacy publish form; ContentCanvas still exposed “发布准备”.
+- GREEN: 37/37 focused and adjacent tests passed across service, Accounts, Knowledge, ContentCanvas, PublishPreparation, ContentWorkspace, and PublishJobPanel.
+- ESLint passed.
+- TypeScript and Vite production build passed; only the repository's existing large-chunk warning remains.
+- Impeccable detector returned `[]` for the changed production UI targets.
+- Browser smoke was not retried in this review round, per the bounded follow-up instruction; the original report's browser concern remains.

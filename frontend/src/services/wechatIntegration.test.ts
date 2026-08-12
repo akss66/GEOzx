@@ -141,4 +141,84 @@ describe("WeChat integration service", () => {
     expect(del).toHaveBeenCalledWith("/accounts/8/knowledge-binding");
     expect(JSON.stringify({ bases, binding })).not.toContain("token");
   });
+
+  it("loads later knowledge-base pages so an eligible brand is available", async () => {
+    get
+      .mockResolvedValueOnce({
+        data: {
+          data: [{
+            id: 21,
+            client_id: null,
+            kind: "organization_shared",
+            name: "Shared library",
+            description: null,
+            status: "active",
+            version: 1,
+          }],
+          pagination: { limit: 1, offset: 0, total: 2 },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: [{
+            id: 22,
+            client_id: 3,
+            kind: "brand",
+            name: "Page two brand",
+            description: null,
+            status: "active",
+            version: 1,
+          }],
+          pagination: { limit: 1, offset: 1, total: 2 },
+        },
+      });
+
+    const result = await listWechatKnowledgeBases({ limit: 1 });
+
+    expect(get).toHaveBeenNthCalledWith(2, "/knowledge-bases", {
+      params: { limit: 1, offset: 1 },
+    });
+    expect(result.data.map((base) => base.name)).toEqual([
+      "Shared library",
+      "Page two brand",
+    ]);
+  });
+
+  it("fails safely when a knowledge-base page makes no pagination progress", async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        data: [],
+        pagination: { limit: 100, offset: 0, total: 2 },
+      },
+    });
+
+    await expect(listWechatKnowledgeBases()).rejects.toThrow(
+      "Knowledge-base pagination made no progress",
+    );
+
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails safely when knowledge-base pagination exceeds its page ceiling", async () => {
+    get.mockImplementation((_url: string, config: { params: { offset: number } }) =>
+      Promise.resolve({
+        data: {
+          data: [{
+            id: config.params.offset + 1,
+            client_id: 3,
+            kind: "brand",
+            name: `Brand ${config.params.offset + 1}`,
+            description: null,
+            status: "active",
+            version: 1,
+          }],
+          pagination: { limit: 1, offset: config.params.offset, total: 101 },
+        },
+      }));
+
+    await expect(listWechatKnowledgeBases({ limit: 1 })).rejects.toThrow(
+      "Knowledge-base pagination exceeded the safe page limit",
+    );
+    expect(get).toHaveBeenCalledTimes(100);
+  });
 });

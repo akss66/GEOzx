@@ -8,6 +8,7 @@ import type {
 } from "../types/wechatArticle";
 
 type JsonRecord = Record<string, unknown>;
+const MAX_KNOWLEDGE_BASE_PAGES = 100;
 
 function record(value: unknown): JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -103,17 +104,37 @@ function parseKnowledgeBase(value: unknown): WechatKnowledgeBase {
 }
 
 export async function listWechatKnowledgeBases(input: { limit?: number; offset?: number } = {}) {
-  const limit = input.limit ?? 100;
-  const offset = input.offset ?? 0;
-  const { data } = await api.get("/knowledge-bases", { params: { limit, offset } });
-  const source = record(data);
-  const pagination = record(source.pagination);
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 100), 1), 100);
+  const initialOffset = Math.max(Math.trunc(input.offset ?? 0), 0);
+  const bases: WechatKnowledgeBase[] = [];
+  let offset = initialOffset;
+  let total = 0;
+
+  for (let page = 0; page < MAX_KNOWLEDGE_BASE_PAGES; page += 1) {
+    const { data } = await api.get("/knowledge-bases", { params: { limit, offset } });
+    const source = record(data);
+    const pagination = record(source.pagination);
+    const pageData = Array.isArray(source.data) ? source.data.map(parseKnowledgeBase) : [];
+    total = number(pagination.total);
+    bases.push(...pageData);
+
+    if (offset + pageData.length >= total) break;
+    const nextOffset = number(pagination.offset) + pageData.length;
+    if (pageData.length === 0 || nextOffset <= offset) {
+      throw new Error("Knowledge-base pagination made no progress");
+    }
+    if (page === MAX_KNOWLEDGE_BASE_PAGES - 1) {
+      throw new Error("Knowledge-base pagination exceeded the safe page limit");
+    }
+    offset = nextOffset;
+  }
+
   return {
-    data: Array.isArray(source.data) ? source.data.map(parseKnowledgeBase) : [],
+    data: bases,
     pagination: {
-      limit: number(pagination.limit),
-      offset: number(pagination.offset),
-      total: number(pagination.total),
+      limit,
+      offset: initialOffset,
+      total,
     },
   };
 }
