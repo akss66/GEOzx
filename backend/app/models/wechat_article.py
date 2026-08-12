@@ -34,6 +34,10 @@ class ArticleWorkingCopy(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("content_item_id", name="uq_article_working_copy_content_item"),
         CheckConstraint("lock_version > 0", name="ck_article_working_copy_lock_version_positive"),
+        CheckConstraint(
+            "wechat_article_document_is_valid(document)",
+            name="ck_article_working_copy_document_valid",
+        ),
         ForeignKeyConstraint(
             ["content_item_id", "account_id"],
             ["content_items.id", "content_items.account_id"],

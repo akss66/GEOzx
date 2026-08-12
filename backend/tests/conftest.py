@@ -3,8 +3,12 @@
 让认证/用户接口在无真实 Postgres 时也能端到端测试。
 """
 
+import json
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -15,6 +19,17 @@ from app.db import Base, get_session
 from app.main import app
 from app.models import Org, User
 from app.models.enums import UserRole
+from app.schemas.wechat_article import ArticleDocument
+
+
+def _sqlite_article_document_is_valid(document: str | None) -> int:
+    if not isinstance(document, str):
+        return 0
+    try:
+        ArticleDocument.model_validate(json.loads(document))
+    except (TypeError, ValueError, ValidationError):
+        return 0
+    return 1
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -42,6 +57,15 @@ async def session():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _register_article_document_check(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.run_async(
+            lambda raw_connection: raw_connection.create_function(
+                "wechat_article_document_is_valid", 1, _sqlite_article_document_is_valid
+            )
+        )
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     maker = async_sessionmaker(engine, expire_on_commit=False)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 
 import pytest
@@ -156,11 +157,24 @@ def fk_session() -> Generator[Session, None, None]:
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
+        dbapi_connection.create_function(
+            "wechat_article_document_is_valid", 1, _sqlite_article_document_is_valid
+        )
 
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
     engine.dispose()
+
+
+def _sqlite_article_document_is_valid(document: str | None) -> int:
+    if not isinstance(document, str):
+        return 0
+    try:
+        ArticleDocument.model_validate(json.loads(document))
+    except (TypeError, ValueError, ValidationError):
+        return 0
+    return 1
 
 
 def test_wechat_article_persistence_enforces_working_copy_slot_and_lineage_invariants(
@@ -334,6 +348,39 @@ def test_working_copy_rejects_documents_that_fail_the_article_document_contract(
         )
 
     assert fk_session.query(ArticleWorkingCopy).count() == 0
+
+
+def test_working_copy_database_constraint_rejects_raw_html_from_a_direct_core_insert(
+    fk_session: Session,
+):
+    org = Org(name="Core document validation organization")
+    account = Account(
+        org=org,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="Core document validation account",
+    )
+    fk_session.add_all([org, account])
+    fk_session.flush()
+    content = ContentItem(account_id=account.id, title="Core validated article")
+    fk_session.add(content)
+    fk_session.commit()
+
+    invalid_document = _valid_document()
+    invalid_document["blocks"] = [
+        {"type": "rawHtml", "block_id": "unsafe", "html": "<script>alert(1)</script>"}
+    ]
+
+    with pytest.raises(IntegrityError):
+        fk_session.execute(
+            ArticleWorkingCopy.__table__.insert().values(
+                content_item_id=content.id,
+                account_id=account.id,
+                document=invalid_document,
+                lock_version=1,
+            )
+        )
+        fk_session.commit()
+    fk_session.rollback()
 
 
 def test_working_copy_and_slots_require_an_account_scoped_content_item(fk_session: Session):
