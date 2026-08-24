@@ -1,6 +1,6 @@
 """工作区域接口测试：项目 / 账号 / 分组 CRUD + RBAC + org 隔离（async，SQLite override）。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import select
@@ -12,8 +12,10 @@ from app.models import (
     Client,
     ClientMembership,
     ContentItem,
+    DataImportBatch,
     DeliverableAcceptance,
     Event,
+    MetricSnapshot,
     PlatformAccountAuth,
     Project,
     ProjectMembership,
@@ -22,9 +24,12 @@ from app.models import (
 from app.models.enums import (
     AgentCode,
     BrainTaskStatus,
+    DataSourceKind,
     DeliverableAcceptanceStatus,
     DeliverableType,
     GroupDimension,
+    ImportBatchStatus,
+    MetricSource,
     Platform,
     WorkspaceRole,
 )
@@ -250,6 +255,57 @@ async def test_account_group_and_account_crud(client, admin):
     # 删除
     assert (await client.delete(f"/accounts/{aid}", headers=_auth(token))).status_code == 204
     assert (await client.get("/accounts", headers=_auth(token))).json() == []
+
+
+@pytest.mark.asyncio
+async def test_deleting_account_removes_import_linked_metric_snapshots(client, admin, session):
+    token = await _token(client, "admin@test.com", "admin-pw-123")
+    account = Account(
+        org_id=admin.org_id,
+        nickname="可删除的真实数据账号",
+        platform=Platform.DOUYIN,
+    )
+    session.add(account)
+    await session.flush()
+    batch = DataImportBatch(
+        org_id=admin.org_id,
+        account_id=account.id,
+        created_by_id=admin.id,
+        source_kind=DataSourceKind.PLATFORM_EXPORT,
+        status=ImportBatchStatus.COMMITTED,
+        template_code="douyin_work_list_v1",
+        content_sha256="a" * 64,
+    )
+    session.add(batch)
+    await session.flush()
+    metric = MetricSnapshot(
+        org_id=admin.org_id,
+        account_id=account.id,
+        import_batch_id=batch.id,
+        source=MetricSource.DOUYIN,
+        stat_date=date(2026, 7, 7),
+        title="账号删除回归",
+    )
+    unlinked_metric = MetricSnapshot(
+        org_id=admin.org_id,
+        account_id=account.id,
+        source=MetricSource.DOUYIN,
+        stat_date=date(2026, 7, 8),
+        title="无导入来源的账号指标",
+    )
+    session.add_all([metric, unlinked_metric])
+    await session.commit()
+    account_id = account.id
+    metric_id = metric.id
+    unlinked_metric_id = unlinked_metric.id
+
+    response = await client.delete(f"/accounts/{account_id}", headers=_auth(token))
+
+    assert response.status_code == 204
+    session.expire_all()
+    assert await session.get(Account, account_id) is None
+    assert await session.get(MetricSnapshot, metric_id) is None
+    assert await session.get(MetricSnapshot, unlinked_metric_id) is None
 
 
 @pytest.mark.asyncio

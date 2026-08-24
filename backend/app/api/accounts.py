@@ -30,6 +30,7 @@ from app.models import (
     Client,
     ContentItem,
     Event,
+    MetricSnapshot,
     PlatformAccountAuth,
     Project,
     ProjectAccount,
@@ -898,5 +899,10 @@ async def create_distribution_action(
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(account_id: int, admin: AdminUser, session: SessionDep) -> None:
     account = await _get_owned_account(session, account_id, admin.org_id)
+    # MetricSnapshot.account_id uses SET NULL so organization-level metrics can exist,
+    # but source-linked account metrics are guarded against becoming orphaned. Delete
+    # account-owned snapshots first so PostgreSQL never evaluates that transient invalid
+    # state while cascading the rest of the account data graph.
+    await session.execute(delete(MetricSnapshot).where(MetricSnapshot.account_id == account.id))
     await session.delete(account)
     await session.commit()
