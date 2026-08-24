@@ -70,6 +70,7 @@ class AgentRun(Base, TimestampMixin):
             ["thread_id", "org_id"],
             ["conversation_threads.id", "conversation_threads.org_id"],
             name="fk_agent_runs_thread_org",
+            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["turn_id", "thread_id", "org_id"],
@@ -79,6 +80,7 @@ class AgentRun(Base, TimestampMixin):
                 "conversation_turns.org_id",
             ],
             name="fk_agent_runs_turn_thread_org",
+            ondelete="CASCADE",
         ),
         CheckConstraint(
             "turn_id IS NULL OR thread_id IS NOT NULL",

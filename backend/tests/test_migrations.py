@@ -605,8 +605,8 @@ def test_bulk_account_data_ingestion_migration_is_reversible(monkeypatch) -> Non
         }
 
 
-def test_migration_head_is_publish_package_deliverable_type() -> None:
-    assert get_head_revision() == "20260805_0300"
+def test_migration_head_is_account_runtime_delete_cascade() -> None:
+    assert get_head_revision() == "20260805_0400"
 
 
 def test_turn_interrupts_sqlite_upgrade_and_downgrade(monkeypatch) -> None:

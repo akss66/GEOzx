@@ -79,6 +79,7 @@ class SkillRun(Base, TimestampMixin):
             ["thread_id", "org_id"],
             ["conversation_threads.id", "conversation_threads.org_id"],
             name="fk_skill_runs_thread_org",
+            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["turn_id", "thread_id", "org_id"],
@@ -88,6 +89,7 @@ class SkillRun(Base, TimestampMixin):
                 "conversation_turns.org_id",
             ],
             name="fk_skill_runs_turn_thread_org",
+            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["run_id", "thread_id", "turn_id", "org_id"],
@@ -98,6 +100,7 @@ class SkillRun(Base, TimestampMixin):
                 "agent_runs.org_id",
             ],
             name="fk_skill_runs_run_thread_turn_org",
+            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["run_id", "task_id", "thread_id", "turn_id", "org_id"],
@@ -109,6 +112,7 @@ class SkillRun(Base, TimestampMixin):
                 "agent_runs.org_id",
             ],
             name="fk_skill_runs_run_task_thread_turn_org",
+            ondelete="CASCADE",
         ),
         Index("ix_skill_runs_org_status", "org_id", "status"),
         Index("ix_skill_runs_thread_created", "thread_id", "created_at"),

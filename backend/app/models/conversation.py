@@ -97,6 +97,7 @@ class ConversationTurn(Base, TimestampMixin):
             ["thread_id", "org_id"],
             ["conversation_threads.id", "conversation_threads.org_id"],
             name="fk_conversation_turn_thread_org",
+            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["target_turn_id", "thread_id", "org_id"],

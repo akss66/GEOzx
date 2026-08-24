@@ -11,7 +11,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.accounts import delete_account
 from app.db import Base
-from app.models import Account, DataImportBatch, MetricSnapshot, Org, User
+from app.models import (
+    Account,
+    AgentRun,
+    ConversationThread,
+    ConversationTurn,
+    DataImportBatch,
+    MetricSnapshot,
+    Org,
+    SkillRun,
+    User,
+)
 from app.models.enums import (
     DataSourceKind,
     ImportBatchStatus,
@@ -87,10 +97,59 @@ def test_postgres_account_delete_removes_source_linked_metrics_before_cascade() 
                     title="PostgreSQL deletion regression",
                 )
                 session.add(metric)
+                thread = ConversationThread(
+                    org_id=org.id,
+                    created_by_id=admin.id,
+                    account_id=account.id,
+                    title="Account deletion runtime",
+                )
+                session.add(thread)
+                await session.flush()
+                turn = ConversationTurn(
+                    thread_id=thread.id,
+                    org_id=org.id,
+                    created_by_id=admin.id,
+                    client_message_id="account-delete-runtime",
+                    user_input="Delete this account",
+                    status="completed",
+                )
+                session.add(turn)
+                await session.flush()
+                run = AgentRun(
+                    org_id=org.id,
+                    requested_by_id=admin.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    client_message_id="account-delete-runtime",
+                    status="completed",
+                    phase="completed",
+                    request_payload={},
+                    result_payload={},
+                )
+                session.add(run)
+                await session.flush()
+                skill_run = SkillRun(
+                    org_id=org.id,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    run_id=run.id,
+                    task_id=None,
+                    idempotency_key="account-delete-runtime",
+                    skill_code="account_inspection",
+                    skill_version=1,
+                    status="completed",
+                    input_snapshot={},
+                    output_snapshot={},
+                )
+                session.add(skill_run)
                 await session.commit()
                 account_id = account.id
                 batch_id = batch.id
                 metric_id = metric.id
+                thread_id = thread.id
+                turn_id = turn.id
+                run_id = run.id
+                skill_run_id = skill_run.id
 
                 await delete_account(account_id, admin, session)
 
@@ -98,6 +157,10 @@ def test_postgres_account_delete_removes_source_linked_metrics_before_cascade() 
                 assert await verification.get(Account, account_id) is None
                 assert await verification.get(DataImportBatch, batch_id) is None
                 assert await verification.get(MetricSnapshot, metric_id) is None
+                assert await verification.get(ConversationThread, thread_id) is None
+                assert await verification.get(ConversationTurn, turn_id) is None
+                assert await verification.get(AgentRun, run_id) is None
+                assert await verification.get(SkillRun, skill_run_id) is None
                 assert await verification.scalar(
                     select(MetricSnapshot.id).where(MetricSnapshot.account_id == account_id)
                 ) is None
