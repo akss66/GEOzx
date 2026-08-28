@@ -336,14 +336,18 @@ async def _turn_projections_by_turn(
         existing_artifact_ids = {
             projection["artifact_id"]
             for projection in projections
-            if projection.get("type") == "artifact" and isinstance(projection.get("artifact_id"), int)
+            if projection.get("type") == "artifact"
+            and isinstance(projection.get("artifact_id"), int)
         }
         for deliverable in deliverables_by_turn.get(turn.id, []):
             artifact_projection = _deliverable_artifact_projection(
                 deliverable,
                 content_by_id=content_by_id,
             )
-            if artifact_projection is None or artifact_projection["artifact_id"] in existing_artifact_ids:
+            if (
+                artifact_projection is None
+                or artifact_projection["artifact_id"] in existing_artifact_ids
+            ):
                 continue
             projections.append(artifact_projection)
             existing_artifact_ids.add(artifact_projection["artifact_id"])

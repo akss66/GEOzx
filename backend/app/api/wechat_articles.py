@@ -16,8 +16,8 @@ from app.models import Account, ArticleImageSlot, Deliverable, Event
 from app.models.enums import DeliverableType
 from app.schemas.publishing import SyncWechatDraftRequest, WechatDraftSyncOut
 from app.schemas.wechat_article import (
-    ArticleDraftSyncContextOut,
     ArticleDocument,
+    ArticleDraftSyncContextOut,
     ArticleImageGenerationRequest,
     ArticleImagePromptOut,
     ArticleImageSelectionRequest,

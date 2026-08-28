@@ -6,8 +6,8 @@ from typing import cast
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -25,7 +25,6 @@ from app.models.publishing import (
     PlatformPublishJobStatus,
 )
 from app.schemas.wechat_article import ArticleDocument
-from app.services import wechat_articles
 from app.services.wechat_articles import (
     create_article,
     freeze_article_version,
@@ -303,7 +302,10 @@ async def test_draft_sync_context_hides_cross_scope_and_version_mismatch(
     secondary_created = await client.post(
         "/wechat-articles",
         headers=admin_headers,
-        json={"account_id": secondary_account.id, "document": _document(paragraph="Other article.")},
+        json={
+            "account_id": secondary_account.id,
+            "document": _document(paragraph="Other article."),
+        },
     )
     primary_article_id = primary_created.json()["articleId"]
     secondary_version_id = secondary_created.json()["firstVersion"]["id"]
