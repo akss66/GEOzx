@@ -3,23 +3,36 @@
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.core.workspace_access import require_client_access, require_project_access
+from app.core.workspace_access import (
+    accessible_client_ids,
+    require_account_access,
+    require_client_access,
+    require_project_access,
+)
 from app.models import (
+    Account,
+    AccountKnowledgeBinding,
     BrainTask,
     Deliverable,
     Event,
+    KnowledgeBase,
     KnowledgeCitation,
     KnowledgeEntry,
     KnowledgeSuggestion,
     Project,
     User,
 )
-from app.models.enums import KnowledgeCategory, WorkspaceRole
+from app.models.enums import KnowledgeCategory, UserRole, WorkspaceRole
 
 OPERATING_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.OPERATOR, WorkspaceRole.EDITOR}
+FACT_REVIEW_ROLES = {WorkspaceRole.LEAD, WorkspaceRole.REVIEWER}
+BINDING_ROLES = {WorkspaceRole.LEAD}
+_MAX_AGENT_KNOWLEDGE_LIMIT = 24
+_EXTERNAL_CLAIM_KINDS = {"product_fact", "case", "promise", "price", "numeric_claim"}
 
 
 async def require_knowledge_scope(
@@ -43,6 +56,173 @@ async def require_knowledge_scope(
     return client, project
 
 
+async def require_account_knowledge_scope(
+    session: AsyncSession, user: User, account_id: int, *, writable: bool
+) -> Account:
+    """Load an authorized account before resolving its brand knowledge.
+
+    Binding writers need a lead workspace role (or organization administrator);
+    reads retain the existing account-visibility semantics.
+    """
+
+    return await require_account_access(
+        session, user, account_id, roles=BINDING_ROLES if writable else None
+    )
+
+
+async def get_scoped_knowledge_base(
+    session: AsyncSession,
+    user: User,
+    knowledge_base_id: int,
+    *,
+    writable: bool,
+) -> KnowledgeBase:
+    """Return a knowledge base only after its organization and client boundary match."""
+
+    base = await session.get(KnowledgeBase, knowledge_base_id)
+    if base is None or base.org_id != user.org_id or base.status != "active":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在")
+    if base.client_id is None:
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在")
+        return base
+    await require_client_access(
+        session, user, base.client_id, roles=OPERATING_ROLES if writable else None
+    )
+    return base
+
+
+async def list_scoped_knowledge_bases(
+    session: AsyncSession, user: User, *, limit: int, offset: int
+) -> tuple[list[KnowledgeBase], int]:
+    """Page only bases visible through the caller's organization/client access."""
+
+    query = select(KnowledgeBase).where(
+        KnowledgeBase.org_id == user.org_id, KnowledgeBase.status == "active"
+    )
+    if user.role != UserRole.ADMIN:
+        visible_client_ids = await accessible_client_ids(session, user)
+        query = query.where(KnowledgeBase.client_id.in_(visible_client_ids))
+    total = await session.scalar(select(func.count()).select_from(query.subquery()))
+    rows = list(
+        await session.scalars(
+            query.order_by(KnowledgeBase.updated_at.desc(), KnowledgeBase.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+    return rows, total or 0
+
+
+async def get_account_primary_binding(
+    session: AsyncSession, account_id: int
+) -> AccountKnowledgeBinding | None:
+    return await session.scalar(
+        select(AccountKnowledgeBinding)
+        .where(
+            AccountKnowledgeBinding.account_id == account_id,
+            AccountKnowledgeBinding.binding_type == "primary_brand",
+            AccountKnowledgeBinding.status == "active",
+        )
+        .order_by(AccountKnowledgeBinding.id.desc())
+    )
+
+
+async def bind_account_primary_knowledge_base(
+    session: AsyncSession,
+    user: User,
+    *,
+    account_id: int,
+    knowledge_base_id: int,
+) -> AccountKnowledgeBinding:
+    """Upsert the sole active primary binding with server-derived scope fields."""
+
+    account = await require_account_knowledge_scope(session, user, account_id, writable=True)
+    locked_account = await session.scalar(
+        select(Account)
+        .where(Account.id == account.id, Account.org_id == user.org_id)
+        .with_for_update()
+    )
+    if locked_account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
+    account = locked_account
+    base = await session.get(KnowledgeBase, knowledge_base_id)
+    if (
+        base is None
+        or base.org_id != user.org_id
+        or base.status != "active"
+        or base.kind != "brand"
+        or base.client_id != account.client_id
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在")
+
+    current = await get_account_primary_binding(session, account.id)
+    if current is not None and current.knowledge_base_id == base.id:
+        return current
+    if current is not None:
+        current.status = "inactive"
+        await session.flush()
+
+    binding = AccountKnowledgeBinding(
+        org_id=account.org_id,
+        account_id=account.id,
+        knowledge_base_id=base.id,
+        knowledge_base_kind=base.kind,
+        client_id=account.client_id,
+        binding_type="primary_brand",
+        status="active",
+        bound_by_id=user.id,
+    )
+    session.add(binding)
+    await session.flush()
+    return binding
+
+
+async def list_scoped_knowledge_base_entries(
+    session: AsyncSession,
+    user: User,
+    *,
+    knowledge_base_id: int,
+    limit: int,
+    offset: int,
+) -> tuple[KnowledgeBase, list[KnowledgeEntry], int]:
+    base = await get_scoped_knowledge_base(session, user, knowledge_base_id, writable=False)
+    query = select(KnowledgeEntry).where(
+        KnowledgeEntry.org_id == user.org_id,
+        KnowledgeEntry.knowledge_base_id == base.id,
+        KnowledgeEntry.status == "active",
+    )
+    total = await session.scalar(select(func.count()).select_from(query.subquery()))
+    rows = list(
+        await session.scalars(
+            query.order_by(KnowledgeEntry.updated_at.desc(), KnowledgeEntry.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+    return base, rows, total or 0
+
+
+async def get_scoped_knowledge_base_entry(
+    session: AsyncSession,
+    user: User,
+    *,
+    knowledge_base_id: int,
+    entry_id: int,
+    writable: bool,
+) -> tuple[KnowledgeBase, KnowledgeEntry]:
+    base = await get_scoped_knowledge_base(session, user, knowledge_base_id, writable=writable)
+    entry = await session.get(KnowledgeEntry, entry_id)
+    if (
+        entry is None
+        or entry.org_id != user.org_id
+        or entry.knowledge_base_id != base.id
+        or entry.status != "active"
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识条目不存在")
+    return base, entry
+
+
 async def get_scoped_entry(
     session: AsyncSession,
     user: User,
@@ -51,7 +231,12 @@ async def get_scoped_entry(
     writable: bool,
 ) -> KnowledgeEntry:
     entry = await session.get(KnowledgeEntry, entry_id)
-    if entry is None or entry.org_id != user.org_id:
+    if (
+        entry is None
+        or entry.org_id != user.org_id
+        or entry.client_id is None
+        or entry.knowledge_base_id is not None
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识条目不存在")
     await require_knowledge_scope(
         session,
@@ -111,20 +296,151 @@ async def list_agent_knowledge(
     )
 
 
-def knowledge_context(rows: list[KnowledgeEntry]) -> dict[str, list[dict]]:
-    grouped: dict[str, list[dict]] = {}
-    for row in rows:
-        grouped.setdefault(row.category.value, []).append(
-            {
-                "id": row.id,
-                "title": row.title,
-                "content": row.content,
-                "tags": row.tags or [],
-                "source": row.source_label,
-                "version": row.version,
-            }
+async def list_agent_knowledge_for_account(
+    session: AsyncSession,
+    *,
+    org_id: int,
+    account_id: int,
+    project_id: int,
+    limit: int = _MAX_AGENT_KNOWLEDGE_LIMIT,
+) -> list[KnowledgeEntry]:
+    """Resolve current, account-bound evidence in one consistent database read.
+
+    ``KnowledgeEntry`` has no account foreign key.  Its local layer is therefore
+    intentionally limited to unbound entries in the account's client and exact
+    project; it must not be represented as account-exclusive data.
+    """
+
+    bounded_limit = min(max(limit, 0), _MAX_AGENT_KNOWLEDGE_LIMIT)
+    if bounded_limit == 0:
+        return []
+
+    primary_binding = aliased(AccountKnowledgeBinding)
+    primary_base = aliased(KnowledgeBase)
+    shared_binding = aliased(AccountKnowledgeBinding)
+    shared_base = aliased(KnowledgeBase)
+    now = datetime.now(UTC)
+
+    primary_match = exists(
+        select(primary_binding.id)
+        .join(primary_base, primary_base.id == primary_binding.knowledge_base_id)
+        .where(
+            primary_binding.org_id == org_id,
+            primary_binding.account_id == account_id,
+            primary_binding.binding_type == "primary_brand",
+            primary_binding.status == "active",
+            primary_base.kind == "brand",
+            primary_base.status == "active",
+            KnowledgeEntry.knowledge_base_id == primary_binding.knowledge_base_id,
         )
-    return grouped
+    )
+    shared_match = exists(
+        select(shared_binding.id)
+        .join(shared_base, shared_base.id == shared_binding.knowledge_base_id)
+        .where(
+            shared_binding.org_id == org_id,
+            shared_binding.account_id == account_id,
+            shared_binding.binding_type == "shared",
+            shared_binding.status == "active",
+            shared_base.kind == "organization_shared",
+            shared_base.status == "active",
+            KnowledgeEntry.knowledge_base_id == shared_binding.knowledge_base_id,
+        )
+    )
+    local_match = KnowledgeEntry.knowledge_base_id.is_(None)
+    local_scope = (
+        local_match
+        & (KnowledgeEntry.client_id == Account.client_id)
+        & (KnowledgeEntry.project_id == project_id)
+    )
+    primary_scope = primary_match & KnowledgeEntry.project_id.is_(None)
+    shared_scope = shared_match & KnowledgeEntry.project_id.is_(None)
+    source_tier = case(
+        (local_match, 0),
+        (primary_match, 1),
+        (shared_match, 2),
+        else_=3,
+    )
+
+    query = (
+        select(KnowledgeEntry)
+        .join(Account, Account.id == account_id)
+        .join(
+            Project,
+            Project.id == project_id,
+        )
+        .where(
+            Account.org_id == org_id,
+            Project.org_id == org_id,
+            Project.client_id == Account.client_id,
+            KnowledgeEntry.org_id == org_id,
+            KnowledgeEntry.status == "active",
+            KnowledgeEntry.verification_status == "verified",
+            or_(KnowledgeEntry.effective_at.is_(None), KnowledgeEntry.effective_at <= now),
+            or_(KnowledgeEntry.expires_at.is_(None), KnowledgeEntry.expires_at > now),
+            or_(
+                ~KnowledgeEntry.entry_kind.in_(("product_fact", "case")),
+                KnowledgeEntry.allowed_for_external_claim.is_(True),
+            ),
+            or_(local_scope, primary_scope, shared_scope),
+        )
+        .order_by(source_tier.asc(), KnowledgeEntry.id.asc())
+    )
+    rows: list[KnowledgeEntry] = []
+    candidates = await session.stream_scalars(query)
+    try:
+        async for row in candidates:
+            if _claim_is_permitted(row):
+                rows.append(row)
+                if len(rows) == bounded_limit:
+                    break
+    finally:
+        await candidates.close()
+    return rows
+
+
+def _claim_is_permitted(row: KnowledgeEntry) -> bool:
+    """Require explicit permission before a claim-like record reaches an Agent."""
+
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    payload_kind = str(payload.get("kind", ""))
+    is_numeric_claim = any(
+        isinstance(payload.get(key), (int, float)) and not isinstance(payload.get(key), bool)
+        for key in ("amount", "price", "value", "quantity")
+    )
+    needs_permission = (
+        row.entry_kind in _EXTERNAL_CLAIM_KINDS
+        or payload_kind in _EXTERNAL_CLAIM_KINDS
+        or is_numeric_claim
+    )
+    return not needs_permission or row.allowed_for_external_claim
+
+
+def knowledge_context(rows: list[KnowledgeEntry]) -> dict[str, list[dict]]:
+    """Build the canonical user-context envelope for untrusted knowledge evidence."""
+
+    evidence = [
+        {
+            "category": row.category.value,
+            "content": row.content,
+            "citation": {
+                "entry_id": row.id,
+                "entry_version": row.version,
+                "source_label": row.source_label,
+                "source_url": row.source_url,
+                "source_type": row.source_type,
+                "verification_status": row.verification_status,
+                "allowed_for_external_claim": row.allowed_for_external_claim,
+            },
+            "tags": row.tags or [],
+            "title": row.title,
+        }
+        for row in rows
+    ]
+    context: dict[str, list[dict]] = {"untrusted_evidence": evidence}
+    for item in evidence:
+        context.setdefault(str(item["category"]), []).append(item)
+    return context
 
 
 async def record_knowledge_citations(
@@ -145,6 +461,14 @@ async def record_knowledge_citations(
             client_id=client_id,
             project_id=project_id,
             entry_id=row.id,
+            entry_version=row.version,
+            source_type=row.source_type,
+            source_label=row.source_label,
+            source_url=row.source_url,
+            verification_status=row.verification_status,
+            allowed_for_external_claim=row.allowed_for_external_claim,
+            effective_at=row.effective_at,
+            expires_at=row.expires_at,
             task_id=task_id,
             invocation_id=invocation_id,
             agent_code=agent_code,

@@ -32,11 +32,39 @@ const FAILED_STEP_STATUSES = new Set([
   "dead_letter",
 ]);
 
-export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
+const WECHAT_STAGE_LABELS: Record<string, string> = {
+  brief_resolution: "正在确认文章目标",
+  scoped_knowledge: "正在读取品牌知识",
+  content_strategy: "正在生成文章初稿",
+  article_editing: "正在生成文章初稿",
+  visual_planning: "已规划配图位置",
+  compliance_and_fact_gate: "正在检查公众号格式",
+  render_preview: "等待你确认同步",
+  waiting_user: "等待你确认同步",
+};
+
+type WorkTurnProjectionContext = {
+  threadAccountId?: number | null;
+};
+
+export function projectWorkTurn(
+  turn: ConversationTurn,
+  context: WorkTurnProjectionContext = {},
+): WorkTurnViewModel {
   const projections = projectionsForTurn(turn);
   const steps = overlayRuntimeSteps(projectSteps(projections), turn);
-  const status = projectStatus(turn.status, turn.turn_phase, turn.pending_interrupt);
-  const assistantText = turn.assistant_response ?? latestAnswer(projections);
+  const articleWorkspaceAction = projectArticleWorkspaceAction(projections, context);
+  const isWechatHandoff = isWechatArticleHandoff(turn, articleWorkspaceAction);
+  const wechatWorkspaceActivity = projectWechatWorkspaceActivity(projections);
+  const status = projectStatus(
+    turn.status,
+    turn.turn_phase,
+    turn.pending_interrupt,
+    isWechatHandoff,
+  );
+  const assistantText = isWechatHandoff
+    ? articleWorkspaceAction?.title ?? turn.assistant_response ?? latestAnswer(projections)
+    : turn.assistant_response ?? latestAnswer(projections);
   const presentation = presentWorkTurn({
     status,
     phase: turn.turn_phase,
@@ -52,8 +80,10 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
     status,
     phase: turn.turn_phase,
     currentActivity: turn.pending_interrupt?.status === "pending"
-      ? turn.pending_interrupt.public_message
-      : presentation.activityLabel,
+      ? isWechatHandoff
+        ? null
+        : turn.pending_interrupt.public_message
+      : wechatWorkspaceActivity ?? presentation.activityLabel,
     assistantText,
     presentation,
     steeringNotice: projectSteeringNotice(turn),
@@ -63,6 +93,7 @@ export function projectWorkTurn(turn: ConversationTurn): WorkTurnViewModel {
       ...projectDeliverableIds(projections),
       ...(turn.runtime_overlay?.deliverableIds ?? []),
     ])],
+    articleWorkspaceAction,
     assistant: {
       identity: "运营大脑",
       steps,
@@ -93,6 +124,7 @@ const RUNTIME_STEP_LABELS: Record<string, string> = {
   specialist_work: "专家分析",
   quality_review: "质量审核",
   prepare_recommendation: "整理运营建议",
+  ...WECHAT_STAGE_LABELS,
 };
 
 function overlayRuntimeSteps(
@@ -173,10 +205,12 @@ function projectStatus(
   status: string,
   phase: TurnPhase | undefined,
   interrupt: ConversationTurn["pending_interrupt"],
+  isWechatHandoff: boolean,
 ): WorkTurnStatus {
   const terminalStatus = TERMINAL_WORK_TURN_STATUSES[status];
   if (terminalStatus) return terminalStatus;
   if (interrupt?.status === "pending") {
+    if (isWechatHandoff) return "waiting_user";
     if (interrupt.kind === "clarification") return "needs_input";
     if (interrupt.kind === "approval") return "needs_approval";
     return "paused";
@@ -198,6 +232,7 @@ function projectSteps(projections: TurnProjection[]): WorkTurnStep[] {
       }));
     }
     if (projection.type === "execution_summary" && projection.skill_code) {
+      if (projection.skill_code === "wechat_article_production") return [];
       return [{
         code: projection.skill_code,
         label: projection.skill_code,
@@ -214,6 +249,51 @@ function projectSteps(projections: TurnProjection[]): WorkTurnStep[] {
     }
     return [];
   });
+}
+
+function projectArticleWorkspaceAction(
+  projections: TurnProjection[],
+  context: WorkTurnProjectionContext,
+): WorkTurnViewModel["articleWorkspaceAction"] {
+  const workspace = projections.find((
+    projection,
+  ): projection is Extract<TurnProjection, { type: "wechat_article_workspace" }> =>
+    projection.type === "wechat_article_workspace"
+  );
+  if (!workspace) return null;
+  if (context.threadAccountId != null && workspace.account_id !== context.threadAccountId) {
+    return null;
+  }
+  const articleId = positiveInteger(workspace.article_id);
+  if (articleId == null) return null;
+  return {
+    articleId,
+    href: `/wechat-articles/${articleId}`,
+    label: "打开文章工作台",
+    title: "文章初稿已生成",
+  };
+}
+
+function projectWechatWorkspaceActivity(projections: TurnProjection[]) {
+  const workspace = projections.find((
+    projection,
+  ): projection is Extract<TurnProjection, { type: "wechat_article_workspace" }> =>
+    projection.type === "wechat_article_workspace"
+  );
+  if (!workspace) return null;
+  if (workspace.current_action === "generate_images") return "正在生成所选图片";
+  if (workspace.current_action === "sync_draft") return "正在同步微信公众号草稿";
+  return null;
+}
+
+function isWechatArticleHandoff(
+  turn: ConversationTurn,
+  articleWorkspaceAction: WorkTurnViewModel["articleWorkspaceAction"],
+) {
+  return articleWorkspaceAction != null
+    && turn.pending_interrupt?.status === "pending"
+    && turn.pending_interrupt.kind === "clarification"
+    && hasWechatArticleActionChoices(turn.pending_interrupt.response_schema);
 }
 
 function projectStepState(status: string | null | undefined): WorkTurnStep["state"] {
@@ -258,6 +338,18 @@ function latestAnswer(projections: TurnProjection[]) {
   return null;
 }
 
+function hasWechatArticleActionChoices(responseSchema: Record<string, unknown>) {
+  const properties = isRecord(responseSchema.properties) ? responseSchema.properties : null;
+  const action = properties && isRecord(properties.action) ? properties.action : null;
+  const values = Array.isArray(action?.enum) ? action.enum : [];
+  const allowed = values.filter((value): value is string => typeof value === "string");
+  return allowed.includes("generate_images") && allowed.includes("sync_draft");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -265,4 +357,9 @@ function stringValue(value: unknown) {
 function nonNegativeInteger(value: unknown) {
   const number = Number(value);
   return Number.isInteger(number) && number >= 0 ? number : null;
+}
+
+function positiveInteger(value: unknown) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
 }

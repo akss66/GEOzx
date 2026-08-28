@@ -108,16 +108,31 @@ describe("PublishPreparation", () => {
     expect(await screen.findByTestId("publish-job-panel")).toHaveTextContent("发布任务 #73");
     expect(createPublishJob).not.toHaveBeenCalled();
   });
+
+  it("does not call legacy publish APIs for a WeChat account", () => {
+    const workspace = makeWorkspace();
+    workspace.account = {
+      ...workspace.account!,
+      nickname: "品牌公众号",
+      platform: "wechat_official_account",
+    };
+
+    renderPreparation(workspace);
+
+    expect(screen.getByText("微信公众号暂不支持旧版发布准备")).toBeInTheDocument();
+    expect(checkPublishReadiness).not.toHaveBeenCalled();
+    expect(listPublishJobs).not.toHaveBeenCalled();
+  });
 });
 
-function renderPreparation() {
+function renderPreparation(workspace = makeWorkspace()) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
       <AntApp>
-        <PublishPreparation workspace={makeWorkspace()} canOperate />
+        <PublishPreparation workspace={workspace} canOperate />
       </AntApp>
     </QueryClientProvider>,
   );

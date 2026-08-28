@@ -21,6 +21,7 @@ const pageComponents: Record<AppPage, React.LazyExoticComponent<React.ComponentT
   accounts: lazy(() => import("./pages/Accounts")),
   "account-data": lazy(() => import("./pages/AccountDataCenter")),
   knowledge: lazy(() => import("./pages/Knowledge")),
+  "wechat-article-workspace": lazy(() => import("./pages/WechatArticleWorkspace")),
   config: lazy(() => import("./pages/Config")),
   models: lazy(() => import("./pages/ModelInfrastructure")),
   users: lazy(() => import("./pages/Users")),

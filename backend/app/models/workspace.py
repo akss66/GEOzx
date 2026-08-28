@@ -81,7 +81,10 @@ class Account(Base, TimestampMixin):
     """矩阵账号（一等模型）。授权 Token 等存于 auth(JSONB)，后续加密。"""
 
     __tablename__ = "accounts"
-    __table_args__ = (UniqueConstraint("id", "org_id", name="uq_accounts_id_org"),)
+    __table_args__ = (
+        UniqueConstraint("id", "org_id", name="uq_accounts_id_org"),
+        UniqueConstraint("id", "client_id", name="uq_accounts_id_client"),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(

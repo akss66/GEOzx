@@ -1453,6 +1453,34 @@ describe("BrainHome V3 conversation projection", () => {
     await waitFor(() => expect(getConversation).toHaveBeenCalledTimes(initialCalls + 1));
   });
 
+  it("recovers a WeChat article action pause into the same WorkTurn after refresh", async () => {
+    const running = persistedTurn(501, "wechat-pause", "Draft a WeChat article", null, "running");
+    const recovered = wechatArticleTurn({
+      assistant_response: "Article draft is ready.",
+    });
+    saveThread(3, 81);
+    vi.mocked(getConversation)
+      .mockResolvedValueOnce(thread(81, [running]))
+      .mockResolvedValueOnce(thread(81, [recovered]));
+
+    renderBrainHome();
+    await screen.findByText("Draft a WeChat article");
+
+    act(() => {
+      mocks.turnEvents.handler?.(durableTurnEvent("turn.paused", 2, 2, 81, 501, {
+        status: "waiting_permission",
+        message: "Article draft is ready.",
+      }));
+    });
+
+    expect(await screen.findByRole("link", { name: "打开文章工作台" })).toHaveAttribute(
+      "href",
+      "/wechat-articles/42",
+    );
+    expect(screen.getAllByTestId("work-turn")).toHaveLength(1);
+    expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+  });
+
   it("recovers a missing deliverable projection once and does not refetch an existing card", async () => {
     const running = persistedTurn(501, "deliverable-client", "Inspect account", null, "running");
     const projection = {
@@ -1510,6 +1538,28 @@ describe("BrainHome V3 conversation projection", () => {
     expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81]))
       .toMatchObject({ account_id: 3, turns: [{ user_input: "Inspect account" }] });
     expect(screen.queryByText("Foreign account")).not.toBeInTheDocument();
+  });
+
+  it("clears the previous account conversation cache and article link after switching accounts", async () => {
+    saveThread(3, 81);
+    vi.mocked(getConversation).mockResolvedValue(thread(81, [wechatArticleTurn()]));
+
+    const view = renderBrainHome();
+    expect(await screen.findByRole("link", { name: "打开文章工作台" })).toHaveAttribute(
+      "href",
+      "/wechat-articles/42",
+    );
+    expect(view.queryClient.getQueryData<ConversationThread>(["brain-conversation", 81]))
+      .toMatchObject({ account_id: 3 });
+
+    mocks.workspace.accountId = 4;
+    fireEvent.click(screen.getByRole("tab", { name: "方案与内容" }));
+    fireEvent.click(screen.getByRole("tab", { name: "对话" }));
+
+    await waitFor(() => {
+      expect(view.queryClient.getQueryData(["brain-conversation", 81])).toBeUndefined();
+    });
+    expect(screen.queryByRole("link", { name: "打开文章工作台" })).not.toBeInTheDocument();
   });
 
   it("replays a durable event received before the initial conversation snapshot materializes", async () => {
@@ -2223,6 +2273,70 @@ function operationSkill(
     required_context: ["account"],
     is_available: true,
     unavailable_reason: null,
+    ...overrides,
+  };
+}
+
+function wechatArticleTurn(
+  overrides: Partial<ConversationTurn> = {},
+): ConversationTurn {
+  return {
+    ...persistedTurn(
+      501,
+      "wechat-article",
+      "Draft a WeChat article",
+      "Article draft is ready.",
+      "waiting_permission",
+    ),
+    projections: [
+      {
+        type: "execution_summary" as const,
+        turn_id: 501,
+        run_id: 4,
+        skill_code: "wechat_article_production",
+        skill_run_id: 41,
+        status: "waiting_user",
+        quality_score: null,
+        experts: [],
+        tools: [],
+      },
+      {
+        type: "wechat_article_workspace" as const,
+        turn_id: 501,
+        skill_run_id: 41,
+        account_id: 3,
+        article_id: 42,
+        article_version_id: 9001,
+        status: "waiting_user",
+        current_action: "produce",
+        available_actions: ["generate_images", "sync_draft"],
+      },
+    ],
+    pending_interrupt: {
+      id: 77,
+      account_id: 3,
+      thread_id: 81,
+      turn_id: 501,
+      run_id: 4,
+      kind: "clarification",
+      status: "pending",
+      public_message: "Choose the next article action.",
+      action_label: "Open article workspace",
+      response_schema: {
+        type: "object",
+        required: ["action"],
+        properties: {
+          action: {
+            type: "string",
+            enum: ["generate_images", "sync_draft"],
+          },
+        },
+      },
+      version: 1,
+      resolved_at: null,
+      created_at: "2026-08-04T00:00:00Z",
+      updated_at: "2026-08-04T00:00:00Z",
+    },
     ...overrides,
   };
 }

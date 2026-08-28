@@ -23,10 +23,13 @@ from app.config import settings
 from app.core.approval_audit import add_approval_requested
 from app.core.runtime_failures import FailureDisposition, classify_runtime_failure
 from app.models import (
+    Account,
     AgentInvocation,
     AgentQualityScore,
     AgentRun,
     AgentToolCall,
+    ArticleImageSlot,
+    ArticleWorkingCopy,
     BrainTask,
     ContentItem,
     ConversationThread,
@@ -40,6 +43,7 @@ from app.models import (
 from app.models.enums import (
     AgentCode,
     AgentInvocationStatus,
+    ArticleImageSlotStatus,
     BrainTaskStatus,
     BrainTaskType,
     ContentStage,
@@ -103,13 +107,30 @@ from app.orchestrator.skills.visual_brief_generation import (
     VisualBriefGenerationReport,
     VisualProductionItem,
 )
+from app.orchestrator.skills.wechat_article_production import (
+    WechatArticleImageSlotPlan,
+    WechatArticleProductionInput,
+    resolve_missing_primary_cta,
+)
 from app.orchestrator.tool_executor import DurableToolExecutor
 from app.schemas.brain import RuntimeToolCall
 from app.schemas.capability_request import CapabilityRequest
+from app.schemas.publishing import SyncWechatDraftRequest
 from app.schemas.skills import SkillDefinition
+from app.schemas.wechat_article import ArticleDocument, ImageSlotBlock
 from app.services.account_metric_analysis import METRIC_REGISTRY, AccountMetricAnalysis
 from app.services.agent_runs import acquire_agent_run, heartbeat_agent_run, utc_now
 from app.services.composite_skill_runs import pause_composite_parent_for_artifacts
+from app.services.image_generation import WechatArticleImageService
+from app.services.knowledge_workspace import (
+    knowledge_context,
+    list_agent_knowledge_for_account,
+    record_knowledge_citations,
+)
+from app.services.publishing import (
+    execute_wechat_draft_sync_job,
+    prepare_wechat_draft_sync_job,
+)
 from app.services.runtime_deliverables import write_runtime_deliverable
 from app.services.runtime_locking import (
     RuntimeRootLock,
@@ -120,6 +141,9 @@ from app.services.runtime_locking import (
 )
 from app.services.runtime_state import TERMINAL_STATUSES, RuntimeStateScope, close_runtime_state
 from app.services.turn_events import TurnEventScope, append_turn_event
+from app.services.turn_interrupts import request_interrupt
+from app.services.wechat_articles import create_article, validate_article_for_sync
+from app.services.wechat_renderer import render_wechat_article
 
 _ACCOUNT_INSPECTION = "account_inspection"
 _ACCOUNT_DATA_ANALYSIS = "account_data_analysis"
@@ -436,6 +460,7 @@ class SkillExecutionResult:
     report: dict[str, Any]
     response: str
     error_code: str | None = None
+    interrupt: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -486,10 +511,18 @@ class SkillRuntime:
         tool_executor: Any | None = None,
         harness: Any | None = None,
         critic: Any | None = None,
+        image_generation_provider: Any | None = None,
+        wechat_capability_probe: Any | None = None,
+        wechat_token_provider: Any | None = None,
+        wechat_draft_client: Any | None = None,
     ) -> None:
         self._tool_executor = tool_executor
         self._harness = harness or agent_harness
         self._critic = critic
+        self._image_generation_provider = image_generation_provider
+        self._wechat_capability_probe = wechat_capability_probe
+        self._wechat_token_provider = wechat_token_provider
+        self._wechat_draft_client = wechat_draft_client
 
     async def execute(
         self,
@@ -539,6 +572,14 @@ class SkillRuntime:
             if recovery_candidate is not None
             else skill_registry.get(skill_code)
         )
+        account_platform = await session.scalar(
+            select(Account.platform).where(
+                Account.id == thread.account_id,
+                Account.org_id == user.org_id,
+            )
+        )
+        if account_platform is None or account_platform.value not in definition.supported_platforms:
+            raise PermissionError("Skill execution platform does not match")
         if recovery_candidate is not None:
             frozen_snapshot = dict(recovery_candidate.input_snapshot or {})
             model_input = {
@@ -561,7 +602,36 @@ class SkillRuntime:
                     **_server_skill_context_snapshot(server_context),
                 }
                 if requested_snapshot != frozen_snapshot:
-                    raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
+                    resolved_input = None
+                    resume_interrupt = dict(run.request_payload or {}).get("resume_interrupt")
+                    if (
+                        definition.code == "wechat_article_production"
+                        and isinstance(resume_interrupt, dict)
+                        and resume_interrupt.get("kind") == "clarification"
+                        and isinstance(resume_interrupt.get("resolution"), dict)
+                    ):
+                        resolved_input = resolve_missing_primary_cta(
+                            frozen_snapshot,
+                            resume_interrupt["resolution"],
+                        )
+                    resolved_snapshot = (
+                        {
+                            **{
+                                key: value
+                                for key, value in frozen_snapshot.items()
+                                if key not in definition.input_model.model_fields
+                            },
+                            **resolved_input.model_dump(mode="json"),
+                        }
+                        if resolved_input is not None
+                        else None
+                    )
+                    if resolved_snapshot != requested_snapshot:
+                        raise SkillRecoveryConflict("SKILL_RECOVERY_INPUT_CONFLICT")
+                    recovery_candidate.input_snapshot = requested_snapshot
+                    recovery_candidate.input_hash = skill_input_hash(requested_snapshot)
+                    frozen_snapshot = requested_snapshot
+                    frozen_input = requested_input
         else:
             frozen_input = _validated_skill_input(
                 definition=definition,
@@ -850,6 +920,19 @@ class SkillRuntime:
                     frozen_input=dict(skill_run.input_snapshot or {}),
                     lease_owner=lease_owner,
                 )
+            if definition.code == "wechat_article_production":
+                return await self._execute_wechat_article_production(
+                    session,
+                    user=user,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=runtime_scope,
+                    frozen_input=dict(skill_run.input_snapshot or {}),
+                    lease_owner=lease_owner,
+                )
             if definition.code == "operation_iteration":
                 return await self._execute_operation_iteration(
                     session,
@@ -974,6 +1057,802 @@ class SkillRuntime:
         finally:
             _NESTED_PARENT_SKILL_RUN_ID.reset(nested_parent_token)
             _ACTIVE_SKILL_STAGES.reset(stage_context_token)
+
+    async def _execute_wechat_article_production(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        frozen_input: dict[str, Any],
+        lease_owner: str,
+    ) -> SkillExecutionResult:
+        """Resolve the strict brief before entering professional production."""
+
+        attempt = max(1, run.attempt)
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="brief_resolution",
+            attempt=attempt,
+        )
+        parsed = WechatArticleProductionInput.model_validate(
+            {
+                key: value
+                for key, value in frozen_input.items()
+                if key in WechatArticleProductionInput.model_fields
+            }
+        )
+        if parsed.requested_action != "produce":
+            required_fields: list[str] = []
+            if parsed.idempotency_key is None:
+                required_fields.append("idempotency_key")
+            if parsed.working_copy_id is None:
+                required_fields.append("working_copy_id")
+            if parsed.requested_action == "sync_draft":
+                if parsed.article_version_id is None:
+                    required_fields.append("article_version_id")
+                if not parsed.sync_confirmed:
+                    required_fields.append("sync_confirmed")
+            if required_fields:
+                return await self._pause_wechat_for_required_fields(
+                    session,
+                    user=user,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=scope,
+                    attempt=attempt,
+                    article_name=(
+                        f"微信公众号文章 {parsed.working_copy_id}"
+                        if parsed.working_copy_id is not None
+                        else "微信公众号文章"
+                    ),
+                    action=parsed.requested_action,
+                    required_fields=sorted(required_fields),
+                    semantic_key=f"wechat-article-{parsed.requested_action}-required",
+                )
+            if parsed.requested_action == "generate_images":
+                return await self._execute_wechat_image_generation(
+                    session,
+                    user=user,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=scope,
+                    attempt=attempt,
+                    input_data=parsed,
+                )
+            if parsed.requested_action == "sync_draft":
+                return await self._execute_wechat_draft_sync(
+                    session,
+                    user=user,
+                    thread=thread,
+                    turn=turn,
+                    run=run,
+                    task=task,
+                    skill_run=skill_run,
+                    scope=scope,
+                    attempt=attempt,
+                    input_data=parsed,
+                )
+            raise NotImplementedError(
+                f"WeChat article action is not implemented: {parsed.requested_action}"
+            )
+        if parsed.brief is None:
+            pending_brief = dict(parsed.pending_brief or {})
+            required_fields = _missing_article_brief_fields(pending_brief)
+            article_name = str(pending_brief.get("topic_or_product") or "微信公众号文章")
+            return await self._pause_wechat_for_required_fields(
+                session,
+                user=user,
+                run=run,
+                task=task,
+                skill_run=skill_run,
+                scope=scope,
+                attempt=attempt,
+                article_name=article_name,
+                action=parsed.requested_action,
+                required_fields=required_fields,
+                semantic_key="wechat-article-brief-required",
+            )
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="brief_resolution",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="scoped_knowledge",
+            attempt=attempt,
+        )
+        knowledge_rows = (
+            await list_agent_knowledge_for_account(
+                session,
+                org_id=user.org_id,
+                account_id=thread.account_id,
+                project_id=thread.project_id,
+            )
+            if thread.project_id is not None
+            else []
+        )
+        scoped_knowledge = knowledge_context(knowledge_rows)
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="scoped_knowledge",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="content_strategy",
+            attempt=attempt,
+        )
+        strategy_result = (
+            await self._execute_expert_stage(
+                session,
+                user=user,
+                task=task,
+                scope=scope,
+                codes=(AgentCode.CONTENT_DIRECTOR,),
+                purpose=(
+                    f"为《{parsed.brief.topic_or_product}》制定微信公众号文章内容策略；"
+                    "只输出专业策略，不以主 Agent 身份代写最终文章。"
+                ),
+                evidence_refs=[f"knowledge_entry:{row.id}" for row in knowledge_rows],
+                step_keys={
+                    AgentCode.CONTENT_DIRECTOR: (
+                        "wechat_article_production:content_strategy:02-content-director"
+                    )
+                },
+                upstream={
+                    "article_brief": parsed.brief.model_dump(mode="json"),
+                    "scoped_knowledge": scoped_knowledge,
+                },
+                lease_owner=lease_owner,
+            )
+        )[0]
+        citations = []
+        if knowledge_rows:
+            account = await session.get(Account, thread.account_id)
+            if account is None or account.client_id is None or thread.project_id is None:
+                raise PermissionError("WeChat article knowledge scope is unavailable")
+            citations = await record_knowledge_citations(
+                session,
+                rows=knowledge_rows,
+                org_id=user.org_id,
+                client_id=account.client_id,
+                project_id=thread.project_id,
+                task_id=task.id,
+                invocation_id=strategy_result.invocation.id,
+                agent_code=AgentCode.CONTENT_DIRECTOR.value,
+                context="wechat_article_production",
+            )
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="content_strategy",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="article_editing",
+            attempt=attempt,
+        )
+        editing_result = (
+            await self._execute_expert_stage(
+                session,
+                user=user,
+                task=task,
+                scope=scope,
+                codes=(AgentCode.EDITOR,),
+                purpose=(
+                    f"依据已确认策略编辑《{parsed.brief.topic_or_product}》的最终结构化公众号文章；"
+                    "不得输出 HTML，所有外部声明必须绑定给定 citation_id。"
+                ),
+                evidence_refs=[f"knowledge_citation:{row.id}" for row in citations],
+                step_keys={AgentCode.EDITOR: "wechat_article_production:article_editing:05-editor"},
+                upstream={
+                    "article_brief": parsed.brief.model_dump(mode="json"),
+                    "content_strategy": strategy_result.output,
+                    "knowledge_citations": [
+                        {
+                            "citation_id": row.id,
+                            "entry_id": row.entry_id,
+                            "entry_version": row.entry_version,
+                        }
+                        for row in citations
+                    ],
+                },
+                lease_owner=lease_owner,
+            )
+        )[0]
+        document = ArticleDocument.model_validate(editing_result.output.get("document"))
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="article_editing",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="visual_planning",
+            attempt=attempt,
+        )
+        visual_result = (
+            await self._execute_expert_stage(
+                session,
+                user=user,
+                task=task,
+                scope=scope,
+                codes=(AgentCode.ART_DIRECTOR,),
+                purpose=(
+                    f"为《{document.title}》规划图片槽位；只规划，不生成图片，"
+                    "并将槽位放在结构化文章正文之外。"
+                ),
+                evidence_refs=[f"knowledge_citation:{row.id}" for row in citations],
+                step_keys={
+                    AgentCode.ART_DIRECTOR: (
+                        "wechat_article_production:visual_planning:03-art-director"
+                    )
+                },
+                upstream={
+                    "article_brief": parsed.brief.model_dump(mode="json"),
+                    "document": document.model_dump(mode="json"),
+                },
+                lease_owner=lease_owner,
+            )
+        )[0]
+        slot_plans = [
+            WechatArticleImageSlotPlan.model_validate(value)
+            for value in visual_result.output.get("image_slots") or []
+        ]
+        if len({plan.stable_key for plan in slot_plans}) != len(slot_plans):
+            raise ValueError("WeChat article image slot stable_key values must be unique")
+        document = _insert_planned_image_slots(document, slot_plans)
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="visual_planning",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="compliance_and_fact_gate",
+            attempt=attempt,
+        )
+        created = await create_article(
+            session,
+            user,
+            account_id=thread.account_id,
+            document=document,
+        )
+        if created is None:
+            raise PermissionError("WeChat article account scope does not match")
+        article, _working_copy, immutable_version = created
+        immutable_version.thread_id = thread.id
+        immutable_version.turn_id = turn.id
+        immutable_version.run_id = run.id
+        immutable_version.skill_run_id = skill_run.id
+        slots = [
+            ArticleImageSlot(
+                content_item_id=article.id,
+                account_id=thread.account_id,
+                stable_key=plan.stable_key,
+                purpose=plan.purpose,
+                placement_after_block_id=plan.placement_after_block_id,
+                aspect_ratio=plan.aspect_ratio,
+                visual_brief=plan.visual_brief,
+                prompt_internal=plan.prompt_internal,
+                status=ArticleImageSlotStatus.PLANNED,
+            )
+            for plan in slot_plans
+        ]
+        session.add_all(slots)
+        await session.commit()
+        readiness = await validate_article_for_sync(
+            session,
+            version_id=immutable_version.id,
+            quality_review_available=self._critic is not None,
+        )
+        readiness_payload = readiness.model_dump(mode="json")
+        if slots:
+            readiness_payload["can_sync"] = False
+            readiness_payload["blockers"] = [
+                *readiness_payload["blockers"],
+                {
+                    "code": "IMAGE_SELECTION_REQUIRED",
+                    "message": "Select generated or uploaded images before draft sync.",
+                    "claim_id": None,
+                },
+            ]
+        readiness_payload["quality_review"] = {
+            "status": "available" if self._critic is not None else "unavailable"
+        }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="compliance_and_fact_gate",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="render_preview",
+            attempt=attempt,
+        )
+        preview_document = document.model_copy(
+            update={
+                "blocks": [
+                    block for block in document.blocks if not isinstance(block, ImageSlotBlock)
+                ]
+            }
+        )
+        preview = render_wechat_article(preview_document, {})
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="render_preview",
+            attempt=attempt,
+            commit=True,
+        )
+
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="waiting_user",
+            attempt=attempt,
+        )
+        slot_summary = [
+            {
+                "id": slot.id,
+                "stable_key": slot.stable_key,
+                "purpose": slot.purpose,
+                "status": slot.status.value,
+                "selected_material_id": slot.selected_material_id,
+            }
+            for slot in slots
+        ]
+        report = {
+            "article_id": article.id,
+            "current_immutable_version": immutable_version.version,
+            "image_slot_summary": slot_summary,
+            "citation_summary": {
+                "count": len(citations),
+                "citation_ids": [row.id for row in citations],
+            },
+            "readiness": {
+                **readiness_payload,
+                "preview": {
+                    "content_hash": preview.content_hash,
+                    "normalized_html": preview.normalized_html,
+                },
+            },
+            "explicit_user_decisions": [
+                {"action": "generate_images", "status": "not_requested"},
+                {"action": "sync_draft", "status": "not_requested"},
+            ],
+        }
+        skill_registry.get("wechat_article_production").output_model.model_validate(report)
+        response = (
+            f"《{document.title}》第 {immutable_version.version} 版已生成；"
+            "图片仍是规划槽位，尚未生成，也尚未同步到微信公众号草稿箱。"
+        )
+        interrupt = {
+            "kind": "article_action",
+            "article": document.title,
+            "article_id": article.id,
+            "article_version_id": immutable_version.id,
+            "available_actions": ["generate_images", "sync_draft"],
+        }
+        await request_interrupt(
+            session,
+            user=user,
+            run_id=run.id,
+            kind="clarification",
+            semantic_key=f"wechat-article-actions:{immutable_version.id}",
+            public_message=response,
+            action_label=f"选择《{document.title}》下一步",
+            response_schema={
+                "type": "object",
+                "required": ["action"],
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["generate_images", "sync_draft"],
+                    },
+                    "article_id": {"const": article.id},
+                    "article_version_id": {"const": immutable_version.id},
+                },
+                "additionalProperties": False,
+            },
+            skill_run_id=skill_run.id,
+        )
+        output = {
+            "status": "waiting_user",
+            "task_id": task.id,
+            "artifact_id": immutable_version.id,
+            "artifact_type": "wechat_article",
+            "report": report,
+            "response": response,
+            "interrupt": interrupt,
+        }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="waiting_user",
+            attempt=attempt,
+            commit=False,
+        )
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="waiting_user",
+            response=response,
+            output_snapshot=output,
+        )
+        return self._existing_result(skill_run)
+
+    async def _execute_wechat_draft_sync(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        attempt: int,
+        input_data: WechatArticleProductionInput,
+    ) -> SkillExecutionResult:
+        lineage = await session.execute(
+            select(ArticleWorkingCopy, Deliverable)
+            .join(
+                Deliverable,
+                Deliverable.content_item_id == ArticleWorkingCopy.content_item_id,
+            )
+            .where(
+                ArticleWorkingCopy.id == input_data.working_copy_id,
+                ArticleWorkingCopy.account_id == thread.account_id,
+                Deliverable.id == input_data.article_version_id,
+                Deliverable.type == DeliverableType.WECHAT_ARTICLE,
+                Deliverable.agent_code == "02-content-director",
+            )
+        )
+        owned_lineage = lineage.one_or_none()
+        if owned_lineage is None:
+            raise _ToolScopeMismatch("article version is outside the account scope")
+        working_copy, immutable_version = owned_lineage
+        if any(
+            dependency is None
+            for dependency in (
+                self._wechat_capability_probe,
+                self._wechat_token_provider,
+                self._wechat_draft_client,
+            )
+        ):
+            raise RuntimeError("WECHAT_DRAFT_SYNC_UNAVAILABLE")
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="brief_resolution",
+            attempt=attempt,
+            commit=True,
+        )
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="compliance_and_fact_gate",
+            attempt=attempt,
+        )
+        job = await prepare_wechat_draft_sync_job(
+            session,
+            user,
+            article_id=working_copy.content_item_id,
+            request=SyncWechatDraftRequest(
+                article_version_id=immutable_version.id,
+                idempotency_key=str(input_data.idempotency_key),
+            ),
+        )
+        job = await execute_wechat_draft_sync_job(
+            session,
+            user,
+            job_id=job.id,
+            capability_probe=self._wechat_capability_probe,
+            token_provider=self._wechat_token_provider,
+            draft_client=self._wechat_draft_client,
+        )
+        report = {
+            "article_id": working_copy.content_item_id,
+            "current_immutable_version": immutable_version.version,
+            "image_slot_summary": [],
+            "citation_summary": {},
+            "readiness": {
+                "status": "draft_sync_completed",
+                "sync_job_id": job.id,
+                "sync_status": getattr(job.status, "value", str(job.status)),
+                "external_media_id": job.external_media_id,
+            },
+            "explicit_user_decisions": [
+                {
+                    "action": "sync_draft",
+                    "status": "executed",
+                    "article_version_id": immutable_version.id,
+                }
+            ],
+        }
+        skill_registry.get("wechat_article_production").output_model.model_validate(report)
+        article_title = ArticleDocument.model_validate(working_copy.document).title
+        response = (
+            f"《{article_title}》第 {immutable_version.version} 版已同步到微信公众号草稿箱；"
+            "未调用 freepublish 提交。"
+        )
+        output = {
+            "status": "completed",
+            "task_id": task.id,
+            "artifact_id": immutable_version.id,
+            "artifact_type": "wechat_article",
+            "report": report,
+            "response": response,
+        }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="compliance_and_fact_gate",
+            attempt=attempt,
+            commit=False,
+        )
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=response,
+            output_snapshot=output,
+        )
+        return self._existing_result(skill_run)
+
+    async def _execute_wechat_image_generation(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        thread: ConversationThread,
+        turn: ConversationTurn,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        attempt: int,
+        input_data: WechatArticleProductionInput,
+    ) -> SkillExecutionResult:
+        working_copy = await session.scalar(
+            select(ArticleWorkingCopy).where(
+                ArticleWorkingCopy.id == input_data.working_copy_id,
+                ArticleWorkingCopy.account_id == thread.account_id,
+            )
+        )
+        if working_copy is None:
+            raise _ToolScopeMismatch("article working copy is outside the account scope")
+        if self._image_generation_provider is None:
+            raise RuntimeError("WECHAT_IMAGE_GENERATION_UNAVAILABLE")
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="brief_resolution",
+            attempt=attempt,
+            commit=True,
+        )
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="visual_planning",
+            attempt=attempt,
+        )
+        service = WechatArticleImageService(
+            session=session,
+            user=user,
+            provider=self._image_generation_provider,
+        )
+        generated = await service.generate_all(
+            working_copy.content_item_id,
+            idempotency_key=str(input_data.idempotency_key),
+        )
+        if generated is None:
+            raise _ToolScopeMismatch("article is outside the account scope")
+        slots = list(
+            await session.scalars(
+                select(ArticleImageSlot)
+                .where(
+                    ArticleImageSlot.content_item_id == working_copy.content_item_id,
+                    ArticleImageSlot.account_id == thread.account_id,
+                )
+                .order_by(ArticleImageSlot.id)
+            )
+        )
+        immutable_version = (
+            await session.get(Deliverable, working_copy.based_on_deliverable_id)
+            if working_copy.based_on_deliverable_id is not None
+            else None
+        )
+        report = {
+            "article_id": working_copy.content_item_id,
+            "current_immutable_version": (
+                immutable_version.version if immutable_version is not None else None
+            ),
+            "image_slot_summary": [
+                {
+                    "id": slot.id,
+                    "stable_key": slot.stable_key,
+                    "purpose": slot.purpose,
+                    "status": slot.status.value,
+                    "selected_material_id": slot.selected_material_id,
+                }
+                for slot in slots
+            ],
+            "citation_summary": {},
+            "readiness": {
+                "status": "images_generated",
+                "requested_slot_ids": generated.requested_slot_ids,
+                "material_ids": generated.material_ids,
+                "failed_slot_ids": generated.failed_slot_ids,
+            },
+            "explicit_user_decisions": [{"action": "generate_images", "status": "executed"}],
+        }
+        skill_registry.get("wechat_article_production").output_model.model_validate(report)
+        response = (
+            f"《{ArticleDocument.model_validate(working_copy.document).title}》的已规划图片生成完成；"
+            "请逐个选择图片后，再单独确认同步微信公众号草稿。"
+        )
+        output = {
+            "status": "completed",
+            "task_id": task.id,
+            "artifact_id": immutable_version.id if immutable_version is not None else None,
+            "artifact_type": "wechat_article",
+            "report": report,
+            "response": response,
+        }
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="visual_planning",
+            attempt=attempt,
+            commit=False,
+        )
+        await self._close_skill_state(
+            session,
+            thread=thread,
+            turn=turn,
+            run=run,
+            task=task,
+            skill_run=skill_run,
+            status="completed",
+            response=response,
+            output_snapshot=output,
+        )
+        return self._existing_result(skill_run)
+
+    async def _pause_wechat_for_required_fields(
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        run: AgentRun,
+        task: BrainTask,
+        skill_run: SkillRun,
+        scope: RuntimeScope,
+        attempt: int,
+        article_name: str,
+        action: str,
+        required_fields: list[str],
+        semantic_key: str,
+    ) -> SkillExecutionResult:
+        interrupt = {
+            "kind": "clarification",
+            "required_fields": required_fields,
+            "article": article_name,
+            "action": action,
+        }
+        response = (
+            f"执行《{article_name}》的 {action} 前还需要补充：" + "、".join(required_fields) + "。"
+        )
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="brief_resolution",
+            attempt=attempt,
+            commit=True,
+        )
+        await _start_skill_stage(
+            session,
+            scope=scope,
+            step_code="waiting_user",
+            attempt=attempt,
+        )
+        await request_interrupt(
+            session,
+            user=user,
+            run_id=run.id,
+            kind="clarification",
+            semantic_key=semantic_key,
+            public_message=response,
+            action_label=f"补充《{article_name}》操作信息",
+            response_schema={
+                "type": "object",
+                "required": required_fields,
+                "properties": {
+                    field: (
+                        {"type": "boolean"}
+                        if field == "sync_confirmed"
+                        else {"type": "object"}
+                        if field == "primary_cta"
+                        else {"type": "string"}
+                    )
+                    for field in required_fields
+                },
+                "additionalProperties": False,
+            },
+            skill_run_id=skill_run.id,
+        )
+        output = {
+            "status": "waiting_user",
+            "task_id": task.id,
+            "artifact_id": None,
+            "artifact_type": "wechat_article",
+            "report": {
+                "article_id": None,
+                "current_immutable_version": None,
+                "image_slot_summary": [],
+                "citation_summary": {},
+                "readiness": {"status": "needs_input"},
+                "explicit_user_decisions": [],
+            },
+            "response": response,
+            "interrupt": interrupt,
+        }
+        skill_run.output_snapshot = output
+        await _complete_skill_stage(
+            session,
+            scope=scope,
+            step_code="waiting_user",
+            attempt=attempt,
+            commit=True,
+        )
+        return self._existing_result(skill_run)
 
     async def _execute_content_publishing(
         self,
@@ -3774,7 +4653,59 @@ class SkillRuntime:
             report=dict(output.get("report") or {}),
             response=response,
             error_code=output.get("error_code") or skill_run.error_code,
+            interrupt=(
+                dict(output["interrupt"]) if isinstance(output.get("interrupt"), dict) else None
+            ),
         )
+
+
+def _missing_article_brief_fields(value: dict[str, Any]) -> list[str]:
+    try:
+        from app.schemas.wechat_article import ArticleBrief
+
+        ArticleBrief.model_validate(value)
+    except Exception as exc:
+        errors = getattr(exc, "errors", lambda: [])()
+        return sorted(
+            {
+                ".".join(str(part) for part in error["loc"])
+                for error in errors
+                if error.get("type") == "missing"
+            }
+        )
+    return []
+
+
+def _insert_planned_image_slots(
+    document: ArticleDocument,
+    plans: list[WechatArticleImageSlotPlan],
+) -> ArticleDocument:
+    """Apply only Art Director-owned placement metadata to the expert document."""
+
+    blocks = list(document.blocks)
+    block_ids = {block.block_id for block in blocks}
+    for plan in plans:
+        block_id = f"image-{plan.stable_key}"
+        if block_id in block_ids:
+            raise ValueError("planned image slot block_id collides with article document")
+        image_block = ImageSlotBlock(
+            block_id=block_id,
+            type="imageSlot",
+            slot_key=plan.stable_key,
+        )
+        placement = plan.placement_after_block_id
+        if placement is None:
+            blocks.append(image_block)
+        else:
+            insertion = next(
+                (index + 1 for index, block in enumerate(blocks) if block.block_id == placement),
+                None,
+            )
+            if insertion is None:
+                raise ValueError("planned image slot placement block does not exist")
+            blocks.insert(insertion, image_block)
+        block_ids.add(block_id)
+    return document.model_copy(update={"blocks": blocks})
 
 
 def _operating_tool_arguments(

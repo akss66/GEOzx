@@ -33,6 +33,7 @@ const workingTurn: WorkTurnViewModel = {
   steps: [{ code: "review", label: "核对账号数据", state: "active" }],
   experts: [{ name: "账号定位专家", status: "completed" }],
   deliverableIds: [],
+  articleWorkspaceAction: null,
   assistant: {
     identity: "运营大脑",
     steps: [{ code: "review", label: "核对账号数据", state: "active" }],
@@ -244,5 +245,29 @@ describe("WorkTurnCard", () => {
     fireEvent.keyDown(technicalToggle, { key: " " });
     fireEvent.click(technicalToggle);
     expect(technicalToggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("renders the WeChat article handoff as a semantic workspace link and keeps technical detail collapsed", () => {
+    render(
+      <WorkTurnCard
+        view={{
+          ...completedTurn,
+          assistantText: "文章初稿已生成",
+          articleWorkspaceAction: {
+            articleId: 42,
+            href: "/wechat-articles/42",
+            label: "打开文章工作台",
+            title: "文章初稿已生成",
+          },
+        }}
+        technicalLog={["skill_run=91", "article_id=42"]}
+      />,
+    );
+
+    expect(screen.getByText("文章初稿已生成")).toBeVisible();
+    expect(screen.getByRole("link", { name: "打开文章工作台" }))
+      .toHaveAttribute("href", "/wechat-articles/42");
+    expect(screen.queryByText("skill_run=91")).not.toBeInTheDocument();
+    expect(screen.queryByText("article_id=42")).not.toBeInTheDocument();
   });
 });

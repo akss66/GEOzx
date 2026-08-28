@@ -69,6 +69,49 @@ class PlatformAccountAuthOut(BaseModel):
     updated_at: datetime
 
 
+class WechatAuthorizationGrant(BaseModel):
+    authorizer_appid: str
+    authorizer_access_token: str | None
+    authorizer_refresh_token: str | None
+    expires_in: int | None
+    func_info: list[int]
+
+
+class CapabilityState(BaseModel):
+    can_use: bool
+    reason: str | None = None
+    permission_ids: list[int] = Field(default_factory=list)
+
+
+class WechatCapabilitySnapshot(BaseModel):
+    account_id: int
+    upload_article_image: CapabilityState
+    add_permanent_material: CapabilityState
+    draft_add: CapabilityState
+    draft_get: CapabilityState
+    draft_update: CapabilityState
+    analytics: CapabilityState
+    freepublish: CapabilityState
+    checked_at: datetime
+
+
+class WechatAuthorizationSessionRequest(BaseModel):
+    client_id: int | None = Field(default=None, gt=0)
+    project_id: int | None = Field(default=None, gt=0)
+    knowledge_base_id: int | None = Field(default=None, gt=0)
+
+
+class WechatAuthorizationSessionOut(BaseModel):
+    authorization_url: str
+    expires_at: datetime
+    state_id: str
+
+
+class WechatPreAuthCodeResponse(BaseModel):
+    pre_auth_code: str = Field(min_length=1, max_length=512)
+    expires_in: int = Field(gt=0)
+
+
 class DouyinAuthorizeRequest(BaseModel):
     account_id: int
 

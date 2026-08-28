@@ -49,6 +49,7 @@ from app.api import (
     turn_events,
     turn_interrupts,
     users,
+    wechat_articles,
     workspace_context,
     ws,
 )
@@ -145,6 +146,7 @@ app.include_router(metrics.router)
 app.include_router(matrix_distribution.router)
 app.include_router(materials.router)
 app.include_router(risks.router)
+app.include_router(wechat_articles.router)
 
 
 @app.get("/", tags=["system"])

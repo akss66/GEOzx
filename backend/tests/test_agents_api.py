@@ -372,6 +372,7 @@ async def test_direct_agent_run_creates_real_artifact_and_pending_acceptance(
         source_type="manual",
         source_label="用户访谈",
         version=1,
+        verification_status="verified",
         created_by_id=admin.id,
         payload={},
     )

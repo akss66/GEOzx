@@ -190,6 +190,16 @@ def route_deterministic_request(
             registry=registry,
             has_account=has_account,
         )
+    if _is_wechat_article_request(normalized):
+        route = _published_skill_route(
+            skill_code="wechat_article_production",
+            platform=platform,
+            registry=registry,
+            has_account=has_account,
+        )
+        if route is not None and route.mode is TurnExecutionMode.SKILL:
+            return route.model_copy(update={"reason": "deterministic_wechat_article_production"})
+        return route
     if _is_metric_lookup(normalized):
         return _query_route("deterministic_metric_query")
     if _is_question(normalized):
@@ -574,6 +584,14 @@ def _is_data_query(message: str) -> bool:
         _contains_any(message, _QUERY_VERBS)
         and _contains_any(message, _QUERY_TARGETS)
         and not _contains_any(message, _OPERATION_TERMS)
+    )
+
+
+def _is_wechat_article_request(message: str) -> bool:
+    return (
+        any(term in message for term in ("公众号", "微信公众号"))
+        and any(term in message for term in ("文章", "推文", "长文"))
+        and any(term in message for term in ("写", "制作", "生成", "创作", "起草", "改写", "编辑"))
     )
 
 

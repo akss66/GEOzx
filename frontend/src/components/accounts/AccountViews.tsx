@@ -13,6 +13,7 @@ const PLATFORM_LABEL: Record<Platform, string> = {
   douyin: "抖音",
   xiaohongshu: "小红书",
   shipinhao: "视频号",
+  wechat_official_account: "微信公众号",
 };
 
 interface AccountCollectionProps {

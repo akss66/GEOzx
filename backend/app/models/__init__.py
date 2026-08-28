@@ -64,17 +64,29 @@ from app.models.identity import (
     User,
     UserDeletionPreviewReservation,
 )
-from app.models.knowledge import KnowledgeCitation, KnowledgeEntry, KnowledgeSuggestion
+from app.models.knowledge import (
+    AccountKnowledgeBinding,
+    KnowledgeBase,
+    KnowledgeCitation,
+    KnowledgeEntry,
+    KnowledgeSuggestion,
+)
 from app.models.llm import LLMCall
 from app.models.material import MaterialAsset
 from app.models.memory import RuntimeMemory
 from app.models.metrics import AccountReviewGoal, MetricSnapshot
 from app.models.orchestration import AgentTask, Event, GateApproval
-from app.models.platform import PlatformAccountAuth, PlatformIntegration
+from app.models.platform import PlatformAccountAuth, PlatformIntegration, WechatComponentCredential
 from app.models.publishing import PlatformPublishJob
 from app.models.run_revision import RunRevision, SkillStageCheckpoint
 from app.models.skill_runtime import SkillRun
 from app.models.turn_interrupt import TurnInterrupt
+from app.models.wechat_article import (
+    ArticleImageSlot,
+    ArticleVersionCitation,
+    ArticleWorkingCopy,
+    WechatDraftMapping,
+)
 from app.models.workspace import Account, AccountGroup, Project
 
 __all__ = [
@@ -138,6 +150,8 @@ __all__ = [
     "Event",
     "GateApproval",
     "KnowledgeEntry",
+    "KnowledgeBase",
+    "AccountKnowledgeBinding",
     "KnowledgeSuggestion",
     "KnowledgeCitation",
     "ModelConfig",
@@ -152,5 +166,10 @@ __all__ = [
     "OptimizationSuggestion",
     "PlatformIntegration",
     "PlatformAccountAuth",
+    "WechatComponentCredential",
+    "ArticleWorkingCopy",
+    "ArticleImageSlot",
+    "ArticleVersionCitation",
+    "WechatDraftMapping",
     "PlatformPublishJob",
 ]

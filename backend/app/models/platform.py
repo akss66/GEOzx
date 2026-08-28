@@ -51,6 +51,26 @@ class PlatformIntegration(Base, TimestampMixin):
         return bool(self.client_secret_ref)
 
 
+class WechatComponentCredential(Base, TimestampMixin):
+    """Encrypted WeChat Open Platform component credentials."""
+
+    __tablename__ = "wechat_component_credentials"
+    __table_args__ = (
+        UniqueConstraint("platform_integration_id", name="uq_wechat_component_integration"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    platform_integration_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_integrations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    component_verify_ticket_encrypted: Mapped[str | None] = mapped_column(Text)
+    ticket_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    component_access_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
 class PlatformAccountAuth(Base, TimestampMixin):
     """Per-account official authorization and sync state."""
 

@@ -67,7 +67,8 @@ export function presentWorkTurnActivity(turn: WorkTurnActivityInput): string | n
   const phaseActivity = turn.phase ? ACTIVITY_BY_PHASE[turn.phase] : null;
   if (phaseActivity) return phaseActivity;
 
-  const activeStep = turn.steps.find((step) => step.state === "active" || step.state === "waiting");
+  const activeStep = turn.steps.find((step) => step.state === "active")
+    ?? turn.steps.find((step) => step.state === "waiting");
   if (activeStep) return activeStep.label;
   if (["queued", "claimed", "waiting_predecessor"].includes(turn.persistedStatus ?? "")) {
     return "等待执行";

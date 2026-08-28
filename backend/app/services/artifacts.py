@@ -100,6 +100,9 @@ _BUSINESS_ARTIFACT_DATABASE_TYPES: dict[str, frozenset[DeliverableType]] = {
     "ad_plan": frozenset({DeliverableType.AD_PLAN}),
     "cs_record": frozenset({DeliverableType.CS_RECORD}),
     "operation_execution_plan": frozenset({DeliverableType.REVIEW_REPORT}),
+    "wechat_article": frozenset({DeliverableType.WECHAT_ARTICLE}),
+    "wechat_image_plan": frozenset({DeliverableType.WECHAT_IMAGE_PLAN}),
+    "wechat_rendered_article": frozenset({DeliverableType.WECHAT_RENDERED_ARTICLE}),
 }
 _ACCOUNT_INSPECTION_FIELDS = {
     "data_sufficiency",
@@ -293,7 +296,11 @@ def _normalize_artifact_types(
         values.extend(artifact_types)
     if not values:
         return None
-    return frozenset(_normalize_artifact_type(value) for value in values)
+    return frozenset(
+        normalized
+        for value in values
+        if (normalized := _normalize_artifact_type(value)) is not None
+    )
 
 
 async def _business_artifact_type(
@@ -336,8 +343,7 @@ async def list_artifacts(
         filters.append(Deliverable.status == _ARTIFACT_TO_STATUS[artifact_status])
     if created_from is not None:
         filters.append(
-            Deliverable.created_at
-            >= datetime.combine(created_from, time.min, tzinfo=UTC)
+            Deliverable.created_at >= datetime.combine(created_from, time.min, tzinfo=UTC)
         )
     if created_to is not None:
         filters.append(
@@ -576,9 +582,7 @@ async def accept_artifact(
         artifact_id,
         roles=ARTIFACT_ACTION_ROLES,
     )
-    acceptance_lock = await lock_composite_artifact_acceptance(
-        session, artifact=selected
-    )
+    acceptance_lock = await lock_composite_artifact_acceptance(session, artifact=selected)
     selected = acceptance_lock.artifact
     latest_version = await _require_latest_artifact_version(session, selected)
     if selected.status == DeliverableStatus.SUPERSEDED or selected.version != latest_version:
@@ -727,9 +731,7 @@ def _validate_revision_payload(
         and "optimization_suggestions" not in normalized_payload
         and "recommendations" in normalized_payload
     ):
-        normalized_payload["optimization_suggestions"] = normalized_payload[
-            "recommendations"
-        ]
+        normalized_payload["optimization_suggestions"] = normalized_payload["recommendations"]
     if (
         deliverable_type == DeliverableType.VIDEO_SCRIPT
         and "presentation_format" not in normalized_payload
@@ -737,9 +739,7 @@ def _validate_revision_payload(
     ):
         normalized_payload["presentation_format"] = source_payload["presentation_format"]
     business_payload = {
-        key: normalized_payload[key]
-        for key in schema.model_fields
-        if key in normalized_payload
+        key: normalized_payload[key] for key in schema.model_fields if key in normalized_payload
     }
     try:
         return validate_payload(deliverable_type, business_payload).model_dump(mode="json")
@@ -911,9 +911,7 @@ def _artifact_presentation(
 ) -> ArtifactPresentationOut:
     if artifact_type == DeliverableType.VIDEO_SCRIPT.value:
         script_format = presentation_format or "storyboard"
-        type_label, completion_noun, detail_action_label = _SCRIPT_PRESENTATIONS[
-            script_format
-        ]
+        type_label, completion_noun, detail_action_label = _SCRIPT_PRESENTATIONS[script_format]
         completion_label = f"已生成 1 条可直接拍摄的{completion_noun}"
     elif artifact_type == DeliverableType.TOPIC_PLAN.value:
         count = _structured_list_count(payload, "topics")
@@ -942,8 +940,7 @@ def _artifact_presentation(
         completion_label=completion_label,
         status_label=(
             "已完成"
-            if artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE
-            and artifact_status == "accepted"
+            if artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE and artifact_status == "accepted"
             else _ARTIFACT_STATUS_LABELS[artifact_status]
         ),
         detail_action_label=detail_action_label,
@@ -969,19 +966,12 @@ def _artifact_next_actions(
     executable_specs: list[ActionSpec] = [
         (definition.code, definition.label, definition.requires_confirmation)
         for definition in SERVER_ACTIONS.values()
-        if (
-            definition.artifact_types is None
-            or artifact_type in definition.artifact_types
-        )
+        if (definition.artifact_types is None or artifact_type in definition.artifact_types)
         and deliverable_type in definition.deliverable_types
         and artifact_status in definition.statuses
         and (
             not definition.requires_thread
-            or (
-                has_thread
-                and thread_owner_id is not None
-                and thread_owner_id == actor_user_id
-            )
+            or (has_thread and thread_owner_id is not None and thread_owner_id == actor_user_id)
         )
     ]
     specs = (*executable_specs, _EXPORT_ACTION)
@@ -1039,16 +1029,12 @@ def _artifact_sections(
         if not section_payload.get("recommendations") and section_payload.get(
             "optimization_suggestions"
         ):
-            section_payload["recommendations"] = section_payload[
-                "optimization_suggestions"
-            ]
+            section_payload["recommendations"] = section_payload["optimization_suggestions"]
         section_payload.pop("optimization_suggestions", None)
     elif business_artifact_type == _ACCOUNT_ANALYSIS_ARTIFACT_TYPE:
         allowed_fields.update(_ACCOUNT_ANALYSIS_FIELDS)
         section_payload = {
-            key: payload[key]
-            for key in _ACCOUNT_ANALYSIS_SECTION_FIELDS
-            if key in payload
+            key: payload[key] for key in _ACCOUNT_ANALYSIS_SECTION_FIELDS if key in payload
         }
     sections: list[ArtifactSection] = []
     for key, value in section_payload.items():
@@ -1182,9 +1168,7 @@ def _evidence_summary(
         )
         group["count"] += 1
         metric = (
-            candidate.get("metric")
-            or candidate.get("metric_name")
-            or candidate.get("metric_code")
+            candidate.get("metric") or candidate.get("metric_name") or candidate.get("metric_code")
         )
         if isinstance(metric, str) and metric.strip():
             normalized_metric = metric.strip()
@@ -1212,9 +1196,7 @@ def _evidence_summary(
     )
 
 
-def _evidence_candidates(
-    payload: dict[str, Any], quality: AgentQualityScore | None
-) -> list[Any]:
+def _evidence_candidates(payload: dict[str, Any], quality: AgentQualityScore | None) -> list[Any]:
     candidates: list[Any] = []
     raw_payload_refs = payload.get("evidence_refs", [])
     if isinstance(raw_payload_refs, list):

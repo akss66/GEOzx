@@ -5,7 +5,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -21,13 +34,47 @@ class KnowledgeEntry(Base, TimestampMixin):
     """A reviewed knowledge document available to agents in one client scope."""
 
     __tablename__ = "knowledge_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "entry_kind IN ('document', 'product_fact', 'policy', 'case', 'brand_voice', "
+            "'asset_reference')",
+            name="ck_knowledge_entries_entry_kind",
+        ),
+        CheckConstraint(
+            "verification_status IN ('draft', 'verified', 'rejected', 'expired')",
+            name="ck_knowledge_entries_verification_status",
+        ),
+        CheckConstraint(
+            "effective_at IS NULL OR expires_at IS NULL OR effective_at <= expires_at",
+            name="ck_knowledge_entries_validity_range",
+        ),
+        CheckConstraint(
+            "(knowledge_base_id IS NULL AND knowledge_base_kind IS NULL "
+            "AND client_id IS NOT NULL) OR "
+            "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'brand' "
+            "AND knowledge_base_kind IS NOT NULL AND client_id IS NOT NULL) OR "
+            "(knowledge_base_id IS NOT NULL AND knowledge_base_kind = 'organization_shared' "
+            "AND knowledge_base_kind IS NOT NULL AND client_id IS NULL)",
+            name="ck_knowledge_entries_scope_kind_client",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "org_id", "knowledge_base_kind"],
+            ["knowledge_bases.id", "knowledge_bases.org_id", "knowledge_bases.kind"],
+            name="fk_knowledge_entries_base_org_kind",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "client_id"],
+            ["knowledge_bases.id", "knowledge_bases.client_id"],
+            name="fk_knowledge_entries_base_client",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    client_id: Mapped[int] = mapped_column(
-        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=False
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=True
     )
     project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
@@ -47,12 +94,140 @@ class KnowledgeEntry(Base, TimestampMixin):
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
+    knowledge_base_id: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    knowledge_base_kind: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    entry_kind: Mapped[str] = mapped_column(
+        String(40), default="document", index=True, nullable=False
+    )
+    verification_status: Mapped[str] = mapped_column(
+        String(40), default="draft", index=True, nullable=False
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    source_attachment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_attachments.id", ondelete="SET NULL"), nullable=True
+    )
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    allowed_for_external_claim: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
 
     org: Mapped[Org] = relationship()  # noqa: F821
-    client: Mapped[Client] = relationship()  # noqa: F821
+    client: Mapped[Client | None] = relationship()  # noqa: F821
     project: Mapped[Project | None] = relationship()  # noqa: F821
     citations: Mapped[list[KnowledgeCitation]] = relationship(
         back_populates="entry", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeBase(Base, TimestampMixin):
+    """An organization-owned knowledge scope for one brand or shared policy."""
+
+    __tablename__ = "knowledge_bases"
+    __table_args__ = (
+        CheckConstraint(
+            "(kind = 'brand' AND client_id IS NOT NULL) OR "
+            "(kind = 'organization_shared' AND client_id IS NULL)",
+            name="ck_knowledge_bases_kind_client_scope",
+        ),
+        CheckConstraint(
+            "kind IN ('brand', 'organization_shared')",
+            name="ck_knowledge_bases_kind",
+        ),
+        UniqueConstraint("id", "org_id", "kind", name="uq_knowledge_bases_id_org_kind"),
+        UniqueConstraint("id", "client_id", name="uq_knowledge_bases_id_client"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="active", index=True, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+
+
+class AccountKnowledgeBinding(Base, TimestampMixin):
+    """Explicit account attachment for a reusable organization knowledge base."""
+
+    __tablename__ = "account_knowledge_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "binding_type IN ('primary_brand', 'shared')",
+            name="ck_account_knowledge_bindings_type",
+        ),
+        CheckConstraint(
+            "(binding_type = 'primary_brand' AND knowledge_base_kind = 'brand' "
+            "AND client_id IS NOT NULL) OR "
+            "(binding_type = 'shared' AND knowledge_base_kind = 'organization_shared' "
+            "AND client_id IS NULL)",
+            name="ck_account_knowledge_bindings_scope_type",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "org_id"],
+            ["accounts.id", "accounts.org_id"],
+            name="fk_account_knowledge_bindings_account_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "org_id", "knowledge_base_kind"],
+            ["knowledge_bases.id", "knowledge_bases.org_id", "knowledge_bases.kind"],
+            name="fk_account_knowledge_bindings_base_org_kind",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "client_id"],
+            ["accounts.id", "accounts.client_id"],
+            name="fk_account_knowledge_bindings_account_client",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "client_id"],
+            ["knowledge_bases.id", "knowledge_bases.client_id"],
+            name="fk_account_knowledge_bindings_base_client",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_account_knowledge_bindings_active_primary_brand",
+            "account_id",
+            unique=True,
+            postgresql_where=text("binding_type = 'primary_brand' AND status = 'active'"),
+            sqlite_where=text("binding_type = 'primary_brand' AND status = 'active'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    knowledge_base_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    knowledge_base_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    client_id: Mapped[int | None] = mapped_column(BigIntPK, index=True, nullable=True)
+    binding_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", index=True, nullable=False)
+    bound_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    bound_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
@@ -101,6 +276,9 @@ class KnowledgeCitation(Base):
     """An immutable record of an agent/task using a knowledge entry."""
 
     __tablename__ = "knowledge_citations"
+    __table_args__ = (
+        Index("ix_knowledge_citations_entry_id_version", "entry_id", "entry_version"),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     org_id: Mapped[int] = mapped_column(
@@ -115,6 +293,14 @@ class KnowledgeCitation(Base):
     entry_id: Mapped[int] = mapped_column(
         ForeignKey("knowledge_entries.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    entry_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_label: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    verification_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    allowed_for_external_claim: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     task_id: Mapped[int | None] = mapped_column(
         ForeignKey("brain_tasks.id", ondelete="SET NULL"), index=True, nullable=True
     )

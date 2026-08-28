@@ -13,6 +13,10 @@ import {
   listAccounts,
   replaceAccountAssignments,
 } from "../api/workspace";
+import {
+  createWechatAuthorizationSession,
+  getWechatAccountCapabilities,
+} from "../services/wechatIntegration";
 import Accounts from "./Accounts";
 
 const workspaceMocks = vi.hoisted(() => ({
@@ -53,6 +57,12 @@ vi.mock("../api/workspace", () => ({
   updateClient: vi.fn(),
   updatePlatformIntegration: vi.fn(),
   updateProject: vi.fn(),
+}));
+
+vi.mock("../services/wechatIntegration", () => ({
+  createWechatAuthorizationSession: vi.fn(),
+  getWechatAccountCapabilities: vi.fn(),
+  isOfficialWechatAuthorizationUrl: vi.fn((value: string) => value.startsWith("https://mp.weixin.qq.com/")),
 }));
 
 vi.mock("../stores/auth", () => ({
@@ -193,6 +203,168 @@ describe("Accounts", () => {
     expect(await screen.findByText("投流回收")).toBeInTheDocument();
     expect(screen.getByText("开放平台待开通")).toBeInTheDocument();
     expect(screen.getByText(/task.posting.user_verification/)).toBeInTheDocument();
+  });
+
+  it("opens the exact official WeChat authorization URL without rendering secrets", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([
+      {
+        id: 18,
+        nickname: "品牌公众号",
+        platform: "wechat_official_account",
+        group_id: null,
+        project_id: null,
+        status: "active",
+        external_account_id: null,
+        integration_status: "oauth_ready",
+        auth_status: "unauthorized",
+        data_sync_status: "not_configured",
+        created_at: "2026-08-12T00:00:00Z",
+      },
+    ]);
+    vi.mocked(createWechatAuthorizationSession).mockResolvedValueOnce({
+      authorizationUrl:
+        "https://mp.weixin.qq.com/cgi-bin/componentloginpage?pre_auth_code=official-code",
+      expiresAt: "2026-08-12T12:00:00Z",
+      stateId: "opaque-reference",
+    });
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "授权微信公众号 品牌公众号" }));
+
+    await waitFor(() => expect(createWechatAuthorizationSession).toHaveBeenCalledWith({}));
+    expect(open).toHaveBeenCalledWith(
+      "https://mp.weixin.qq.com/cgi-bin/componentloginpage?pre_auth_code=official-code",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(document.body).not.toHaveTextContent("official-code");
+    expect(JSON.stringify(sessionStorage)).not.toContain("opaque-reference");
+    open.mockRestore();
+  });
+
+  it("explains how to recover when WeChat authorization configuration is missing", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([{
+      id: 18,
+      nickname: "品牌公众号",
+      platform: "wechat_official_account",
+      group_id: null,
+      project_id: null,
+      status: "active",
+      external_account_id: null,
+      integration_status: "oauth_ready",
+      auth_status: "unauthorized",
+      data_sync_status: "not_configured",
+      created_at: "2026-08-12T00:00:00Z",
+    }]);
+    vi.mocked(createWechatAuthorizationSession).mockRejectedValueOnce({
+      response: {
+        status: 422,
+        data: { detail: "missing client_key and redirect_uri; raw-secret" },
+      },
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "授权微信公众号 品牌公众号" }));
+
+    expect(await screen.findByText(
+      "请联系管理员配置微信公众号第三方平台 AppID 和授权回调地址",
+    )).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("raw-secret");
+  });
+
+  it("renders actionable WeChat capability states and keeps freepublish disabled", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([
+      {
+        id: 19,
+        nickname: "已授权公众号",
+        platform: "wechat_official_account",
+        group_id: null,
+        project_id: null,
+        status: "active",
+        external_account_id: "wx-app",
+        integration_status: "connected",
+        auth_status: "authorized",
+        data_sync_status: "healthy",
+        created_at: "2026-08-12T00:00:00Z",
+      },
+    ]);
+    vi.mocked(getWechatAccountCapabilities).mockResolvedValueOnce({
+      accountId: 19,
+      uploadArticleImage: { canUse: true, reason: null, permissionIds: [11] },
+      addPermanentMaterial: {
+        canUse: false,
+        reason: "component_permission_missing",
+        permissionIds: [11],
+      },
+      draftAdd: { canUse: false, reason: "account_permission_missing", permissionIds: [11] },
+      draftGet: { canUse: false, reason: "account_not_verified", permissionIds: [11] },
+      draftUpdate: { canUse: false, reason: "live_probe_failed", permissionIds: [11] },
+      analytics: {
+        canUse: false,
+        reason: "account_qualification_unknown",
+        permissionIds: [7],
+      },
+      freepublish: { canUse: true, reason: null, permissionIds: [11] },
+      checkedAt: "2026-08-12T00:00:00Z",
+    });
+
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看微信能力 已授权公众号" }),
+    );
+
+    expect(await screen.findByText("上传图文图片")).toBeInTheDocument();
+    expect(screen.getByText("可用")).toBeInTheDocument();
+    expect(screen.getByText("开放平台组件缺少权限")).toBeInTheDocument();
+    expect(screen.getByText("公众号尚未授权所需权限")).toBeInTheDocument();
+    expect(screen.getByText("公众号未认证")).toBeInTheDocument();
+    expect(screen.getByText("实时探测失败，请稍后重试")).toBeInTheDocument();
+    expect(screen.getByText("公众号资质未知")).toBeInTheDocument();
+    expect(screen.getByText("首版未开启")).toBeInTheDocument();
+  });
+
+  it("isolates WeChat capability data when a different account is inspected", async () => {
+    vi.mocked(listAccounts).mockResolvedValueOnce([
+      {
+        id: 21, nickname: "甲公众号", platform: "wechat_official_account", group_id: null,
+        project_id: null, status: "active", external_account_id: "wx-a",
+        integration_status: "connected", auth_status: "authorized", data_sync_status: "healthy",
+        created_at: "2026-08-12T00:00:00Z",
+      },
+      {
+        id: 22, nickname: "乙公众号", platform: "wechat_official_account", group_id: null,
+        project_id: null, status: "active", external_account_id: "wx-b",
+        integration_status: "connected", auth_status: "authorized", data_sync_status: "healthy",
+        created_at: "2026-08-12T00:00:00Z",
+      },
+    ]);
+    const snapshot = (accountId: number, reason: string | null) => ({
+      accountId,
+      uploadArticleImage: { canUse: reason == null, reason, permissionIds: [11] },
+      addPermanentMaterial: { canUse: true, reason: null, permissionIds: [11] },
+      draftAdd: { canUse: true, reason: null, permissionIds: [11] },
+      draftGet: { canUse: true, reason: null, permissionIds: [11] },
+      draftUpdate: { canUse: true, reason: null, permissionIds: [11] },
+      analytics: { canUse: true, reason: null, permissionIds: [7] },
+      freepublish: { canUse: false, reason: "disabled_by_product_policy", permissionIds: [11] },
+      checkedAt: "2026-08-12T00:00:00Z",
+    });
+    vi.mocked(getWechatAccountCapabilities).mockImplementation(async (accountId) =>
+      accountId === 21
+        ? snapshot(21, "component_permission_missing")
+        : snapshot(22, "account_not_verified"),
+    );
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "查看微信能力 甲公众号" }));
+    expect(await screen.findByText("开放平台组件缺少权限")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看微信能力 乙公众号" }));
+    expect(await screen.findByText("公众号未认证")).toBeInTheDocument();
+    expect(screen.queryByText("开放平台组件缺少权限")).not.toBeInTheDocument();
+    expect(getWechatAccountCapabilities).toHaveBeenCalledWith(21);
+    expect(getWechatAccountCapabilities).toHaveBeenCalledWith(22);
   });
 
   it("opens the data center for the selected account and preserves workspace context", async () => {

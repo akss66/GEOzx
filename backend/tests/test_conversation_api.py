@@ -2724,6 +2724,110 @@ async def test_history_fail_closed_sanitizes_every_result_payload_projection_kin
 
 
 @pytest.mark.asyncio
+async def test_history_projects_wechat_article_workspace_from_durable_same_turn_lineage_only(
+    client, session, admin, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "main_agent_v2_enabled", True)
+    account = Account(
+        org_id=admin.org_id,
+        platform=Platform.WECHAT_OFFICIAL_ACCOUNT,
+        nickname="wechat-workspace-projection",
+    )
+    session.add(account)
+    await session.commit()
+    thread = await _create_thread(client, admin, account)
+    submitted = await _submit_turn(
+        client,
+        admin,
+        thread["id"],
+        client_message_id="wechat-workspace-projection",
+        message="Draft a wechat article",
+        requested_skill_code="wechat_article_production",
+    )
+    body = submitted.json()
+    task = BrainTask(
+        org_id=admin.org_id,
+        created_by_id=admin.id,
+        title="wechat projection task",
+        status=BrainTaskStatus.PENDING_CONFIRMATION,
+    )
+    session.add(task)
+    await session.flush()
+    content = ContentItem(
+        account_id=account.id,
+        created_by_id=admin.id,
+        title="wechat projection article",
+    )
+    session.add(content)
+    await session.flush()
+    task.content_item_id = content.id
+    skill_run = SkillRun(
+        org_id=admin.org_id,
+        thread_id=thread["id"],
+        turn_id=body["turn"]["id"],
+        run_id=body["run"]["id"],
+        task_id=task.id,
+        idempotency_key="wechat-workspace-projection",
+        skill_code="wechat_article_production",
+        skill_version=1,
+        status="waiting_permission",
+        input_snapshot={},
+        output_snapshot={
+            "status": "waiting_user",
+            "response": "Article draft is ready.",
+            "report": {
+                "article_id": content.id,
+                "current_immutable_version": 1,
+                "readiness": {"status": "waiting_user"},
+                "explicit_user_decisions": [
+                    {"action": "generate_images", "status": "not_requested"},
+                    {"action": "sync_draft", "status": "not_requested"},
+                ],
+            },
+        },
+    )
+    session.add(skill_run)
+    await session.flush()
+    deliverable = Deliverable(
+        content_item_id=content.id,
+        thread_id=thread["id"],
+        turn_id=body["turn"]["id"],
+        run_id=body["run"]["id"],
+        skill_run_id=skill_run.id,
+        agent_code=AgentCode.CONTENT_DIRECTOR.value,
+        type=DeliverableType.WECHAT_ARTICLE,
+        version=1,
+        status=DeliverableStatus.PENDING_REVIEW,
+        payload={"document": {"title": "wechat draft"}, "report": {"must_not_leak": True}},
+    )
+    session.add(deliverable)
+    await session.commit()
+
+    history = await client.get(
+        f"/brain/conversations/{thread['id']}",
+        headers=_auth(admin),
+    )
+
+    assert history.status_code == 200
+    projections = history.json()["turns"][0]["projections"]
+    workspace = next(item for item in projections if item["type"] == "wechat_article_workspace")
+    assert workspace == {
+        "type": "wechat_article_workspace",
+        "turn_id": body["turn"]["id"],
+        "skill_run_id": skill_run.id,
+        "account_id": account.id,
+        "article_id": content.id,
+        "article_version_id": deliverable.id,
+        "status": "waiting_user",
+        "current_action": "produce",
+        "available_actions": ["generate_images", "sync_draft"],
+    }
+    serialized = json.dumps(projections, ensure_ascii=False)
+    assert '"report"' not in serialized
+    assert "must_not_leak" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_history_reconstructs_pending_approval_projection(
     client, session, admin, monkeypatch
 ) -> None:

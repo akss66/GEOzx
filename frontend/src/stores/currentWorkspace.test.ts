@@ -33,6 +33,48 @@ describe("useCurrentWorkspace", () => {
     expect(useCurrentWorkspace.getState().accountId).toBe(7);
   });
 
+  it("restores a persisted wechat official account workspace on reload", async () => {
+    installLocalStorage({
+      tongzhouxing_current_workspace: JSON.stringify({
+        version: 2,
+        clientId: 5,
+        projectId: 9,
+        platform: "wechat_official_account",
+        accountId: 11,
+      }),
+    });
+
+    const { useCurrentWorkspace } = await import("./currentWorkspace");
+
+    expect(useCurrentWorkspace.getState()).toMatchObject({
+      clientId: 5,
+      projectId: 9,
+      platform: "wechat_official_account",
+      accountId: 11,
+    });
+  });
+
+  it("fails closed to douyin when persisted platform is unknown", async () => {
+    installLocalStorage({
+      tongzhouxing_current_workspace: JSON.stringify({
+        version: 2,
+        clientId: 5,
+        projectId: 9,
+        platform: "unknown_platform",
+        accountId: 11,
+      }),
+    });
+
+    const { useCurrentWorkspace } = await import("./currentWorkspace");
+
+    expect(useCurrentWorkspace.getState()).toMatchObject({
+      clientId: 5,
+      projectId: 9,
+      platform: "douyin",
+      accountId: 11,
+    });
+  });
+
   it("persists account changes", async () => {
     const storage = installLocalStorage();
     const { useCurrentWorkspace } = await import("./currentWorkspace");

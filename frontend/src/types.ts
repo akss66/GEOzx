@@ -799,6 +799,17 @@ export type TurnProjection =
       turn_id?: number;
     }
   | {
+      type: "wechat_article_workspace";
+      turn_id: number;
+      skill_run_id: number;
+      account_id: number;
+      article_id: number;
+      article_version_id: number;
+      status: "waiting_user" | "completed" | "blocked" | "failed";
+      current_action: "produce" | "generate_images" | "sync_draft";
+      available_actions: Array<"generate_images" | "sync_draft">;
+    }
+  | {
       type: "account_data";
       account_id: number;
       skill_code: string;
@@ -962,6 +973,12 @@ export interface WorkTurnViewModel {
   steps: WorkTurnStep[];
   experts: Array<{ name: string; status: string }>;
   deliverableIds: number[];
+  articleWorkspaceAction: {
+    articleId: number;
+    href: string;
+    label: string;
+    title: string;
+  } | null;
   assistant: WorkTurnAssistant;
 }
 
@@ -1365,7 +1382,7 @@ export interface RiskQueueItem {
 
 // —— 工作区域：项目 / 账号矩阵 ——
 
-export type Platform = "douyin" | "xiaohongshu" | "shipinhao";
+export type Platform = "douyin" | "xiaohongshu" | "shipinhao" | "wechat_official_account";
 export type ProjectStatus = "active" | "paused" | "archived";
 export type AccountStatus = "active" | "inactive" | "banned";
 export type GroupDimension = "track" | "persona" | "platform";

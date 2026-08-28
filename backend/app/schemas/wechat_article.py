@@ -1,0 +1,363 @@
+"""Fail-closed contracts for WeChat article planning and document content."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from html.parser import HTMLParser
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
+
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+
+from app.models.enums import ArticleImageSlotStatus
+
+StrictText = Annotated[str, Field(min_length=1, max_length=20_000)]
+BlockId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
+SlotKey = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,127}$")]
+PositiveCitationId = Annotated[int, Field(gt=0)]
+WechatCommentFlag = Literal[0, 1]
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ArticleObjective(_StrictModel):
+    kind: Literal["awareness", "education", "lead_generation", "conversion", "event"]
+    description: Annotated[str, Field(min_length=1, max_length=1_000)]
+
+
+class ArticleAudience(_StrictModel):
+    segments: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        min_length=1, max_length=12
+    )
+    scenarios: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+        min_length=1, max_length=12
+    )
+
+
+class ArticleCta(_StrictModel):
+    action: Literal["consult", "contact", "visit", "register", "learn_more"]
+    label: Annotated[str, Field(min_length=1, max_length=120)]
+    url: AnyHttpUrl
+
+
+class ArticleBrandRequirements(_StrictModel):
+    tone: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(
+        min_length=1, max_length=8
+    )
+    must_include: list[Annotated[str, Field(min_length=1, max_length=1_000)]] = Field(
+        default_factory=list, max_length=30
+    )
+    forbidden_expressions: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+        default_factory=list, max_length=30
+    )
+
+
+class ArticleBrief(_StrictModel):
+    objective: ArticleObjective
+    target_audience: ArticleAudience
+    topic_or_product: Annotated[str, Field(min_length=1, max_length=500)]
+    primary_cta: ArticleCta
+    brand_requirements: ArticleBrandRequirements
+    core_selling_points: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=20
+    )
+    target_length: int | None = Field(default=None, ge=200, le=30_000)
+    reference_urls: list[AnyHttpUrl] = Field(default_factory=list, max_length=20)
+    source_material_ids: list[int] = Field(default_factory=list, max_length=50)
+    image_style: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+    author_name: Annotated[str, Field(min_length=1, max_length=120)] | None = None
+    content_source_url: AnyHttpUrl | None = None
+    comment_policy: Literal["default", "open", "closed"] | None = None
+
+
+class _ArticleBlock(_StrictModel):
+    block_id: BlockId
+
+
+class HeadingBlock(_ArticleBlock):
+    type: Literal["heading"]
+    level: Literal[2, 3, 4]
+    text: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class ParagraphBlock(_ArticleBlock):
+    type: Literal["paragraph"]
+    text: StrictText
+
+
+class QuoteBlock(_ArticleBlock):
+    type: Literal["quote"]
+    text: Annotated[str, Field(min_length=1, max_length=4_000)]
+    attribution: Annotated[str, Field(min_length=1, max_length=300)] | None = None
+
+
+class ListBlock(_ArticleBlock):
+    type: Literal["list"]
+    style: Literal["ordered", "unordered"]
+    items: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = Field(
+        min_length=1, max_length=30
+    )
+
+
+class CalloutBlock(_ArticleBlock):
+    type: Literal["callout"]
+    tone: Literal["info", "tip", "warning"]
+    text: Annotated[str, Field(min_length=1, max_length=4_000)]
+
+
+class ImageSlotBlock(_ArticleBlock):
+    type: Literal["imageSlot"]
+    slot_key: SlotKey
+
+
+class DividerBlock(_ArticleBlock):
+    type: Literal["divider"]
+
+
+class CtaBlock(_ArticleBlock):
+    type: Literal["cta"]
+    label: Annotated[str, Field(min_length=1, max_length=120)]
+    action: Literal["consult", "contact", "visit", "register", "learn_more"]
+    url: AnyHttpUrl
+
+
+ArticleBlock = Annotated[
+    HeadingBlock
+    | ParagraphBlock
+    | QuoteBlock
+    | ListBlock
+    | CalloutBlock
+    | ImageSlotBlock
+    | DividerBlock
+    | CtaBlock,
+    Field(discriminator="type"),
+]
+
+
+class ArticleClaim(_StrictModel):
+    claim_id: BlockId
+    block_id: BlockId
+    kind: Literal["product_fact", "case", "promise", "price", "numeric", "public_info"]
+    text: StrictText
+    citation_ids: list[PositiveCitationId] = Field(default_factory=list, max_length=20)
+
+    @field_validator("text", mode="after")
+    @classmethod
+    def _reject_html_text(cls, value: str) -> str:
+        if "<" in value or ">" in value:
+            raise ValueError("HTML is not permitted in article claims")
+        return value
+
+    @model_validator(mode="after")
+    def _require_unique_citations(self) -> ArticleClaim:
+        if len(self.citation_ids) != len(set(self.citation_ids)):
+            raise ValueError("article claim citation_ids must be unique")
+        return self
+
+
+class ArticleDocument(_StrictModel):
+    title: Annotated[str, Field(min_length=1, max_length=64)]
+    digest: Annotated[str, Field(min_length=1, max_length=120)]
+    author: Annotated[str, Field(min_length=1, max_length=120)] | None = None
+    blocks: list[ArticleBlock] = Field(min_length=1, max_length=500)
+    claims: list[ArticleClaim] = Field(default_factory=list, max_length=200)
+
+    @field_validator("title", "digest", "author", mode="after")
+    @classmethod
+    def _reject_html(cls, value: str | None) -> str | None:
+        if value is not None and ("<" in value or ">" in value):
+            raise ValueError("HTML is not permitted in article documents")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_document_invariants(self) -> ArticleDocument:
+        block_ids = [block.block_id for block in self.blocks]
+        if len(block_ids) != len(set(block_ids)):
+            raise ValueError("article block_id values must be unique")
+        claim_ids = [claim.claim_id for claim in self.claims]
+        if len(claim_ids) != len(set(claim_ids)):
+            raise ValueError("article claim_id values must be unique")
+        unknown_block_ids = {claim.block_id for claim in self.claims} - set(block_ids)
+        if unknown_block_ids:
+            raise ValueError("article claims must reference an existing block_id")
+        for block in self.blocks:
+            for value in _block_text_values(block):
+                if "<" in value or ">" in value:
+                    raise ValueError("HTML is not permitted in article documents")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_legacy_claims(self, handler: SerializerFunctionWrapHandler) -> dict:
+        serialized = handler(self)
+        if not self.claims:
+            serialized.pop("claims", None)
+        return serialized
+
+
+class ReadinessIssue(_StrictModel):
+    code: Annotated[str, Field(min_length=1, max_length=120)]
+    message: Annotated[str, Field(min_length=1, max_length=500)]
+    claim_id: str | None = None
+
+
+class ArticleSyncReadiness(_StrictModel):
+    can_sync: bool
+    blockers: list[ReadinessIssue]
+    warnings: list[ReadinessIssue]
+    citation_count: int = Field(ge=0)
+    unresolved_claim_count: int = Field(ge=0)
+
+
+class ArticleSyncReadinessIssueOut(_StrictModel):
+    code: Annotated[str, Field(min_length=1, max_length=120)]
+    message: Annotated[str, Field(min_length=1, max_length=500)]
+    claimId: str | None = None
+
+
+class ArticleSyncReadinessOut(_StrictModel):
+    canSync: bool
+    blockers: list[ArticleSyncReadinessIssueOut]
+    warnings: list[ArticleSyncReadinessIssueOut]
+    unresolvedClaimCount: int = Field(ge=0)
+
+
+class ArticleSyncTargetAccountOut(_StrictModel):
+    id: int = Field(gt=0)
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class ArticleSyncRemoteStateOut(_StrictModel):
+    status: Annotated[str, Field(min_length=1, max_length=120)]
+    remoteHash: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    updatedAt: datetime
+    errorCode: Annotated[str, Field(min_length=1, max_length=120)] | None = None
+    operationType: Annotated[str, Field(min_length=1, max_length=120)]
+
+
+class ArticleDraftSyncContextOut(_StrictModel):
+    targetAccount: ArticleSyncTargetAccountOut
+    articleTitle: Annotated[str, Field(min_length=1, max_length=64)]
+    articleVersionId: int = Field(gt=0)
+    imageCount: int = Field(ge=0)
+    readiness: ArticleSyncReadinessOut
+    remote: ArticleSyncRemoteStateOut | None = None
+
+
+class ArticleImageSlotOut(_StrictModel):
+    """Public slot projection; internal prompts are deliberately absent."""
+
+    id: int = Field(gt=0)
+    stableKey: SlotKey
+    purpose: Annotated[str, Field(min_length=1, max_length=300)]
+    aspectRatio: Annotated[str, Field(min_length=1, max_length=32)]
+    visualBrief: StrictText
+    status: ArticleImageSlotStatus
+    selectedMaterialId: int | None
+    lockVersion: int = Field(ge=1)
+    hasPrompt: bool
+
+
+class ArticleImagePromptOut(_StrictModel):
+    prompt: StrictText
+
+
+class ArticleImageGenerationRequest(_StrictModel):
+    idempotency_key: Annotated[str, Field(min_length=8, max_length=160)]
+    reference_material_ids: list[PositiveCitationId] = Field(default_factory=list, max_length=20)
+
+
+class ArticleImageSelectionRequest(_StrictModel):
+    material_id: PositiveCitationId
+    expected_lock_version: int = Field(ge=1)
+
+
+class WechatDraftArticle(_StrictModel):
+    """Only the plan-approved fields accepted by WeChat draft add/update."""
+
+    title: Annotated[str, Field(min_length=1, max_length=32)]
+    author: Annotated[str, Field(min_length=1, max_length=16)] | None = None
+    digest: Annotated[str, Field(min_length=1, max_length=120)]
+    content: Annotated[str, Field(min_length=1, max_length=20_000)]
+    thumb_media_id: Annotated[str, Field(min_length=1, max_length=256)]
+    need_open_comment: WechatCommentFlag
+    only_fans_can_comment: WechatCommentFlag
+    content_source_url: AnyHttpUrl | None = None
+
+    @field_validator("content", mode="after")
+    @classmethod
+    def _require_wechat_image_sources(cls, value: str) -> str:
+        parser = _DraftImageSourceValidator()
+        parser.feed(value)
+        parser.close()
+        return value
+
+
+class WechatRemoteDraftItem(WechatDraftArticle):
+    """Validated conflict fields from draft/get; remote-only fields are not propagated."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    @field_validator("author", "content_source_url", mode="before")
+    @classmethod
+    def _empty_optional_fields_are_unset(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+
+class WechatRemoteDraft(_StrictModel):
+    news_item: list[WechatRemoteDraftItem] = Field(min_length=1)
+
+
+class _DraftImageSourceValidator(HTMLParser):
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag != "img":
+            return
+        sources = [value for name, value in attrs if name == "src"]
+        if len(sources) != 1 or sources[0] is None:
+            raise ValueError("article image must contain exactly one source URL")
+        source = sources[0]
+        try:
+            parsed = urlsplit(source)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("article image URL is invalid") from exc
+        if not (
+            parsed.scheme.lower() == "https"
+            and (parsed.hostname or "").lower() == "mmbiz.qpic.cn"
+            and parsed.username is None
+            and parsed.password is None
+            and port in (None, 443)
+        ):
+            raise ValueError("article images must use WeChat-hosted HTTPS URLs")
+
+    handle_startendtag = handle_starttag
+
+
+def _block_text_values(block: ArticleBlock) -> tuple[str, ...]:
+    if isinstance(block, ListBlock):
+        return tuple(block.items)
+    return tuple(
+        value
+        for value in (
+            getattr(block, "text", None),
+            getattr(block, "attribution", None),
+            getattr(block, "label", None),
+        )
+        if value is not None
+    )

@@ -31,6 +31,13 @@ const EMPTY_WORKSPACE: WorkspaceSelection = {
   accountId: null,
 };
 
+const SUPPORTED_PLATFORMS = new Set<Platform>([
+  "douyin",
+  "xiaohongshu",
+  "shipinhao",
+  "wechat_official_account",
+]);
+
 export function listSelectableWorkspaceAccounts(accounts: Account[], platform: Platform) {
   return accounts.filter(
     (account) => account.platform === platform && account.status === "active",
@@ -68,7 +75,9 @@ function readStoredWorkspace(): WorkspaceSelection {
     return {
       clientId: typeof parsed.clientId === "number" ? parsed.clientId : null,
       projectId: typeof parsed.projectId === "number" ? parsed.projectId : null,
-      platform: parsed.platform === "douyin" ? "douyin" : "douyin",
+      platform: SUPPORTED_PLATFORMS.has(parsed.platform as Platform)
+        ? (parsed.platform as Platform)
+        : "douyin",
       accountId: typeof parsed.accountId === "number" ? parsed.accountId : null,
     };
   } catch {

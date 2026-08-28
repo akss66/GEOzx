@@ -30,6 +30,7 @@ class Platform(enum.StrEnum):
     DOUYIN = "douyin"
     XIAOHONGSHU = "xiaohongshu"
     SHIPINHAO = "shipinhao"
+    WECHAT_OFFICIAL_ACCOUNT = "wechat_official_account"
 
 
 class ProjectStatus(enum.StrEnum):
@@ -87,6 +88,17 @@ class DeliverableType(enum.StrEnum):
     REVIEW_REPORT = "review_report"
     AD_PLAN = "ad_plan"
     CS_RECORD = "cs_record"
+    WECHAT_ARTICLE = "wechat_article"
+    WECHAT_IMAGE_PLAN = "wechat_image_plan"
+    WECHAT_RENDERED_ARTICLE = "wechat_rendered_article"
+
+
+class ArticleImageSlotStatus(enum.StrEnum):
+    PLANNED = "planned"
+    GENERATING = "generating"
+    READY = "ready"
+    SELECTED = "selected"
+    FAILED = "failed"
 
 
 class DeliverableStatus(enum.StrEnum):

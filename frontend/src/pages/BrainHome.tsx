@@ -485,6 +485,7 @@ export default function BrainHome() {
   useEffect(() => {
     const nextAccountId = effectiveAccountId;
     const previousAccountId = previousAccountIdRef.current;
+    const previousThreadId = activeConversationThreadIdRef.current;
     const accountChanged = previousAccountId != null && previousAccountId !== nextAccountId;
     previousAccountIdRef.current = nextAccountId;
     const nextThreadId = effectiveAccountId != null
@@ -498,6 +499,9 @@ export default function BrainHome() {
     pendingClientMessageId.current = null;
     if (accountChanged) setGoal("");
     if (previousAccountId != null && previousAccountId !== nextAccountId) {
+      if (previousThreadId != null) {
+        qc.removeQueries({ queryKey: ["brain-conversation", previousThreadId] });
+      }
       qc.removeQueries({ queryKey: ["account-artifacts", previousAccountId] });
       qc.removeQueries({ queryKey: pendingWorkQueryKey(previousAccountId) });
     }

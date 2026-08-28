@@ -57,7 +57,7 @@ from app.schemas.brain import RuntimeToolCall
 from app.services.agent_management import get_business_config, require_agent_enabled
 from app.services.knowledge_workspace import (
     knowledge_context,
-    list_agent_knowledge,
+    list_agent_knowledge_for_account,
     record_knowledge_citations,
 )
 from app.services.runtime_deliverables import write_runtime_deliverable
@@ -341,13 +341,13 @@ class AgentHarness:
         await self._publish_runtime_lifecycle(started_lifecycle)
 
         knowledge_rows = (
-            await list_agent_knowledge(
+            await list_agent_knowledge_for_account(
                 session,
                 org_id=user.org_id,
-                client_id=project.client_id,
+                account_id=account.id,
                 project_id=project.id,
             )
-            if project is not None and project.client_id is not None
+            if project is not None
             else []
         )
         operating_context = {

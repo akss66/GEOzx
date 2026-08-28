@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import DeliverableType
 from app.schemas.artifacts import ScriptPresentationFormat
+from app.schemas.wechat_article import ArticleDocument
 
 
 class DeliverablePayload(BaseModel):
@@ -163,3 +164,28 @@ class CustomerServiceRecordPayload(DeliverablePayload):
     sentiment: dict = Field(min_length=1)
     response_guidelines: list[str] = Field(min_length=1)
     content_opportunities: list[str] = Field(min_length=1)
+
+
+@register(DeliverableType.WECHAT_ARTICLE)
+class WechatArticlePayload(DeliverablePayload):
+    """An immutable structured article document, never provider HTML."""
+
+    document: ArticleDocument
+
+
+class WechatImagePlanSlot(DeliverablePayload):
+    stable_key: str = Field(min_length=1, max_length=128)
+    purpose: str = Field(min_length=1, max_length=300)
+    aspect_ratio: str = Field(min_length=1, max_length=32)
+    visual_brief: str = Field(min_length=1, max_length=5_000)
+
+
+@register(DeliverableType.WECHAT_IMAGE_PLAN)
+class WechatImagePlanPayload(DeliverablePayload):
+    slots: list[WechatImagePlanSlot] = Field(min_length=1, max_length=100)
+
+
+@register(DeliverableType.WECHAT_RENDERED_ARTICLE)
+class WechatRenderedArticlePayload(DeliverablePayload):
+    article_deliverable_id: int = Field(gt=0)
+    rendered_html: str = Field(min_length=1, max_length=200_000)

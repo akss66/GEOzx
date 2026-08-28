@@ -23,6 +23,7 @@ describe("app routes", () => {
         "accounts",
         "accounts/:accountId/data",
         "knowledge",
+        "wechat-articles/:articleId",
       ]),
     );
   });

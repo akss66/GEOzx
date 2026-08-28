@@ -43,15 +43,31 @@ export function PublishPreparation({
       </div>
     );
   }
-  return <PublishPreparationForm workspace={workspace} account={workspace.account} />;
+  if (workspace.account.platform === "wechat_official_account") {
+    return (
+      <div className="content-inspector-empty">
+        <strong>微信公众号暂不支持旧版发布准备</strong>
+        <p>请使用微信公众号草稿流程完成内容准备。</p>
+      </div>
+    );
+  }
+  return (
+    <PublishPreparationForm
+      workspace={workspace}
+      account={workspace.account}
+      platform={workspace.account.platform}
+    />
+  );
 }
 
 function PublishPreparationForm({
   workspace,
   account,
+  platform,
 }: {
   workspace: ContentWorkspace;
   account: NonNullable<ContentWorkspace["account"]>;
+  platform: Exclude<NonNullable<ContentWorkspace["account"]>["platform"], "wechat_official_account">;
 }) {
   const { message } = AntApp.useApp();
   const qc = useQueryClient();
@@ -113,7 +129,7 @@ function PublishPreparationForm({
   const mutation = useMutation({
     mutationFn: (values: PublishForm) =>
       checkPublishReadiness(workspace.content_item.id, {
-        platform: account.platform,
+        platform,
         title: values.title.trim(),
         body: values.body.trim(),
         topics: lines(values.topics),
